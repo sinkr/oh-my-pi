@@ -675,6 +675,45 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 	return fileSessionId.startsWith(normalizedArg);
 }
 
+/**
+ * Find the best resume match in a modified-descending session list.
+ *
+ * Match tiers, checked across the whole list so a title can never shadow an
+ * id/filename prefix:
+ * 1. id / filename / filename-id-suffix prefix (see {@link sessionMatchesResumeArg})
+ * 2. exact title match (case-insensitive)
+ * 3. title substring match (case-insensitive)
+ *
+ * Titles are compared after {@link sanitizeSessionName} (first line only,
+ * control characters stripped), so a match always corresponds to the title
+ * the picker displays.
+ *
+ * Within a tier, the first (most recently modified) session wins.
+ */
+function findResumeMatch(sessions: SessionInfo[], sessionArg: string): SessionInfo | undefined {
+	const normalizedArg = sessionArg.toLowerCase();
+	let titleExact: SessionInfo | undefined;
+	let titlePartial: SessionInfo | undefined;
+	for (const session of sessions) {
+		if (sessionMatchesResumeArg(session, sessionArg)) {
+			return session;
+		}
+		if (titleExact) {
+			continue;
+		}
+		const title = sanitizeSessionName(session.title)?.toLowerCase();
+		if (!title) {
+			continue;
+		}
+		if (title === normalizedArg) {
+			titleExact = session;
+		} else if (!titlePartial && title.includes(normalizedArg)) {
+			titlePartial = session;
+		}
+	}
+	return titleExact ?? titlePartial;
+}
+
 /** Controls cross-directory fallback for resumable session lookup. */
 export interface ResolveResumableSessionOptions {
 	/** Search default global session buckets after the active/custom session directory misses. */
@@ -696,7 +735,7 @@ export async function resolveResumableSession(
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const localSessions = await listSessions(localSessionDir, storage);
-	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const localMatch = findResumeMatch(localSessions, sessionArg);
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
 	}
@@ -706,7 +745,7 @@ export async function resolveResumableSession(
 	}
 
 	const globalSessions = await listAllSessions(storage);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const globalMatch = findResumeMatch(globalSessions, sessionArg);
 	if (!globalMatch) {
 		return undefined;
 	}
