@@ -93,6 +93,9 @@
 ### Added
 
 - Added `externalThinking` setting for private scratchpad reasoning via the new `think` tool
+### Changed
+
+- `--resume`/`-r` (and `/resume`, `--fork`, `omp share`) now also match session titles — exact title first, then title substring, case-insensitive; ID/filename prefix matches keep precedence.
 
 ## [17.2.13] - 2026-08-11
 
