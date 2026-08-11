@@ -257,7 +257,7 @@ Startup `--fork` is resolved before normal session creation:
 
 1. `--fork` is rejected with `--no-session`.
 2. Path-like values (`/`, `\`, or `.jsonl`) call `SessionManager.forkFrom(path, cwd, sessionDir)`.
-3. Other values resolve via `resolveResumableSession(...)`: local sessions first, then global search when `sessionDir` is not forced. Matching accepts lowercased session id prefixes, full JSONL filename prefixes, and timestamp-stripped filename id suffixes.
+3. Other values resolve via `resolveResumableSession(...)`: local sessions first, then global search when `sessionDir` is not forced. Matching accepts lowercased session id prefixes, full JSONL filename prefixes, timestamp-stripped filename id suffixes, or the session title (exact title first, then title substring); id/filename matches always beat title matches, and within a tier the most recently modified session wins.
 4. The forked file is created in the current cwd/session-dir scope and becomes the active session manager for startup.
 5. Full-context forks automatically seed `providerPromptCacheKey` from the source header's inherited key, falling back to the source session id. Startup drops that automatic inheritance when `--model`, `--thinking`, `--system-prompt`, `--append-system-prompt`, `--tools`, or `--no-tools` changes the provider route or prompt/tool shape.
 
@@ -276,7 +276,7 @@ Without an argument:
 
 With an argument:
 
-- `/resume <id>` resolves an id/filename prefix with local-first, then global fallback and switches directly to the matched file; an unknown value reports `Session "<value>" not found`.
+- `/resume <id>` resolves an id/filename prefix or session title (exact title first, then title substring; id/filename matches take precedence) with local-first, then global fallback and switches directly to the matched file; an unknown value reports `Session "<value>" not found`.
 - `/resume @claude` and `/resume @codex` open a foreign-session picker. Selecting one converts and persists it under a fresh OMP session identity, then switches to that new session.
 
 ## CLI `--resume`
@@ -294,7 +294,7 @@ With an argument:
 2. Else `resolveResumableSession(...)` searches:
    - current scope (`SessionManager.list(cwd, sessionDir)`)
    - global sessions (`SessionManager.listAll()`) only when no explicit `sessionDir` was provided
-3. Matching accepts case-insensitive session id prefixes, full JSONL filename prefixes, and the id suffix after the timestamp in `<timestamp>_<sessionId>.jsonl`.
+3. Matching accepts case-insensitive session id prefixes, full JSONL filename prefixes, the id suffix after the timestamp in `<timestamp>_<sessionId>.jsonl`, or the session title (exact title first, then title substring). Id/filename matches always beat title matches; within a tier the most recently modified session wins.
 
 Cross-project id match behavior:
 
