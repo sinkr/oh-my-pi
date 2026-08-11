@@ -109,12 +109,12 @@ describe("resolveResumableSession", () => {
 		removeSyncWithRetries(tempDir);
 	});
 
-	function writeSession(fileName: string, headerCwd: string, id: string = Snowflake.next()): string {
+	function writeSession(fileName: string, headerCwd: string, id: string = Snowflake.next(), title?: string): string {
 		const filePath = path.join(sessionDir, fileName);
 		fs.writeFileSync(
 			filePath,
 			`${[
-				JSON.stringify({ type: "session", id, timestamp: "2025-01-01T00:00:00Z", cwd: headerCwd }),
+				JSON.stringify({ type: "session", id, timestamp: "2025-01-01T00:00:00Z", cwd: headerCwd, title }),
 				JSON.stringify({
 					type: "message",
 					id: "msg-1",
@@ -161,6 +161,84 @@ describe("resolveResumableSession", () => {
 
 		expect(match?.scope).toBe("local");
 		expect(match?.session.path).toBe(path.join(sessionDir, "2025-01-01_moved.jsonl"));
+	});
+
+	it("matches by exact title, case-insensitively", async () => {
+		const id = writeSession("2025-01-01_titled.jsonl", "/tmp/project", "titled1234", "Fast GPT");
+
+		const match = await resolveResumableSession("fast gpt", "/tmp/project", sessionDir);
+
+		expect(match?.scope).toBe("local");
+		expect(match?.session.id).toBe(id);
+	});
+
+	it("matches by title substring when no exact title matches", async () => {
+		const id = writeSession("2025-01-01_substr.jsonl", "/tmp/project", "substr1234", "Fast GPT experiments");
+
+		const match = await resolveResumableSession("gpt exper", "/tmp/project", sessionDir);
+
+		expect(match?.session.id).toBe(id);
+	});
+
+	it("prefers id prefix over a more recent title match", async () => {
+		const idMatch = writeSession("2025-01-01_idmatch.jsonl", "/tmp/project", "abc123def");
+		// Backdate the older file so mtimes differ deterministically
+		const past = new Date(Date.now() - 60_000);
+		fs.utimesSync(path.join(sessionDir, "2025-01-01_idmatch.jsonl"), past, past);
+		writeSession("2025-01-02_titlematch.jsonl", "/tmp/project", "unrelated1", "abc123def notes");
+
+		const match = await resolveResumableSession("abc123", "/tmp/project", sessionDir);
+
+		expect(match?.session.id).toBe(idMatch);
+	});
+
+	it("prefers an exact title over a more recent substring title match", async () => {
+		const exactId = writeSession("2025-01-01_exact.jsonl", "/tmp/project", "exact12345", "fast gpt");
+		// Backdate the older file so mtimes differ deterministically
+		const past = new Date(Date.now() - 60_000);
+		fs.utimesSync(path.join(sessionDir, "2025-01-01_exact.jsonl"), past, past);
+		writeSession("2025-01-02_extras.jsonl", "/tmp/project", "extras1234", "fast gpt extras");
+
+		const match = await resolveResumableSession("fast gpt", "/tmp/project", sessionDir);
+
+		expect(match?.session.id).toBe(exactId);
+	});
+
+	it("resolves the most recently modified session when titles are identical", async () => {
+		writeSession("2025-01-01_older.jsonl", "/tmp/project", "older12345", "daily notes");
+		// Backdate the older file so mtimes differ deterministically
+		const past = new Date(Date.now() - 60_000);
+		fs.utimesSync(path.join(sessionDir, "2025-01-01_older.jsonl"), past, past);
+		const newerId = writeSession("2025-01-02_newer.jsonl", "/tmp/project", "newer12345", "daily notes");
+
+		const match = await resolveResumableSession("daily notes", "/tmp/project", sessionDir);
+
+		expect(match?.session.id).toBe(newerId);
+	});
+
+	it("matches multi-line titles by their visible first line", async () => {
+		const exactId = writeSession(
+			"2025-01-01_visible.jsonl",
+			"/tmp/project",
+			"visible123",
+			"fast gpt\nhidden details",
+		);
+		// Backdate so the exact-tier session is older than the substring-tier one
+		const past = new Date(Date.now() - 60_000);
+		fs.utimesSync(path.join(sessionDir, "2025-01-01_visible.jsonl"), past, past);
+		writeSession("2025-01-02_noise.jsonl", "/tmp/project", "noise12345", "fast gpt tools");
+
+		const match = await resolveResumableSession("fast gpt", "/tmp/project", sessionDir);
+
+		expect(match?.session.id).toBe(exactId);
+	});
+
+	it("returns undefined when neither id nor title matches", async () => {
+		writeSession("2025-01-01_nomatch.jsonl", "/tmp/project", "nomatch123", "some title");
+
+		const match = await resolveResumableSession("no-such-thing", "/tmp/project", sessionDir);
+
+		expect(match).toBeUndefined();
 	});
 });
 

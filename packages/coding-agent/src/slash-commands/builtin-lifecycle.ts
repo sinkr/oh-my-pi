@@ -207,7 +207,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "resume",
 		description: "Resume a different session",
-		inlineHint: "[session id|@claude|@codex]",
+		inlineHint: "[session id|title|@claude|@codex]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const sessionArg = command.args.trim();

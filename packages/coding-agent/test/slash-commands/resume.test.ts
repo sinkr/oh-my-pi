@@ -33,11 +33,12 @@ async function writeSession(
 	id: string,
 	cwd = tempDir,
 	sessionDir = computeDefaultSessionDir(cwd, storage),
+	title?: string,
 ): Promise<string> {
 	const sessionPath = path.join(sessionDir, `2026-01-01T00-00-00-000Z_${id}.jsonl`);
 	await Bun.write(
 		sessionPath,
-		`${JSON.stringify({ type: "session", id, timestamp: "2026-01-01T00:00:00.000Z", cwd })}\n`,
+		`${JSON.stringify({ type: "session", id, timestamp: "2026-01-01T00:00:00.000Z", cwd, title })}\n`,
 	);
 	return sessionPath;
 }
@@ -105,6 +106,22 @@ describe("/resume slash command", () => {
 		expect(handled).toBe(true);
 		expect(harness.setText).toHaveBeenCalledWith("");
 		expect(harness.showSessionSelector).not.toHaveBeenCalled();
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+	});
+
+	it("resumes a session by title substring", async () => {
+		const sessionPath = await writeSession(
+			"019ed700-02fb-7000-8dac-396e2f84d484",
+			tempDir,
+			undefined,
+			"Auth refactor spike",
+		);
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/resume auth refactor", harness.runtime);
+
+		expect(handled).toBe(true);
 		expect(harness.showError).not.toHaveBeenCalled();
 		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
 	});

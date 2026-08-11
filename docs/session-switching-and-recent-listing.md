@@ -91,8 +91,8 @@ Breadcrumb writes are best-effort and non-fatal.
 
 2. Resume key value
    - `resolveResumableSession(...)` searches local sessions first, then all sessions unless a custom `sessionDir` disables global fallback
-   - matching is case-insensitive and accepts `id` prefix, full JSONL filename prefix, or session-id suffix after the timestamp
-   - first match in modified-descending order is used (no ambiguity prompt)
+   - matching is case-insensitive and accepts `id` prefix, full JSONL filename prefix, session-id suffix after the timestamp, or the session title (exact title first, then title substring)
+   - id/filename matches always beat title matches; within a tier, the first match in modified-descending order is used (no ambiguity prompt)
 
 If a matched session's recorded cwd no longer exists, CLI prompts `Move (re-root) it into the current directory? [Y/n]`. Acceptance opens it and `moveTo(cwd)` relocates it; decline exits cleanly. A non-TTY cannot answer and raises `SessionResolutionError`.
 
@@ -245,6 +245,7 @@ Switch/open can still throw on true I/O failures (permission errors, rewrite fai
 
 ### ID prefix matching caveats
 
-- Matching uses `startsWith` on the lowercased session id, lowercased JSONL filename, and lowercased id suffix after the filename timestamp.
-- First match in modified-descending order wins; there is no ambiguity UI if multiple sessions share a prefix.
+- Matching uses `startsWith` on the lowercased session id, lowercased JSONL filename, and lowercased id suffix after the filename timestamp; when none of these match, the lowercased session title is tried as a lower-priority tier — exact title match first, then title substring.
+- Id/filename matches always beat title matches; within a tier, the first match in modified-descending order wins. There is no ambiguity UI if multiple sessions share a prefix or title.
+- CLI arguments that look like paths (containing `/` or `\`, or ending in `.jsonl`) are opened directly as session files before any matching runs, so a title containing a path separator cannot be matched via CLI `--resume`/`--fork`/`omp share`. The interactive `/resume <arg>` command has no path short-circuit and can match such titles.
 - Prefix-listing metadata is intentionally lightweight, so search text may not include messages outside the first 4KB of the session file.

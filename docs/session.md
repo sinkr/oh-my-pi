@@ -498,7 +498,7 @@ Discovery helpers live in `session-listing.ts`; `SessionManager` exposes project
 - `listAllSessions(storage)` / `SessionManager.listAll()` -> all project scopes
 - `resolveResumableSession(...)` -> local lookup then optional global fallback
 
-Recent/most-recent scans read only a 4 KiB prefix. Full lists read that prefix plus a bounded 32 KiB tail for lifecycle status. Scans are stat-keyed and cached; large sets are processed with bounded parallel workers. Normal per-directory scans also recover the newest orphaned EPERM backup when its primary JSONL is missing. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp.
+Recent/most-recent scans read only a 4 KiB prefix. Full lists read that prefix plus a bounded 32 KiB tail for lifecycle status. Scans are stat-keyed and cached; large sets are processed with bounded parallel workers. Normal per-directory scans also recover the newest orphaned EPERM backup when its primary JSONL is missing. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp, with the session title as a lower-priority tier (exact title first, then title substring); id/filename matches always beat title matches.
 
 ## Related but Distinct: Prompt History Storage
 
