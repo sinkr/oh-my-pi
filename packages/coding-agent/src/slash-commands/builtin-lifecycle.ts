@@ -8,6 +8,7 @@ import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
+import { syncHerdrTitles } from "../utils/herdr-title";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -371,7 +372,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return commandConsumed();
 			}
 			await runtime.notifyTitleChanged?.();
-			await runtime.output(`Session renamed to ${command.args}.`);
+			const herdrSync = await syncHerdrTitles(runtime.sessionManager.getSessionName()!);
+			await runtime.output(
+				herdrSync === "failed"
+					? `Session renamed to ${command.args}, but the HerdR title update failed.`
+					: `Session renamed to ${command.args}.`,
+			);
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
