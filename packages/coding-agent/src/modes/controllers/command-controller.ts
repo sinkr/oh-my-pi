@@ -56,6 +56,7 @@ import {
 	renderChangelogEntries,
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
+import { syncHerdrTitles } from "../../utils/herdr-title";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 
@@ -1129,6 +1130,11 @@ export class CommandController {
 				return;
 			}
 			const name = this.ctx.sessionManager.getSessionName()!;
+			const herdrSync = await syncHerdrTitles(name);
+			if (herdrSync === "failed") {
+				this.ctx.showWarning(`Session renamed to "${name}", but the HerdR title update failed.`);
+				return;
+			}
 			this.ctx.showStatus(`Session renamed to "${name}".`);
 		} catch (err) {
 			this.ctx.showError(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
