@@ -27,7 +27,7 @@ import { type FirstResultViewportRepaint, type ToolRenderer, toolRenderers } fro
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
 import type { XdevState } from "../../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
-import { convertImageToPng } from "../../utils/image-loading";
+import { imageNeedsKittyDisplayPreparation, prepareImageForKittyDisplay } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
 
@@ -628,8 +628,10 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	/**
-	 * Convert non-PNG images to PNG for Kitty graphics protocol.
-	 * Kitty requires PNG format (f=100), so JPEG/GIF/WebP won't display.
+	 * Prepare result images for the Kitty graphics protocol: convert non-PNG
+	 * payloads to PNG (Kitty transmits f=100) and downscale anything over the
+	 * inline display budget so an oversized screenshot cannot become a
+	 * tens-of-megabytes APC.
 	 */
 	#maybeConvertImagesForKitty(): void {
 		// Only needed for Kitty protocol
@@ -641,13 +643,13 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		for (let i = 0; i < imageBlocks.length; i++) {
 			const img = imageBlocks[i];
 			if (!img.data || !img.mimeType) continue;
-			// Skip if already PNG or already converted
-			if (img.mimeType === "image/png") continue;
 			if (this.#convertedImages.has(i)) continue;
+			// Small PNGs pass through untouched — no re-encode churn.
+			if (!imageNeedsKittyDisplayPreparation({ data: img.data, mimeType: img.mimeType })) continue;
 
-			// Convert async - catch errors from processing
+			// Prepare async - catch errors from processing
 			const index = i;
-			convertImageToPng({ type: "image", data: img.data, mimeType: img.mimeType })
+			prepareImageForKittyDisplay({ type: "image", data: img.data, mimeType: img.mimeType })
 				.then(converted => {
 					this.#convertedImages.set(index, converted);
 					this.#displayInputVersion++;
@@ -655,7 +657,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 					this.#ui.requestRender();
 				})
 				.catch(() => {
-					// Ignore conversion failures - display will use original image format
+					// Ignore preparation failures - the Kitty render gate keeps the
+					// unpreparable payload off the wire and shows the text fallback.
 				});
 		}
 	}
@@ -1258,13 +1261,18 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			for (let i = 0; i < imageBlocks.length; i++) {
 				const img = imageBlocks[i];
 				if (TERMINAL.imageProtocol && this.#showImages && img.data && img.mimeType) {
-					// Use converted PNG for Kitty protocol if available
+					// Use the prepared (PNG, budget-fit) payload for Kitty if available
 					const converted = this.#convertedImages.get(i);
 					const imageData = converted?.data ?? img.data;
 					const imageMimeType = converted?.mimeType ?? img.mimeType;
 
-					// For Kitty, skip non-PNG images that haven't been converted yet
-					if (TERMINAL.imageProtocol === ImageProtocol.Kitty && imageMimeType !== "image/png") {
+					// For Kitty, hold back images whose prepared payload isn't ready yet
+					// (non-PNG needing conversion, or oversized needing a downscale).
+					if (
+						TERMINAL.imageProtocol === ImageProtocol.Kitty &&
+						!converted &&
+						imageNeedsKittyDisplayPreparation({ data: img.data, mimeType: img.mimeType })
+					) {
 						continue;
 					}
 
