@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed inline image display transmitting original pixel payloads over the kitty graphics protocol; a 6048x8064 tool-result photo became a ~34.8MB APC that blew downstream 32MiB per-frame budgets (herdr) and rendered placeholder glyph soup. Oversized images (longest side > 2048px or payload > 8MiB) are now downscaled and re-encoded to PNG before transmit; small PNGs still pass through byte-identical.
+
 ## [17.3.0] - 2026-08-13
 
 ### Breaking Changes
