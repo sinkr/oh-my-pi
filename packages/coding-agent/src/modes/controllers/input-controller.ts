@@ -79,7 +79,7 @@ import {
 import { type ConversationPosition, continuesConversation, conversationPosition } from "../utils/conversation-position";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
 import { compactImageMarkers, formatVisionMarker, shiftImageMarkers } from "../view-model/prompt/composer-attachments";
-import { extractImagePastePathsFromText, extractImagePathFromText } from "../view-model/prompt/custom-editor";
+import { extractImagePathFromText } from "../view-model/prompt/custom-editor";
 import { formatQueueShorthand, parseQueueShorthand, splitQueuedMessages } from "../view-model/prompt/queue-input";
 
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
@@ -698,23 +698,16 @@ export class InputController {
 	/**
 	 * A paste into the composer, however it got there (the terminal's bracketed paste, an
 	 * enhanced paste's text, a dialog or an extension handing one over): an empty one is the
-	 * terminal's cue that the clipboard holds an image (#3601), explicit image or video paths
-	 * attach (#3506), and a menu-sized one waits for the large-paste menu. Anything else is the
-	 * composer's own paste: typed, or collapsed into a text chip.
+	 * terminal's cue that the clipboard holds an image (#3601), and a menu-sized one waits for the
+	 * large-paste menu. Anything else is the composer's own paste: typed, or collapsed into a text
+	 * chip. Pasted text is never promoted to an image attachment merely because it looks like an
+	 * image file path — image attachment requires real provenance (clipboard image bytes or a
+	 * macOS file-url flavor), both handled by {@link handleImagePaste}.
 	 */
 	#onComposerPaste(paste: PasteEvent): boolean {
 		const content = paste.text;
 		if (content.length === 0) {
 			void this.handleImagePaste();
-			return true;
-		}
-		const paths = extractImagePastePathsFromText(content);
-		if (paths) {
-			void this.#trackImagePaste(
-				(async () => {
-					for (const path of paths) await this.handleImagePathPaste(path);
-				})(),
-			);
 			return true;
 		}
 		const text = content.replace(/\r\n?/g, "\n");
@@ -2918,6 +2911,7 @@ export class InputController {
 					`Unsupported clipboard image format: ${image.mimeType}`,
 				);
 			}
+
 			// Smart paste (#1628): no image on the clipboard — fall back to
 			// pasting its text so the same chord covers both payload kinds.
 			// Hosts that pre-empt the terminal's own paste (VS Code's
@@ -2928,17 +2922,10 @@ export class InputController {
 				this.ctx.showStatus("Clipboard is empty");
 				return false;
 			}
-			// #3506: when the clipboard text is an explicit image file path,
-			// route through {@link #pasteImagePath} so the image is
-			// loaded and attached instead of pasting the path as literal
-			// text. Covers terminals that paste the Finder file path as
-			// plain text rather than as a `public.file-url` (most macOS
-			// terminals do this for image clipboards).
-			const imagePath = textOnlyFocus ? null : extractImagePathFromText(text);
-			if (imagePath) {
-				await this.#pasteImagePath(imagePath, sink);
-				return true;
-			}
+			// Paste contract: clipboard TEXT always pastes as text, even when
+			// it looks like an image file path. Image attachment requires real
+			// provenance — raw image bytes or the macOS `public.file-url`
+			// pasteboard flavor handled above — never text-shape sniffing.
 			// Keep the initiating prompt as the only possible modal destination.
 			if (modalFocus && this.ctx.shell.focused() !== modalFocus) return false;
 			if (textOnlyFocus) return this.ctx.shell.paste(text);

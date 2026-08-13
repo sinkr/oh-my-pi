@@ -102,13 +102,15 @@ describe("Composer empty bracketed paste (issue #3601)", () => {
 		expect(composer.text()).toBe("hello world");
 	});
 
-	it("routes an explicit image-file path to the image-path paste (existing #3506 path)", () => {
-		const { paste, spies } = createCtx();
+	it("does not hijack a bracketed paste that resolves to a path-shaped payload (text contract)", () => {
+		const { composer, paste, spies } = createCtx();
 		spies.handleImagePathPaste.mockResolvedValue();
 
 		paste("/tmp/screenshot.png");
 
-		expect(spies.handleImagePathPaste).toHaveBeenCalledWith("/tmp/screenshot.png");
+		// Path-shaped TEXT inserts literally; the empty-paste and image-path branches stay out.
+		expect(composer.text()).toBe("/tmp/screenshot.png");
+		expect(spies.handleImagePathPaste).not.toHaveBeenCalled();
 		expect(spies.handleImagePaste).not.toHaveBeenCalled();
 	});
 });
