@@ -15,7 +15,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { expandKeyHint, getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
-import { convertImageToPng } from "../../utils/image-loading";
+import { imageNeedsKittyDisplayPreparation, prepareImageForKittyDisplay } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
@@ -615,10 +615,11 @@ export class AssistantMessageComponent extends Container {
 	#convertImagesForKitty(entries: Array<{ image: ImageContent; key: string }>): void {
 		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
 		for (const { image, key } of entries) {
-			if (image.mimeType === "image/png") continue;
+			// Small PNGs render as-is; non-PNG or over-budget payloads need prep.
+			if (!imageNeedsKittyDisplayPreparation(image)) continue;
 			if (this.#convertedKittyImages.has(key) || this.#kittyConversionsInFlight.has(key)) continue;
 			this.#kittyConversionsInFlight.add(key);
-			convertImageToPng(image)
+			prepareImageForKittyDisplay(image)
 				.then(converted => {
 					this.#kittyConversionsInFlight.delete(key);
 					this.#convertedKittyImages.set(key, converted);
@@ -640,7 +641,7 @@ export class AssistantMessageComponent extends Container {
 		if (withLeadingSpacer) this.#contentContainer.addChild(new Spacer(1));
 		for (const { image, key } of entries) {
 			const displayImage =
-				TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png"
+				TERMINAL.imageProtocol === ImageProtocol.Kitty && imageNeedsKittyDisplayPreparation(image)
 					? this.#convertedKittyImages.get(key)
 					: image;
 			if (TERMINAL.imageProtocol && displayImage) {
