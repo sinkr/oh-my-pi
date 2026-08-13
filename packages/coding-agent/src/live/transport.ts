@@ -32,7 +32,7 @@ interface LiveSignalingResult {
 	attestation: string | undefined;
 }
 
-class LiveSignalingError extends Error {
+export class LiveSignalingError extends Error {
 	status: number;
 	errorMessage: string;
 
@@ -105,7 +105,15 @@ function boundedErrorBody(body: string, statusText: string): string {
 	return `${normalized.slice(0, MAX_ERROR_BODY_LENGTH)}…`;
 }
 
-function isAuthError(error: unknown): boolean {
+/**
+ * Auth-retryable classification for live signaling: OpenAI's entitlement gate
+ * returns 404 {"detail":"Not Found"} (not 403) for accounts whose plan lacks
+ * Codex live. Treat it as rotation-worthy so withOAuthAccess tries sibling
+ * credentials (e.g. a work account without live vs a personal plan with it)
+ * instead of failing the call on whichever credential happened to be active.
+ */
+export function isAuthError(error: unknown): boolean {
+	if (error instanceof LiveSignalingError && error.status === 404) return true;
 	return isAuthRetryableError(error);
 }
 
