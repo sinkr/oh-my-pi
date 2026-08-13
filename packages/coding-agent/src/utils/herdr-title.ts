@@ -13,12 +13,13 @@ async function run(command: readonly string[]): Promise<number> {
 }
 
 /**
- * Mirror an explicit OMP session rename onto the enclosing HerdR surfaces.
+ * Mirror an explicit OMP session rename onto the enclosing HerdR tab.
  *
- * Renames both the tab (tab bar) and the workspace (sidebar) so the session
- * name is visible regardless of which chrome the current layout shows.
- * Requires the HerdR pane environment (`HERDR_ENV=1` plus at least one target
- * id); anywhere else the sync is skipped. The `herdr` CLI exits non-zero with
+ * Renames only the tab (tab bar); the workspace (sidebar) label is left
+ * alone — workspaces group multiple tabs, so a per-session rename clobbering
+ * the workspace name was wrong whenever more than one agent shared it.
+ * Requires the HerdR pane environment (`HERDR_ENV=1` plus a tab id);
+ * anywhere else the sync is skipped. The `herdr` CLI exits non-zero with
  * `protocol_mismatch` when the session server predates the installed binary —
  * surfaced as "failed" so callers can tell the user to restart HerdR.
  */
@@ -31,9 +32,6 @@ export async function syncHerdrTitles(
 	const targets: string[][] = [];
 	if (environment.HERDR_TAB_ID) {
 		targets.push(["herdr", "tab", "rename", environment.HERDR_TAB_ID, title]);
-	}
-	if (environment.HERDR_WORKSPACE_ID) {
-		targets.push(["herdr", "workspace", "rename", environment.HERDR_WORKSPACE_ID, title]);
 	}
 	if (targets.length === 0) return "skipped";
 
