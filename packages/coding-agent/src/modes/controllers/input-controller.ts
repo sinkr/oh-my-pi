@@ -621,7 +621,6 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.clipboard.pasteImage"),
 		);
 		this.ctx.editor.onPasteImage = () => this.handleImagePaste();
-		this.ctx.editor.onPasteImagePath = path => this.handleImagePathPaste(path);
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteTextRaw",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
@@ -2101,6 +2100,7 @@ export class InputController {
 					`Unsupported clipboard image format: ${image.mimeType}`,
 				);
 			}
+
 			// Smart paste (#1628): no image on the clipboard — fall back to
 			// pasting its text so the same chord covers both payload kinds.
 			// Hosts that pre-empt the terminal's own paste (VS Code's
@@ -2111,17 +2111,10 @@ export class InputController {
 				this.ctx.showStatus("Clipboard is empty");
 				return false;
 			}
-			// #3506: when the clipboard text is an explicit image file path,
-			// route through {@link handleImagePathPaste} so the image is
-			// loaded and attached instead of pasting the path as literal
-			// text. Covers terminals that paste the Finder file path as
-			// plain text rather than as a `public.file-url` (most macOS
-			// terminals do this for image clipboards).
-			const imagePath = promptTarget ? null : extractImagePathFromText(text);
-			if (imagePath) {
-				await this.handleImagePathPaste(imagePath);
-				return true;
-			}
+			// Paste contract: clipboard TEXT always pastes as text, even when
+			// it looks like an image file path. Image attachment requires real
+			// provenance — raw image bytes or the macOS `public.file-url`
+			// pasteboard flavor handled above — never text-shape sniffing.
 			// Keep the initiating prompt as the only possible modal destination.
 			if (promptTarget && this.ctx.ui.getFocused() !== promptTarget) return false;
 			if (finishPaste) {
@@ -2129,6 +2122,8 @@ export class InputController {
 				finishPaste = undefined;
 				if (!accepted) return false;
 			} else {
+				// Route to the focused component when it accepts pastes (modal
+				// Input prompts), matching the enhanced-paste text path (#2127).
 				const target = promptTarget ?? this.ctx.editor;
 				target.pasteText(text);
 			}
