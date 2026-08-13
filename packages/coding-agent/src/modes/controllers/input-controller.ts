@@ -464,7 +464,6 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.clipboard.pasteImage"),
 		);
 		this.ctx.editor.onPasteImage = () => this.handleImagePaste();
-		this.ctx.editor.onPasteImagePath = path => this.handleImagePathPaste(path);
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteTextRaw",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
@@ -1658,10 +1657,9 @@ export class InputController {
 			// so it returns empty for file-url-only pasteboards — the smart
 			// text fallback below would dead-end with "Clipboard is empty".
 			// Reach the file URL directly via AppleScript and route every
-			// image-shaped path through {@link handleImagePathPaste}, matching
-			// the bracketed-paste handler in `CustomEditor.handleInput` which
-			// iterates every extracted image path. Multi-image Finder
-			// selections must not silently drop after the first attach.
+			// image-shaped path through {@link handleImagePathPaste}.
+			// Multi-image Finder selections must not silently drop after
+			// the first attach.
 			// `readMacFileUrls` returns an empty list off Darwin, so the
 			// check is free on every other platform.
 			const fileUrls = promptTarget ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
@@ -1683,17 +1681,10 @@ export class InputController {
 				this.ctx.showStatus("Clipboard is empty");
 				return false;
 			}
-			// #3506: when the clipboard text is an explicit image file path,
-			// route through {@link handleImagePathPaste} so the image is
-			// loaded and attached instead of pasting the path as literal
-			// text. Covers terminals that paste the Finder file path as
-			// plain text rather than as a `public.file-url` (most macOS
-			// terminals do this for image clipboards).
-			const imagePath = promptTarget ? null : extractImagePathFromText(text);
-			if (imagePath) {
-				await this.handleImagePathPaste(imagePath);
-				return true;
-			}
+			// Paste contract: clipboard TEXT always pastes as text, even when
+			// it looks like an image file path. Image attachment requires real
+			// provenance — raw image bytes or the macOS `public.file-url`
+			// pasteboard flavor handled above — never text-shape sniffing.
 			// Route to the focused component when it accepts pastes (modal
 			// Input prompts), matching the enhanced-paste text path (#2127).
 			const target = promptTarget ?? this.ctx.editor;
