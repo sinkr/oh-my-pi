@@ -311,20 +311,19 @@ export function extractPastePathsFromText(text: string): string[] | undefined {
 }
 
 /**
- * Whole-text-as-path pass shared by {@link extractImagePastePathsFromText}
- * and {@link extractImagePathFromText}: treat the entire text as one path
- * when it is anchored by {@link ABSOLUTE_PATH_PREFIX_REGEX}, contains no
- * newlines, and points at a vision-previewable image or video extension. Recovers single paths
- * whose unescaped spaces defeat the segment splitter (macOS screenshot names).
+ * Whole-text-as-path pass used by {@link extractImagePathFromText}: treat the
+ * entire text as one path when it is anchored by
+ * {@link ABSOLUTE_PATH_PREFIX_REGEX}, contains no newlines, and points at a
+ * vision-previewable image or video extension. Recovers single paths whose
+ * unescaped spaces defeat the segment splitter (macOS screenshot names).
  *
  * Refuses payloads carrying a second {@link INTERIOR_PATH_ANCHOR_REGEX} anchor.
- * Dragging two files at once emits `/tmp/a.png /tmp/b shot.png`, which the
- * splitter also refuses (`shot.png` is not explicit); swallowing it as one path
- * attaches nothing, and `handleImagePathPaste`'s ENOENT branch only surfaces a
- * status — unlike its other failure branches it never re-pastes the text — so
- * both paths would vanish. Genuinely ambiguous input lands here too (a
- * directory whose name ends in a space, as in `/tmp/odd dir /sub/x.png`); a
- * plain text paste is the losing-nothing outcome, so ambiguity resolves that way.
+ * A pasteboard item naming two files at once (`/tmp/a.png /tmp/b shot.png`)
+ * defeats the splitter too (`shot.png` is not explicit); swallowing it as one
+ * path would hand the loader a path that can never resolve. Genuinely
+ * ambiguous input lands here too (a directory whose name ends in a space, as
+ * in `/tmp/odd dir /sub/x.png`); refusing costs nothing — the caller simply
+ * skips the candidate.
  */
 function extractWholeTextAttachmentPath(text: string): string | undefined {
 	const trimmed = text.trim();
@@ -336,24 +335,6 @@ function extractWholeTextAttachmentPath(text: string): string | undefined {
 		: undefined;
 }
 
-/**
- * Same shape as {@link extractBracketedImagePastePaths} but operates on a
- * payload that has already been stripped of the `\x1b[200~` / `\x1b[201~`
- * markers — used by the assembled-paste router in {@link CustomEditor.handleInput}
- * so split bracketed pastes get the same attachment-path detection as single-chunk ones.
- *
- * When the segment splitter fails (an unescaped space in a real path breaks
- * its every-segment-is-a-path invariant), falls back to
- * {@link extractWholeTextAttachmentPath}, so a dropped macOS screenshot
- * (`Screenshot 2026-06-25 at 1.23.45 PM.png`) attaches as an image instead of
- * degrading to literal text (#6578).
- */
-export function extractImagePastePathsFromText(text: string): string[] | undefined {
-	const paths = extractPastePathsFromText(text);
-	if (paths !== undefined) return paths.every(isPreviewableAttachmentPath) ? paths : undefined;
-	const wholePath = extractWholeTextAttachmentPath(text);
-	return wholePath ? [wholePath] : undefined;
-}
 
 function bracketedPastePayload(data: string): string | undefined {
 	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
@@ -367,32 +348,20 @@ export function extractBracketedPastePaths(data: string): string[] | undefined {
 	return payload === undefined ? undefined : extractExplicitPathSegments(payload);
 }
 
-export function extractBracketedImagePastePaths(data: string): string[] | undefined {
-	const payload = bracketedPastePayload(data);
-	return payload === undefined ? undefined : extractImagePastePathsFromText(payload);
-}
-
-export function extractBracketedImagePastePath(data: string): string | undefined {
-	const paths = extractBracketedImagePastePaths(data);
-	return paths?.length === 1 ? paths[0] : undefined;
-}
-
 /**
  * Return a single previewable file path when `text` is exactly one explicit
- * image (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`) or video path. Used by the
- * keybind-driven clipboard image paste path so a
- * clipboard whose only payload is an image file (e.g. Finder `Cmd+C` on
- * macOS) attaches the image instead of pasting the path as literal text.
+ * image (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`) or video path. Used to
+ * filter the macOS `public.file-url` pasteboard flavor (`readMacFileUrls`)
+ * down to previewable entries — the only remaining path-based attachment
+ * provenance. Pasted TEXT is never routed through this: text that merely
+ * looks like an image path stays text.
  *
  * Two-stage detection:
  *
- * 1. Splitter pass (shared with the bracketed-paste handler) — handles
- *    quoted paths, shell-escaped spaces, and unambiguous single tokens.
- *    Returns the single previewable path when it parses cleanly; explicitly
- *    returns `undefined` when the splitter found multiple segments (so
- *    ambiguous multi-path clipboard text like `/tmp/a.png /tmp/b.png`
- *    still falls through to the text fallback instead of being mis-loaded
- *    as one giant path).
+ * 1. Splitter pass — handles quoted paths, shell-escaped spaces, and
+ *    unambiguous single tokens. Returns the single previewable path when it
+ *    parses cleanly; explicitly returns `undefined` when the splitter
+ *    found multiple segments.
  * 2. {@link extractWholeTextAttachmentPath} — only reached when the splitter
  *    failed (every segment must look like an explicit path; an unescaped
  *    space in a real path breaks that). This is what recovers macOS
@@ -1366,8 +1335,7 @@ export class CustomEditor extends Editor {
 	onCopyPrompt?: () => void;
 	/** Called when the configured image-paste shortcut is pressed. */
 	onPasteImage?: () => Promise<boolean>;
-	/** Called when a bracketed paste contains one or more image or video file paths. */
-	onPasteImagePath?: (path: string) => void | Promise<void>;
+
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
@@ -1402,7 +1370,7 @@ export class CustomEditor extends Editor {
 	 *  assembled payload here; the empty-paste / image-path branches must see the full content,
 	 *  not the raw single-chunk byte sequence. */
 	#pasteHandler = new BracketedPasteHandler();
-	/** Number of async pastes (clipboard-image reads / image-path attachments) currently in flight.
+	/** Number of async pastes (clipboard-image reads) currently in flight.
 	 *  While > 0, `handleInput` queues subsequent keystrokes into {@link #pendingInput} instead of
 	 *  dispatching them so a trailing `Enter` after `Cmd+V` can't submit before the image lands on
 	 *  `pendingImages` (Codex PR #3602 review). */
@@ -1532,9 +1500,12 @@ export class CustomEditor extends Editor {
 		// the assembled content regardless of chunk boundaries:
 		//  - empty payload → `onPasteImage` (#3601: `Cmd+V`/`Ctrl+V` on an
 		//    image-only macOS pasteboard the terminal stripped to `""` first);
-		//  - explicit image-file paths → `onPasteImagePath` (#3506);
 		//  - anything else → the base editor's `pasteText` so `[Paste #N]`
-		//    markers, autocomplete, and undo state stay intact.
+		//    markers, autocomplete, and undo state stay intact. Pasted text
+		//    is never promoted to an image attachment merely because it
+		//    looks like an image file path — image attachment requires real
+		//    provenance (clipboard image bytes or a macOS file-url flavor),
+		//    both handled by `InputController.handleImagePaste`.
 		const paste = this.#pasteHandler.process(data);
 		if (paste.handled) {
 			if (paste.pasteContent === undefined) return; // still buffering — wait for end marker
@@ -1546,15 +1517,6 @@ export class CustomEditor extends Editor {
 			if (remaining.length > 0) this.#pendingInput.push(remaining);
 			if (content.length === 0 && this.onPasteImage) {
 				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
-				return;
-			}
-			const attachmentPaths = extractImagePastePathsFromText(content);
-			if (attachmentPaths && this.onPasteImagePath) {
-				this.#trackAsyncPaste(
-					(async () => {
-						for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
-					})(),
-				);
 				return;
 			}
 			// A submit key that shared the read (see `StdinBuffer`'s paste event) is
