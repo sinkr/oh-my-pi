@@ -58,6 +58,23 @@ describe("InputController.handleImagePaste smart-paste fallback", () => {
 		expect(spies.showStatus).not.toHaveBeenCalled();
 	});
 
+	it("pastes path-shaped text literally instead of promoting it to an image", async () => {
+		// 2026-08-13 regression report: a copied image PATH (plain text) was
+		// swallowed into an image attachment. Contract: only real clipboard
+		// image bytes or macOS file-url flavors attach; text is text.
+		const { ctx, spies } = createContext();
+		const controller = new InputController(ctx, {
+			readImage: async () => null,
+			readText: async () => "/Users/robert/Downloads/img.jpg",
+		});
+
+		const result = await controller.handleImagePaste();
+
+		expect(result).toBe(true);
+		expect(spies.pasteText).toHaveBeenCalledWith("/Users/robert/Downloads/img.jpg");
+		expect(spies.showStatus).not.toHaveBeenCalled();
+	});
+
 	it("routes the text fallback to a focused paste-capable component (#2127 contract)", async () => {
 		const focusedPasteText = vi.fn();
 		const { ctx, spies } = createContext({ focused: { pasteText: focusedPasteText } });
