@@ -10,7 +10,7 @@ import type {
 import { formatBytes, isRecord, logger, readImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveReadPath } from "../tools/path-utils";
-import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
+import { formatDimensionNote, type ImageResizeOptions, readImageHeaderDimensions, resizeImage } from "./image-resize";
 
 export const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
 export const SUPPORTED_INPUT_IMAGE_MIME_TYPES = SUPPORTED_IMAGE_MIME_TYPES;
@@ -215,6 +215,75 @@ export async function convertImageToPng(image: ImageContent): Promise<ImageConte
 	const bytes = Buffer.from(image.data, "base64");
 	const data = await new Bun.Image(bytes).png().toBase64();
 	return { ...image, data, mimeType: "image/png" };
+}
+
+/**
+ * Longest edge (px) an inline image may keep before the display path downscales
+ * it. Far larger than any sane cell-grid fit, while keeping worst-case payloads
+ * comfortably below terminal frame budgets (herdr drops frames over 32 MiB).
+ */
+export const MAX_KITTY_IMAGE_DIMENSION = 2048;
+/** Encoded-payload budget (bytes) for a single inline kitty image transmit. */
+export const MAX_KITTY_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/** Decoded byte length of a base64 payload without materializing the buffer. */
+function base64ByteLength(data: string): number {
+	let padding = 0;
+	if (data.endsWith("==")) padding = 2;
+	else if (data.endsWith("=")) padding = 1;
+	return Math.floor((data.length * 3) / 4) - padding;
+}
+
+/**
+ * Whether an inline image must be re-encoded before it is handed to the TUI's
+ * kitty graphics path. True for non-PNG payloads (kitty transmits `f=100`) and
+ * for PNGs over the display budget: transmitting original pixels with only
+ * cell-size hints once turned a 6048x8064 photo into a ~34.8 MB kitty APC,
+ * blowing herdr's 32 MiB per-frame budget and rendering placeholder glyph soup.
+ * Cheap enough for the repaint path — it decodes at most 48 header bytes.
+ */
+export function imageNeedsKittyDisplayPreparation(image: Pick<ImageContent, "data" | "mimeType">): boolean {
+	if (image.mimeType !== "image/png") return true;
+	if (base64ByteLength(image.data) > MAX_KITTY_IMAGE_BYTES) return true;
+	// Header-only decode: 48 bytes cover the PNG IHDR, so a multi-megabyte
+	// buffer is never materialized just to read dimensions.
+	const header = readImageHeaderDimensions(Buffer.from(image.data.slice(0, 64), "base64"));
+	// Unreadable header: hand off to the async preparer, which can truly decode.
+	if (!header) return true;
+	return Math.max(header.width, header.height) > MAX_KITTY_IMAGE_DIMENSION;
+}
+
+/**
+ * Prepare an inline image for kitty graphics transmission: downscale anything
+ * over the display budget (preserving aspect ratio, never upscaling) and ensure
+ * the payload is PNG. Images already within budget come back unchanged (PNG) or
+ * format-converted only (non-PNG), so small images see no resize churn.
+ * Rejects when the image cannot be decoded; callers skip display on rejection.
+ */
+export async function prepareImageForKittyDisplay(image: ImageContent): Promise<ImageContent> {
+	const bytes = Buffer.from(image.data, "base64");
+	const { width, height, format } = await new Bun.Image(bytes).metadata();
+	const oversized = bytes.length > MAX_KITTY_IMAGE_BYTES || Math.max(width, height) > MAX_KITTY_IMAGE_DIMENSION;
+	if (!oversized) {
+		return format === "png" && image.mimeType === "image/png" ? image : convertImageToPng(image);
+	}
+	const resized = await resizeImage(image, {
+		maxWidth: MAX_KITTY_IMAGE_DIMENSION,
+		maxHeight: MAX_KITTY_IMAGE_DIMENSION,
+		maxBytes: MAX_KITTY_IMAGE_BYTES,
+		// The model-facing 200px floor upscales icons; the display path never upscales.
+		minDimension: 1,
+		// Kitty transmits PNG — a WebP encode candidate would be wasted work.
+		excludeWebP: true,
+	});
+	if (resized.decodeFailed) {
+		throw new Error("prepareImageForKittyDisplay: image could not be decoded");
+	}
+	if (resized.mimeType === "image/png") {
+		return { type: "image", data: resized.data, mimeType: "image/png" };
+	}
+	// The smallest re-encode came out lossy; kitty still needs PNG bytes.
+	return convertImageToPng({ type: "image", data: resized.data, mimeType: resized.mimeType });
 }
 
 export async function ensureSupportedImageInput(image: ImageContent): Promise<ImageContent | null> {

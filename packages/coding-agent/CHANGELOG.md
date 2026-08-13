@@ -130,6 +130,9 @@
 - Fixed omp plugin install failing with cloning errors for legacy Pi extensions whose tool schemas use legacy-typebox builders.
 - Fixed omp update aborting with chmod ENOENT when concurrent update runs overlapped by using unique download temporary paths.
 - Fixed the browser tool executable probe launching the user's installed GUI Chromium on Windows: the `--version` version probe from ecb22957 was Linux-scoped but ran for every platform candidate, so on Windows it could hand off to a running `chrome.exe`, open a normal browser window, then reject the candidate and fall back to cached Chrome for Testing. The probe is now confined to Linux ([#8445](https://github.com/can1357/oh-my-pi/issues/8445)).
+### Fixed
+
+- Fixed inline image display transmitting original pixel payloads over the kitty graphics protocol; a 6048x8064 tool-result photo became a ~34.8MB APC that blew downstream 32MiB per-frame budgets (herdr) and rendered placeholder glyph soup. Oversized images (longest side > 2048px or payload > 8MiB) are now downscaled and re-encoded to PNG before transmit; small PNGs still pass through byte-identical.
 
 ## [17.3.0] - 2026-08-13
 

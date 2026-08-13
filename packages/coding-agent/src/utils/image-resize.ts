@@ -43,7 +43,7 @@ const DEFAULT_OPTIONS: Required<Omit<ImageResizeOptions, "excludeWebP">> = {
 	minDimension: DEFAULT_MIN_DIMENSION,
 };
 
-interface ImageHeaderDimensions {
+export interface ImageHeaderDimensions {
 	width: number;
 	height: number;
 	mimeType: string;
@@ -116,7 +116,8 @@ function readJpegHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | u
 	return undefined;
 }
 
-function readImageHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | undefined {
+/** Parse width/height from a PNG or JPEG header without decoding the image. */
+export function readImageHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | undefined {
 	return readPngHeaderDimensions(buffer) ?? readJpegHeaderDimensions(buffer);
 }
 
