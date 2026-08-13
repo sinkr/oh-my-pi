@@ -8,7 +8,7 @@ const HERDR_ENV = {
 } as const;
 
 describe("syncHerdrTitles", () => {
-	it("renames both the current HerdR tab and workspace", async () => {
+	it("renames only the HerdR tab, never the workspace", async () => {
 		const calls: string[][] = [];
 		const result = await syncHerdrTitles("Fix login flow", HERDR_ENV, async command => {
 			calls.push([...command]);
@@ -16,20 +16,22 @@ describe("syncHerdrTitles", () => {
 		});
 
 		expect(result).toBe("renamed");
-		expect(calls).toContainEqual(["herdr", "tab", "rename", "w1:t2", "Fix login flow"]);
-		expect(calls).toContainEqual(["herdr", "workspace", "rename", "w1", "Fix login flow"]);
-		expect(calls).toHaveLength(2);
+		expect(calls).toEqual([["herdr", "tab", "rename", "w1:t2", "Fix login flow"]]);
 	});
 
-	it("renames only the surfaces whose ids are present", async () => {
+	it("skips when only a workspace id is present", async () => {
 		const calls: string[][] = [];
-		const result = await syncHerdrTitles("Tab only", { HERDR_ENV: "1", HERDR_TAB_ID: "w9:t1" }, async command => {
-			calls.push([...command]);
-			return 0;
-		});
+		const result = await syncHerdrTitles(
+			"Workspace only",
+			{ HERDR_ENV: "1", HERDR_WORKSPACE_ID: "w1" },
+			async command => {
+				calls.push([...command]);
+				return 0;
+			},
+		);
 
-		expect(result).toBe("renamed");
-		expect(calls).toEqual([["herdr", "tab", "rename", "w9:t1", "Tab only"]]);
+		expect(result).toBe("skipped");
+		expect(calls).toEqual([]);
 	});
 
 	it("does nothing outside HerdR", async () => {
@@ -48,15 +50,13 @@ describe("syncHerdrTitles", () => {
 		expect(invoked).toBe(0);
 	});
 
-	it("reports a failure when any surface rename fails", async () => {
-		const exitOneForWorkspace = await syncHerdrTitles("Half", HERDR_ENV, async command =>
-			command[1] === "workspace" ? 1 : 0,
-		);
+	it("reports a failure when the tab rename fails", async () => {
+		const exitOne = await syncHerdrTitles("Half", HERDR_ENV, async () => 1);
 		const thrown = await syncHerdrTitles("Boom", HERDR_ENV, async () => {
 			throw new Error("spawn failed");
 		});
 
-		expect(exitOneForWorkspace).toBe("failed");
+		expect(exitOne).toBe("failed");
 		expect(thrown).toBe("failed");
 	});
 });
