@@ -41,7 +41,7 @@ import { applyCompatOverrides } from "./apply";
 import { API_COMPAT_RECORDS, AXES, type CompatRecordName } from "./axes";
 import { hasModelScopedEffortsRule, resolveCascade } from "./cascade";
 import { compareRevision, parseRevision, type Revision } from "./revision";
-import { classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
+import { AmbiguousIdentityError, classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
 import type { ModelIdentity, RequestPolicy, ResolvedAxes, ResolveTarget } from "./types";
 
 /** Result of resolving one model spec through the compat engine. */
@@ -120,7 +120,21 @@ function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity
 	// Strict on purpose: ambiguous identity is a rule-authoring defect surfaced
 	// at build/CI time, never silently degraded to `unknown`. Discovery
 	// normalization opts into leniency through `classifyModel` directly.
-	return classifyModel(spec.provider, spec.id);
+	//
+	// But `buildModel` (the only caller of `resolveModelPolicy` that reaches
+	// here for discovered/custom/override specs, per its own doc comment) has
+	// no CI gate to catch a tie before it ships — a discovered or user-defined
+	// model id that ties two families/classes at equal rank would otherwise
+	// throw `AmbiguousIdentityError` out of full catalog composition, taking
+	// down the entire model registry (and anything that forces it, like
+	// advisor startup) rather than just that one model. Fall back to lenient
+	// classification so a tie degrades to `unknown` for this spec instead.
+	try {
+		return classifyModel(spec.provider, spec.id);
+	} catch (error) {
+		if (!(error instanceof AmbiguousIdentityError)) throw error;
+		return classifyModel(spec.provider, spec.id, { lenient: true });
+	}
 }
 
 // ---------------------------------------------------------------------------
