@@ -44,7 +44,7 @@ import { applyCompatOverrides } from "./apply";
 import { API_COMPAT_RECORDS, AXES, type CompatRecordName } from "./axes";
 import { hasModelScopedEffortsRule, resolveCascade } from "./cascade";
 import { compareRevision, parseRevision, type Revision } from "./revision";
-import { classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
+import { AmbiguousIdentityError, classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
 import type { ModelIdentity, RequestPolicy, ResolvedAxes, ResolveTarget } from "./types";
 
 /** Result of resolving one model spec through the compat engine. */
@@ -121,6 +121,20 @@ class IdentityFacts {
 }
 
 /**
+ * Strict classification that degrades an equal-rank family/class tie to
+ * `unknown` instead of throwing `AmbiguousIdentityError`. Every other error
+ * still propagates.
+ */
+function classifyForPolicy(provider: string, modelId: string): ModelIdentity {
+	try {
+		return classifyModel(provider, modelId);
+	} catch (error) {
+		if (!(error instanceof AmbiguousIdentityError)) throw error;
+		return classifyModel(provider, modelId, { lenient: true });
+	}
+}
+
+/**
  * The id a spec resolves identity and rules under: its own, unless that names
  * no model and the row sends a model that does on the wire. A Devin Fusion
  * pairing runs only its lead, so the lead's reviewed rules (cache-write rate,
@@ -129,15 +143,26 @@ class IdentityFacts {
 function policyModelId<TApi extends Api>(spec: ModelSpec<TApi>): string {
 	const wireId = spec.requestModelId;
 	if (wireId === undefined || wireId === spec.id) return spec.id;
-	if (classifyModel(spec.provider, spec.id).class !== "unknown") return spec.id;
-	return classifyModel(spec.provider, wireId).class === "unknown" ? spec.id : wireId;
+	if (classifyForPolicy(spec.provider, spec.id).class !== "unknown") return spec.id;
+	return classifyForPolicy(spec.provider, wireId).class === "unknown" ? spec.id : wireId;
 }
 
 function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity {
 	// Strict on purpose: ambiguous identity is a rule-authoring defect surfaced
 	// at build/CI time, never silently degraded to `unknown`. Discovery
 	// normalization opts into leniency through `classifyModel` directly.
-	return classifyModel(spec.provider, policyModelId(spec));
+	//
+	// But `buildModel` (the only caller of `resolveModelPolicy` that reaches
+	// here for discovered/custom/override specs, per its own doc comment) has
+	// no CI gate to catch a tie before it ships — a discovered or user-defined
+	// model id that ties two families/classes at equal rank would otherwise
+	// throw `AmbiguousIdentityError` out of full catalog composition, taking
+	// down the entire model registry (and anything that forces it, like
+	// advisor startup) rather than just that one model. `classifyForPolicy`
+	// degrades a tie to `unknown` for this spec instead; `policyModelId` uses
+	// the same tolerance so an ambiguous own id defers to a known wire id
+	// exactly like an unknown one does.
+	return classifyForPolicy(spec.provider, policyModelId(spec));
 }
 
 // ---------------------------------------------------------------------------
