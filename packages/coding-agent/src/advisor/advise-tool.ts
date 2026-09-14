@@ -154,12 +154,14 @@ export function deriveAdvisorTelemetry(
 }
 
 /**
- * The tools an advisor receives by default when its config omits `tools` — the
- * read-only investigative set. The full available pool is every built tool the
- * session has (the advisor is a full agent); a config's `tools` selects from it.
- * The runtime build additionally admits `recall` into the default set when the
- * active memory backend built it (hindsight/mnemopi).
+ * Hard allowlist for advisor tools. Advisors are reviewers, not agents that can
+ * mutate files, run commands, delegate work, or change external state. `recall`
+ * is included because memory retrieval is read-only; it is only present when
+ * the active memory backend builds it.
  */
+export const ADVISOR_ALLOWED_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "grep", "glob", "recall"]);
+
+/** Tools an advisor receives by default when its config omits `tools`. */
 export const ADVISOR_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "grep", "glob"]);
 
 function advisorNoteDedupeKey(note: string): string {
