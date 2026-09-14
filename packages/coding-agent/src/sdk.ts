@@ -49,6 +49,7 @@ import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { DEFAULT_FRAME_DATA_BYTES_BUDGET, frameDataBytesBudget } from "@oh-my-pi/snapcompact";
 import {
+	ADVISOR_ALLOWED_TOOL_NAMES,
 	discoverAdvisorConfigs,
 	discoverWatchdogFiles,
 	formatActiveRepoWatchdogPrompt,
@@ -5241,14 +5242,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// (snapshots, conflict history, repeat-read counts), so sharing it across
 		// the roster would attribute one advisor's reads to another (#18834). Each
 		// is also distinct from the primary (its own `-advisor` session id + agent
-		// id), while edit/bash/write stay fully functional: the advisor is a full
-		// agent and its config's `tools` selects which of these it actually gets
-		// (defaulting to read/grep/glob).
+		// id). Only the hard read-only advisor toolset is ever built against it, so
+		// advisors can be toggled at runtime without constructing mutating tools.
 		const createAdvisorToolSession = (): ToolSession => ({
 			...toolSession,
 			state: new ToolConversationState(),
-			// The primary may carry a dormant xd:// write transport. Advisors use
-			// their own configured tool slate, so a selected write is always full.
+			// The primary may carry a dormant xd:// write transport. Advisors never
+			// receive that transport or any file-mutating tool.
 			deviceOnlyWrite: undefined,
 			pendingFullWriteDescription: undefined,
 			get cwd() {
@@ -5261,7 +5261,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return toolSession.skills;
 			},
-			hasEditTool: true,
+			hasEditTool: false,
 			requireYieldTool: false,
 			getSessionId: () => {
 				const id = sessionManager.getSessionId?.();
@@ -5284,7 +5284,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Advisor rosters build synchronously; `task` is the one built-in that
 		// discovers asynchronously, so resolve its agents once up front.
 		const advisorTaskAgents = await TaskTool.discoverAgents(createAdvisorToolSession());
-		const advisorBuiltinNames = Object.keys(BUILTIN_TOOLS) as Array<keyof typeof BUILTIN_TOOLS>;
+		// Hard read-only allowlist: a grant selects only from these names, so no
+		// mutating, delegating, or external-state built-in is ever built. The
+		// `task` wiring around it stays as a structurally gated seam.
+		const advisorBuiltinNames = (Object.keys(BUILTIN_TOOLS) as Array<keyof typeof BUILTIN_TOOLS>).filter(name =>
+			ADVISOR_ALLOWED_TOOL_NAMES.has(name),
+		);
 		const buildAdvisorTool = (name: keyof typeof BUILTIN_TOOLS, advisorSession: ToolSession): Tool | null => {
 			if (name === "task") return TaskTool.withAgents(advisorSession, advisorTaskAgents);
 			const tool = BUILTIN_TOOLS[name](advisorSession);
@@ -5317,12 +5322,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						activeToolNames.delete(name);
 						continue;
 					}
-					// Wrapped like every registry tool: `ExtensionToolWrapper` is where the
-					// approval mode, per-tool `tools.approval.<tool>` policies and
-					// `autoApprove` are enforced. The advisor's loop and its Cursor exec
-					// bridge both run these instances directly, so a raw one would execute a
-					// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
-					// first, matching the registry's wrap order.
+					// Wrapped like every registry tool so the advisor uses the same metadata
+					// and approval plumbing as the primary, while the allowlist above ensures
+					// no mutating tool is ever handed to its loop or Cursor bridge.
 					tools.push(new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent));
 				}
 				return {
@@ -5331,8 +5333,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// advisor's own tool session so a `pi_grep` frame's context width and
 					// match cap are honored there too.
 					createGrepTool: createBridgeGrepFactory(advisorSession, extensionRunner, advisorAgent),
-					// Same `replace`-mode requirement as the primary bridge; the advisor
-					// path gates it on the advisor's own `edit` grant.
+					// Same `replace`-mode requirement as the primary bridge. The hard advisor
+					// allowlist excludes edit; retain this structurally gated bridge seam.
 					createEditTool: () => createBridgeEditTool(advisorSession, extensionRunner, advisorAgent),
 					resetState: () => {
 						advisorSession.state = new ToolConversationState();
