@@ -41,7 +41,7 @@ describe("discoverAdvisorConfigs", () => {
 			"    reviewInterval: 3",
 			"    instructions: Watch module boundaries.",
 			"  - name: Security Reviewer",
-			"    tools: [read, definitely-not-a-tool]",
+			"    tools: [read, bash, edit, recall, definitely-not-a-tool]",
 		].join("\n");
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
 
@@ -59,8 +59,8 @@ describe("discoverAdvisorConfigs", () => {
 		expect(sec.model).toBeUndefined();
 		expect(sec.reviewMode).toBeUndefined();
 		expect(sec.reviewInterval).toBeUndefined();
-		// The unknown/non-read-only tool is dropped; only `read` survives.
-		expect(sec.tools).toEqual(["read"]);
+		// Unknown and mutating tools are dropped; read-only tools survive.
+		expect(sec.tools).toEqual(["read", "recall"]);
 		expect(sharedInstructions).toBe("Shared baseline for all advisors.");
 	});
 
