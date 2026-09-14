@@ -38,7 +38,7 @@ describe("discoverAdvisorConfigs", () => {
 			"    model: x-ai/grok-code-fast:high",
 			"    instructions: Watch module boundaries.",
 			"  - name: Security Reviewer",
-			"    tools: [read, definitely-not-a-tool]",
+			"    tools: [read, bash, edit, recall, definitely-not-a-tool]",
 		].join("\n");
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
 
@@ -52,8 +52,8 @@ describe("discoverAdvisorConfigs", () => {
 		expect(arch.instructions).toBe("Watch module boundaries.");
 		expect(sec.name).toBe("Security Reviewer");
 		expect(sec.model).toBeUndefined();
-		// The unknown/non-read-only tool is dropped; only `read` survives.
-		expect(sec.tools).toEqual(["read"]);
+		// Unknown and mutating tools are dropped; read-only tools survive.
+		expect(sec.tools).toEqual(["read", "recall"]);
 		expect(sharedInstructions).toBe("Shared baseline for all advisors.");
 	});
 
