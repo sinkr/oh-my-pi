@@ -11399,10 +11399,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * The names of the tools available to advisors this session (the pool a
-	 * `/advisor configure` editor lists). The advisor is a full agent, so this is the
-	 * full built tool set; a tool whose optional factory returns null (e.g. lsp with
-	 * no servers) is absent.
+	 * The names of the read-only tools available to advisors this session (the
+	 * pool a `/advisor configure` editor lists). A tool whose optional factory
+	 * returns null is absent.
 	 */
 	getAdvisorAvailableToolNames(): string[] {
 		return this.#advisors.getAdvisorAvailableToolNames();
