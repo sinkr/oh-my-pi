@@ -43,7 +43,7 @@ export interface AdvisorConfig {
 	name: string;
 	/** Model selector with an optional `:level` thinking suffix, resolved like any other model override. */
 	model?: string;
-	/** Built-in tool names, including mutating tools; omitted uses read/grep/glob plus available recall, empty grants none. */
+	/** Read-only tool names (read/grep/glob/recall); omitted adds available recall to the defaults, empty grants none. */
 	tools?: string[];
 	instructions?: string;
 	/** Defaults to true; false retains the advisor in the roster and status displays without building its runtime. */

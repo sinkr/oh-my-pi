@@ -43,6 +43,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import {
+	ADVISOR_ALLOWED_TOOL_NAMES,
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
 	ADVISOR_MAX_BUDGET_PER_UPDATE,
@@ -1084,7 +1085,9 @@ export class SessionAdvisors {
 			// nothing there). The advisor's instance reads the same bank as the
 			// primary. Explicit `tools` lists stay user-owned and are not widened.
 			const names =
-				config.tools === undefined ? new Set([...ADVISOR_DEFAULT_TOOL_NAMES, "recall"]) : new Set(config.tools);
+				config.tools === undefined
+					? new Set([...ADVISOR_DEFAULT_TOOL_NAMES, "recall"])
+					: new Set(config.tools.filter(name => ADVISOR_ALLOWED_TOOL_NAMES.has(name)));
 			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
@@ -2403,13 +2406,14 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * The names of the tools available to advisors this session (the pool a
-	 * `/advisor configure` editor lists). The advisor is a full agent, so this is the
-	 * full built tool set; a tool whose optional factory returns null (e.g. lsp with
-	 * no servers) is absent.
+	 * The names of the read-only tools available to advisors this session (the
+	 * pool a `/advisor configure` editor lists). A tool whose optional factory
+	 * returns null is absent.
 	 */
 	getAdvisorAvailableToolNames(): string[] {
-		return (this.#advisorTools ?? []).map(tool => tool.name);
+		return (this.#advisorTools ?? [])
+			.map(tool => tool.name)
+			.filter(name => ADVISOR_ALLOWED_TOOL_NAMES.has(name));
 	}
 
 	/**
