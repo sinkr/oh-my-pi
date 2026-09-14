@@ -37,6 +37,7 @@ import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
+	ADVISOR_ALLOWED_TOOL_NAMES,
 	discoverAdvisorConfigs,
 	discoverWatchdogFiles,
 	formatActiveRepoWatchdogPrompt,
@@ -3850,17 +3851,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
-		// Full toolset for the advisor, built unconditionally so it can be toggled at
-		// runtime. Bound to a DISTINCT ToolSession (its own `-advisor` session id +
-		// agent id) so the advisor's tool state — snapshot, seen-lines, conflict, and
-		// summary caches, all keyed on session identity — stays isolated from the
-		// primary, while edit/bash/write stay fully functional: the advisor is a full
-		// agent and its config's `tools` selects which of these it actually gets
-		// (defaulting to read/grep/glob).
+		// Build only the hard read-only advisor toolset, unconditionally so advisors
+		// can be toggled at runtime without ever constructing mutating tools. Bound
+		// to a DISTINCT ToolSession so read state stays isolated from the primary.
 		const advisorToolSession: ToolSession = {
 			...toolSession,
-			// The primary may carry a dormant xd:// write transport. Advisors use
-			// their own configured tool slate, so a selected write is always full.
+			// The primary may carry a dormant xd:// write transport. Advisors never
+			// receive that transport or any file-mutating tool.
 			deviceOnlyWrite: undefined,
 			pendingFullWriteDescription: undefined,
 			get cwd() {
@@ -3869,7 +3866,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skillHintVisible() {
 				return toolSession.skillHintVisible;
 			},
-			hasEditTool: true,
+			hasEditTool: false,
+			conflictHistory: undefined,
 			requireYieldTool: false,
 			getSessionId: () => {
 				const id = sessionManager.getSessionId?.();
@@ -3887,16 +3885,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			isToolActive: name => toolSession.isToolActive?.(name) === true,
 		};
 		const advisorToolBuilds: Array<Tool | null | Promise<Tool | null>> = [];
-		for (const name in BUILTIN_TOOLS) {
+		for (const name of ADVISOR_ALLOWED_TOOL_NAMES) {
 			advisorToolBuilds.push(BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS](advisorToolSession));
 		}
 		const built = await Promise.all(advisorToolBuilds);
-		// Wrapped like every registry tool: `ExtensionToolWrapper` is where the
-		// approval mode, per-tool `tools.approval.<tool>` policies and
-		// `autoApprove` are enforced. The advisor's loop and its Cursor exec
-		// bridge both run these instances directly, so a raw one would execute a
-		// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
-		// first, matching the registry's wrap order.
+		// Wrapped like every registry tool so the advisor uses the same metadata
+		// and approval plumbing as the primary, while the allowlist above ensures
+		// no mutating tool is ever handed to its loop or Cursor bridge.
 		const advisorTools: Tool[] = built
 			.filter((tool): tool is Tool => tool != null)
 			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
@@ -4038,8 +4033,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// advisor's own tool session so a `pi_grep` frame's context width and
 			// match cap are honored there too.
 			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner),
-			// Same `replace`-mode requirement as the primary bridge; the advisor
-			// path gates it on the advisor's own `edit` grant.
+			// Same `replace`-mode requirement as the primary bridge. The hard advisor
+			// allowlist excludes edit; retain this structurally gated bridge seam.
 			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner),
 			// The advisor's bridge tools are wrapped for approval, but the wrapper
 			// reads the mode and per-tool policies only from the execute-time
