@@ -2,7 +2,7 @@
 
 The advisor subsystem attaches one or more optional reviewer models to a session. Each advisor reviews primary-agent transcript updates, can inspect the workspace with its own tools, and injects concise advice back into the primary session.
 
-An advisor does not approve actions or mutate primary session state directly. Its default investigative toolset is `read`, `grep`, and `glob`, but a `WATCHDOG.yml` roster entry may grant any built-in — including mutating tools such as `edit`, `write`, `bash`, and `eval`. Those tools run in an isolated advisor `ToolSession`, but they honor the session's normal approval mode and per-tool policies; grant them only when the advisor model and workspace are trusted (see [Tools and isolation](#tools-and-isolation)).
+An advisor does not approve actions or mutate primary session state directly. Its hard investigative tool allowlist is `read`, `grep`, and `glob`, plus `recall` when memory is available. A `WATCHDOG.yml` roster entry may narrow that set, but cannot grant command execution, file mutation, delegation, or external-state tools.
 
 ## Implementation files
 
@@ -89,7 +89,7 @@ When the advisor is enabled mid-session, the cursor seeds to the current primary
 
 ## Tools and isolation
 
-The advisor is a full agent with its own `Agent` instance and a distinct `ToolSession` whose id is suffixed `-advisor`. It does not share the primary agent's file snapshots, seen-lines tracking, conflict state, or summary cache.
+The advisor has its own `Agent` instance and a distinct read-only `ToolSession` whose id is suffixed `-advisor`. It does not share the primary agent's file snapshots, seen-lines tracking, conflict state, or summary cache.
 
 Every advisor has the `advise` tool for surfacing notes into the primary transcript. When `tools` is omitted, its investigative grant is:
 
@@ -97,9 +97,9 @@ Every advisor has the `advise` tool for surfacing notes into the primary transcr
 - `grep`
 - `glob`
 
-A `WATCHDOG.yml` roster entry may select any subset of built-ins that were actually constructed for the session (a factory that returned `null`, such as unavailable `lsp`, is absent). An explicit empty `tools: []` grants no investigative tools; `advise` remains available. Unknown-only lists are dropped with a warning and currently fall back to the default subset. Grantable names include mutating tools such as `edit`, `write`, `bash`, `eval`, `debug`, `ast_edit`, `task`, `hub`, and memory tools. Enabled browser/computer preludes are reached through `eval`, not granted as tools.
+A `WATCHDOG.yml` roster entry may select a read-only subset of those tools; `recall` is also accepted when the active memory backend provides it. An explicit empty `tools: []` grants no investigative tools; `advise` remains available. Unknown or mutating names are dropped with a warning; if no allowed names remain, the implementation falls back to the default subset.
 
-Advisor tools are built against the isolated advisor `ToolSession` and wrapped with `ExtensionToolWrapper`, so `tools.approvalMode`, per-tool approval policies, and `autoApprove` apply just as they do to registry tools. Cursor's server-side exec bridge uses the same approval context and only exposes delete/edit/search capabilities when the corresponding advisor grant exists.
+Advisor tools are built against the isolated advisor `ToolSession` and wrapped with `ExtensionToolWrapper`, so the normal metadata and approval plumbing still applies. The Cursor server-side bridge receives the same read-only tool map and cannot expose file mutation or command execution.
 
 The `advise` tool accepts one note and an optional severity:
 
@@ -276,9 +276,9 @@ advisors:
   - name: Fixer
     enabled: false
     model: anthropic/claude-sonnet-4-5:high
-    tools: [read, grep, glob, edit, bash]
+    tools: [read, grep, glob]
     instructions: |
-      You may edit and run tests to prove a fix locally, then advise.
+      Review the proposed fix and report risks without changing the workspace.
 ```
 
 Fields:
@@ -287,7 +287,7 @@ Fields:
 - `advisors[].name`: human label; slugified for the session id and its `__advisor.<slug>.jsonl` filename. Duplicate slugs across files are resolved by the same specificity rule as `WATCHDOG.md` discovery (project leaf > project ancestor > user).
 - `advisors[].enabled`: optional per-advisor switch, default `true`. `false` leaves the advisor visible as paused in status/configuration.
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
-- `advisors[].tools`: optional list of built-in tool names to grant. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning; if that leaves a nonempty input with no valid names, the implementation currently treats the result as omitted and uses the default subset.
+- `advisors[].tools`: optional read-only tool list. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. `recall` is accepted when the active memory backend provides it. Mutating or unknown names are dropped with a warning. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized; if no allowed names remain, the implementation falls back to the default subset.
 - `maxNotesPerUpdate` (top level or per advisor): accepted non-blocker notes per prompt update, default `4`. A per-advisor value overrides the top-level value, which overrides the `advisor.maxNotesPerUpdate` setting.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
 
