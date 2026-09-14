@@ -4,19 +4,18 @@ import { type } from "@oh-my-pi/omptype";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { expandAtImports } from "../discovery/at-imports";
-import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
+import { normalizeToolNames } from "../tools/builtin-names";
+import { ADVISOR_ALLOWED_TOOL_NAMES } from "./advise-tool";
 import { collectConfigCandidates } from "./watchdog";
 
 /**
  * One advisor declared in a `WATCHDOG.yml` file. `model` is a model selector
  * with an optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`),
- * resolved exactly like any other model override; `tools` is a subset of
- * `BUILTIN_TOOL_NAMES` — any built-in name, including mutating tools such as
- * `edit`/`write`/`bash` (the advisor is a full agent). Omitted falls back to
- * the default `read`/`grep`/`glob` subset (plus `recall` when the active
- * memory backend provides it); an explicit empty list grants no
- * tools. `instructions` is the advisor's specialization, appended to the shared
- * baseline.
+ * resolved exactly like any other model override; `tools` is a subset of the
+ * advisor's read-only allowlist. Omitted falls back to the default
+ * `read`/`grep`/`glob` subset (plus `recall` when the active memory backend
+ * provides it); an explicit empty list grants no tools. `instructions` is the
+ * advisor's specialization, appended to the shared baseline.
  */
 export interface AdvisorConfig {
 	name: string;
@@ -160,13 +159,10 @@ export function getOrCreateAdvisorProviderSessionId(
 	return next;
 }
 
-/** Built tool names, for validating an advisor's `tools` list. */
-const KNOWN_TOOL_NAMES = new Set<string>(BUILTIN_TOOL_NAMES);
-
 /**
- * Keep only valid tool names from an advisor's `tools` list, dropping unknowns
- * with a warning. The advisor is a full agent, so any built tool may be granted;
- * the runtime further filters to what's actually available this session.
+ * Keep only read-only tool names from an advisor's `tools` list, dropping
+ * unknown or mutating tools with a warning. The runtime applies the same
+ * allowlist as a defense in depth for configs constructed in memory.
  * `undefined` means "use the default subset" (read/grep/glob); only an explicit
  * raw empty list means "no tools".
  */
@@ -175,8 +171,8 @@ function filterAdvisorTools(tools: string[] | undefined, sourcePath: string): st
 	if (tools.length === 0) return [];
 	// Normalize legacy aliases (search→grep, find→glob) and dedupe before validating.
 	const filtered = normalizeToolNames(tools).filter(name => {
-		if (KNOWN_TOOL_NAMES.has(name)) return true;
-		logger.warn("Advisor config: dropping unknown tool", { path: sourcePath, tool: name });
+		if (ADVISOR_ALLOWED_TOOL_NAMES.has(name)) return true;
+		logger.warn("Advisor config: dropping unknown or non-read-only tool", { path: sourcePath, tool: name });
 		return false;
 	});
 	return filtered.length > 0 ? filtered : undefined;

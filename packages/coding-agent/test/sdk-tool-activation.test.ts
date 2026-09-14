@@ -2555,77 +2555,48 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 	});
 
-	it("runs advisor tools through the approval gate", async () => {
-		// The advisor's tools are built straight from `BUILTIN_TOOLS`, outside
-		// the registry loop that wraps everything else. Its own loop and its
-		// Cursor exec bridge (`piWrite`/`piBash`) run those instances directly,
-		// so an unwrapped one executes whatever it is handed regardless of the
-		// user's `tools.approval.<tool>` policy — the gate lives in
-		// `ExtensionToolWrapper`, not in either caller.
+	it("keeps advisors read-only when a mutating tool is requested", async () => {
 		const tempDir = makeTempDir();
-		const target = path.join(tempDir, "advisor-write.txt");
 
-		// An advisor only builds once a model resolves for it, and both the
-		// explicit override and the `advisor` role chain resolve against
-		// `modelRegistry.getAvailable()` — the models this machine holds auth
-		// for. Grant the suite's isolated storage a key and name the model
-		// outright, or the roster silently resolves to `no_model` wherever no
-		// provider is configured (CI) while passing on a developer box whose
-		// environment happens to carry provider keys.
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
-				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "deny" } }),
+				settings: Settings.isolated({ "advisor.enabled": true }),
 			});
 			try {
-				// The default advisor roster is read-only (read/grep/glob); the
-				// reviewed hole needs one actually granted a mutating tool.
-				session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
+				session.applyAdvisorConfigs(
+					[{ name: "writer", tools: ["write", "bash", "edit", "hub"], model: "gpt-4o-mini" }],
+					undefined,
+				);
 				const advisor = session.getAdvisorAgent();
 				if (!advisor) throw new Error("expected an advisor agent");
-				const writeTool = advisor.state.tools?.find(tool => tool.name === "write");
-				if (!writeTool) throw new Error("expected the advisor to hold a write tool");
-
-				// The gate rejects rather than returning an error result — that throw
-				// IS the refusal, and it only happens when the instance is wrapped.
-				await expect(
-					writeTool.execute("advisor-w1", { path: target, content: "written" }, undefined, undefined, {
-						settings: session.settings,
-					} as never),
-				).rejects.toThrow(/blocked by user policy/);
-				expect(fs.existsSync(target)).toBe(false);
+				const names = advisor.state.tools?.map(tool => tool.name) ?? [];
+				expect(names).toContain("advise");
+				expect(names).not.toContain("write");
+				expect(names).not.toContain("bash");
+				expect(names).not.toContain("edit");
+				expect(names).not.toContain("hub");
 			} finally {
 				await session.dispose();
 			}
 		});
 	});
 
-	it("keeps advisor write full-access when the primary has a device-only transport", async () => {
+	it("does not widen advisors when the primary has a device-only transport", async () => {
 		const tempDir = makeTempDir();
-		const target = path.join(tempDir, "advisor-full-write.txt");
 
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
-				settings: Settings.isolated({ "advisor.enabled": true, "tools.approval": { write: "allow" } }),
+				settings: Settings.isolated({ "advisor.enabled": true }),
 				toolNames: ["read"],
 			});
 			try {
 				session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
 				const advisor = session.getAdvisorAgent();
 				if (!advisor) throw new Error("expected an advisor agent");
-				const writeTool = advisor.state.tools?.find(tool => tool.name === "write");
-				if (!writeTool) throw new Error("expected the advisor to hold a write tool");
-
-				const result = await writeTool.execute(
-					"advisor-full-write",
-					{ path: target, content: "written\n" },
-					undefined,
-					undefined,
-					{ settings: session.settings } as never,
-				);
-				expect(result.isError).toBeUndefined();
-				expect(fs.readFileSync(target, "utf8")).toBe("written\n");
+				const names = advisor.state.tools?.map(tool => tool.name) ?? [];
+				expect(names).not.toContain("write");
 			} finally {
 				await session.dispose();
 			}
