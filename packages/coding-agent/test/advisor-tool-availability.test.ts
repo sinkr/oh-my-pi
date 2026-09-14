@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { ADVISOR_ALLOWED_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/advisor/advise-tool";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -33,27 +34,9 @@ function requireTool(tools: readonly AgentTool[], name: string): AgentTool {
 	return tool;
 }
 
-function schemaText(tool: AgentTool): string {
-	const parameters = tool.parameters as { toJsonSchema(): unknown };
-	return JSON.stringify(parameters.toJsonSchema());
-}
-
-async function outcomeText(tool: AgentTool): Promise<string> {
-	try {
-		const result = await tool.execute("advisor-service", {
-			command: "true",
-			name: "advisor-web",
-			cwd: "proc://",
-		} as never);
-		return result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
-	} catch (error) {
-		return error instanceof Error ? error.message : String(error);
-	}
-}
-
-// An advisor granted bash must be able to launch services when the primary does
-// not have bash, and must not advertise tools only the primary has.
-test("advisor tool availability follows that advisor's grant, not the primary", async () => {
+// Advisors are hard read-only: a slate holds only allowlisted tools however
+// much its grant asks for, and never advertises a tool only the primary has.
+test("advisor slates hold only allowlisted tools, whatever the grant or the primary has", async () => {
 	const RealSessionAdvisors = sessionAdvisors.SessionAdvisors;
 	let factory: sessionAdvisors.AdvisorToolFactory | undefined;
 	const advisorsSpy = spyOn(sessionAdvisors, "SessionAdvisors").mockImplementation(function (
@@ -70,12 +53,7 @@ test("advisor tool availability follows that advisor's grant, not the primary", 
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
-			settings: Settings.isolated({
-				"launch.enabled": true,
-				"async.enabled": true,
-				"find.enabled": "on",
-				"bashInterceptor.enabled": false,
-			}),
+			settings: Settings.isolated({ "find.enabled": "on" }),
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -87,67 +65,44 @@ test("advisor tool availability follows that advisor's grant, not the primary", 
 			skipPythonPreflight: true,
 			rules: [],
 			preloadedCustomToolPaths: [],
-			toolNames: ["read", "bash", "wait", "find"],
+			toolNames: ["read", "bash", "grep", "find"],
 		}));
 	} finally {
 		advisorsSpy.mockRestore();
 	}
 	try {
-		await session.setActiveToolsByName(["read"]);
+		// The primary holds and advertises tools no advisor may have.
+		await session.setActiveToolsByName(["read", "bash", "grep", "find"]);
 		const primaryActive = session.getActiveToolNames();
-		expect(primaryActive).toContain("read");
-		expect(primaryActive).not.toContain("bash");
-		expect(primaryActive).not.toContain("wait");
-		expect(primaryActive).not.toContain("find");
-		const primaryBash = session.getToolByName("bash");
-		expect(primaryBash).toBeDefined();
-		expect(schemaText(primaryBash!)).not.toContain('"ready"');
-		expect(primaryBash!.description).not.toContain("Long-lived services");
+		expect(primaryActive).toContain("bash");
+		expect(primaryActive).toContain("find");
+		const primaryGrep = session.getToolByName("grep");
+		expect(primaryGrep).toBeDefined();
+		expect(primaryGrep!.description).toContain("Behavior/unknown symbol → `find`");
 
+		// Every name a slate can hold is on the allowlist.
+		const available = factory!.names();
+		expect(available).toContain("grep");
+		expect(available.filter(name => !ADVISOR_ALLOWED_TOOL_NAMES.has(name))).toEqual([]);
+
+		// Mutating, delegating, and primary-only grants build nothing.
 		const rich = factory!.create(new Set(["bash", "task", "wait", "grep", "find", "lsp"]));
 		const narrow = factory!.create(new Set(["bash", "task", "grep"]));
-		expect(rich.tools.map(tool => tool.name)).not.toContain("lsp");
-		const richBash = requireTool(rich.tools, "bash");
-		const richTask = requireTool(rich.tools, "task");
+		expect(rich.tools.map(tool => tool.name)).toEqual(["grep"]);
+		expect(narrow.tools.map(tool => tool.name)).toEqual(["grep"]);
+		// `find` was requested but never built, so neither slate advertises it.
 		const richGrep = requireTool(rich.tools, "grep");
-		const narrowBash = requireTool(narrow.tools, "bash");
-		const narrowTask = requireTool(narrow.tools, "task");
 		const narrowGrep = requireTool(narrow.tools, "grep");
-
-		expect(schemaText(richBash)).toContain('"ready"');
-		expect(richBash.description).toContain("Long-lived services");
-		expect(richTask.description).toContain("Call `wait`");
-		expect(richGrep.description).toContain("Behavior/unknown symbol → `find`");
-		expect(schemaText(narrowBash)).toContain('"ready"');
-		expect(narrowBash.description).toContain("Long-lived services");
-		expect(narrowTask.description).not.toContain("Call `wait`");
+		expect(richGrep.description).not.toContain("`find`");
 		expect(narrowGrep.description).not.toContain("`find`");
 
-		const launch = await outcomeText(richBash);
-		expect(launch).toContain("exists only in the embedded shell");
-		expect(launch).not.toContain("Service launch is disabled");
-
+		// The Cursor bridge's per-call grep follows the same slate.
 		const bridgeGrep = narrow.createGrepTool?.({});
 		const richBridgeGrep = rich.createGrepTool?.({});
 		expect(bridgeGrep).toBeDefined();
 		expect(richBridgeGrep).toBeDefined();
 		expect(bridgeGrep!.description).not.toContain("`find`");
-		expect(richBridgeGrep!.description).toContain("Behavior/unknown symbol → `find`");
-
-		await session.setActiveToolsByName(["read", "wait", "find"]);
-		expect(session.getActiveToolNames()).toContain("wait");
-		expect(session.getActiveToolNames()).toContain("find");
-		expect(session.getActiveToolNames()).not.toContain("bash");
-		expect(narrowTask.description).not.toContain("Call `wait`");
-		expect(narrowGrep.description).not.toContain("`find`");
-		expect(narrowBash.description).toContain("Long-lived services");
-		expect(richTask.description).toContain("Call `wait`");
-		expect(schemaText(richBash)).toContain('"ready"');
-
-		await session.setActiveToolsByName(["read"]);
-		expect(richTask.description).toContain("Call `wait`");
-		expect(richGrep.description).toContain("Behavior/unknown symbol → `find`");
-		expect(schemaText(primaryBash!)).not.toContain('"ready"');
+		expect(richBridgeGrep!.description).not.toContain("`find`");
 	} finally {
 		await session!.dispose();
 	}
