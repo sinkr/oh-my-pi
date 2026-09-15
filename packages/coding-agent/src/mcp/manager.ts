@@ -43,7 +43,7 @@ import type { MCPStoredOAuthCredential } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
 
 import type { MCPToolDetails } from "./tool-bridge";
-import { DeferredMCPTool, MCPTool } from "./tool-bridge";
+import { DeferredMCPTool, isRetriableConnectionError, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import { setGeneratedHeader } from "./transports/header-policy";
 import type {
@@ -89,6 +89,13 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
 	return source
 		? { type: "failed", serverName, error, sourcePath: source.path }
 		: { type: "failed", serverName, error };
+}
+
+function isRetriableRemoteConnectionError(config: MCPServerConfig, error: unknown): boolean {
+	return (
+		(config.type === "http" || config.type === "sse") &&
+		(error instanceof MCPConnectionTimeoutError || isRetriableConnectionError(error))
+	);
 }
 
 /**
@@ -714,7 +721,7 @@ export class MCPManager {
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
 					}
-					if (error instanceof MCPConnectionTimeoutError) {
+					if (error instanceof MCPConnectionTimeoutError || isRetriableRemoteConnectionError(config, error)) {
 						notify({ type: "reconnecting", serverName: name });
 						const stopForwarding = onStatus
 							? this.addConnectionStatusListener(event => {
@@ -1210,9 +1217,10 @@ export class MCPManager {
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 
-		// Retry with backoff — the server may still be starting up.
-		const delays = [500, 1000, 2000, 4000];
-		for (let attempt = 0; attempt <= delays.length; attempt++) {
+		// Remote hubs can take much longer than the initial burst to restart.
+		// Keep retrying transient remote failures, without respawning stdio servers.
+		let delay = 500;
+		for (let attempt = 0; ; attempt++) {
 			if (this.#epoch !== reconnectEpoch || this.#serverConfigs.get(name) !== config) {
 				logger.debug("MCP reconnect aborted before attempt after configuration changed", {
 					path: `mcp:${name}`,
@@ -1237,13 +1245,14 @@ export class MCPManager {
 				}
 
 				const msg = error instanceof Error ? error.message : String(error);
-				if (attempt < delays.length) {
+				if (attempt < 4 || isRetriableRemoteConnectionError(config, error)) {
 					logger.debug("MCP reconnect attempt failed, retrying", {
 						path: `mcp:${name}`,
 						attempt: attempt + 1,
 						error: msg,
 					});
-					await Bun.sleep(delays[attempt]);
+					await Bun.sleep(delay);
+					delay = Math.min(delay * 2, 30_000);
 				} else {
 					logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
 					this.#emitConnectionStatus({ type: "failed", serverName: name, error: msg });
@@ -1251,10 +1260,10 @@ export class MCPManager {
 					// remain selected. Calls will fail with MCP errors, which
 					// triggers the tool-level reconnect, or the user can run
 					// /mcp reconnect <name> manually.
+					return null;
 				}
 			}
 		}
-		return null;
 	}
 
 	/** Establish a new connection to a server, wire handlers, load tools. */

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- HTTP/SSE MCP servers now recover automatically from slow hub restarts and transient startup failures, with retry backoff capped at 30 seconds while preserving stdio respawn limits.
+
 ## [18.2.0] - 2026-09-15
 
 ### Breaking Changes
