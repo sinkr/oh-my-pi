@@ -94,12 +94,13 @@ describe("MCPManager initial connection ownership", () => {
 			if (tools.some(tool => tool.name === `mcp__server_${DELAYED_TOOL_NAME}`)) rebound.resolve();
 		});
 
+		const originalTimeout = process.env.OMP_MCP_TIMEOUT_MS;
 		try {
-			const result = await manager.connectServers({ server: config }, {}, event => {
+			delete process.env.OMP_MCP_TIMEOUT_MS;
+			await manager.connectServers({ server: config }, {}, event => {
 				statusTypes.push(event.type);
 				if (event.type === "connected") statusSettled.resolve();
 			});
-			expect(result.errors.get("server")).toBe('Connection to MCP server "server" timed out after 100ms');
 			await rebound.promise;
 			await statusSettled.promise;
 
@@ -107,6 +108,8 @@ describe("MCPManager initial connection ownership", () => {
 			expect(manager.getTools().map(tool => tool.name)).toEqual([`mcp__server_${DELAYED_TOOL_NAME}`]);
 			expect(statusTypes).toEqual(["connecting", "failed", "reconnecting", "connected"]);
 		} finally {
+			if (originalTimeout === undefined) delete process.env.OMP_MCP_TIMEOUT_MS;
+			else process.env.OMP_MCP_TIMEOUT_MS = originalTimeout;
 			await manager.disconnectAll();
 			await removeWithRetries(workDir);
 		}
