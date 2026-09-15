@@ -183,8 +183,10 @@ If no listener is attached, the manager buffers up to 100 frames, dropping the o
 Current runtime behavior is connection-event driven:
 
 - **No autonomous polling health monitor** in manager/client.
-- **Automatic reconnect is wired to `transport.onClose`** for managed connections.
-- Reconnect retries with backoff (`500`, `1000`, `2000`, `4000` ms), reloads tools, and notifies consumers on success. A crash-storm circuit breaker suspends automatic reconnects for a server after more than 5 reconnect attempts within 30s; manual `/mcp reconnect` resets that history.
+- **Automatic reconnect is wired to `transport.onClose`** for managed connections. Initial handshake timeouts and transient HTTP/SSE startup failures also enter the reconnect path.
+- Each foreground reconnect is bounded to five attempts with backoff (`500`, `1000`, `2000`, `4000` ms), including reconnects awaited by tool calls or `/mcp reconnect`. Stdio failures stop at this ladder.
+- After the ladder ends in a transient HTTP/SSE failure, the manager keeps recovering in the background, including servers still starting up for the first time. Each scheduled retry is one quiet attempt, starting after 15 seconds and doubling up to 5 minutes. Callers do not wait for the background schedule; an in-flight scheduled attempt is shared with concurrent reconnects. Terminal failures stop the schedule. Successful recovery reloads tools and notifies consumers. Explicit disconnect, config replacement, or manager teardown invalidates pending retries.
+- A crash-storm circuit breaker suspends automatic reconnects after more than 5 reconnect invocations within 30 seconds; retries within one invocation do not count as separate crashes. Manual `/mcp reconnect` resets that history.
 - Tool calls that see retriable connection errors also attempt one reconnect + retry.
 - Reconnect is also explicit via `/mcp reconnect <name>` or broader `/mcp reload`.
 
