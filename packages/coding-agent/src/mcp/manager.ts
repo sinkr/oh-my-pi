@@ -50,7 +50,13 @@ import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
 import type { MCPToolDetails } from "../tools/details/mcp";
-import { type MCPReconnect, type MCPReconnectOptions, MCPTool, type MCPToolCallObserver } from "./tool-bridge";
+import {
+	isRetriableConnectionError,
+	type MCPReconnect,
+	type MCPReconnectOptions,
+	MCPTool,
+	type MCPToolCallObserver,
+} from "./tool-bridge";
 import type { MCPDroppedServer, MCPTransformContext } from "./transforms";
 import type {
 	MCPAuthChallenge,
@@ -134,6 +140,28 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
 		? { type: "failed", serverName, error, sourcePath: source.path }
 		: { type: "failed", serverName, error };
 }
+
+function isRetriableRemoteConnectionError(config: MCPServerConfig, error: unknown): boolean {
+	return (
+		(config.type === "http" || config.type === "sse") &&
+		(error instanceof MCPConnectionTimeoutError || isRetriableConnectionError(error))
+	);
+}
+
+/**
+ * How {@link MCPManager} paces background recovery after a transient remote
+ * connection loss or startup failure. Foreground reconnects use the host link;
+ * this policy only paces quiet retries after those attempts fail.
+ */
+export interface MCPReconnectPolicy {
+	readonly retryBaseMs: number;
+	readonly retryMaxMs: number;
+}
+
+const DEFAULT_RECONNECT_POLICY: MCPReconnectPolicy = {
+	retryBaseMs: 15_000,
+	retryMaxMs: 5 * 60_000,
+};
 
 /**
  * Bounded buffer for notifications received before any listener attaches.
@@ -419,6 +447,14 @@ export class MCPManager implements MCPManagerApi {
 	#epoch = 0;
 	/** Aborts the handshakes of the current epoch; replaced on disconnectAll. */
 	#connectAbort = new AbortController();
+	/**
+	 * Remote servers being recovered after connection loss or transient startup
+	 * failure, with the backoff schedule that keeps trying to bring them back
+	 * (see {@link MCPReconnectPolicy}). `timer` is set while a scheduled
+	 * attempt is pending; success, terminal failure, disconnect or reconfiguration
+	 * removes the entry.
+	 */
+	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
 	/** Views opened so far; never forgotten, so a revived session reopens its own. */
 	#toolScopes = new Set<MCPToolScope>();
 	/** Scope of each attributed tool call still running, by tool-call id. */
@@ -442,6 +478,7 @@ export class MCPManager implements MCPManagerApi {
 		private idleMs: number = MCP_DEFAULT_IDLE_MS,
 		/** Where this manager's servers are hosted; the process-wide host when absent. Tests script their own. */
 		private hostAccess?: McpHostAccess,
+		private reconnectPolicy: MCPReconnectPolicy = DEFAULT_RECONNECT_POLICY,
 	) {}
 
 	/**
@@ -964,6 +1001,7 @@ export class MCPManager implements MCPManagerApi {
 			}
 
 			// Save config early so reconnection works even if the initial connect times out.
+			this.#forgetLostServer(name);
 			this.#serverConfigs.set(name, config);
 			const connectionEpoch = this.#epoch;
 			const scope = this.#beginConnect(name);
@@ -1045,7 +1083,7 @@ export class MCPManager implements MCPManagerApi {
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
 					}
-					if (error instanceof MCPConnectionTimeoutError) {
+					if (error instanceof MCPConnectionTimeoutError || isRetriableRemoteConnectionError(config, error)) {
 						notify({ type: "reconnecting", serverName: name });
 						const stopForwarding = onStatus
 							? this.addConnectionStatusListener(event => {
@@ -1531,6 +1569,7 @@ export class MCPManager implements MCPManagerApi {
 	 * Disconnect from a specific server.
 	 */
 	async disconnectServer(name: string): Promise<void> {
+		this.#forgetLostServer(name);
 		this.#startupServers.delete(name);
 		this.#startupFailures.delete(name);
 		this.#startupUpdates.delete(name);
@@ -1584,6 +1623,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#epoch++;
 		this.#connectAbort.abort();
 		this.#connectAbort = new AbortController();
+		for (const name of this.#lostRemoteServers.keys()) this.#forgetLostServer(name);
 		const promises = Array.from(this.#connections, ([name, connection]) => this.#discardConnection(name, connection));
 		await Promise.allSettled(promises);
 
@@ -1620,7 +1660,8 @@ export class MCPManager implements MCPManagerApi {
 	 * its attachment, the link attaches to the unit of the new one. Then the
 	 * server is discovered again and its catalogs reloaded. Concurrent calls
 	 * for the same server share one attempt. Returns the connection, or `null`
-	 * when the reconnect failed or the server was disconnected meanwhile.
+	 * when the reconnect failed or the server was disconnected meanwhile. A
+	 * transient remote failure also arms quiet background recovery.
 	 * @param options.manual - When `true` (`/mcp reconnect`), the host also
 	 *   stops the upstream and forgets its crash history, so the next request
 	 *   starts a fresh one; when the host itself is elsewhere by now
@@ -1642,7 +1683,10 @@ export class MCPManager implements MCPManagerApi {
 		try {
 			return await attempt;
 		} finally {
-			if (this.#pendingReconnections.get(name) === attempt) this.#pendingReconnections.delete(name);
+			if (this.#pendingReconnections.get(name) === attempt) {
+				this.#pendingReconnections.delete(name);
+				this.#scheduleLostServerRetry(name);
+			}
 		}
 	}
 
@@ -1691,6 +1735,7 @@ export class MCPManager implements MCPManagerApi {
 				live = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
 			}
 			logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: live.tools?.length ?? 0 });
+			this.#forgetLostServer(name);
 			this.#emitConnectionStatus({ type: "connected", serverName: name });
 			return live;
 		} catch (error) {
@@ -1705,10 +1750,39 @@ export class MCPManager implements MCPManagerApi {
 			// Stale tools stay registered so they remain selected: a later call
 			// retries the reconnect, or the user runs /mcp reconnect <name>.
 			const msg = error instanceof Error ? error.message : String(error);
+			if (isRetriableRemoteConnectionError(config, error)) {
+				if (!this.#lostRemoteServers.has(name)) {
+					this.#lostRemoteServers.set(name, { timer: undefined, delayMs: this.reconnectPolicy.retryBaseMs });
+				}
+			} else {
+				this.#forgetLostServer(name);
+			}
 			logger.error("MCP reconnect failed", { path: `mcp:${name}`, error: msg });
 			this.#emitConnectionStatus({ type: "failed", serverName: name, error: msg });
 			return null;
 		}
+	}
+
+	#scheduleLostServerRetry(name: string): void {
+		const state = this.#lostRemoteServers.get(name);
+		if (!state || state.timer !== undefined) return;
+		const delayMs = state.delayMs;
+		state.delayMs = Math.min(delayMs * 2, this.reconnectPolicy.retryMaxMs);
+		state.timer = setTimeout(() => {
+			state.timer = undefined;
+			if (this.#lostRemoteServers.get(name) !== state || this.#pendingReconnections.has(name)) return;
+			void this.reconnectServer(name).catch(error => {
+				logger.debug("MCP scheduled reconnect failed", { path: `mcp:${name}`, error: String(error) });
+			});
+		}, delayMs);
+		state.timer.unref();
+	}
+
+	#forgetLostServer(name: string): void {
+		const state = this.#lostRemoteServers.get(name);
+		if (!state) return;
+		clearTimeout(state.timer);
+		this.#lostRemoteServers.delete(name);
 	}
 
 	/** Bring a connected server's link back in line with its config and the current host, then reload what the server offers. */

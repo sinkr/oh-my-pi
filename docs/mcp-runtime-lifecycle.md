@@ -53,9 +53,10 @@ There are no deferred or cached tool handles in the session: a server that has n
 
 ### Reconnect
 
-There is no reconnect ladder, crash breaker or background retry schedule in the session; restarting servers is the host's job.
+There is no reconnect ladder or crash breaker in the session; restarting servers is the host's job. A server the host knows stays linked through an outage and is reached again by the next request.
 
 - `reconnectServer(name, { manual })` re-resolves credentials. If they changed, the link retargets to the new identity. A manual reconnect (`/mcp reconnect`) additionally sends `omp/restart`, which stops the upstream and clears the host's crash guard; automatic recovery never restarts an upstream, because a modern one is shared with other sessions. Then discovery and catalogs are reloaded.
+- A remote (`http`/`sse`) server whose connect fails transiently, typically one still starting when the session connected, has no link and no tools, so no request would ever reach it again. The manager retries it quietly after 15 seconds, doubling up to 5 minutes. Success, a terminal failure, explicit disconnect, reconfiguration and teardown stop the schedule.
 - If the tunnel is lost (daemon restart), the link fails its in-flight requests as non-retryable, re-attaches, re-sends its roots, and the manager re-opens subscriptions and reloads catalogs.
 - A 401/403 from a remote server, including one from the first era probe, calls the manager's refresh hook once; fresh headers retarget the link and the request is retried once. Resource subscriptions of the old identity are not replayed; the manager re-derives them from the reloaded catalog.
 - A handshake-era HTTP server that expired its session answers 404: the host retires that session and the retried call opens a new one.
