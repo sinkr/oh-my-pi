@@ -44,7 +44,7 @@ import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
 import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
-import { DeferredMCPTool, MCPTool } from "./tool-bridge";
+import { DeferredMCPTool, isRetriableConnectionError, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import { setGeneratedHeader } from "./transports/header-policy";
 import type {
@@ -90,6 +90,13 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
 		: { type: "failed", serverName, error };
 }
 
+function isRetriableRemoteConnectionError(config: MCPServerConfig, error: unknown): boolean {
+	return (
+		(config.type === "http" || config.type === "sse") &&
+		(error instanceof MCPConnectionTimeoutError || isRetriableConnectionError(error))
+	);
+}
+
 /**
  * Per-server reconnect-storm circuit breaker.
  *
@@ -112,17 +119,17 @@ const RECONNECT_BURST_WINDOW_MS = 30_000;
 const RECONNECT_BURST_LIMIT = 5;
 
 /**
- * How {@link MCPManager} paces reconnects after a transport is lost.
+ * How {@link MCPManager} paces reconnects after a transport is lost or startup fails.
  *
  * `ladderMs` are the sleeps between the attempts one `reconnectServer` call
  * makes before giving up; every caller that awaits a reconnect (tool calls,
  * `/mcp reconnect`, {@link MCPManager.waitForConnection}) is bounded by it.
  *
- * When the ladder fails for an `http`/`sse` server that was connected and
- * then lost, the manager keeps trying on its own: one quiet attempt after
- * `retryBaseMs`, doubling up to `retryMaxMs`, until the server answers or the
- * server is disconnected or reconfigured. A remote server that is merely
- * restarting (a redeploy, a laptop waking with the network not yet back)
+ * When the ladder ends in a transient failure for an `http`/`sse` server,
+ * including one that has not finished its initial startup, the manager keeps
+ * trying on its own: one quiet attempt after `retryBaseMs`, doubling up to
+ * `retryMaxMs`, until it answers, fails terminally, is disconnected or reconfigured.
+ * A remote server that is merely restarting (a redeploy, a laptop waking)
  * comes back on its own schedule, and until it does the manager's resource
  * subscriptions are dead while nothing else would reconnect them: without the
  * schedule the server stays "not connected" until a tool call happens to hit
@@ -298,12 +305,11 @@ export class MCPManager {
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
 	/**
-	 * Remote servers that were connected and then lost, with the backoff
-	 * schedule that keeps trying to bring them back (see
-	 * {@link MCPReconnectPolicy}). An entry exists from the moment a live
-	 * connection is being replaced until a reconnect succeeds or the server
-	 * is disconnected or reconfigured; `timer` is set while a scheduled
-	 * attempt is pending.
+	 * Remote servers being recovered after connection loss or transient startup
+	 * failure, with the backoff schedule that keeps trying to bring them back
+	 * (see {@link MCPReconnectPolicy}). `timer` is set while a scheduled
+	 * attempt is pending; success, terminal failure, disconnect or reconfiguration
+	 * removes the entry.
 	 */
 	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
 
@@ -864,7 +870,7 @@ export class MCPManager {
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
 					}
-					if (error instanceof MCPConnectionTimeoutError) {
+					if (error instanceof MCPConnectionTimeoutError || isRetriableRemoteConnectionError(config, error)) {
 						notify({ type: "reconnecting", serverName: name });
 						const stopForwarding = onStatus
 							? this.addConnectionStatusListener(event => {
@@ -1339,8 +1345,8 @@ export class MCPManager {
 	 * the same server share one reconnection attempt. Returns the new
 	 * connection, or `null` if reconnection failed or the per-server crash
 	 * burst limit (see {@link RECONNECT_BURST_LIMIT}) is exceeded. A failed
-	 * reconnect of a remote server that was connected keeps being retried in
-	 * the background (see {@link MCPReconnectPolicy}).
+	 * remote reconnect ending in a transient error keeps being retried in the
+	 * background (see {@link MCPReconnectPolicy}).
 	 * @param options.manual - When `true`, resets the crash-burst window so a
 	 *   user-driven retry (e.g. `/mcp reconnect`) is never blocked by an
 	 *   earlier storm. Defaults to `false`; the transport `onClose` callback
@@ -1502,9 +1508,8 @@ export class MCPManager {
 		if (oldConnection) {
 			// From here the live remote connection is gone: the server is lost
 			// until a reconnect succeeds, and the schedule outlives this attempt.
-			// Stdio stops at the ladder (see MCPReconnectPolicy). A server that
-			// never connected is not lost — a startup timeout or a typo'd URL
-			// stays a one-shot failure.
+			// Stdio stops at the ladder (see MCPReconnectPolicy). Transient
+			// startup failures join this schedule when their ladder is exhausted.
 			if ((config.type === "http" || config.type === "sse") && !this.#lostRemoteServers.has(name)) {
 				this.#lostRemoteServers.set(name, { timer: undefined, delayMs: this.reconnectPolicy.retryBaseMs });
 			}
@@ -1541,6 +1546,15 @@ export class MCPManager {
 				}
 
 				const msg = error instanceof Error ? error.message : String(error);
+				if (attempt === delays.length) {
+					if (isRetriableRemoteConnectionError(config, error)) {
+						if (!this.#lostRemoteServers.has(name)) {
+							this.#lostRemoteServers.set(name, { timer: undefined, delayMs: this.reconnectPolicy.retryBaseMs });
+						}
+					} else {
+						this.#forgetLostServer(name);
+					}
+				}
 				if (attempt < delays.length) {
 					logger.debug("MCP reconnect attempt failed, retrying", {
 						path: `mcp:${name}`,
@@ -1556,8 +1570,8 @@ export class MCPManager {
 					// Don't remove stale tools — keep them in the registry so they
 					// remain selected. Calls will fail with MCP errors, which
 					// triggers the tool-level reconnect, or the user can run
-					// /mcp reconnect <name> manually. A lost remote server is also
-					// retried on the schedule (#trackReconnect arms it).
+					// /mcp reconnect <name> manually. Transient remote failures also
+					// retry on the schedule (#trackReconnect arms it).
 				}
 			}
 		}
