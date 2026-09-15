@@ -1745,6 +1745,9 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@1e3cc3ab94d0](
 ### Removed
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
+### Fixed
+
+- HTTP/SSE MCP servers now recover automatically from slow hub restarts and transient startup failures, with retry backoff capped at 30 seconds while preserving stdio respawn limits.
 
 ## [18.2.0] - 2026-09-15
 
