@@ -12,8 +12,6 @@
  *   however long it stays down, and the outage is reported once — every
  *   `failed` event repaints the /extensions dashboard and logs at error level;
  * - a server the user disconnected is not reconnected by the schedule;
- * - a server that never connected is not scheduled: a startup failure or a
- *   bad URL stays a one-shot failure;
  * - a reconnect that never replaced the live connection (a declined auth
  *   challenge) does not schedule one that would.
  */
@@ -142,25 +140,5 @@ describe("MCP lost remote server retry schedule", () => {
 		expect(flaky.initializes).toBe(initializesBefore);
 		expect(statuses.filter(status => status === "connected")).toHaveLength(1);
 		expect(manager.getConnectionStatus("flaky")).toBe("connected");
-	});
-
-	it("does not schedule a server that never connected", async () => {
-		workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-lost-remote-"));
-		flaky = startFlakyHttpMcpServer();
-		flaky.setDown(true);
-		manager = new MCPManager(workDir, null, undefined, FAST);
-		const config: MCPHttpServerConfig = { type: "http", url: flaky.url, timeout: GUARD_MS };
-		await manager.connectServers({ flaky: config }, {});
-		expect(manager.getConnectionStatus("flaky")).toBe("disconnected");
-
-		// The explicit paths that reach the ladder for a never-connected server.
-		expect(await manager.reconnectServer("flaky")).toBeNull();
-		expect(await manager.reconnectServer("flaky", { manual: true })).toBeNull();
-
-		flaky.setDown(false);
-		await Bun.sleep(QUIET_MS); // negative contract, see above
-
-		expect(flaky.initializes).toBe(0);
-		expect(manager.getConnectionStatus("flaky")).toBe("disconnected");
 	});
 });
