@@ -2,7 +2,7 @@ import { bottomBorder, dividerSplit, PanelRows, row, topBorderSplit } from "../c
 import { SplitPane } from "../components/layout/split-pane";
 import { Stack } from "../components/layout/stack";
 import { matchesKey } from "../keys";
-import { theme } from "../theme/theme";
+import { ensureThemeSync, theme } from "../theme/theme";
 import { truncateToWidth, visibleWidth } from "../utils";
 
 /** A scope row shared by fullscreen hubs, with hub-specific kinds and metadata. */
@@ -77,6 +77,7 @@ export class HubFrame {
 		renderSidebar: (width: number, rows: number) => string[],
 		renderBody: (width: number, height: number | undefined) => readonly string[],
 	) {
+		ensureThemeSync();
 		this.#title = title;
 		this.#sidebarBounds = sidebarBounds;
 		this.#split = new SplitPane({
