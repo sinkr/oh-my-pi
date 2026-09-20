@@ -2,7 +2,7 @@ import { bottomBorder, dividerSplit, PanelRows, row, topBorderSplit } from "../c
 import { SplitPane } from "../components/layout/split-pane";
 import { Stack } from "../components/layout/stack";
 import { matchesKey } from "../keys";
-import { theme } from "../theme/theme";
+import { ensureThemeSync, theme } from "../theme/theme";
 import { truncateToWidth, visibleWidth } from "../utils";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { node, span, text } from "../native/describe";
@@ -162,6 +162,7 @@ export class HubFrame {
 		renderBody: (width: number, height: number | undefined) => readonly string[],
 		options: { bodyMinWidth?: number; preserveSidebar?: boolean } = {},
 	) {
+		ensureThemeSync();
 		this.#title = title;
 		this.#sidebarBounds = sidebarBounds;
 		this.#preserveSidebar = options.preserveSidebar ?? false;
