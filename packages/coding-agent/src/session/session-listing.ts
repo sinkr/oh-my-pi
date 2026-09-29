@@ -12,7 +12,7 @@ import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
-import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
+import { FileSessionStorage, getDefaultSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
 /**
@@ -667,7 +667,7 @@ export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage
 
 /** List all sessions across all project directories (newest first). */
 export async function listAllSessions(
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = getDefaultSessionStorage(),
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
 	try {
@@ -705,7 +705,7 @@ export function filterSessionsForPicker(sessions: SessionInfo[], pinnedIds: Read
 /** Most recent session with resumable content, skipping 0-turn empties. Exported for testing. */
 export async function findMostRecentNonEmptySession(
 	sessionDir: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = getDefaultSessionStorage(),
 ): Promise<string | null> {
 	// Status on: answered-ness comes from the tail lifecycle, not the 4 KB
 	// prefix, so a transcript whose first assistant record starts past the
@@ -717,7 +717,7 @@ export async function findMostRecentNonEmptySession(
 /** Exported for testing */
 export async function findMostRecentSession(
 	sessionDir: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = getDefaultSessionStorage(),
 ): Promise<string | null> {
 	const sessions = await scanSessionDir(sessionDir, storage, false);
 	return sessions[0]?.path ?? null;
@@ -1406,7 +1406,7 @@ export async function findSessionFiles(idPrefix: string, sessionsRoot: string = 
 export async function getRecentSessions(
 	sessionDir: string,
 	limit = 4,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = getDefaultSessionStorage(),
 ): Promise<RecentSessionInfo[]> {
 	// The index is keyed by real session ids; in-memory test storages must not
 	// touch the process-wide history.db.
@@ -1464,10 +1464,10 @@ export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
 	sessionDir?: string,
-	storageOrOptions: SessionStorage | ResolveResumableSessionOptions = new FileSessionStorage(),
+	storageOrOptions: SessionStorage | ResolveResumableSessionOptions = getDefaultSessionStorage(),
 	options: ResolveResumableSessionOptions = {},
 ): Promise<ResolvedSessionMatch | undefined> {
-	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
+	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : getDefaultSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const localSessions = await listSessions(localSessionDir, storage);
