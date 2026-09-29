@@ -311,18 +311,16 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onSubmit).toHaveBeenCalledWith("see ");
 	});
 
-	it("keeps empty and image-path pastes as text in a prompt that did not opt into images", () => {
+	it("keeps path-shaped bracketed pastes as text even when the prompt accepts images", () => {
 		const onPasteImage = vi.fn();
-		const otherPathHandler = vi.fn();
 		const onSubmit = vi.fn();
-		const plain = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+		const prompt = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
 			promptStyle: true,
+			acceptImages: true,
 			onPasteImage,
-			onPasteImagePath: otherPathHandler,
 		});
-		plain.handleInput("\x1b[200~\x1b[201~\x1b[200~/tmp/shot.png\x1b[201~\r");
+		prompt.handleInput("\x1b[200~/tmp/shot.png\x1b[201~\r");
 		expect(onPasteImage).not.toHaveBeenCalled();
-		expect(otherPathHandler).not.toHaveBeenCalled();
 		expect(onSubmit).toHaveBeenCalledWith("/tmp/shot.png");
 	});
 

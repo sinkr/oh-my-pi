@@ -9,7 +9,6 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { compactImageMarkers, formatVisionMarker, PLACEHOLDER_REGEX } from "../prompt/composer-attachments";
-import { extractImagePastePathsFromText } from "../prompt/custom-editor";
 import {
 	Editor,
 	Ellipsis,
@@ -78,12 +77,6 @@ export interface HookEditorOptions {
 	 */
 	onPasteImage?: () => Promise<boolean>;
 	/**
-	 * With `acceptImages`, called for each path of a bracketed paste made only of image paths.
-	 * Same signature as `CustomEditor.onPasteImagePath`; calls are not awaited in turn, so images
-	 * attach as they finish loading and are renumbered in text order on submit.
-	 */
-	onPasteImagePath?: (path: string) => void | Promise<void>;
-	/**
 	 * Max rows the inner Editor may occupy. When omitted, the editor is
 	 * bounded to the current terminal height minus the component's chrome
 	 * (≈10 rows) so long content scrolls instead of pushing the submit
@@ -104,7 +97,6 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#images: ImageContent[];
 	#externalEditor: HookEditorOptions["externalEditor"];
 	#onPasteImage: HookEditorOptions["onPasteImage"];
-	#onPasteImagePath: HookEditorOptions["onPasteImagePath"];
 	#pasteHandler = new BracketedPasteHandler();
 	#pendingPastes: { settled: boolean; text: string | undefined }[] = [];
 	#submitQueued = false;
@@ -138,7 +130,6 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		this.#images = this.#acceptImages ? [...(options?.images ?? [])] : [];
 		this.#externalEditor = options?.externalEditor;
 		this.#onPasteImage = options?.onPasteImage;
-		this.#onPasteImagePath = options?.onPasteImagePath;
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
@@ -243,16 +234,12 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			// Hosts reserve ordered delivery synchronously inside these callbacks, so input
 			// that followed the paste in this chunk (e.g. Enter) still waits for the image.
 			const content = paste.pasteContent;
-			const acceptsImages = this.acceptsImages;
-			if (acceptsImages && content.length === 0 && this.#onPasteImage) {
+			if (this.acceptsImages && content.length === 0 && this.#onPasteImage) {
 				void this.#onPasteImage();
 			} else {
-				const imagePaths = acceptsImages ? extractImagePastePathsFromText(content) : undefined;
-				if (imagePaths && this.#onPasteImagePath) {
-					for (const path of imagePaths) void this.#onPasteImagePath(path);
-				} else {
-					this.pasteText(content);
-				}
+				// Bracketed paste is text regardless of whether it resembles a path.
+				// Real image bytes and macOS file URLs enter through InputController.
+				this.pasteText(content);
 			}
 			if (paste.remaining.length > 0) this.handleInput(paste.remaining);
 			return;
