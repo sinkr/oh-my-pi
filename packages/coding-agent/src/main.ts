@@ -129,6 +129,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import { initSessionStorage } from "./session/session-storage-init";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -219,7 +220,7 @@ type SessionPicker = (
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
 async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
-	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
+	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { getDefaultSessionStorage }] =
 		await Promise.all([
 			import("@oh-my-pi/pi-tui/apps/session-picker"),
 			import("./session/history-storage"),
@@ -227,7 +228,7 @@ async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionP
 			import("./session/session-storage"),
 		]);
 	return (sessions, options) => {
-		const storage = new FileSessionStorage();
+		const storage = getDefaultSessionStorage();
 		// The picker runs before interactive mode loads the user's keymap, and its pin keys are remappable.
 		KeybindingsManager.create();
 		return selectSession(sessions, options, {
@@ -1842,6 +1843,7 @@ export async function runRootCommand(
 	logger.startTiming();
 	startStartupWatchdog();
 	try {
+		await logger.time("initSessionStorage", initSessionStorage);
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
 		await logger.time("initTheme:initial", ensureTheme);
