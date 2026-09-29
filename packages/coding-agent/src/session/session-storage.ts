@@ -1287,3 +1287,13 @@ export class MemorySessionStorage implements SessionStorage {
 		return new MemorySessionStorageWriter(this, path, options);
 	}
 }
+
+let activeDefaultSessionStorage: SessionStorage | undefined;
+
+export function getDefaultSessionStorage(): SessionStorage {
+	return activeDefaultSessionStorage ?? new FileSessionStorage();
+}
+
+export function setDefaultSessionStorage(storage: SessionStorage): void {
+	activeDefaultSessionStorage = storage;
+}
