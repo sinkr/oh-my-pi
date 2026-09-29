@@ -14,7 +14,7 @@ import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { parseSessionOrigin, type SessionOrigin } from "./session-entries";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
-import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
+import { FileSessionStorage, getDefaultSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
 import { overlapsWindow, type TimeWindow } from "./time-window";
 
@@ -708,7 +708,7 @@ export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage
 
 /** List the terminal's sessions across all project directories (newest first); see {@link isForeignSession}. */
 export async function listAllSessions(
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = getDefaultSessionStorage(),
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
 	try {
@@ -894,7 +894,7 @@ function indexScannedTitles(sessions: readonly SessionInfo[], indexed: ReadonlyM
 /** Most recent terminal session with resumable content, skipping 0-turn empties and foreign sessions. Exported for testing. */
 export async function findMostRecentNonEmptySession(
 	sessionDir: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = getDefaultSessionStorage(),
 ): Promise<string | null> {
 	// Status on: answered-ness comes from the tail lifecycle, not the 4 KB
 	// prefix, so a transcript whose first assistant record starts past the
@@ -906,7 +906,7 @@ export async function findMostRecentNonEmptySession(
 /** Exported for testing */
 export async function findMostRecentSession(
 	sessionDir: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = getDefaultSessionStorage(),
 ): Promise<string | null> {
 	const sessions = await scanSessionDir(sessionDir, storage, false);
 	return sessions.find(session => !isForeignSession(session))?.path ?? null;
@@ -1694,7 +1694,7 @@ export async function findSessionFiles(idPrefix: string, sessionsRoot: string = 
 export async function getRecentSessions(
 	sessionDir: string,
 	limit = 4,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = getDefaultSessionStorage(),
 ): Promise<RecentSessionInfo[]> {
 	// The index is keyed by real session ids; in-memory test storages must not
 	// touch the process-wide history.db.
@@ -1752,10 +1752,10 @@ export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
 	sessionDir?: string,
-	storageOrOptions: SessionStorage | ResolveResumableSessionOptions = new FileSessionStorage(),
+	storageOrOptions: SessionStorage | ResolveResumableSessionOptions = getDefaultSessionStorage(),
 	options: ResolveResumableSessionOptions = {},
 ): Promise<ResolvedSessionMatch | undefined> {
-	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
+	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : getDefaultSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const localSessions = await listSessions(localSessionDir, storage);
