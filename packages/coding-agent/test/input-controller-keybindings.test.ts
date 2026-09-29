@@ -823,30 +823,19 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.getText()).toBe("");
 	});
 
-	it("submits a bracketed image-path paste after Enter arrives mid-paste", async () => {
+	it("submits a bracketed image-path payload as text", async () => {
 		const imagePath = await writePng("shot.png");
 		const context = await createPromptContext();
-		const controller = new InputController(context.ctx);
-		const pasted: Promise<void>[] = [];
 		const onSubmit = vi.fn<(text: string, images?: ImageContent[]) => void>();
 		const prompt = new HookEditorComponent(context.ctx.ui, "Answer", "see ", onSubmit, vi.fn(), {
 			promptStyle: true,
 			acceptImages: true,
-			onPasteImagePath: pastedPath => {
-				const paste = controller.handleImagePathPaste(pastedPath);
-				pasted.push(paste);
-				return paste;
-			},
 		});
 		context.setFocused(prompt);
 
 		prompt.handleInput(`\x1b[200~${imagePath}\x1b[201~\r`);
-		expect(onSubmit).not.toHaveBeenCalled();
-		await Promise.all(pasted);
 
-		const submitted = submittedImage(onSubmit);
-		expect(submitted.text).toMatch(/^see \[Image #1, \d+x\d+\]$/);
-		expect(submitted.source).toBe(imagePath);
+		expect(onSubmit).toHaveBeenCalledWith(`see ${imagePath}`);
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
@@ -893,7 +882,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
-	it("attaches the image file named by smart-pasted clipboard text (#3506)", async () => {
+	it("pastes path-shaped clipboard text without attaching it (#3506)", async () => {
 		const imagePath = await writePng("clipboard-image.png");
 		const context = await createPromptContext();
 		const { prompt, onSubmit } = createPrompt(context, { acceptImages: true });
@@ -906,8 +895,8 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(await controller.handleImagePaste()).toBe(true);
 		prompt.handleInput("\r");
 
-		expect(submittedImage(onSubmit).source).toBe(imagePath);
-		expect(context.editor.getText()).toBe("");
+		expect(onSubmit).toHaveBeenCalledWith(imagePath);
+		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
 	it("recovers the clipboard bitmap for a vanished path and reports a missing one like the main editor (#2375)", async () => {
