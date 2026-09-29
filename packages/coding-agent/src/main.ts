@@ -129,6 +129,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import { initSessionStorage } from "./session/session-storage-init";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -218,14 +219,14 @@ type SessionPicker = (
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
 async function loadSessionPicker(init?: { allowRename?: boolean }): Promise<SessionPicker> {
-	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds }, { FileSessionStorage }] = await Promise.all([
+	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds }, { getDefaultSessionStorage }] = await Promise.all([
 		import("@oh-my-pi/pi-tui/apps/session-picker"),
 		import("./session/history-storage"),
 		import("./session/session-pins"),
 		import("./session/session-storage"),
 	]);
 	return (sessions, options) => {
-		const storage = new FileSessionStorage();
+		const storage = getDefaultSessionStorage();
 		return selectSession(sessions, options, {
 			loadPinnedIds: loadPinnedSessionIds,
 			loadHistoryMatcher: () => {
@@ -1818,6 +1819,7 @@ export async function runRootCommand(
 	logger.startTiming();
 	startStartupWatchdog();
 	try {
+		await logger.time("initSessionStorage", initSessionStorage);
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
 		await logger.time("initTheme:initial", ensureTheme);
