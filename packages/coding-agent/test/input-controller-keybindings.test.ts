@@ -1127,7 +1127,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
-	it("attaches the image file named by smart-pasted clipboard text (#3506)", async () => {
+	it("pastes path-shaped clipboard text without attaching it (#3506)", async () => {
 		const imagePath = await writePng("clipboard-image.png");
 		const context = createPromptContext();
 		const { attachImage } = createPrompt(context, { acceptImages: true });
@@ -1139,8 +1139,9 @@ describe("InputController image paste into an image-accepting prompt", () => {
 
 		expect(await controller.handleImagePaste()).toBe(true);
 
-		expect(attachedSource(attachImage)).toBe(imagePath);
-		expect(context.editor.text()).toBe("");
+		expect(context.spies.shellPaste).toHaveBeenCalledWith(imagePath);
+		expect(attachImage).not.toHaveBeenCalled();
+		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
 	it("recovers the clipboard bitmap for a vanished path and reports a missing one like the main editor (#2375)", async () => {
