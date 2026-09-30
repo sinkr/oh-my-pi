@@ -879,43 +879,43 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 	});
 
-	it("recovers the clipboard bitmap for a vanished path and reports a missing one like the main editor (#2375)", async () => {
-		const context = await createPromptContext();
-		const delivered: (string | undefined)[] = [];
-		const attached: ImageContent[] = [];
-		context.setFocused({
-			pasteText: vi.fn(),
-			acceptsImages: true,
-			attachImage: (image: ImageContent) => {
-				attached.push(image);
-				return `[Image #${attached.length}]`;
-			},
-			beginPaste: () => (text: string | undefined) => {
-				delivered.push(text);
-				return true;
-			},
-		});
-		let clipboardImage: { data: Uint8Array; mimeType: string } | null = {
-			data: Buffer.from(TINY_PNG, "base64"),
-			mimeType: "image/png",
-		};
-		const controller = new InputController(context.ctx, {
-			readImage: async () => clipboardImage,
-			readText: async () => "",
-		});
+	it("preserves a recovered clipboard image but requires resubmission after a missing-image paste (#2375)", async () => {
+		const sshKeys = ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"] as const;
+		const savedSsh = sshKeys.map(key => process.env[key]);
+		try {
+			for (const key of sshKeys) delete process.env[key];
+			const context = await createPromptContext();
+			const { prompt, onSubmit } = createPrompt(context, { acceptImages: true });
+			let clipboardImage: { data: Uint8Array; mimeType: string } | null = {
+				data: Buffer.from(TINY_PNG, "base64"),
+				mimeType: "image/png",
+			};
+			const controller = new InputController(context.ctx, {
+				readImage: async () => clipboardImage,
+				readText: async () => "",
+			});
 
-		// Windows 11 Win+Shift+S: the pasted TempState path is already gone; the bitmap is on the clipboard.
-		await controller.handleImagePathPaste(tempDir.join("TempState", "gone.png"));
-		clipboardImage = null;
-		await controller.handleImagePathPaste(tempDir.join("missing.png"));
+			await controller.handleImagePathPaste(tempDir.join("TempState", "gone.png"));
+			clipboardImage = null;
+			const missingPaste = controller.handleImagePathPaste(tempDir.join("missing.png"));
+			prompt.handleInput("\r");
+			expect(onSubmit).not.toHaveBeenCalled();
+			await missingPaste;
+			expect(onSubmit).not.toHaveBeenCalled();
+			prompt.handleInput("\r");
 
-		expect(delivered).toEqual(["[Image #1]"]);
-		expect(attached.map(image => imageAttachmentSource(image)?.path)).toEqual([
-			expect.stringMatching(/^local:\/\/pasted-image-[0-9a-f]+\.png$/),
-		]);
-		// The status shortens and truncates the path; the missing path is never pasted as text.
-		expect(context.ctx.showStatus).toHaveBeenCalledWith(expect.stringMatching(/^Image not found at /));
-		expect(context.editor.pendingImages).toHaveLength(0);
+			const submitted = submittedImage(onSubmit);
+			expect(submitted.source).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
+			expect(submitted.text).not.toContain("missing.png");
+			expect(context.ctx.showStatus).toHaveBeenCalledWith(expect.stringMatching(/^Image not found at /));
+			expect(context.editor.pendingImages).toHaveLength(0);
+		} finally {
+			for (const [index, key] of sshKeys.entries()) {
+				const value = savedSsh[index];
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
 	});
 
 	it("keeps a pasted video path as text and says why in an image-accepting prompt", async () => {
