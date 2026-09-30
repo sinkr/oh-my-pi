@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { toError } from "@oh-my-pi/pi-utils";
 import {
-	directChildKeyName,
+	relativeKeyName,
 	SessionWriteConflictError,
 	type SessionStorage,
 	type SessionStorageStat,
@@ -78,12 +78,6 @@ interface IndexAppend {
 }
 
 const RESOLVED = Promise.resolve();
-
-function matchesGlob(name: string, pattern: string): boolean {
-	if (pattern === "*") return true;
-	if (pattern.startsWith("*.")) return name.endsWith(pattern.slice(1));
-	return name === pattern;
-}
 
 function byteLength(text: string): number {
 	return Buffer.byteLength(text, "utf-8");
@@ -247,9 +241,10 @@ export class IndexedSessionStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		const resolvedDir = path.resolve(dir);
 		const out: string[] = [];
+		const glob = new Bun.Glob(pattern);
 		for (const key of this.#index.keys()) {
-			const name = directChildKeyName(resolvedDir, key);
-			if (name === undefined || !matchesGlob(name, pattern)) continue;
+			const name = relativeKeyName(resolvedDir, key);
+			if (name === undefined || !glob.match(name)) continue;
 			out.push(key);
 		}
 		return out;
