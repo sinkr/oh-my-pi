@@ -138,6 +138,7 @@ export interface SessionStorage {
 	 */
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
 	statSync(path: string): SessionStorageStat;
+	/** List files whose path relative to `dir` matches the Bun.Glob pattern. */
 	listFilesSync(dir: string, pattern: string): string[];
 
 	exists(path: string): Promise<boolean>;
@@ -1094,14 +1095,6 @@ export class FileSessionStorage implements SessionStorage {
 	}
 }
 
-function matchesPattern(name: string, pattern: string): boolean {
-	if (pattern === "*") return true;
-	if (pattern.startsWith("*.")) {
-		return name.endsWith(pattern.slice(1));
-	}
-	return name === pattern;
-}
-
 class MemorySessionStorageWriter implements SessionStorageWriter {
 	#storage: MemorySessionStorage;
 	#path: string;
@@ -1358,11 +1351,11 @@ export class MemorySessionStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		const prefix = dir.endsWith("/") ? dir : `${dir}/`;
 		const files: string[] = [];
+		const glob = new Bun.Glob(pattern);
 		for (const path of this.#files.keys()) {
 			if (!path.startsWith(prefix)) continue;
 			const name = path.slice(prefix.length);
-			if (name.includes("/") || name.includes("\\")) continue;
-			if (!matchesPattern(name, pattern)) continue;
+			if (!glob.match(name)) continue;
 			files.push(path);
 		}
 		return files;
