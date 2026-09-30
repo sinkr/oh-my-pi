@@ -153,6 +153,7 @@ export interface SessionStorage {
 	 */
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
 	statSync(path: string): SessionStorageStat;
+	/** List files whose path relative to `dir` matches the Bun.Glob pattern. */
 	listFilesSync(dir: string, pattern: string): string[];
 
 	exists(path: string): Promise<boolean>;
@@ -1304,26 +1305,18 @@ export class FileSessionStorage implements SessionStorage {
 	}
 }
 
-function matchesPattern(name: string, pattern: string): boolean {
-	if (pattern === "*") return true;
-	if (pattern.startsWith("*.")) {
-		return name.endsWith(pattern.slice(1));
-	}
-	return name === pattern;
-}
-
 /**
- * Name of `key` when it sits directly inside `resolvedDir` (a `path.resolve`d
- * directory), else `undefined`. Key-indexed storages keep whatever spelling
- * callers wrote, so both sides are resolved: on Windows `/sessions/x` and the
- * `path.join`-built `\sessions\x\…` keys must list as the same directory.
+ * Path of `key` relative to `resolvedDir` (a `path.resolve`d directory), `/`-separated,
+ * or `undefined` when the key sits outside it. Key-indexed storages keep whatever
+ * spelling callers wrote, so both sides are resolved: on Windows `/sessions/x` and the
+ * `path.join`-built `\sessions\x\…` keys must list as the same directory. Callers match
+ * the result against a `Bun.Glob` pattern, so two-level patterns such as the all-projects session scan work.
  */
-export function directChildKeyName(resolvedDir: string, key: string): string | undefined {
-	const name = path.basename(key);
-	if (!name || name.includes("/") || name.includes("\\")) return undefined;
-	return path.resolve(path.dirname(key)) === resolvedDir ? name : undefined;
+export function relativeKeyName(resolvedDir: string, key: string): string | undefined {
+	const rel = path.relative(resolvedDir, path.resolve(key));
+	if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return undefined;
+	return path.sep === "/" ? rel : rel.split(path.sep).join("/");
 }
-
 class MemorySessionStorageWriter implements SessionStorageWriter {
 	#storage: MemorySessionStorage;
 	#path: string;
@@ -1580,9 +1573,10 @@ export class MemorySessionStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		const resolvedDir = path.resolve(dir);
 		const files: string[] = [];
+		const glob = new Bun.Glob(pattern);
 		for (const key of this.#files.keys()) {
-			const name = directChildKeyName(resolvedDir, key);
-			if (name === undefined || !matchesPattern(name, pattern)) continue;
+			const name = relativeKeyName(resolvedDir, key);
+			if (name === undefined || !glob.match(name)) continue;
 			files.push(key);
 		}
 		return files;
