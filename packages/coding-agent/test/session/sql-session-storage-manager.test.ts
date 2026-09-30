@@ -8,9 +8,10 @@
 
 import { describe, expect, it } from "bun:test";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import { listAllSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SQL } from "bun";
 
 function fakeUsage(input: number, output: number): Usage {
@@ -122,6 +123,38 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		const sessionFiles = sessions.map(s => s.path).sort();
 		expect(sessionFiles).toContain(aFile as string);
 		expect(sessionFiles).toContain(bFile as string);
+		await client.end();
+	});
+
+	it("listAllSessions returns SQL-backed sessions across project directories", async () => {
+		const client = new SQL("sqlite::memory:");
+		const storage = await SqlSessionStorage.create({ client });
+		const root = "/sessions";
+		const managers = [
+			SessionManager.create("/cwd/alpha", `${root}/alpha`, storage),
+			SessionManager.create("/cwd/beta", `${root}/beta`, storage),
+		];
+
+		for (const [index, manager] of managers.entries()) {
+			manager.appendMessage({
+				role: "assistant",
+				provider: "anthropic",
+				model: "claude-3-7-sonnet",
+				content: [{ type: "text", text: `session ${index}` }],
+				usage: fakeUsage(1, 1),
+				api: "anthropic-messages",
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			await manager.flush();
+			await manager.close();
+		}
+		await storage.drain();
+
+		const sessions = await listAllSessions(storage, root);
+		expect(sessions.map((session) => session.path).sort()).toEqual(
+			managers.map((manager) => manager.getSessionFile() as string).sort(),
+		);
 		await client.end();
 	});
 

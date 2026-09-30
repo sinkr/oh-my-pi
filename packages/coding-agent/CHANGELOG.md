@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SQL-backed session storage now populates the all-projects `/resume` view instead of scanning only local session files.
+
 ## [18.4.4] - 2026-09-29
 
 ### Added
