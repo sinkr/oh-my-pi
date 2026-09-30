@@ -712,7 +712,10 @@ export async function listAllSessions(
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
 	try {
-		const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, "*.jsonl"));
+		const files =
+			storage instanceof FileSessionStorage
+				? await dedupeRealPaths(await scanBucketFiles(sessionsRoot, "*.jsonl"))
+				: storage.listFilesSync(sessionsRoot, "*/*.jsonl");
 		const sessions = await collectSessionsFromFiles(files, storage, true);
 		return sessions.filter(session => !isForeignSession(session));
 	} catch {
