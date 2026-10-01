@@ -5,7 +5,7 @@
  */
 import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { clearCache as clearFsCache } from "../../capability/fs";
@@ -1311,6 +1311,16 @@ export class MCPCommandController {
 		}
 
 		if (!oauth) {
+			logger.warn("MCP OAuth endpoint discovery failed", {
+				url: "url" in config ? config.url : undefined,
+				connectionSucceeded,
+				connectionError: connectionError?.message,
+				authChallenge: authChallenge?.wwwAuthenticate,
+				requiresAuth: authResult.requiresAuth,
+				authType: authResult.authType,
+				authServerUrl: authResult.authServerUrl,
+				resourceMetadataUrl: authResult.resourceMetadataUrl,
+			});
 			throw new Error("Could not discover OAuth endpoints from server response.");
 		}
 
