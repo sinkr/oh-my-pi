@@ -14,7 +14,7 @@
  * shown, and (TUI only) where manual code input comes from.
  */
 import * as path from "node:path";
-import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
 import { expandEnvVarsDeep } from "../discovery/helpers";
 import { connectToServer, disconnectServer } from "./client";
@@ -443,6 +443,16 @@ export async function resolveMcpOAuthEndpointsFromServer(
 	}
 
 	if (!oauth) {
+		logger.warn("MCP OAuth endpoint discovery failed", {
+			url: "url" in config ? config.url : undefined,
+			connectionSucceeded,
+			connectionError: connectionError?.message,
+			authChallenge: opts.authChallenge?.wwwAuthenticate,
+			requiresAuth: authResult.requiresAuth,
+			authType: authResult.authType,
+			authServerUrl: authResult.authServerUrl,
+			resourceMetadataUrl: authResult.resourceMetadataUrl,
+		});
 		throw new Error("Could not discover OAuth endpoints from server response.");
 	}
 
