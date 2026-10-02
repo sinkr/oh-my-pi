@@ -157,10 +157,49 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		await storage.drain();
 
 		const sessions = await listAllSessions(storage, root);
-		expect(sessions.map((session) => session.path).sort()).toEqual(
-			managers.map((manager) => manager.getSessionFile() as string).sort(),
+		expect(sessions.map(session => session.path).sort()).toEqual(
+			managers.map(manager => manager.getSessionFile() as string).sort(),
 		);
 		await client.end();
+	});
+
+	it("persists entries and a title racing the first SQL write without reporting a conflict", async () => {
+		const client = new SQL("sqlite::memory:");
+		try {
+			const storage = await SqlSessionStorage.create({ client });
+			const manager = SessionManager.create("/cwd", "/sessions/racing", storage);
+			const errors: Error[] = [];
+			manager.onPersistenceError(error => errors.push(error));
+			manager.appendMessage({
+				role: "assistant",
+				provider: "anthropic",
+				model: "claude-3-7-sonnet",
+				content: [{ type: "text", text: "first turn" }],
+				usage: fakeUsage(1, 1),
+				api: "anthropic-messages",
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			manager.appendMessage({ role: "user", content: "next turn", timestamp: Date.now() });
+			await manager.setSessionName("Racing title", "auto");
+			await manager.flush();
+			await manager.close();
+			expect(errors).toEqual([]);
+
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected session file");
+			const reader = await SqlSessionStorage.create({ client });
+			const reopened = await SessionManager.open(sessionFile, "/sessions/racing", reader);
+			const snapshot = reopened.captureState();
+			expect(snapshot.sessionName).toBe("Racing title");
+			expect(snapshot.entries.filter(entry => entry.type === "message").map(entry => entry.message)).toMatchObject([
+				{ role: "assistant", content: [{ type: "text", text: "first turn" }] },
+				{ role: "user", content: "next turn" },
+			]);
+			await reopened.close();
+		} finally {
+			await client.end();
+		}
 	});
 
 	it("rejects a stale rewrite after another SQL storage appends", async () => {
