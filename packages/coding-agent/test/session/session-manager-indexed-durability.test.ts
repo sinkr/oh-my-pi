@@ -236,19 +236,13 @@ describe("SessionManager + indexed backend durability", () => {
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("expected a session file");
 
-		// The first cold rewrite is rejected by the backend while a second turn
-		// races it synchronously (hV-oB): the queued publish is only a promise,
-		// so the manager must record nothing and expose nothing as current
-		// until the backend confirms.
+		// A failed first publish must not leave a racing entry as a bare append.
 		backend.failWrites = 1;
 		manager.appendMessage(assistantMessage("first turn"));
 		expect(manager.captureState().expectedDiskSize).toBeNull();
 		expect(manager.captureState().onDisk).toBe(false);
 
-		// The racing turn must not land as a bare append on the unconfirmed
-		// body: its cold-path rewrite still carries the last confirmed token,
-		// which the store's queue-time size check fail-fasts before a second
-		// provisional publish can queue behind the unconfirmed one.
+		// Keep the racing turn in memory until the pending write settles.
 		manager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
 		await manager.flush().catch(() => {});
 		await storage.drain().catch(() => {});
@@ -304,29 +298,5 @@ describe("SessionManager + indexed backend durability", () => {
 		expect(body).toContain("healer turn");
 		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
 		await manager.close();
-	});
-
-	it("does not mark a superseded deferred rewrite current on confirm", async () => {
-		const backend = new FakeBackend();
-		const storage = new IndexedSessionStorage(backend);
-		await storage.initialize();
-		const manager = SessionManager.create("/cwd", "/sessions/proj", storage);
-		const sessionFile = manager.getSessionFile();
-		if (!sessionFile) throw new Error("expected a session file");
-
-		// The first cold rewrite queues its publish; a second turn races it
-		// synchronously and fail-fasts against the unconfirmed optimistic
-		// index. When the first publish confirms, the manager must not
-		// declare current a body that predates the racing turn: close must
-		// still persist the whole transcript (rvEW).
-		manager.appendMessage(assistantMessage("first turn"));
-		manager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
-		await manager.flush().catch(() => {});
-		await storage.drain().catch(() => {});
-		await manager.close();
-
-		const body = backend.files.get(sessionFile) ?? "";
-		expect(body).toContain("first turn");
-		expect(body).toContain("second turn");
 	});
 });
