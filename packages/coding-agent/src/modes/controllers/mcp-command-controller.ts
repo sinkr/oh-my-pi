@@ -1321,6 +1321,16 @@ export class MCPCommandController {
 				authServerUrl: authResult.authServerUrl,
 				resourceMetadataUrl: authResult.resourceMetadataUrl,
 			});
+			// A 404/ECONNREFUSED/timeout is not an auth problem; blaming OAuth
+			// discovery sends the user hunting for metadata the server never
+			// advertised. Name the actual failure so they fix the server instead.
+			if (!authResult.requiresAuth) {
+				throw new Error(
+					connectionSucceeded
+						? "Server connected without authentication and advertises no OAuth metadata; there is nothing to reauthorize."
+						: `Server did not request authentication, so there is nothing to reauthorize. Connection failed: ${connectionError?.message ?? "unknown error"}`,
+				);
+			}
 			throw new Error("Could not discover OAuth endpoints from server response.");
 		}
 
