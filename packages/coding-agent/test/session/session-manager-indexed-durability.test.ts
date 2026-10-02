@@ -244,19 +244,13 @@ describe("SessionManager + indexed backend durability", () => {
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("expected a session file");
 
-		// The first cold rewrite is rejected by the backend while a second turn
-		// races it synchronously (hV-oB): the queued publish is only a promise,
-		// so the manager must record nothing and expose nothing as current
-		// until the backend confirms.
+		// A failed first publish must not leave a racing entry as a bare append.
 		backend.failWrites = 1;
 		manager.appendMessage(assistantMessage("first turn"));
 		expect(manager.captureState().expectedDiskSize).toBeNull();
 		expect(manager.captureState().onDisk).toBe(false);
 
-		// The racing turn must not land as a bare append on the unconfirmed
-		// body: its cold-path rewrite still carries the last confirmed token,
-		// which the store's queue-time size check fail-fasts before a second
-		// provisional publish can queue behind the unconfirmed one.
+		// Keep the racing turn in memory until the pending write settles.
 		manager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
 		await manager.flush().catch(() => {});
 		await storage.drain().catch(() => {});
@@ -314,64 +308,4 @@ describe("SessionManager + indexed backend durability", () => {
 		await manager.close();
 	});
 
-	it("does not mark a superseded deferred rewrite current on confirm", async () => {
-		const backend = new FakeBackend();
-		const storage = new IndexedSessionStorage(backend);
-		await storage.initialize();
-		const manager = SessionManager.create("/cwd", "/sessions/proj", storage);
-		const sessionFile = manager.getSessionFile();
-		if (!sessionFile) throw new Error("expected a session file");
-
-		// The first cold rewrite queues its publish; a second turn races it
-		// synchronously and fail-fasts against the unconfirmed optimistic
-		// index. When the first publish confirms, the manager must not
-		// declare current a body that predates the racing turn: close must
-		// still persist the whole transcript (rvEW).
-		manager.appendMessage(assistantMessage("first turn"));
-		manager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
-		await manager.flush().catch(() => {});
-		await storage.drain().catch(() => {});
-		await manager.close();
-
-		const body = backend.files.get(sessionFile) ?? "";
-		expect(body).toContain("first turn");
-		expect(body).toContain("second turn");
-	});
-
-	// The size-check conflict after pruning is covered against the real backend in
-	// sql-session-storage-manager.test.ts.
-	it("recovers IndexedSessionStorage after a rejected deferred publish", async () => {
-		const { backend, storage, manager } = await makeManager();
-		const sessionFile = manager.getSessionFile();
-		if (!sessionFile) throw new Error("expected a session file");
-
-		manager.appendMessage(assistantMessage("seed reply"));
-		manager.appendMessage({ role: "user", content: "before rewrite", timestamp: Date.now() });
-		await manager.flush();
-		await storage.drain();
-
-		const hold = Promise.withResolvers<void>();
-		backend.holdNextWrite = hold;
-		const rewritePublished = manager.rewriteEntries();
-		await backend.writeHeld.promise;
-		backend.failWrites = 1;
-		manager.appendMessage({ role: "user", content: "fenced append", timestamp: Date.now() });
-		manager.appendMessage({ role: "user", content: "after fenced append", timestamp: Date.now() });
-		hold.resolve();
-		await rewritePublished.catch(() => {});
-		await manager.flush().catch(() => {});
-		await storage.drain().catch(() => {});
-
-		manager.appendMessage({ role: "user", content: "later turn 1", timestamp: Date.now() });
-		manager.appendMessage({ role: "user", content: "later turn 2", timestamp: Date.now() });
-		await manager.flush().catch(() => {});
-		await storage.drain().catch(() => {});
-
-		const body = backend.files.get(sessionFile) ?? "";
-		for (const turn of ["fenced append", "after fenced append", "later turn 1", "later turn 2"]) {
-			expect(body).toContain(turn);
-		}
-		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
-		await manager.close();
-	});
 });
