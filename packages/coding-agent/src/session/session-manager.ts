@@ -811,13 +811,9 @@ export class SessionManager {
 	#rewriteRequired = false;
 	/** Byte length this manager last loaded or durably wrote; `null` means the path was absent. */
 	#expectedDiskSize: number | null = null;
-	/**
-	 * Generation of the latest deferred publish queued on a `defersSyncPublish`
-	 * backend. A deferred-rewrite confirmation older than the latest queued
-	 * publish is stale (the backend no longer holds its body) and must record
-	 * nothing (rvEW).
-	 */
+	/** Older deferred confirmations must not overwrite a newer publish's durability record. */
 	#deferredPublishGen = 0;
+	#pendingDeferredRewrite: string | undefined;
 	/** Lazy gate crossed (ensureOnDisk / loaded file): every entry must persist from now on. */
 	#forceFileCreation = false;
 	/**
@@ -1401,31 +1397,21 @@ export class SessionManager {
 		this.#expectedDiskSize = Buffer.byteLength(body, "utf8");
 	}
 
-	/**
-	 * Confirm a publish the backend only queued. The manager's durability state
-	 * (durable size, current-marking) advances only here, never at queue time:
-	 * until the store confirms, the record still describes the last confirmed
-	 * publish. A rejected publish is realigned with the size the store actually
-	 * holds and latched, so the next append retries the transcript instead of
-	 * reusing an `expectedSize` the backend never reached.
-	 *
-	 * `onConfirm` runs only once the backend confirms the queued publish. A
-	 * deferred rewrite must neither record the replacement nor mark the manager
-	 * current before then (hV-oB): an append racing the unconfirmed publish
-	 * would otherwise take the hot path and land a bare append on a body the
-	 * backend may still reject, inflating the CAS token past anything durable.
-	 * A rewrite racing it instead carries the last confirmed token, which the
-	 * store's queue-time size check fail-fasts before a second provisional
-	 * publish can queue behind the unconfirmed one.
-	 */
+	/** Entries racing a deferred rewrite stay in memory until its confirmed size can guard the next publish. */
 	#confirmDeferredPublish(sessionFile: string, onConfirm?: () => void): void {
 		const confirmed = this.#storage.confirmWrites?.(sessionFile);
 		if (!confirmed) return;
+		const generation = ++this.#deferredPublishGen;
+		this.#pendingDeferredRewrite = sessionFile;
 		void confirmed
 			.then(() => {
+				if (generation !== this.#deferredPublishGen) return;
+				this.#pendingDeferredRewrite = undefined;
 				onConfirm?.();
 			})
 			.catch(err => {
+				if (generation !== this.#deferredPublishGen) return;
+				this.#pendingDeferredRewrite = undefined;
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
 				try {
@@ -1492,6 +1478,7 @@ export class SessionManager {
 		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
 		let targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
+		if (this.#pendingDeferredRewrite === targetPath) return;
 
 		try {
 			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
@@ -1512,28 +1499,10 @@ export class SessionManager {
 			}
 			this.#clearDiskError();
 			if (this.#storage.defersSyncPublish) {
-				// The publish is only queued: record nothing and stay non-current
-				// until the backend confirms (hV-oB). A racing rewrite still
-				// carries the last confirmed token, so the store's queue-time
-				// size check fail-fasts it instead of queueing a second
-				// provisional publish behind the unconfirmed one; a racing
-				// append retries the transcript on the cold path instead of
-				// landing a bare append on a body the backend may still reject.
-				// The success handler below is the single place the replacement
-				// becomes durable state.
-				const generation = ++this.#deferredPublishGen;
 				this.#confirmDeferredPublish(targetPath, () => {
-					// A newer deferred publish owns the durability record now;
-					// this body is no longer on the backend, so record nothing.
-					if (generation !== this.#deferredPublishGen) return;
 					this.#recordFullRewrite(body);
 					if (this.#fileBody() !== body) {
-						// Entries raced the unconfirmed publish: the confirmed
-						// body predates them. Stay non-current and re-issue the
-						// full transcript instead of declaring it durable
-						// (rvEW); the re-issued publish carries the
-						// just-confirmed size token, so its queue-time check
-						// passes.
+						// The pending body omitted racing entries; publish them against the newly confirmed size.
 						this.#fileIsCurrent = false;
 						this.#rewriteRequired = true;
 						this.#rewriteSynchronously();
@@ -2734,9 +2703,7 @@ export class SessionManager {
 		const claim = this.#sessionClaim;
 		claim?.release?.();
 		if (claim) claim.release = undefined;
-		// A prior `flushSync` can self-conflict with this manager's own
-		// unconfirmed deferred publish; drain despite the latch so that
-		// publish can still confirm before we give up on the transcript.
+		// Drain earlier writes despite a failure so shutdown can recover.
 		await this.#scheduleDiskWork(
 			async () => {
 				const hadWriter = this.#writer !== undefined;
@@ -2758,18 +2725,14 @@ export class SessionManager {
 			{ ignorePriorError: true },
 		);
 		if (
-			this.#diskFailure &&
+			(this.#diskFailure || this.#rewriteRequired) &&
 			this.#sessionFile &&
 			this.#storage.defersSyncPublish &&
 			!this.#entriesReleased &&
 			this.#shouldHaveSessionFile()
 		) {
-			// Deferred-publish only: a synchronous backend's drain() is a
-			// no-op, so any failure there is a genuine external conflict or a
-			// permanent write failure, not a self-race this retry can catch
-			// up on. seal() disabled the ordinary mid-life repair path, so
-			// close() issues the terminal write directly instead.
-			const operationError = this.#diskFailure;
+			// seal() blocks ordinary catch-up writes, but close must still publish retained entries.
+			const operationError = this.#diskFailure ?? new Error("Session closed with unpublished entries");
 			const sessionFile = this.#sessionFile;
 			await this.#scheduleDiskWork(
 				async () => {
@@ -3778,7 +3741,11 @@ export class SessionManager {
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
 	 */
-	static create(cwd: string, sessionDir?: string, storage: SessionStorage = getDefaultSessionStorage()): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = getDefaultSessionStorage(),
+	): SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#resetToNewSession();
