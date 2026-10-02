@@ -449,6 +449,13 @@ export async function resolveMcpOAuthEndpointsFromServer(
 			authServerUrl: authResult.authServerUrl,
 			resourceMetadataUrl: authResult.resourceMetadataUrl,
 		});
+		if (!authResult.requiresAuth) {
+			throw new Error(
+				connectionSucceeded
+					? "Server connected without authentication and advertises no OAuth metadata; there is nothing to reauthorize."
+					: `Server did not request authentication, so there is nothing to reauthorize. Connection failed: ${connectionError?.message ?? "unknown error"}`,
+			);
+		}
 		throw new Error("Could not discover OAuth endpoints from server response.");
 	}
 
