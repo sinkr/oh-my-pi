@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed spurious session persistence warnings when messages or title changes race the first SQL/Redis write, while preserving pending entries during shutdown and rejecting external write conflicts.
+
 ## [18.4.9] - 2026-10-01
 
 ### Added
