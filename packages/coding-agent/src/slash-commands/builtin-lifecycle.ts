@@ -389,7 +389,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		name: "resume",
 		icon: "history",
 		description: "Resume a different session",
-		inlineHint: "[session id|@claude|@codex]",
+		inlineHint: "[session id|name|@claude|@codex]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const sessionArg = command.args.trim();
@@ -420,7 +420,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		name: "pin",
 		icon: "pin",
 		description: "Pin or unpin a session at the top of the resume list",
-		inlineHint: "[session id]",
+		inlineHint: "[session id|name]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const sessionArg = command.args.trim();

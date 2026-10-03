@@ -149,6 +149,7 @@
 ### Fixed
 
 - PostgreSQL session storage now commits writes to a durable, profile-shared local SQLite cache/outbox before returning, so cached sessions remain writable and resumable during connection outages and across restarts. Remote replay reconnects failed clients, uses transaction receipts to prevent duplicate writes after lost acknowledgements, and preserves conflicting local and remote edits instead of overwriting them.
+- `omp --resume` / `-r` now accepts a session name from file or SQL storage across the active profile's project buckets. ID/filename prefixes take priority; names prefer case-insensitive exact matches over substrings and the newest session within each tier. Explicit `--session-dir` remains scoped.
 
 ## [18.4.12] - 2026-10-02
 
