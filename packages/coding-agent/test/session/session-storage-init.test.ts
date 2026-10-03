@@ -1,56 +1,73 @@
-import { describe, expect, it, afterEach } from "bun:test";
-import { getDefaultSessionStorage, setDefaultSessionStorage, FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { initSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage-init";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 
-describe("session-storage default and init", () => {
-	const origEnvStorage = process.env.OMP_SESSION_STORAGE;
-	const origEnvPg = process.env.OMP_PG_SESSIONS;
-	const origDbUrl = process.env.DATABASE_URL;
+const initModule = new URL("../../src/session/session-storage-init.ts", import.meta.url).pathname;
+const temporaryHomes: string[] = [];
 
-	afterEach(() => {
-		if (origEnvStorage !== undefined) process.env.OMP_SESSION_STORAGE = origEnvStorage;
-		else delete process.env.OMP_SESSION_STORAGE;
-
-		if (origEnvPg !== undefined) process.env.OMP_PG_SESSIONS = origEnvPg;
-		else delete process.env.OMP_PG_SESSIONS;
-
-		if (origDbUrl !== undefined) process.env.DATABASE_URL = origDbUrl;
-		else delete process.env.DATABASE_URL;
-
-		setDefaultSessionStorage(new FileSessionStorage());
-	});
-
-	it("defaults transparently to FileSessionStorage when unset", () => {
-		delete process.env.OMP_SESSION_STORAGE;
-		delete process.env.OMP_PG_SESSIONS;
-		const storage = getDefaultSessionStorage();
-		expect(storage).toBeInstanceOf(FileSessionStorage);
-	});
-
-	it("allows overriding default session storage via setDefaultSessionStorage", () => {
-		const mem = new MemorySessionStorage();
-		setDefaultSessionStorage(mem);
-		expect(getDefaultSessionStorage()).toBe(mem);
-		expect(SessionManager.createEmptySessionFile).toBeDefined();
-	});
-
-	it("initSessionStorage returns undefined and keeps FileSessionStorage when unset", async () => {
-		delete process.env.OMP_SESSION_STORAGE;
-		delete process.env.OMP_PG_SESSIONS;
-		const res = await initSessionStorage();
-		expect(res).toBeUndefined();
-		expect(getDefaultSessionStorage()).toBeInstanceOf(FileSessionStorage);
-	});
-
-	it("initializes SqlSessionStorage when OMP_PG_SESSIONS=true or OMP_SESSION_STORAGE=postgres", async () => {
-		process.env.OMP_PG_SESSIONS = "true";
-		// Uses DATABASE_URL from ~/.config/pg-memory/env if available
+async function runOffline(home: string, password: string, body: string): Promise<string> {
+	const child = Bun.spawn(
+		[
+			process.execPath,
+			"--eval",
+			`
+		import { initSessionStorage } from ${JSON.stringify(initModule)};
 		const storage = await initSessionStorage();
-		if (storage) {
-			expect(storage).toBeInstanceOf(SqlSessionStorage);
-			expect(getDefaultSessionStorage()).toBe(storage);
-		}
-	});
+		if (!storage) throw new Error("PostgreSQL storage was not selected");
+		${body}
+	`,
+		],
+		{
+			env: {
+				...process.env,
+				HOME: home,
+				PI_CONFIG_DIR: ".omp",
+				OMP_PROFILE: "",
+				PI_PROFILE: "",
+				PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"),
+				OMP_PG_SESSIONS: "true",
+				OMP_SESSION_STORAGE: "postgres",
+				DATABASE_URL: `postgres://cache_test:${password}@127.0.0.1:1/cache_test`,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		},
+	);
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	if (exitCode !== 0) throw new Error(`Offline child exited ${exitCode}: ${stderr}`);
+	return stdout.trim();
+}
+
+afterEach(async () => {
+	await Promise.all(temporaryHomes.splice(0).map(home => rm(home, { recursive: true, force: true })));
+});
+
+describe("PostgreSQL session storage startup", () => {
+	it("retains an offline append across abrupt process exit and credential rotation", async () => {
+		const home = await mkdtemp(path.join(tmpdir(), "omp-session-init-"));
+		temporaryHomes.push(home);
+		await runOffline(
+			home,
+			"before_rotation",
+			`
+			storage.writeTextSync("/sessions/offline.jsonl", "header\\n", { expectedSize: null });
+			storage.openWriter("/sessions/offline.jsonl").appendSync("durable turn\\n");
+			process.exit(0);
+		`,
+		);
+		const restored = await runOffline(
+			home,
+			"after_rotation",
+			`
+			console.log(JSON.stringify(await storage.readText("/sessions/offline.jsonl")));
+			process.exit(0);
+		`,
+		);
+		expect(JSON.parse(restored)).toBe("header\ndurable turn\n");
+	}, 15_000);
 });
