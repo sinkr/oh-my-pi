@@ -611,11 +611,11 @@ Discovery helpers live in `session-listing.ts`; `SessionManager` exposes project
 - `listSessionsReadOnly(...)` -> same metadata without backup recovery
 - `listAllSessions(storage)` / `SessionManager.listAll()` -> project buckets under the managed sessions root, not arbitrary custom directories
 - `SessionManager.listForPicker(...)` / `listAllForPicker()` -> pinned-first lists with untitled, prompt-less zero-turn stubs removed; pinned stubs remain selectable
-- `resolveResumableSession(...)` -> local lookup then optional global fallback
+- `resolveResumableSession(...)` -> ID/filename-prefix lookup, then title lookup across allowed profile buckets
 
 `getRecentSessions()` sorts file stats and first looks up titles in `history.db`'s `session_titles` index; unindexed files fall back to content scanning and backfill their title. `findMostRecentSession()` reads a 4 KiB prefix. Status-enabled full/non-empty scans read that prefix plus a bounded 32 KiB tail. Scans are stat-keyed and cached; large full lists use bounded parallel workers. Normal per-directory scans also recover the newest orphaned EPERM backup when its primary JSONL is missing.
 
-`SessionManager.list()`/`listAll()` sort pinned sessions first; raw listing helpers sort newest first. Empty filtering is picker/continue-specific, not applied to id lookup or maintenance. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp. Explicit `sessionDir` disables global fallback unless `allowGlobalFallback: true` is requested.
+`SessionManager.list()`/`listAll()` sort pinned sessions first; raw listing helpers sort newest first. Empty filtering is picker/continue-specific, not applied to ID/title lookup or maintenance. Resume matching is case-insensitive: session id prefixes, full filename prefixes, and the id suffix after the timestamp retain local-first precedence and win over titles. Title matching prefers exact names over substrings, then the newest session per tier across all allowed buckets. Both file and SQL listings stay within the active profile. Explicit `sessionDir` disables global fallback unless `allowGlobalFallback: true` is requested.
 
 ## Related but Distinct: Prompt History Storage
 

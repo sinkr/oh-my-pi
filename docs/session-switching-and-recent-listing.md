@@ -92,9 +92,9 @@ Breadcrumb writes are best-effort and non-fatal.
    - direct `SessionManager.open(sessionArg, parsed.sessionDir)`
 
 2. Resume key value
-   - `resolveResumableSession(...)` searches local sessions first, then all sessions unless a custom `sessionDir` disables global fallback
-   - matching is case-insensitive and accepts `id` prefix, full JSONL filename prefix, or session-id suffix after the timestamp
-   - first match in modified-descending order is used (no ambiguity prompt)
+   - `resolveResumableSession(...)` searches file or SQL storage within the active profile; a custom `sessionDir` disables global fallback
+   - ID/filename matching is case-insensitive and accepts `id` prefix, full JSONL filename prefix, or session-id suffix after the timestamp; local IDs win over global IDs, and all ID matches win over titles
+   - title lookup prefers case-insensitive exact names over substrings, then newest per tier across all allowed buckets (no ambiguity prompt)
 
 If a matched session's recorded cwd no longer exists, CLI prompts `Move (re-root) it into the current directory? [Y/n]`. Acceptance opens it and `moveTo(cwd)` relocates it; decline exits cleanly. A non-TTY cannot answer and raises `SessionResolutionError`.
 
@@ -142,7 +142,7 @@ Flow:
    - cancel -> hide overlay, restore editor focus, rerender
    - exit -> hide overlay, then `ctx.shutdown()`
 
-`/resume <id-prefix>` resolves local then global matches and switches directly. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
+`/resume <id-or-name>` uses the same ID/title priorities as startup, with global fallback enabled for the active profile. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
 
 ## Session selector component behavior
 

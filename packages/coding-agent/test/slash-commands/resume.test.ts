@@ -33,11 +33,12 @@ async function writeSession(
 	id: string,
 	cwd = tempDir,
 	sessionDir = computeDefaultSessionDir(cwd, storage),
+	title?: string,
 ): Promise<string> {
 	const sessionPath = path.join(sessionDir, `2026-01-01T00-00-00-000Z_${id}.jsonl`);
 	await Bun.write(
 		sessionPath,
-		`${JSON.stringify({ type: "session", id, timestamp: "2026-01-01T00:00:00.000Z", cwd })}\n`,
+		`${JSON.stringify({ type: "session", id, title, timestamp: "2026-01-01T00:00:00.000Z", cwd })}\n`,
 	);
 	return sessionPath;
 }
@@ -106,6 +107,22 @@ describe("/resume slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 		expect(harness.showSessionSelector).not.toHaveBeenCalled();
 		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+	});
+
+	it("resumes a title with spaces from another cwd through global fallback", async () => {
+		const currentCwd = path.join(tempDir, "current");
+		const otherCwd = path.join(tempDir, "other");
+		const currentSessionDir = computeDefaultSessionDir(currentCwd, storage);
+		const otherSessionDir = computeDefaultSessionDir(otherCwd, storage);
+		const sessionPath = await writeSession("title-target", otherCwd, otherSessionDir, "AWS Infrastructure");
+		const harness = createRuntime(currentCwd, currentSessionDir);
+
+		const handled = await executeBuiltinSlashCommand("/resume aws infrastructure", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.showSessionSelector).not.toHaveBeenCalled();
 		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
 	});
 
