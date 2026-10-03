@@ -23,7 +23,7 @@ export default class Share extends Command {
 	static description = commandHelp.description;
 	static args = {
 		session: Args.string({
-			description: "Session id (prefix) or path to a session .jsonl",
+			description: "Session id (prefix), name, or path to a session .jsonl",
 			required: true,
 		}),
 	};
