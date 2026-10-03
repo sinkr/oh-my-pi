@@ -11,7 +11,7 @@ Covers:
 - Migration/compatibility behavior when loading old or malformed files
 - Context reconstruction (`buildSessionContext`)
 - Persistence guarantees, failure behavior, truncation/blob externalization
-- Storage abstractions (`FileSessionStorage`, `MemorySessionStorage`) and related utilities
+- Storage abstractions (`FileSessionStorage`, `MemorySessionStorage`, remote adapters, and the durable SQL buffer) and related utilities
 
 Does not cover `/tree` UI rendering behavior beyond semantics that affect session data.
 
@@ -30,6 +30,7 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 - [`src/session/session-storage.ts`](../packages/coding-agent/src/session/session-storage.ts) — storage abstractions
 - [`src/session/session-title-slot.ts`](../packages/coding-agent/src/session/session-title-slot.ts) — fixed-width current-title slot
 - [`src/session/indexed-session-storage.ts`](../packages/coding-agent/src/session/indexed-session-storage.ts) — local index + ordered remote-backed storage adapter
+- [`src/session/buffered-sql-session-storage.ts`](../packages/coding-agent/src/session/buffered-sql-session-storage.ts) — durable SQLite mirror/outbox for PostgreSQL sessions
 - [`src/session/messages.ts`](../packages/coding-agent/src/session/messages.ts) — custom-message transformers
 - [`src/session/blob-store.ts`](../packages/coding-agent/src/session/blob-store.ts) — content-addressed blob store
 - [`src/session/history-storage.ts`](../packages/coding-agent/src/session/history-storage.ts) — prompt history (separate subsystem)
@@ -516,7 +517,7 @@ Algorithm:
 
 ### Write pipeline
 
-Ordinary completed appends update memory and local file storage synchronously once the lazy file-creation gate has been crossed. There is no `fsync`, so successful local writes protect against software crashes, not power loss. Indexed Redis/SQL backends update their local view immediately but publish remotely in an ordered async queue; `flush()`/backend drain is required to confirm those writes. Title changes and atomic batches have their own awaited persistence paths. Streaming partial text is not persisted until the completed message is appended.
+Ordinary completed appends update memory and local file storage synchronously once the lazy file-creation gate has been crossed. File writes do not call `fsync`, so they protect against software crashes, not power loss. Indexed Redis/direct SQL adapters publish remotely in an ordered async queue and require awaited `flush()`/backend drain to confirm those writes. Configured PostgreSQL sessions instead use a durable local SQLite mirror/outbox: successful synchronous writes commit locally before returning, while remote publication is eventually consistent. Title changes and atomic batches have their own awaited persistence paths. Streaming partial text is not persisted until the completed message is appended.
 
 - A new ordinary session remains memory-only until it contains an assistant message or a caller invokes `ensureOnDisk()`.
 - Before that gate, entries remain in memory; crossing it writes the full title slot, header, and accumulated entries.
@@ -528,7 +529,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 
 ### Durability operations
 
-- `flush()` drains async disk/storage queues and the open writer (no `fsync`); `flushSync()` drains synchronously supported work or rewrites a non-current file. It cannot confirm queued remote publication; those backends still require awaited `flush()`/drain.
+- `flush()` drains storage queues and the open writer; `flushSync()` drains synchronously supported work or rewrites a non-current file. File-backed flushes do not call `fsync`; direct indexed adapters still require awaited `flush()`/drain for remote confirmation. For buffered PostgreSQL sessions, flush/drain confirms SQLite durability and does not require the remote database to be reachable; explicit `sync()` confirms remote replay.
 - Atomic full rewrites use storage `writeTextAtomic` with a commit guard and expected byte-size precondition; file storage stages then renames over the target, including an EPERM-safe move-aside fallback.
 - Local appends and publication share a cross-process publish lock. A changed byte size raises `SessionWriteConflictError`; lock contention raises `SessionLockError` without publishing the staged rewrite. This is not a content-hash comparison and cannot protect against non-cooperating external writers.
 - `FileSessionStorage` holds a process-owned OS lease on each session a process writes, keyed by the session id rather than the file's path, so every process that reaches one journal (through a symlink, a hard link, or after a move) meets the same lease. The lease is `pi-utils` `tryAcquireFileLock` on `<session-owners>/<session-id>`, where `<session-owners>` is `~/.omp/run/session-owners` (XDG: `$XDG_STATE_HOME/omp/run/session-owners`), shared across profiles: on Linux an abstract socket and on Windows a named mutex, neither of which creates a file; on macOS and other non-Linux Unix a `flock` on a sidecar in that directory. Only write paths claim it, so the first process to write a session owns it; opening a session to inspect it (`omp share`, `--export`, `render`) never does. Managers in one process share the lease; it is released on close or a session switch, and the kernel drops it when its process exits. Processes with different home or state directories do not meet in this lease. A plain copy of a session file keeps its id, so a process writing the copy while the original's writer is live moves to a sibling; a collab guest's replica takes its own id (`parentSession` is the host's) so it never contends with the host.
@@ -545,6 +546,18 @@ Ordinary completed appends update memory and local file storage synchronously on
 - `onPersistenceNotice` reports a session moving to a sibling file as a `SessionPersistenceNotice` (`reason`, `from`, `to`); it latches nothing and never reaches `onPersistenceError`. Every notice raised so far is replayed to each new subscriber, like a latched failure. Interactive mode shows it as a warning, print mode on stderr, RPC as a `warning` notice frame, each with home-relative paths.
 - Atomic batch and recovery paths attempt authoritative repair. If publication may have happened and repair cannot be proven durable, `SessionPersistenceIndeterminateError` fails closed with the original and recovery errors.
 - Writer close propagates the first meaningful error. Final disposal seals the manager, making late appends/rewrites no-ops, then releases retained entries so a disposed manager cannot overwrite a revived transcript.
+
+### Buffered PostgreSQL sessions
+
+`OMP_PG_SESSIONS` or the PostgreSQL selection in `OMP_SESSION_STORAGE` enables `BufferedSqlSessionStorage`. PostgreSQL remains the primary shared store, but each machine keeps a durable SQLite mirror and ordered outbox. A missing `DATABASE_URL` is a startup configuration error, not a switch to file storage. A remote connection failure opens the existing cache and reports paused synchronization; it does not discard buffered sessions or create a separate file-backed history.
+
+- The cache is `getBaseConfigRoot()/session-cache/<sha256>.sqlite` (normally `~/.omp/session-cache/<hash>.sqlite`). It is profile-independent: profiles targeting the same remote database/table share the cache, outbox, and locks. The hash includes protocol, host, port (default `5432`), database path, username/role, connection options/search-path URL parameters, and table. It excludes the password, so password rotation keeps the same buffer.
+- SQLite uses WAL, `synchronous=FULL`, and a busy timeout. A local mutation and its outbox operation commit in one transaction before `writeTextSync()` or `appendSync()` returns. Appends journal deltas in order rather than a transcript copy per entry. Failure to open or commit the local cache fails closed.
+- Cached transcripts remain readable and writable during an outage and after restart. The remote catalog is refreshed when reachable, and transcript bodies are cached on demand. An uncached body cannot be resumed offline: reads fail explicitly rather than inventing an empty session. Refresh never overwrites pending local changes or resurrects pending deletions, and it preserves an active writer's original remote baseline so a peer edit cannot become the implicit precondition for its next append.
+- A single cross-process replay leader sends queued operations in path order. Background synchronization normally runs every 30 seconds; `sync()` explicitly attempts replay and catalog refresh and rejects on failure. `getSyncStatus()` exposes `pendingOperations`, `conflictCount`, `lastSyncAt`, and `lastError`; `onSyncError` reports both remote and local cache failures, including failures that prevent updating SQLite status metadata. A remote failure retains pending operations and closes the failed client so a later attempt creates a fresh connection. Client creation uses bounded connection/idle/lifetime limits, not an indefinitely reused stale connection.
+- Each remote operation and its UUID receipt commit in one transaction in the session table and its `<table>_buffer_receipts` table. If PostgreSQL committed but the acknowledgement was lost, replay sees the receipt and does not duplicate an append or repeat a rename/delete. Pending work survives `close()`; closing stops the timer and releases resources without requiring successful remote publication.
+- Replay checks the remote row's expected modification time and UTF-8 byte size atomically. A genuine remote edit, including a same-size rewrite with a newer modification time, blocks that path without overwriting remote content. Local entries and the conflicting operation remain durable and visible in sync status; unrelated paths can still synchronize. Conflicts are not dropped after a retry count.
+- Local ownership claims prevent two processes from appending to the same active session: `SessionManager` moves a competing writer to a sibling session, as with file-backed storage. This protects local ownership separately from the remote optimistic checks used for writers on other machines.
 
 ## Data Size Controls and Blob Externalization
 
@@ -568,6 +581,7 @@ Implementations and adapters:
 - `FileSessionStorage`: real local files
 - `MemorySessionStorage`: map/chunk-backed in-memory storage for non-persistent sessions and tests
 - `IndexedSessionStorage`: shared local index plus ordered remote publication used by Redis/SQL-backed storage
+- `BufferedSqlSessionStorage`: durable local SQLite cache/outbox plus receipt-based, conflict-preserving PostgreSQL replay
 
 `SessionStorageWriter` exposes `append`, optional `appendSync`, `flush`, optional `flushSync`, `isOpen`, `close`, and `getError`.
 
