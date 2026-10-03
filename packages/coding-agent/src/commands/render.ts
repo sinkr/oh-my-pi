@@ -11,7 +11,7 @@ import { CliUsageError } from "../cli/usage-error";
 export default class Render extends Command {
 	static description = commandHelp.description;
 	static args = {
-		session: Args.string({ description: "Session file path or id prefix (default: most recent for cwd)" }),
+		session: Args.string({ description: "Session file path, id prefix, or name (default: most recent for cwd)" }),
 	};
 	static flags = {
 		width: Flags.integer({ char: "w", description: "Render width in columns (default: terminal width)" }),
