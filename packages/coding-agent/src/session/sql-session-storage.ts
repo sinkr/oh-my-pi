@@ -273,6 +273,11 @@ export class SqlSessionStorage extends IndexedSessionStorage {
 		return storage;
 	}
 
+	/** Reuse the remote DDL without allocating an unused metadata index. */
+	static async initializeSchema(options: SqlSessionStorageOptions): Promise<void> {
+		await new SqlSessionStorageBackend(options).init();
+	}
+
 	get adapter(): SqlSessionStorageAdapter {
 		return this.#adapter;
 	}
