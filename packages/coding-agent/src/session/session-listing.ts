@@ -14,7 +14,12 @@ import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { parseSessionOrigin, type SessionOrigin } from "./session-entries";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
-import { FileSessionStorage, getDefaultSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
+import {
+	FileSessionStorage,
+	getDefaultSessionStorage,
+	type SessionStorage,
+	type SessionStorageStat,
+} from "./session-storage";
 import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
 import { overlapsWindow, type TimeWindow } from "./time-window";
 
