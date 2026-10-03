@@ -84,9 +84,9 @@ Argument handling:
 | Flag | Description |
 | --- | --- |
 | `--continue`, `-c` | Continue the previous session. |
-| `--resume [id]`, `-r`, `--session [id]` | Resume a session by ID prefix or path, or open the picker when no value is given. |
+| `--resume [id-or-name]`, `-r`, `--session [id-or-name]` | Resume a session by ID prefix, name or path, or open the picker when no value is given. |
 | `--restore [id]` | Resume a session as `--resume` does, then go on with what its last process left unfinished when it crashed or was killed: the interrupted turn and the subagents it was running. Interactive only; takes no prompt. See [session operations](./session-operations-export-share-fork-resume.md#cli---restore). |
-| `--fork <session>` | Fork a saved session (by ID prefix or path) into a new session. See [session operations](./session-operations-export-share-fork-resume.md). |
+| `--fork <session>` | Fork a saved session (by ID prefix, name or path) into a new session. See [session operations](./session-operations-export-share-fork-resume.md). |
 | `--from-claude` | Import a Claude Code session into OMP. |
 | `--from-codex` | Import a Codex session into OMP. |
 | `--export <session>` | Export a session file to HTML and exit. |
@@ -96,6 +96,8 @@ Argument handling:
 persistence and cannot use `--no-session`. `--from-claude` and `--from-codex`
 are mutually exclusive and cannot be combined with `--continue`, `--resume`,
 or `--fork`.
+
+Session names are matched case-insensitively across file or SQL storage in the active profile's project buckets: exact names win over substrings, then the newest session wins within each tier. ID/filename prefixes take priority over names and retain local-first lookup. `--session-dir` restricts startup lookup to that directory. For example, `omp -r AWS` resumes the newest exact `AWS` session in the current profile; quote names containing spaces.
 
 #### Model selection
 
