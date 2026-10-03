@@ -93,9 +93,9 @@ Breadcrumb writes are best-effort and non-fatal.
    - `findSessionContinuation(sessionArg)` first; then `SessionManager.open(<continuation or sessionArg>, parsed.sessionDir, undefined, { throwIfMissing: true })`; a missing path fails with `Session "<path>" not found.` instead of creating a session there
 
 2. Resume key value
-   - `resolveResumableSession(...)` searches local sessions first, then all sessions unless a custom `sessionDir` disables global fallback
-   - matching is case-insensitive and accepts `id` prefix, full JSONL filename prefix, or session-id suffix after the timestamp
-   - first match in modified-descending order is used (no ambiguity prompt)
+   - `resolveResumableSession(...)` searches file or SQL storage within the active profile; a custom `sessionDir` disables global fallback
+   - ID/filename matching is case-insensitive and accepts `id` prefix, full JSONL filename prefix, or session-id suffix after the timestamp; local IDs win over global IDs, and all ID matches win over titles
+   - title lookup prefers case-insensitive exact names over substrings, then newest per tier across all allowed buckets (no ambiguity prompt)
    - with no match, the resolver (`resolveResumeTarget`) looks in the same scopes for a `<timestamp>_<id>.jsonl` file whose name matches but which no longer reads as a session (the listing skips it)
 
 Both modes follow the session's continuations: when its conversation went on in a sibling file whose header names it in `continuationOf`, the copy with the newest turn opens instead (unless the named file has turns that copy lacks) and a notice names both files. A file that no longer holds the session its generated name records was replaced under that session; it is followed by that name's id when it no longer parses, or, for a resume key that matched only the file name, when it holds another session.
@@ -146,7 +146,7 @@ Flow:
    - cancel -> hide overlay, restore editor focus, rerender
    - exit -> hide overlay, then `ctx.shutdown()`
 
-`/resume <id-prefix>` resolves local then global matches with `resolveResumeTarget`, the same resolver the CLI's `--resume <id>` uses, and switches to the copy it picks. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
+`/resume <id-or-name>` uses the same ID/title priorities as startup, with global fallback enabled for the active profile, and switches to the copy `resolveResumeTarget` picks. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
 
 ## Session selector component behavior
 
