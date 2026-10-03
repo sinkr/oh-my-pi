@@ -1676,9 +1676,30 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 	return fileSessionId.startsWith(normalizedArg);
 }
 
+function findSessionTitleMatch(
+	localSessions: SessionInfo[],
+	globalSessions: SessionInfo[],
+	sessionArg: string,
+): ResolvedSessionMatch | undefined {
+	const normalizedArg = sessionArg.toLowerCase();
+	let match: ResolvedSessionMatch | undefined;
+	let matchTier = 0;
+	for (const scope of ["local", "global"] as const) {
+		for (const session of scope === "local" ? localSessions : globalSessions) {
+			const title = sanitizeSessionName(session.title)?.toLowerCase();
+			const tier = title === normalizedArg ? 2 : title?.includes(normalizedArg) ? 1 : 0;
+			if (tier === 0 || tier < matchTier) continue;
+			if (tier === matchTier && match && compareNewestFirst(session, match.session) >= 0) continue;
+			match = { session, scope };
+			matchTier = tier;
+		}
+	}
+	return match;
+}
+
 /** Controls cross-directory fallback for resumable session lookup. */
 export interface ResolveResumableSessionOptions {
-	/** Search default global session buckets after the active/custom session directory misses. */
+	/** Include the active profile's global session buckets in addition to an explicit session directory. */
 	allowGlobalFallback?: boolean;
 }
 
@@ -1686,6 +1707,11 @@ function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions
 	return "listFilesSync" in value;
 }
 
+/**
+ * Resolve ID/filename prefixes before titles. IDs retain local-first lookup;
+ * titles prefer case-insensitive exact matches over substrings, newest per tier
+ * across all allowed buckets in the active profile.
+ */
 export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
@@ -1703,14 +1729,14 @@ export async function resolveResumableSession(
 	}
 
 	if (sessionDir && resolvedOptions.allowGlobalFallback !== true) {
-		return undefined;
+		return findSessionTitleMatch(localSessions, [], sessionArg);
 	}
 
 	const globalSessions = await listAllSessions(storage);
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
-	if (!globalMatch) {
-		return undefined;
+	if (globalMatch) {
+		return { session: globalMatch, scope: "global" };
 	}
 
-	return { session: globalMatch, scope: "global" };
+	return findSessionTitleMatch(localSessions, globalSessions, sessionArg);
 }
