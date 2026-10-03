@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- PostgreSQL session storage now commits writes to a durable, profile-shared local SQLite cache/outbox before returning, so cached sessions remain writable and resumable during connection outages and across restarts. Remote replay reconnects failed clients, uses transaction receipts to prevent duplicate writes after lost acknowledgements, and preserves conflicting local and remote edits instead of overwriting them.
+
 ## [18.4.12] - 2026-10-02
 
 ### Added
