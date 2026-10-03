@@ -30,7 +30,7 @@ import { findMostRecentSession, resolveResumableSession } from "../session/sessi
 import { SessionManager } from "../session/session-manager";
 
 export interface RenderCommandArgs {
-	/** Session file path or id prefix; default: most recent session for cwd. */
+	/** Session file path, id prefix, or name; default: most recent session for cwd. */
 	session?: string;
 	/** Terminal width in columns. Default: current terminal width, else 120. */
 	width?: number;
@@ -132,7 +132,7 @@ class DrainScheduler implements RenderScheduler {
 	}
 }
 
-/** Resolve the target session file from a path, id prefix, or cwd default. */
+/** Resolve the target session file from a path, id prefix, name, or cwd default. */
 async function resolveTargetSession(sessionArg: string | undefined, cwd: string): Promise<string> {
 	if (sessionArg) {
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
