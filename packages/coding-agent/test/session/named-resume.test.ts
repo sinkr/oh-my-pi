@@ -14,6 +14,7 @@ import {
 	type SessionStorage,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { __resetDirsFromEnvForTests, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 
@@ -63,7 +64,15 @@ for (const backend of ["file", "sql"] as const) {
 			dir = path.join(sessionsRoot, "other-project"),
 		): Promise<string> {
 			const sessionPath = path.join(dir, `2026-01-01T00-00-00-000Z_${id}.jsonl`);
-			const content = `${JSON.stringify({
+			const titleSlot =
+				backend === "sql"
+					? serializeTitleSlot({
+							title: "stale header title",
+							source: "user",
+							updatedAt: "2026-01-01T00:00:00.000Z",
+						})
+					: "";
+			const content = `${titleSlot}${JSON.stringify({
 				type: "session",
 				id,
 				title: backend === "sql" ? "stale header title" : title,
@@ -73,7 +82,7 @@ for (const backend of ["file", "sql"] as const) {
 			if (client) {
 				await client.unsafe(
 					"INSERT INTO omp_session_files (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-					[sessionPath, content, modified, title ?? null, "manual", "2026-01-01T00:00:00.000Z"],
+					[sessionPath, content, modified, title ?? null, "user", "2026-01-01T00:00:00.000Z"],
 				);
 			} else {
 				await fs.mkdir(dir, { recursive: true });
