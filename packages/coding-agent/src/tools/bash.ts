@@ -648,6 +648,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return new InternalUrlFilesystem({ context: sessionResolveContext(this.session, { signal }), tier });
 	}
 
+	/**
+	 * Session identity for the command, resolved per run so `/fork`, `/new`, and
+	 * `/resume` take effect on the next call. Always set both keys: an empty
+	 * value replaces a stale one inherited from a parent omp process, since an
+	 * env overlay cannot unset.
+	 */
+	#sessionEnv(): Record<string, string> {
+		return {
+			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
+			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
+		};
+	}
+
 	/** Service launch mode: live `launch.enabled` while `bash` itself is an active tool. */
 	get #launchEnabled(): boolean {
 		return cfgLaunchEnabled.get(this.session.settings) === true && (this.session.isToolActive?.("bash") ?? true);
@@ -886,6 +899,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				try {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
+						env: this.#sessionEnv(),
 						// A call that starts in the foreground runs in the session's
 						// persistent shell, like the direct path, so its variables,
 						// functions, and options reach the next call even after it is
@@ -1111,6 +1125,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					cwd: commandCwd,
 					pty: pty ?? true,
 					ready,
+					env: this.#sessionEnv(),
 				},
 				signal,
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
@@ -1280,6 +1295,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const backendPreflight =
 			bridgeTerminalAvailable || canUseInteractiveBashPty(pty === true, ctx)
 				? await applyDirenvPreflight(command, commandCwd, {
+						callerEnv: this.#sessionEnv(),
 						signal,
 						timeoutMs: cfgBashDirenvLoadTimeoutMs.get(this.session.settings),
 						callerTimeoutMs: timeoutMs,
@@ -1587,6 +1603,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				// command here so the unset prefix is not applied twice.
 				await executeBash(command, {
 					cwd: commandCwd,
+					env: this.#sessionEnv(),
 					sessionKey: sessionId,
 					isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === sessionId,
 					timeout: timeoutMs ?? 0,
