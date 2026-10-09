@@ -336,7 +336,6 @@ function extractWholeTextAttachmentPath(text: string): string | undefined {
 		: undefined;
 }
 
-
 function bracketedPastePayload(data: string): string | undefined {
 	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
 	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
