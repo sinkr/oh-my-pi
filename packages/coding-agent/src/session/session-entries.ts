@@ -56,6 +56,8 @@ export interface SessionHeader {
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
+	/** Marks a restricted seance fork before its runtime session contract is appended. */
+	seanceFork?: true;
 }
 
 export interface NewSessionOptions {
