@@ -138,39 +138,3 @@ export const launchHelp = {
 		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,
 	],
 } satisfies CommandMetadata;
-
-⚠ 1 unresolved conflict detected
-- ours = HEAD
-- theirs = 0aafadc53f (fix(session): resolve resumable sessions by title in active profile)
-NOTICE: Inspect a block by reading `conflict://<N>` (add `/ours` / `/theirs` / `/base` to render a single side). Resolve with `write({ path: "conflict://<N>", content })`, or bulk-resolve every registered conflict with `write({ path: "conflict://*", content })`. Writes replace ONLY the marker block (markers + all sides) — never repeat the lines before/after it; they stay in place.
-`content` shorthand: a line that is exactly `@ours` / `@theirs` / `@base` / `@both` expands to that recorded section. `@both` is ours-then-theirs with no separator — only for additive conflicts where each side adds something different; NEVER for competing edits of the same lines (pick a side or write the combined text). Lines that are not a token pass through verbatim, so `"// keep both\n@ours\n@theirs"` literally writes the comment, then ours, then theirs.
-Per-id bulk: `write({ path: "conflict://*", content: "1: @ours\n2: @theirs\n…" })` resolves each listed id with that side in ONE call — the cheapest way through many pick-one conflicts; unlisted ids stay registered.
-Resolve each block faithfully: keep one side (`@ours`/`@theirs`), or combine them when both intents apply — never invent content beyond the recorded sides, and never stack both sides of competing edits. Resolve several conflicts in a single turn by issuing multiple `write` calls at once; ids stay valid as earlier blocks are resolved.
-
-──── #5  L64-72 ────
-<<< ours
-		resume: Flags.string({ char: "r", description: "Resume a session (by ID prefix, path, or picker if omitted)" }),
-		restore: Flags.string({
-			description:
-				"Resume a session as --resume does, then go on with what its last process left unfinished (the interrupted turn and the subagents it was running)",
-		}),
->>> theirs
-		resume: Flags.string({ char: "r", description: "Resume a session (by ID prefix, name, path, or picker if omitted)" }),
-⚠ 1 unresolved conflict detected
-- ours = HEAD
-- theirs = 27366ae7df (Fix SQL title fixtures and format named session resolution)
-NOTICE: Inspect a block by reading `conflict://<N>` (add `/ours` / `/theirs` / `/base` to render a single side). Resolve with `write({ path: "conflict://<N>", content })`, or bulk-resolve every registered conflict with `write({ path: "conflict://*", content })`. Writes replace ONLY the marker block (markers + all sides) — never repeat the lines before/after it; they stay in place.
-`content` shorthand: a line that is exactly `@ours` / `@theirs` / `@base` / `@both` expands to that recorded section. `@both` is ours-then-theirs with no separator — only for additive conflicts where each side adds something different; NEVER for competing edits of the same lines (pick a side or write the combined text). Lines that are not a token pass through verbatim, so `"// keep both\n@ours\n@theirs"` literally writes the comment, then ours, then theirs.
-Per-id bulk: `write({ path: "conflict://*", content: "1: @ours\n2: @theirs\n…" })` resolves each listed id with that side in ONE call — the cheapest way through many pick-one conflicts; unlisted ids stay registered.
-Resolve each block faithfully: keep one side (`@ours`/`@theirs`), or combine them when both intents apply — never invent content beyond the recorded sides, and never stack both sides of competing edits. Resolve several conflicts in a single turn by issuing multiple `write` calls at once; ids stay valid as earlier blocks are resolved.
-
-──── #5  L64-73 ────
-<<< ours
-		resume: Flags.string({ char: "r", description: "Resume a session (by ID prefix, name, path, or picker if omitted)" }),
-		restore: Flags.string({
-			description:
-				"Resume a session as --resume does, then go on with what its last process left unfinished (the interrupted turn and the subagents it was running)",
->>> theirs
-		resume: Flags.string({
-			char: "r",
-			description: "Resume a session (by ID prefix, name, path, or picker if omitted)",
