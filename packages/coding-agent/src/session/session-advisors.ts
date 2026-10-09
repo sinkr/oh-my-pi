@@ -2801,9 +2801,7 @@ export class SessionAdvisors {
 	 * returns null is absent.
 	 */
 	getAdvisorAvailableToolNames(): string[] {
-		return (this.#advisorTools ?? [])
-			.map(tool => tool.name)
-			.filter(name => ADVISOR_ALLOWED_TOOL_NAMES.has(name));
+		return (this.#advisorTools ?? []).map(tool => tool.name).filter(name => ADVISOR_ALLOWED_TOOL_NAMES.has(name));
 	}
 
 	/**
