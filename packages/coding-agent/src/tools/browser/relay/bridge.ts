@@ -118,7 +118,7 @@ interface ExtInstance {
 	/** Short code derived from the instance id and browser run; names target ids (`TAB<code>.<tabId>`). */
 	code: string;
 	socket: RelaySocket | null;
-	info: { userAgent: string; browserVersion: string; discardedTabsProtocol?: number } | null;
+	info: { userAgent: string; browserVersion: string; discardedTabsProtocol?: number; ompVersion?: string } | null;
 	/** `Date.now()` when its socket closed; null while connected. */
 	goneSince: number | null;
 	/** Settles at its next hello; created by the first caller that waits for one. */
@@ -411,6 +411,8 @@ export class RelayBridge {
 			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
 			ompExtensionDiscardedTabsProtocol: String(hasCompatibleExtension ? DISCARDED_TABS_PROTOCOL_VERSION : 0),
 			ompRelayCdpClients: this.#conns.size,
+			// The omp that installed the answering extension; empty when it predates the stamp.
+			ompExtensionVersion: info?.ompVersion ?? "",
 		};
 	}
 
@@ -570,6 +572,7 @@ export class RelayBridge {
 			userAgent: msg.userAgent,
 			browserVersion: msg.browserVersion,
 			discardedTabsProtocol: msg.discardedTabsProtocol,
+			ompVersion: typeof msg.ompVersion === "string" ? msg.ompVersion : undefined,
 		};
 		this.#lastHelloInstance = instanceId;
 		this.#extensionSeen = true;
