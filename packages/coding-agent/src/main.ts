@@ -195,12 +195,13 @@ type SessionPicker = (
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
 async function loadSessionPicker(): Promise<SessionPicker> {
-	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds }, { getDefaultSessionStorage }] = await Promise.all([
-		import("@oh-my-pi/pi-tui/apps/session-picker"),
-		import("./session/history-storage"),
-		import("./session/session-pins"),
-		import("./session/session-storage"),
-	]);
+	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds }, { getDefaultSessionStorage }] =
+		await Promise.all([
+			import("@oh-my-pi/pi-tui/apps/session-picker"),
+			import("./session/history-storage"),
+			import("./session/session-pins"),
+			import("./session/session-storage"),
+		]);
 	return (sessions, options) => {
 		const storage = getDefaultSessionStorage();
 		return selectSession(sessions, options, {
