@@ -360,7 +360,6 @@ export function classifyImagePaste(content: string): ImagePaste {
 	const paths = extractImagePastePathsFromText(content);
 	return paths ? { kind: "paths", paths } : { kind: "text" };
 }
-
 function bracketedPastePayload(data: string): string | undefined {
 	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
 	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
