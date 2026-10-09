@@ -48,6 +48,34 @@ export function setGeneratedHeader(headers: Record<string, string>, name: string
 	headers[name] = value;
 }
 
+/**
+ * Return `headers` without any entry whose name case-insensitively matches
+ * `name`. Used to keep transport-reserved protocol headers (e.g.
+ * `MCP-Protocol-Version`) out of user-configured headers so config can never
+ * inject them. Returns the original reference when there is nothing to strip,
+ * so the common (no-match) path allocates nothing.
+ */
+export function withoutHeader(
+	headers: Record<string, string> | undefined,
+	name: string,
+): Record<string, string> | undefined {
+	if (!headers) return headers;
+	const lower = name.toLowerCase();
+	let hasMatch = false;
+	for (const key in headers) {
+		if (key.toLowerCase() === lower) {
+			hasMatch = true;
+			break;
+		}
+	}
+	if (!hasMatch) return headers;
+	const result: Record<string, string> = {};
+	for (const key in headers) {
+		if (key.toLowerCase() !== lower) result[key] = headers[key];
+	}
+	return result;
+}
+
 const REDIRECT_STATUSES: Record<number, true> = { 301: true, 302: true, 303: true, 307: true, 308: true };
 const MAX_REDIRECT_HOPS = 5;
 
@@ -64,6 +92,14 @@ export interface MCPFetchInit {
  * Non-locked servers keep the platform default redirect behavior. Locked
  * non-GET requests only follow 307/308 (method-preserving); a 301/302/303
  * redirect of a JSON-RPC POST is a connection error, never a silent GET.
+ *
+ * `timeout: false` keeps the runtime's socket idle timer out of the MCP timeout
+ * surface. MCP calls are long-poll shaped — a server may stay silent for as
+ * long as the work takes — and that timer would end such a wait even where the
+ * operator disabled MCP deadlines outright (`timeout: 0`,
+ * `OMP_MCP_TIMEOUT_MS=0`). Deadlines and cancellation stay with `init.signal`,
+ * which each transport composes from the configured per-request deadline,
+ * caller cancellation, and transport close.
  */
 export async function mcpFetch(
 	url: string,
@@ -72,7 +108,7 @@ export async function mcpFetch(
 	originLocked: boolean,
 ): Promise<Response> {
 	if (!originLocked) {
-		return fetch(url, { ...init, headers: mergeMCPHeaders(sources) });
+		return fetch(url, { ...init, headers: mergeMCPHeaders(sources), timeout: false });
 	}
 
 	const configuredOrigin = new URL(url).origin;
@@ -80,7 +116,7 @@ export async function mcpFetch(
 	for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
 		const attachConfigured = new URL(currentUrl).origin === configuredOrigin;
 		const headers = mergeMCPHeaders(attachConfigured ? sources : { generated: sources.generated });
-		const response = await fetch(currentUrl, { ...init, headers, redirect: "manual" });
+		const response = await fetch(currentUrl, { ...init, headers, redirect: "manual", timeout: false });
 		if (!REDIRECT_STATUSES[response.status]) return response;
 
 		const location = response.headers.get("Location");

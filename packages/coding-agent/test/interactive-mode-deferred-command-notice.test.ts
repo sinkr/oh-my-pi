@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Text } from "@oh-my-pi/pi-tui";
@@ -13,9 +13,16 @@ type Harness = {
 	setStreaming: (value: boolean) => void;
 };
 
-let harnesses: Harness[] = [];
+let harness: Harness | undefined;
 
 async function createHarness(): Promise<Harness> {
+	if (harness) {
+		harness.setStreaming(false);
+		harness.mode.clearTransientSessionUi();
+		harness.mode.chatContainer.disposeChildren();
+		return harness;
+	}
+
 	const tempDir = TempDir.createSync("@pi-deferred-notice-");
 	await Settings.init({ inMemory: true, cwd: tempDir.path() });
 	await initTheme(false);
@@ -39,14 +46,13 @@ async function createHarness(): Promise<Harness> {
 		},
 	} as unknown as AgentSession;
 	const mode = new InteractiveMode(session, "test");
-	const harness = {
+	harness = {
 		mode,
 		tempDir,
 		setStreaming: (value: boolean) => {
 			streaming = value;
 		},
 	};
-	harnesses.push(harness);
 	return harness;
 }
 
@@ -63,12 +69,13 @@ function transcriptText(mode: InteractiveMode): string {
 }
 
 afterEach(() => {
-	for (const harness of harnesses) {
-		harness.mode.stop();
-		harness.tempDir.removeSync();
-	}
-	harnesses = [];
 	vi.restoreAllMocks();
+});
+
+afterAll(() => {
+	harness?.mode.stop();
+	harness?.tempDir.removeSync();
+	harness = undefined;
 	resetSettingsForTest();
 });
 
@@ -88,6 +95,23 @@ describe("InteractiveMode deferred command preview", () => {
 		// (issues #4806/#6767), which is what deferral was introduced to stop.
 		expect(transcriptRowCount(mode)).toBe(transcriptBefore);
 		expect(transcriptText(mode)).not.toContain("Claude 5 Hour");
+	});
+
+	it("mounts mid-turn output straight into the transcript on a Tern surface", async () => {
+		const { mode, setStreaming } = await createHarness();
+		setStreaming(true);
+		// A native surface reconciles a document instead of appending scrollback,
+		// so there is nothing to duplicate and no reason to hold a clipped preview
+		// above the prompt for the rest of the turn.
+		Object.defineProperty(mode.ui, "nativeRendering", { configurable: true, get: () => true });
+		try {
+			mode.presentCommandOutput(new Text("Context 112K / 1m", 1, 0));
+		} finally {
+			Reflect.deleteProperty(mode.ui, "nativeRendering");
+		}
+
+		expect(noticeText(mode)).toBe("");
+		expect(transcriptText(mode)).toContain("Context 112K / 1m");
 	});
 
 	it("counts commands rather than the components each one queues", async () => {

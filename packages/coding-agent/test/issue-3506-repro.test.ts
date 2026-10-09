@@ -1,20 +1,13 @@
 /**
- * Repro for #3506: macOS image-file clipboard pasted as literal text.
+ * Paste contract tests (grown out of the #3506 repro).
  *
- * When a user copies an image file via Finder `Cmd+C` (or any flow that puts
- * a file URL on the pasteboard with no raw image bytes), `arboard::get_image`
- * returns `ContentNotAvailable`. Before the fix, the smart-paste fallback in
- * `InputController.handleImagePaste` then dumped the clipboard text — the
- * file path — verbatim into the editor instead of attaching the image, so
- * the user saw "text pasted, image lost". The terminal-mediated `Cmd+V` path
- * (bracketed paste → `extractBracketedImagePastePaths` → `handleImagePathPaste`)
- * already attached the image, which produced the asymmetric "for image I need
- * control+v which is very odd" symptom.
- *
- * Defended contract: when the clipboard text is an explicit image file path,
- * `handleImagePaste` MUST load and attach the image, NEVER paste the path as
- * text. Non-image text falls through to the existing #1628 text-paste
- * behavior.
+ * Current contract: pasted TEXT is never promoted to an image attachment
+ * merely because it looks like an image file path — path-shaped clipboard
+ * text pastes as literal text (the 2026-08-13 regression report: users paste
+ * paths and want the path). Real image flavors still attach: raw clipboard
+ * image bytes, and macOS `public.file-url` pasteboards read via
+ * `readMacFileUrls` (Finder Cmd+C keeps attaching because the pasteboard
+ * carries an explicit file flavor, not plain text).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -34,6 +27,7 @@ const ONE_PX_PNG = Buffer.from(
 function createCtx() {
 	const pasteText = vi.fn();
 	const insertText = vi.fn();
+	const insertAtom = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
 	const pendingImages: ImageContent[] = [];
@@ -42,6 +36,7 @@ function createCtx() {
 		editor: {
 			pasteText,
 			insertText,
+			insertAtom,
 			imageLinks: undefined,
 			pendingImages,
 			pendingImageLinks,
@@ -53,7 +48,10 @@ function createCtx() {
 		} as unknown as InteractiveModeContext["sessionManager"],
 		showStatus,
 	} as unknown as InteractiveModeContext;
-	return { ctx, spies: { pasteText, insertText, requestRender, showStatus, pendingImages, pendingImageLinks } };
+	return {
+		ctx,
+		spies: { pasteText, insertText, insertAtom, requestRender, showStatus, pendingImages, pendingImageLinks },
+	};
 }
 
 describe("InputController.handleImagePaste (issue #3506)", () => {
@@ -74,25 +72,22 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("attaches the image when the clipboard exposes only its file path (Finder Cmd+C)", async () => {
+	it("pastes the path as literal text when the clipboard exposes only path text", async () => {
 		const { ctx, spies } = createCtx();
 		const controller = new InputController(ctx, {
-			readImage: async () => null, // arboard returns ContentNotAvailable when only a file URL is on the pasteboard
+			readImage: async () => null, // no raw image bytes on the pasteboard
 			readText: async () => imgPath,
 		});
 
 		const result = await controller.handleImagePaste();
 
 		expect(result).toBe(true);
-		// The path MUST NOT land in the editor as literal text — that's the user-visible bug.
-		expect(spies.pasteText).not.toHaveBeenCalled();
-		expect(spies.insertText).toHaveBeenCalled();
-		// The image is attached to the draft.
-		expect(spies.pendingImages.length).toBe(1);
-		expect(spies.pendingImages[0]?.type).toBe("image");
+		// Path-shaped TEXT stays text: no image attachment, no path swallowing.
+		expect(spies.pasteText).toHaveBeenCalledWith(imgPath);
+		expect(spies.pendingImages.length).toBe(0);
 	});
 
-	it("attaches the image when the clipboard exposes a `file://` URL (Codex parity)", async () => {
+	it("pastes a file:// URL as literal text when it arrives as plain text", async () => {
 		const { ctx, spies } = createCtx();
 		const fileUrl = new URL(`file://${imgPath}`).href;
 		const controller = new InputController(ctx, {
@@ -103,18 +98,11 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 		const result = await controller.handleImagePaste();
 
 		expect(result).toBe(true);
-		// Neither the bare URL nor the decoded path may land in the editor as text.
-		expect(spies.pasteText).not.toHaveBeenCalled();
-		expect(spies.pendingImages.length).toBe(1);
-		expect(spies.pendingImages[0]?.type).toBe("image");
+		expect(spies.pasteText).toHaveBeenCalledWith(fileUrl);
+		expect(spies.pendingImages.length).toBe(0);
 	});
 
-	it("attaches the image when the clipboard text is a single anchored path containing spaces", async () => {
-		// macOS screenshots default to filenames like
-		// `Screenshot 2026-06-25 at 1.23.45 PM.png` — unescaped spaces. The
-		// bracketed-paste splitter shreds the path on whitespace, so the
-		// keybind text fallback MUST try the trimmed text as a single
-		// candidate before splitting.
+	it("pastes a spaced screenshot path as literal text", async () => {
 		const { ctx, spies } = createCtx();
 		const spaced = path.join(tmpDir, "Screenshot 2026-06-25 at 1.23.45 PM.png");
 		await fs.writeFile(spaced, ONE_PX_PNG);
@@ -126,8 +114,8 @@ describe("InputController.handleImagePaste (issue #3506)", () => {
 		const result = await controller.handleImagePaste();
 
 		expect(result).toBe(true);
-		expect(spies.pasteText).not.toHaveBeenCalled();
-		expect(spies.pendingImages.length).toBe(1);
+		expect(spies.pasteText).toHaveBeenCalledWith(spaced);
+		expect(spies.pendingImages.length).toBe(0);
 	});
 
 	it("attaches the image via the macOS file-URL pasteboard when readText is empty (pbpaste limitation)", async () => {

@@ -1,13 +1,14 @@
 //! `grep` builtin implemented on top of the ripgrep libraries.
 //!
 //! Matching uses `grep-regex`/`grep-searcher`; recursive walks use `pi-walker`.
+//! Also hosts the plumbing `rg` and pi-natives' grep binding share with it:
+//! [`CompiledMatcher`], the PCRE2 JIT toggle, exit status, and record layout.
 
 
 use std::{
-	borrow::Cow,
 	ffi::{OsStr, OsString},
-	fs::File,
-	io::{self, BufWriter, Read, Write},
+	fmt,
+	io::{self, Read, Write},
 	path::{Path, PathBuf},
 };
 
@@ -20,16 +21,201 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
+use crate::bre;
 use crate::host::{Host, Utility, util};
 
-/// PCRE2 JIT toggle: `OMP_PCRE2_JIT=1` forces JIT on, `0`/`false` forces it
-/// off. Unset, JIT stays on everywhere except macOS, where PCRE2's SLJIT
-/// executable allocator can fault while compiling patterns (issue #7399).
-pub(crate) fn pcre2_jit_enabled(host: &Host) -> bool {
-	match host.var("OMP_PCRE2_JIT") {
+/// PCRE2 JIT toggle for an `OMP_PCRE2_JIT` value: `1` forces JIT on,
+/// `0`/`false` forces it off. Unset or empty, JIT stays on everywhere except
+/// macOS, where PCRE2's SLJIT executable allocator can fault while compiling
+/// patterns (issue #7399). The caller reads the variable from its own
+/// environment: the builtins see the shell's exported variables, which the
+/// host process environment does not carry.
+pub fn pcre2_jit_enabled(setting: Option<&str>) -> bool {
+	match setting {
 		Some(value) if !value.is_empty() => value != "0" && !value.eq_ignore_ascii_case("false"),
 		_ => !cfg!(target_os = "macos"),
 	}
+}
+
+/// A pattern compiled by one of the two engines: Rust `regex`, or PCRE2 for
+/// syntax it lacks (look-around, back-references).
+///
+/// Hot search loops match on the variant and run monomorphized per engine;
+/// the [`Matcher`] impl serves one-shot callers that only need an answer.
+pub enum CompiledMatcher {
+	Rust(RegexMatcher),
+	Pcre(PcreMatcher),
+}
+
+/// Search error from either engine behind a [`CompiledMatcher`].
+#[derive(Debug)]
+pub enum CompiledMatcherError {
+	Rust(grep_matcher::NoError),
+	Pcre(grep_pcre2::Error),
+}
+
+impl fmt::Display for CompiledMatcherError {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Rust(err) => err.fmt(formatter),
+			Self::Pcre(err) => err.fmt(formatter),
+		}
+	}
+}
+
+impl Matcher for CompiledMatcher {
+	type Captures = grep_matcher::NoCaptures;
+	type Error = CompiledMatcherError;
+
+	fn find_at(
+		&self,
+		haystack: &[u8],
+		at: usize,
+	) -> Result<Option<grep_matcher::Match>, Self::Error> {
+		match self {
+			Self::Rust(matcher) => matcher
+				.find_at(haystack, at)
+				.map_err(CompiledMatcherError::Rust),
+			Self::Pcre(matcher) => matcher
+				.find_at(haystack, at)
+				.map_err(CompiledMatcherError::Pcre),
+		}
+	}
+
+	fn new_captures(&self) -> Result<Self::Captures, Self::Error> {
+		Ok(grep_matcher::NoCaptures::new())
+	}
+}
+
+/// Exit status of a `grep` or `rg` run: 0 when a line was selected, 1 when
+/// none was, 2 on any error, except that under `-q` a match outranks errors.
+pub(crate) const fn exit_status(quiet: bool, any_match: bool, had_error: bool) -> i32 {
+	if quiet && any_match {
+		0
+	} else if had_error {
+		2
+	} else if any_match {
+		0
+	} else {
+		1
+	}
+}
+
+/// How `grep` and `rg` lay out the file name and record ends they print.
+#[derive(Clone, Copy)]
+pub(crate) struct RecordFormat {
+	/// Byte printed in place of each `/` in a path (`rg --path-separator`).
+	pub path_separator: Option<u8>,
+	/// End a printed path with NUL instead of its separator or terminator
+	/// (`grep -Z`, `rg -0`).
+	pub null_paths:     bool,
+	/// Ends each record: `\n`, or NUL under `grep -z`.
+	pub terminator:     u8,
+}
+
+impl RecordFormat {
+	fn write_path<W: Write + ?Sized>(&self, out: &mut W, path: &[u8]) -> io::Result<()> {
+		let Some(separator) = self.path_separator else {
+			return out.write_all(path);
+		};
+		let mut rest = path;
+		while let Some(pos) = rest.iter().position(|&byte| byte == b'/') {
+			out.write_all(&rest[..pos])?;
+			out.write_all(&[separator])?;
+			rest = &rest[pos + 1..];
+		}
+		out.write_all(rest)
+	}
+
+	/// Writes the `PATH:LINE:COLUMN:OFFSET:` prefix of a line record, skipping
+	/// absent fields; under `null_paths` NUL replaces the separator after the
+	/// path. Returns whether any field was written.
+	pub fn write_prefix<W: Write + ?Sized>(
+		&self,
+		out: &mut W,
+		path: Option<&[u8]>,
+		line_number: Option<u64>,
+		column: Option<usize>,
+		byte_offset: Option<u64>,
+		separator: u8,
+	) -> io::Result<bool> {
+		if let Some(path) = path {
+			self.write_path(out, path)?;
+			out.write_all(&[if self.null_paths { b'\0' } else { separator }])?;
+		}
+		if let Some(number) = line_number {
+			write!(out, "{number}")?;
+			out.write_all(&[separator])?;
+		}
+		if let Some(column) = column {
+			write!(out, "{column}")?;
+			out.write_all(&[separator])?;
+		}
+		if let Some(offset) = byte_offset {
+			write!(out, "{offset}")?;
+			out.write_all(&[separator])?;
+		}
+		Ok(path.is_some() || line_number.is_some() || column.is_some() || byte_offset.is_some())
+	}
+
+	/// Writes a file-name record (`-l`, `-L`, `rg --files`): the path ended
+	/// by NUL under `null_paths`, else by the terminator. An unnamed input
+	/// prints only the terminator, and nothing under `null_paths`.
+	pub fn write_path_record<W: Write + ?Sized>(
+		&self,
+		out: &mut W,
+		path: Option<&[u8]>,
+	) -> io::Result<()> {
+		match path {
+			Some(path) => {
+				self.write_path(out, path)?;
+				out.write_all(&[if self.null_paths { b'\0' } else { self.terminator }])
+			},
+			None if self.null_paths => Ok(()),
+			None => out.write_all(&[self.terminator]),
+		}
+	}
+
+	/// Writes a `-c` record: the optional `PATH:` prefix, then `count`.
+	pub fn write_count_record<W: Write + ?Sized>(
+		&self,
+		out: &mut W,
+		path: Option<&[u8]>,
+		count: u64,
+	) -> io::Result<()> {
+		self.write_prefix(out, path, None, None, None, b':')?;
+		write!(out, "{count}")?;
+		out.write_all(&[self.terminator])
+	}
+}
+
+/// Calls `visit` with each non-empty match in `line`, left to right as `-o`
+/// prints them, plus its absolute byte offset given the line's `line_offset`.
+pub(crate) fn for_each_nonempty_match<M: Matcher>(
+	matcher: &M,
+	line: &[u8],
+	line_offset: u64,
+	mut visit: impl FnMut(grep_matcher::Match, u64) -> io::Result<()>,
+) -> io::Result<()> {
+	let mut at = 0usize;
+	while at <= line.len() {
+		let Some(found) = matcher
+			.find_at(line, at)
+			.map_err(|error| io::Error::other(error.to_string()))?
+		else {
+			break;
+		};
+		if found.is_empty() {
+			at = found.end() + 1;
+			continue;
+		}
+		let match_offset = line_offset.saturating_add(
+			u64::try_from(found.start()).map_err(|error| io::Error::other(error.to_string()))?,
+		);
+		visit(found, match_offset)?;
+		at = found.end();
+	}
+	Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -337,16 +523,10 @@ struct Options {
 	quiet:               bool,
 	prefix_filename:     bool,
 	initial_tab:         bool,
-	null_paths:          bool,
-	record_terminator:   u8,
+	record:              RecordFormat,
 	group_separator:     Option<Vec<u8>>,
 	line_buffered:       bool,
 	binary_files:        BinaryFiles,
-}
-
-enum CompiledMatcher {
-	Rust(RegexMatcher),
-	Pcre(PcreMatcher),
 }
 
 struct PathRule {
@@ -588,83 +768,35 @@ fn normalize_context_args(argv: Vec<OsString>) -> Vec<OsString> {
 	normalized
 }
 
-/// Escape regular-expression meta-characters so a pattern is matched literally,
-/// mirroring `regex::escape` (used to implement `-F`/`--fixed-strings`).
-fn escape_literal(pat: &str) -> String {
-	const META: &[char] =
-		&['\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$', '#', '&', '-', '~'];
-	let mut out = String::with_capacity(pat.len());
-	for ch in pat.chars() {
-		if META.contains(&ch) {
-			out.push('\\');
-		}
-		out.push(ch);
-	}
-	out
-}
-
-/// Translate GNU BRE `\|` alternation into the syntax accepted by
-/// `grep-regex`, without rewriting escaped pipes inside character classes.
-fn normalize_basic_alternation(pattern: &str) -> Cow<'_, str> {
-	let bytes = pattern.as_bytes();
-	let mut output = None;
-	let mut copied = 0;
-	let mut index = 0;
-	let mut in_class = false;
-
-	while index < bytes.len() {
-		if bytes[index] == b'\\' {
-			let run_start = index;
-			while index < bytes.len() && bytes[index] == b'\\' {
-				index += 1;
-			}
-			let slash_count = index - run_start;
-			if !in_class && slash_count % 2 == 1 && index < bytes.len() && bytes[index] == b'|' {
-				let normalized = output.get_or_insert_with(|| String::with_capacity(pattern.len()));
-				normalized.push_str(&pattern[copied..index - 1]);
-				normalized.push('|');
-				copied = index + 1;
-				index += 1;
-				continue;
-			}
-			if slash_count % 2 == 1 && index < bytes.len() {
-				index += 1;
-			}
-			continue;
-		}
-
-		match bytes[index] {
-			b'[' if !in_class => in_class = true,
-			b']' if in_class => in_class = false,
-			_ => {},
-		}
-		index += 1;
-	}
-
-	if let Some(mut normalized) = output {
-		normalized.push_str(&pattern[copied..]);
-		Cow::Owned(normalized)
-	} else {
-		Cow::Borrowed(pattern)
-	}
-}
-
-fn build_default_matcher<P: AsRef<str>>(
+/// Build a matcher, falling back to a literal match for any pattern the engine
+/// refuses.
+///
+/// `fallbacks` supplies the text to escape when the corresponding entry of
+/// `patterns` will not compile. The two differ for a BRE, where `patterns`
+/// holds the translated form: a back-reference cannot be compiled by
+/// `grep-regex` at all, and escaping the TRANSLATION would make `\(a\)\1`
+/// match the text `(a)\1` rather than the bytes the user typed. The literal
+/// fallback must reproduce the user's pattern, which is what it did before the
+/// translation step existed.
+fn build_default_matcher<P: AsRef<str>, F: AsRef<str>>(
 	builder: &RegexMatcherBuilder,
 	patterns: &[P],
+	fallbacks: &[F],
 ) -> Result<RegexMatcher, String> {
+	debug_assert_eq!(patterns.len(), fallbacks.len());
 	let error = match builder.build_many(patterns) {
 		Ok(matcher) => return Ok(matcher),
 		Err(error) => error,
 	};
 	let sanitized: Vec<String> = patterns
 		.iter()
-		.map(|pattern| {
+		.zip(fallbacks.iter())
+		.map(|(pattern, fallback)| {
 			let pattern = pattern.as_ref();
 			if builder.build(pattern).is_ok() {
 				pattern.to_owned()
 			} else {
-				escape_literal(pattern)
+				regex::escape(fallback.as_ref())
 			}
 		})
 		.collect();
@@ -689,7 +821,7 @@ fn build_matcher(
 			.whole_line(cli.line_regexp)
 			.utf(true)
 			.ucp(true)
-			.jit_if_available(pcre2_jit_enabled(host));
+			.jit_if_available(pcre2_jit_enabled(host.var("OMP_PCRE2_JIT")));
 		return builder
 			.build_many(patterns)
 			.map(CompiledMatcher::Pcre)
@@ -705,10 +837,7 @@ fn build_matcher(
 		builder.line_terminator(Some(b'\0'));
 	}
 	if mode == MatchMode::Fixed {
-		let escaped: Vec<String> = patterns
-			.iter()
-			.map(|pattern| escape_literal(pattern))
-			.collect();
+		let escaped: Vec<String> = patterns.iter().map(|pattern| regex::escape(pattern)).collect();
 		return builder
 			.build_many(&escaped)
 			.map(CompiledMatcher::Rust)
@@ -716,15 +845,43 @@ fn build_matcher(
 	}
 
 	if mode == MatchMode::Default {
-		let normalized: Vec<_> = patterns
+		// BRE is a distinct dialect, not ERE with different escaping: `\+` is
+		// the operator and a bare `+` is a literal. Translating through the
+		// shared BRE module is what makes `grep 'fo+'` mean "fo+" and
+		// `grep '^+'` mean a leading plus, as GNU and BSD grep both do.
+		//
+		// The ORIGINAL patterns are handed to the fallback. `grep-regex`
+		// cannot compile a back-reference, so `\(a\)\1` falls back to a
+		// literal match, and it has to be the user's own text - escaping the
+		// translated `(a)\1` would silently match different bytes than before
+		// this translation step existed.
+		let translated: Vec<String> = patterns
 			.iter()
-			.map(|pattern| normalize_basic_alternation(pattern))
-			.collect();
-		return build_default_matcher(&builder, &normalized).map(CompiledMatcher::Rust);
+			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported))
+			.collect::<Result<_, _>>()
+			.map_err(|e: bre::BreError| e.message().to_owned())?;
+		return build_default_matcher(&builder, &translated, patterns).map(CompiledMatcher::Rust);
+	}
+
+	// A `{` that opens no interval is a literal to GNU and BSD grep, but the
+	// `regex` crate refuses the whole pattern, so `grep -E '{a}'` failed on
+	// patterns real grep matches. An attempted-but-unterminated interval
+	// stays an error in both.
+	let patterns: Vec<std::borrow::Cow<'_, str>> =
+		patterns.iter().map(|p| bre::ere_literalize_braces(p)).collect();
+
+	// `regex` accepts `^+` and compiles it as `(?:^)+`, which matches at every
+	// line start. GNU and BSD grep both reject the pattern, so returning every
+	// line with exit 0 would be a wrong answer reported as success.
+	if let Some(bad) = patterns
+		.iter()
+		.find(|pattern| bre::ere_repetition_operand_missing(pattern))
+	{
+		return Err(format!("repetition-operator operand invalid: {bad}"));
 	}
 
 	builder
-		.build_many(patterns)
+		.build_many(&patterns)
 		.map(CompiledMatcher::Rust)
 		.map_err(|error| error.to_string())
 }
@@ -754,28 +911,14 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 		byte_offset: u64,
 		separator: u8,
 	) -> io::Result<()> {
-		let mut has_prefix = false;
-		if self.opts.prefix_filename {
-			self.out.write_all(self.display)?;
-			if self.opts.null_paths {
-				self.out.write_all(b"\0")?;
-			} else {
-				self.out.write_all(&[separator])?;
-			}
-			has_prefix = true;
-		}
-		if self.opts.line_number
-			&& let Some(number) = line_number
-		{
-			write!(self.out, "{number}")?;
-			self.out.write_all(&[separator])?;
-			has_prefix = true;
-		}
-		if self.opts.byte_offset {
-			write!(self.out, "{byte_offset}")?;
-			self.out.write_all(&[separator])?;
-			has_prefix = true;
-		}
+		let has_prefix = self.opts.record.write_prefix(
+			self.out,
+			self.opts.prefix_filename.then_some(self.display),
+			line_number.filter(|_| self.opts.line_number),
+			None,
+			self.opts.byte_offset.then_some(byte_offset),
+			separator,
+		)?;
 		if self.opts.initial_tab && has_prefix {
 			self.out.write_all(b"\t")?;
 		}
@@ -784,20 +927,14 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 
 	fn write_record(&mut self, record: &[u8]) -> io::Result<()> {
 		self.out.write_all(record)?;
-		if record.last().copied() != Some(self.opts.record_terminator) {
-			self.out.write_all(&[self.opts.record_terminator])?;
+		if record.last().copied() != Some(self.opts.record.terminator) {
+			self.out.write_all(&[self.opts.record.terminator])?;
 		}
 		self.flush_record()
 	}
 
 	fn write_path_record(&mut self) -> io::Result<()> {
-		self.out.write_all(self.display)?;
-		let terminator = if self.opts.null_paths {
-			b'\0'
-		} else {
-			self.opts.record_terminator
-		};
-		self.out.write_all(&[terminator])?;
+		self.opts.record.write_path_record(self.out, Some(self.display))?;
 		self.flush_record()
 	}
 
@@ -807,27 +944,10 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 		line_number: Option<u64>,
 		line_offset: u64,
 	) -> io::Result<()> {
-		let mut at = 0usize;
-		while at <= line.len() {
-			let Some(found) = self
-				.matcher
-				.find_at(line, at)
-				.map_err(|error| io::Error::other(error.to_string()))?
-			else {
-				break;
-			};
-			if found.is_empty() {
-				at = found.end() + 1;
-				continue;
-			}
-			let match_offset = line_offset.saturating_add(
-				u64::try_from(found.start()).map_err(|error| io::Error::other(error.to_string()))?,
-			);
+		for_each_nonempty_match(self.matcher, line, line_offset, |found, match_offset| {
 			self.write_prefix(line_number, match_offset, b':')?;
-			self.write_record(&line[found.start()..found.end()])?;
-			at = found.end();
-		}
-		Ok(())
+			self.write_record(&line[found.start()..found.end()])
+		})
 	}
 
 	fn normal_output_is_suppressed(&self) -> bool {
@@ -888,7 +1008,7 @@ impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
 			&& let Some(separator) = &self.opts.group_separator
 		{
 			self.out.write_all(separator)?;
-			self.out.write_all(&[self.opts.record_terminator])?;
+			self.out.write_all(&[self.opts.record.terminator])?;
 			self.flush_record()?;
 		}
 		Ok(true)
@@ -916,7 +1036,7 @@ impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
 			self.out.write_all(b"Binary file ")?;
 			self.out.write_all(self.display)?;
 			self.out.write_all(b" matches")?;
-			self.out.write_all(&[self.opts.record_terminator])?;
+			self.out.write_all(&[self.opts.record.terminator])?;
 			return self.flush_record();
 		}
 		if self.opts.files_with_matches {
@@ -928,16 +1048,11 @@ impl<M: Matcher, W: Write> Sink for GrepSink<'_, M, W> {
 				self.write_path_record()?;
 			}
 		} else if self.opts.count {
-			if self.opts.prefix_filename {
-				self.out.write_all(self.display)?;
-				if self.opts.null_paths {
-					self.out.write_all(b"\0")?;
-				} else {
-					self.out.write_all(b":")?;
-				}
-			}
-			write!(self.out, "{}", self.match_count)?;
-			self.out.write_all(&[self.opts.record_terminator])?;
+			self.opts.record.write_count_record(
+				self.out,
+				self.opts.prefix_filename.then_some(self.display),
+				self.match_count,
+			)?;
 			self.flush_record()?;
 		}
 		Ok(())
@@ -979,13 +1094,15 @@ fn search_file_path<M: Matcher, W: Write>(
 	opts: &Options,
 	out: &mut W,
 	had_error: &mut bool,
-) -> bool {
+) -> io::Result<bool> {
 	let display_path = display_path_for_operand(operand, resolved, path);
-	match File::open(path) {
+	match host.fs().open(path) {
 		Ok(file) => {
 			let display = display_path.as_os_str().as_encoded_bytes();
 			match process_reader(matcher, searcher, file, display, opts, out) {
-				Ok(matched) => matched,
+				Ok(matched) => Ok(matched),
+				// Propagate BrokenPipe to stop the search; the host maps its status.
+				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
 				Err(error) => {
 					*had_error = true;
 					if !opts.no_messages {
@@ -995,7 +1112,7 @@ fn search_file_path<M: Matcher, W: Write>(
 							display_path.to_string_lossy()
 						);
 					}
-					false
+					Ok(false)
 				},
 			}
 		},
@@ -1008,13 +1125,18 @@ fn search_file_path<M: Matcher, W: Write>(
 					display_path.to_string_lossy()
 				);
 			}
-			false
+			Ok(false)
 		},
 	}
 }
 
-fn grep_walk_request(root: &Path, follow_links: pi_walker::FollowLinks) -> pi_walker::WalkRequest {
+fn grep_walk_request(
+	fs: &pi_vfs::BlockingFs,
+	root: &Path,
+	follow_links: pi_walker::FollowLinks,
+) -> pi_walker::WalkRequest {
 	pi_walker::WalkRequest::new(root)
+		.filesystem(fs.clone())
 		.hidden(true)
 		.gitignore(false)
 		.skip_git(false)
@@ -1044,20 +1166,13 @@ fn search_dir<M: Matcher, W: Write>(
 	follow_links: pi_walker::FollowLinks,
 	out: &mut W,
 	had_error: &mut bool,
-) -> bool {
-	let request = grep_walk_request(resolved, follow_links);
+) -> io::Result<bool> {
+	let request = grep_walk_request(host.fs(), resolved, follow_links);
 	let mut any = false;
 	let had_error_state = std::cell::Cell::new(*had_error);
-	let cancel = host.cancel_flag();
 	let mut walk_err = host.stderr_clone();
 	let walk = request.for_each_entry_with_heartbeat(
-		|| {
-			if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-				Err(io::Error::from(io::ErrorKind::Interrupted))
-			} else {
-				Ok::<(), io::Error>(())
-			}
-		},
+		host.cancel_heartbeat(),
 		|entry: pi_walker::EntryMeta<'_>| {
 			if opts.quiet && any {
 				return Ok(pi_walker::WalkDecision::Stop);
@@ -1084,7 +1199,7 @@ fn search_dir<M: Matcher, W: Write>(
 				opts,
 				out,
 				&mut entry_had_error,
-			);
+			)?;
 			had_error_state.set(entry_had_error);
 			any |= matched;
 			if opts.quiet && any {
@@ -1109,18 +1224,24 @@ fn search_dir<M: Matcher, W: Write>(
 	);
 	*had_error |= had_error_state.get();
 	match walk {
-		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => any,
+		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => Ok(any),
+		// Propagate BrokenPipe to stop the walk; the host maps its status.
+		Err(pi_walker::WalkError::Interrupted(error))
+			if error.kind() == io::ErrorKind::BrokenPipe =>
+		{
+			Err(error)
+		},
 		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
 			// The shell wrapper owns the user-visible cancellation status.
 			*had_error = true;
-			any
+			Ok(any)
 		},
 		Err(pi_walker::WalkError::Interrupted(error)) => {
 			*had_error = true;
 			if !opts.no_messages {
 				let _ = writeln!(host.stderr, "grep: {error}");
 			}
-			any
+			Ok(any)
 		},
 		Err(pi_walker::WalkError::InvalidData { path, message }) => {
 			*had_error = true;
@@ -1132,21 +1253,19 @@ fn search_dir<M: Matcher, W: Write>(
 					display_path.to_string_lossy()
 				);
 			}
-			any
+			Ok(any)
 		},
 	}
 }
 
 fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String> {
-	let mut bytes = Vec::new();
 	let result = if path == OsStr::new("-") {
-		host.stdin.read_to_end(&mut bytes)
+		let mut bytes = Vec::new();
+		host.stdin.read_to_end(&mut bytes).map(|_| bytes)
 	} else {
-		File::open(host.resolve(path)).and_then(|mut file| file.read_to_end(&mut bytes))
+		host.fs().read(host.resolve(path))
 	};
-	result
-		.map(|_| bytes)
-		.map_err(|error| format!("{}: {error}", path.to_string_lossy()))
+	result.map_err(|error| format!("{}: {error}", path.to_string_lossy()))
 }
 
 fn pattern_file_lines(bytes: &[u8]) -> Vec<String> {
@@ -1274,7 +1393,7 @@ fn execute_search<M: Matcher>(
 	max_count: Option<u64>,
 ) -> i32 {
 	let mut searcher = build_searcher(cli, opts, max_count);
-	let mut out = BufWriter::new(host.stdout_clone());
+	let mut out = host.stdout_writer();
 	let mut any_match = false;
 	let mut had_error = false;
 	let mut processed_operand = false;
@@ -1304,6 +1423,10 @@ fn execute_search<M: Matcher>(
 				&mut out,
 			) {
 				Ok(matched) => any_match |= matched,
+				// Abort remaining work; the host maps the BrokenPipe status.
+				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+					return crate::host::SIGPIPE_EXIT_CODE;
+				},
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
@@ -1319,11 +1442,11 @@ fn execute_search<M: Matcher>(
 		}
 
 		let resolved = host.resolve(operand);
-		match std::fs::metadata(&resolved) {
+		match host.fs().metadata(&resolved) {
 			Ok(metadata) if metadata.is_dir() => match directory_action {
 				DirectoryAction::Recurse => {
-					if rules.allows_dir(Path::new(operand))
-						&& search_dir(
+					if rules.allows_dir(Path::new(operand)) {
+						match search_dir(
 							host,
 							operand.as_os_str(),
 							&resolved,
@@ -1335,7 +1458,9 @@ fn execute_search<M: Matcher>(
 							&mut out,
 							&mut had_error,
 						) {
-						any_match = true;
+							Ok(matched) => any_match |= matched,
+							Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
+						}
 					}
 				},
 				DirectoryAction::Skip => {},
@@ -1355,7 +1480,7 @@ fn execute_search<M: Matcher>(
 				if !rules.allows_file(Path::new(operand)) {
 					continue;
 				}
-				if search_file_path(
+				match search_file_path(
 					host,
 					operand.as_os_str(),
 					&resolved,
@@ -1366,7 +1491,8 @@ fn execute_search<M: Matcher>(
 					&mut out,
 					&mut had_error,
 				) {
-					any_match = true;
+					Ok(matched) => any_match |= matched,
+					Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
 				}
 			},
 			Err(error) => {
@@ -1383,22 +1509,12 @@ fn execute_search<M: Matcher>(
 		}
 	}
 
-	let _ = out.flush();
-	if opts.quiet {
-		if any_match {
-			0
-		} else if had_error {
-			2
-		} else {
-			1
+	if let Err(error) = out.flush() {
+		if error.kind() == io::ErrorKind::BrokenPipe {
+			return crate::host::SIGPIPE_EXIT_CODE;
 		}
-	} else if had_error {
-		2
-	} else if any_match {
-		0
-	} else {
-		1
 	}
+	exit_status(opts.quiet, any_match, had_error)
 }
 
 impl Utility for Grep {
@@ -1481,8 +1597,11 @@ impl Utility for Grep {
 		quiet: cli.quiet,
 		prefix_filename,
 		initial_tab: cli.initial_tab,
-		null_paths: cli.null_paths,
-		record_terminator: if cli.null_data { b'\0' } else { b'\n' },
+		record: RecordFormat {
+			path_separator: None,
+			null_paths:     cli.null_paths,
+			terminator:     if cli.null_data { b'\0' } else { b'\n' },
+		},
 		group_separator: resolve_group_separator(&cli, &matches),
 		line_buffered: cli.line_buffered,
 		binary_files: resolve_binary_files(&cli, &matches),
@@ -1523,12 +1642,99 @@ pub(crate) fn grep_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		io::{self, Read, Write},
+		sync::Arc,
+	};
+
+	use parking_lot::Mutex;
+
 	use super::*;
-	use crate::host::{Host, run_util};
+	use brush_core::openfiles;
+	use crate::host::{Host, run_caught, run_util};
+
+	struct SnapshottingStdin {
+		pos:      usize,
+		snapped:  bool,
+		stdout:   Arc<Mutex<Option<Arc<Mutex<Vec<u8>>>>>>,
+		snapshot: Arc<Mutex<Vec<u8>>>,
+	}
+
+	const SNAPSHOT_INPUT: &[u8] = b"hit\nmiss\n";
+
+	impl Read for SnapshottingStdin {
+		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			if self.pos < SNAPSHOT_INPUT.len() {
+				let n = buf.len().min(SNAPSHOT_INPUT.len() - self.pos);
+				buf[..n].copy_from_slice(&SNAPSHOT_INPUT[self.pos..self.pos + n]);
+				self.pos += n;
+				return Ok(n);
+			}
+			// Input exhausted: grep is back asking for more. Whatever it has
+			// already flushed to stdout is what a live consumer would see now.
+			if !self.snapped {
+				let stdout = self.stdout.lock().clone().expect("stdout buffer is initialized");
+				*self.snapshot.lock() = stdout.lock().clone();
+				self.snapped = true;
+			}
+			Ok(0)
+		}
+	}
+
+	impl Write for SnapshottingStdin {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			Ok(buf.len())
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	impl openfiles::Stream for SnapshottingStdin {
+		fn clone_box(&self) -> Box<dyn openfiles::Stream> {
+			Box::new(Self {
+				pos:      self.pos,
+				snapped:  self.snapped,
+				stdout:   Arc::clone(&self.stdout),
+				snapshot: Arc::clone(&self.snapshot),
+			})
+		}
+
+		#[cfg(unix)]
+		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
+			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
+		}
+
+		#[cfg(unix)]
+		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
+			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
+		}
+	}
 
 	fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_util::<Grep>(args, stdin, "/");
 		(code, capture.out(), capture.err())
+	}
+
+	#[test]
+	fn stdin_matches_are_visible_before_eof() {
+		let stdout = Arc::new(Mutex::new(None));
+		let snapshot = Arc::new(Mutex::new(Vec::new()));
+		let stdin = Box::new(SnapshottingStdin {
+			pos: 0,
+			snapped: false,
+			stdout: Arc::clone(&stdout),
+			snapshot: Arc::clone(&snapshot),
+		});
+		let (mut host, capture) = Host::for_test_with_stdin("grep", stdin, "/");
+		*stdout.lock() = Some(capture.stdout_buffer());
+
+		let parsed = Grep::try_parse_from(["grep", "hit", "-"]).unwrap();
+		assert_eq!(run_caught(parsed, &mut host), 0, "{}", capture.err());
+
+		// A regression re-buffering grep's output makes matches invisible until EOF.
+		assert_eq!(snapshot.lock().as_slice(), b"hit\n");
 	}
 
 	#[test]
@@ -1614,17 +1820,25 @@ mod tests {
 	}
 
 	#[test]
-	fn basic_mode_falls_back_per_pattern_but_extended_mode_is_strict() {
+	fn basic_mode_is_posix_bre_and_extended_mode_is_strict() {
 		let (code, out, err) = run(&["-A", "1", "fail)"], "ok\n(1 fail)\nnext\n");
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "(1 fail)\nnext\n");
 		let (code, _, err) = run(&["-E", "fail)"], "fail)\n");
 		assert_eq!(code, 2);
 		assert!(err.contains("grep:"));
+		// In a BRE a bare `+` is a LITERAL, so `fo+` does not match `foooo`.
+		// This assertion previously expected `foooo`, which is ERE
+		// behaviour; `/usr/bin/grep -e 'fo+' -e 'bar)' -h` on this input
+		// prints `bar)` alone on both GNU and BSD grep. Use `fo\+` for the
+		// quantifier.
 		let (code, out, err) =
 			run(&["-e", "fo+", "-e", "bar)", "-h"], "foooo\nbar)\nbaz\n");
 		assert_eq!(code, 0, "{err}");
-		assert_eq!(out, "foooo\nbar)\n");
+		assert_eq!(out, "bar)\n");
+		let (code, out, err) = run(&["-e", r"fo\+", "-h"], "foooo\nbar)\nbaz\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "foooo\n");
 	}
 
 	#[test]
@@ -1646,6 +1860,192 @@ mod tests {
 		assert_eq!(code, 0);
 		assert!(err.is_empty());
 		assert!(out.contains("grep") && out.contains("pi-uu-grep"));
+	}
+
+	#[test]
+	fn repetition_with_no_operand_is_literal_in_bre_and_invalid_in_ere() {
+		// Measured against GNU/BSD grep 2.6.0 on the same fixture. Before
+		// this, every BRE row below returned 5 - the whole file - because
+		// `^+` reached the engine as an operator and compiled to `(?:^)+`,
+		// matching the empty string at every line start.
+		let input = "alpha\n+added\n-removed\n context\n+another\n";
+		for (pattern, want) in
+			[("^+", "2\n"), ("^*", "0\n"), ("^?", "0\n"), ("*x", "0\n"), ("^\\+", "2\n")]
+		{
+			let (code, out, err) = run(&["-c", pattern], input);
+			assert!(code == 0 || code == 1, "{pattern}: {err}");
+			assert_eq!(out, want, "pattern {pattern}");
+		}
+
+		// The forms that already agreed must not regress.
+		for (pattern, want) in [("+added", "1\n"), ("[+]", "2\n"), ("a\\+", "3\n")] {
+			let (code, out, err) = run(&["-c", pattern], input);
+			assert_eq!(code, 0, "{pattern}: {err}");
+			assert_eq!(out, want, "pattern {pattern}");
+		}
+
+		// ERE rejects it outright, as the real grep does, rather than
+		// silently accepting a repeated anchor. The anchor breaks adjacency
+		// to an earlier atom too: `a^+` repeats `^`, not `a`.
+		for pattern in ["^+", "a^+", "a$*"] {
+			let (code, _, err) = run(&["-Ec", pattern], input);
+			assert_eq!(code, 2, "-E {pattern:?} must be rejected");
+			assert!(err.contains("grep:"), "{pattern}: {err}");
+		}
+	}
+
+	#[test]
+	fn no_operand_brace_interval_is_rejected_through_grep() {
+		// Covered here rather than only in the translator, because the failure
+		// mode was invisible at that level: `^\{2\}` translated to `^{2}`,
+		// which `grep-regex` ACCEPTS as `(?:^){2}` and matches at every line
+		// start, so the whole file came back with exit 0.
+		let input = "alpha\n+added\n-removed\n context\n+another\n";
+		for pattern in [r"^\{2\}", r"^\{1,4\}", r"\{1,4\}", r"\(\{2\}\)", r"a\|\{2\}"] {
+			let (code, out, err) = run(&["-c", pattern], input);
+			assert_eq!(code, 2, "{pattern} must be rejected, got {out:?}");
+			assert!(err.contains("repetition-operator operand invalid"), "{pattern}: {err}");
+		}
+		// With an operand it is an ordinary quantifier and still works.
+		let (code, out, err) = run(&["-c", r"a\{1,2\}"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "3\n");
+	}
+
+	#[test]
+	fn literal_brace_is_not_rejected_by_the_operand_check() {
+		// `grep -E '^{"'` is a real pattern - the common JSON-line filter -
+		// and GNU grep accepts it, because a `{` that opens no interval is a
+		// literal. An earlier revision of this guard exited 2 on it.
+		let input = "{\"a\":1}\n{foo\nplain\n";
+		for args in
+			[vec!["-c", "^{"], vec!["-Ec", "^\\{"], vec!["-Ec", "^\\{\""], vec!["-c", "{foo"]]
+		{
+			let (code, _, err) = run(&args, input);
+			assert!(code == 0 || code == 1, "{args:?} must not error: {err}");
+			assert!(!err.contains("operand invalid"), "{args:?}: {err}");
+		}
+		let (code, out, err) = run(&["-c", "^{"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "2\n");
+
+		// NOT asserted here, and a known divergence: `-E '{a}'` and `-E 'a{'`
+		// are literals to GNU grep but `regex` rejects them in its own parser,
+		// which it did before this operand check existed. Making those literal
+		// means rewriting ERE patterns rather than validating them.
+	}
+
+	#[test]
+	fn unsupported_backreference_falls_back_to_the_users_own_text() {
+		// `grep-regex` cannot compile a back-reference, so the pattern is
+		// matched literally. That literal must be what the user typed: after
+		// translation the pattern reads `(a)\1`, and escaping THAT made
+		// `\(a\)\1` match the text `(a)\1` instead of `\(a\)\1`.
+		let (code, out, err) = run(&["-c", r"\(a\)\1"], "x\\(a\\)\\1y\nnope\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "1\n", "fallback must match the original pattern text");
+		let (code, out, _) = run(&["-c", r"\(a\)\1"], "x(a)\\1y\nnope\n");
+		assert_eq!(code, 1, "translated text must not be what is matched");
+		assert_eq!(out, "0\n");
+	}
+
+	#[test]
+	fn only_the_first_caret_of_a_branch_anchors() {
+		// Measured: `grep -c '^^'` counts lines beginning with a literal
+		// caret, and `sed 's/^^/X/'` rewrites only those. Treating the second
+		// caret as another anchor matched every line.
+		let input = "^a\naaa\n^^b\n";
+		let (code, out, err) = run(&["-c", "^^"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "2\n");
+		let (code, out, err) = run(&["-c", r"^\^"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "2\n", "the escaped form must agree with the bare one");
+	}
+
+	#[test]
+	fn a_dollar_before_a_branch_boundary_still_anchors() {
+		// `$` anchors at the end of a BRE BRANCH, not only at the end of the
+		// whole pattern. Escaping it made the first branch unmatchable, so
+		// lines ending in `a` were silently dropped from the result.
+		let input = "a\nb\nca\nxb\nz\nax\n";
+		let (code, out, err) = run(&["-c", r"a$\|b"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "4\n", "a, b, ca and xb all match");
+
+		// The same alternation written the other way round must agree.
+		let (_, out, err) = run(&["-c", r"b\|a$"], input);
+		assert_eq!(out, "4\n", "{err}");
+
+		// And inside a group, where `\)` ends the branch instead of `\|`.
+		let (_, out, err) = run(&["-c", r"\(a$\)"], input);
+		assert_eq!(out, "2\n", "{err}");
+
+		// A `$` that ends neither is still a literal dollar sign.
+		let (_, out, err) = run(&["-c", "a$b"], "a$b\nab\n");
+		assert_eq!(out, "1\n", "{err}");
+	}
+
+	#[test]
+	fn bracket_expressions_are_not_translated_as_bre() {
+		// Inside `[...]` the BRE operators are ordinary characters. The
+		// translator used to read `\(` as a group opener, producing a pattern
+		// the engine refused, which then fell back to a literal match.
+		let input = "has ( paren\nhas \\ slash\nplain\n";
+		let (code, out, err) = run(&["-c", r"[\(]"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "2\n", "a backslash OR a parenthesis, as measured");
+
+		// `]` first is a literal, `^` still negates, and a character class
+		for (pattern, want) in
+			[(r"[]x]", "1\n"), (r"[^abc]", "3\n"), (r"[[:digit:]]", "1\n"), (r"[*+]", "1\n")]
+		{
+			let (code, out, err) = run(&["-c", pattern], "]\nq7\n*\nabc\n");
+			assert_eq!(code, 0, "{pattern}: {err}");
+			assert_eq!(out, want, "{pattern}");
+		}
+
+		// An unterminated bracket expression is not silently swallowed as an
+		// empty class: the engine refuses it. In `grep` it then reaches the
+		// pre-existing literal fallback - the same path back-references take -
+		// so it matches the typed text rather than erroring the way real grep
+		// does. That divergence predates this change and is unchanged by it;
+		// `sed`, which has no such fallback, reports the error.
+		let (code, out, err) = run(&["-c", "a[d"], "a[d\nplain\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "1\n", "falls back to the literal text the user typed");
+	}
+
+	#[test]
+	fn a_brace_that_opens_no_interval_is_literal_in_an_ere() {
+		// Every expectation below is a measurement from /usr/bin/grep against
+		// this same input, not a reading of the spec.
+		let input = "{a}\na{\n{foo\na{1}b\nplain\n}\n[{]\n";
+		for (pattern, want) in [
+			("{a}", "1\n"),
+			("a{", "2\n"),
+			("{foo", "1\n"),
+			("}", "3\n"),
+			("[{]", "5\n"),
+			(r"\{a\}", "1\n"),
+			// Still a real interval, and still applied.
+			("a{1}", "4\n"),
+			("a{1,2}", "4\n"),
+		] {
+			let (code, out, err) = run(&["-Ec", pattern], input);
+			assert_eq!(code, 0, "-E {pattern}: {err}");
+			assert_eq!(out, want, "-E {pattern}");
+		}
+
+		// The two brace patterns real grep REFUSES must stay refused. A `{`
+		// followed by a digit is an attempted interval: unterminated, it is
+		// "braces not balanced", and with no operand it is "repetition-operator
+		// operand invalid". Escaping those would convert a diagnosed mistake
+		// into a silent literal match.
+		for pattern in ["a{1,2", "{1}"] {
+			let (code, out, _) = run(&["-Ec", pattern], input);
+			assert_eq!(code, 2, "-E {pattern} must stay an error, got {out:?}");
+		}
 	}
 }
 

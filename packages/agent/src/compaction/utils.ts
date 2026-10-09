@@ -38,6 +38,7 @@ const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
 const READ_SELECTOR_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts)$`, "i");
 const READ_RANGE_ONLY_RE = new RegExp(`^${RANGE_LIST_SRC}$`, "i");
 const READ_RAW_ONLY_RE = /^raw$/i;
+const READ_ALTERNATE_FORM_RE = /^(?:raw|conflicts)$/i;
 
 /**
  * Split a read-tool path into its base path and trailing selector, mirroring the
@@ -75,6 +76,14 @@ export function splitReadSelector(path: string): { path: string; sel?: string } 
  */
 export function stripReadSelector(path: string): string {
 	return splitReadSelector(path).path;
+}
+
+/**
+ * Whether a selector from {@link splitReadSelector} shows the file in a form other
+ * than its plain lines: verbatim `raw` bytes or the merge `conflicts` view.
+ */
+export function isAlternateFormReadSelector(sel: string): boolean {
+	return sel.split(":").some(part => READ_ALTERNATE_FORM_RE.test(part));
 }
 
 /**
@@ -208,13 +217,20 @@ export function truncateToolResultForSummary(text: string): string {
 	return `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n\n[... ${truncatedChars} more characters truncated]`;
 }
 
+const SUMMARY_BOUNDARY_TAG_RE = /<\s*\/?\s*(?:conversation|previous-summary)\s*>/gi;
+
+/** Keep untrusted summary input from closing or impersonating harness-owned boundaries. */
+export function escapeSummaryBoundaryTags(text: string): string {
+	return text.replace(SUMMARY_BOUNDARY_TAG_RE, tag => `&lt;${tag.slice(1)}`);
+}
+
 /**
  * Serialize LLM messages as plain summary input without provider control tokens.
  */
 export function serializeConversationForSummary(messages: Message[], dialect?: Dialect): string {
 	const conversation = serializeConversation(messages, dialect);
-	if (dialect !== "harmony") return conversation;
-	return escapeHarmonyControlTokens(conversation);
+	const escaped = dialect === "harmony" ? escapeHarmonyControlTokens(conversation) : conversation;
+	return escapeSummaryBoundaryTags(escaped);
 }
 
 /**

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -10,6 +10,7 @@ const EMPTY_AWS_ENV = {
 	AWS_ACCESS_KEY_ID: undefined,
 	AWS_SECRET_ACCESS_KEY: undefined,
 	AWS_BEARER_TOKEN_BEDROCK: undefined,
+	AWS_BEDROCK_SKIP_AUTH: undefined,
 	AWS_PROFILE: undefined,
 	AWS_SDK_LOAD_CONFIG: undefined,
 	AWS_WEB_IDENTITY_TOKEN_FILE: undefined,
@@ -21,6 +22,22 @@ const EMPTY_AWS_ENV = {
 };
 
 describe("AWS provider availability", () => {
+	test("recognizes the Bedrock auth bypass without AWS credentials", async () => {
+		await withEnv(
+			{
+				...EMPTY_AWS_ENV,
+				AWS_BEDROCK_SKIP_AUTH: "1",
+				AWS_SHARED_CREDENTIALS_FILE: "/missing/aws-credentials",
+				AWS_CONFIG_FILE: "/missing/aws-config",
+				AWS_EC2_METADATA_DISABLED: "true",
+			},
+			async () => {
+				expect(getEnvApiKey("amazon-bedrock")).toBeDefined();
+				expect(getEnvApiKey("bedrock-mantle")).toBeUndefined();
+			},
+		);
+	});
+
 	test("recognizes the default shared credentials file", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "aws-registry-"));
 		try {
@@ -185,6 +202,31 @@ describe("AWS provider availability", () => {
 			await withEnv({ ...baseEnv, AWS_EC2_METADATA_DISABLED: "false" }, async () =>
 				expect(getEnvApiKey("bedrock-mantle")).toBeDefined(),
 			);
+		} finally {
+			await removeWithRetries(tmp);
+		}
+	});
+
+	test("sees shared config edits on the next availability check", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "aws-registry-edit-"));
+		try {
+			const configPath = path.join(tmp, "config");
+			await Bun.write(configPath, "[default]\nregion = us-east-1\n");
+			const env = {
+				...EMPTY_AWS_ENV,
+				AWS_PROFILE: "default",
+				AWS_SHARED_CREDENTIALS_FILE: path.join(tmp, "missing-credentials"),
+				AWS_CONFIG_FILE: configPath,
+				AWS_EC2_METADATA_DISABLED: "true",
+			};
+			await withEnv(env, async () => {
+				expect(getEnvApiKey("bedrock-mantle")).toBeUndefined();
+				// What `aws configure` / `aws sso login` in another terminal does.
+				await Bun.write(configPath, "[default]\nregion = us-east-1\ncredential_process = /bin/true\n");
+				expect(getEnvApiKey("bedrock-mantle")).toBeDefined();
+				await Bun.write(configPath, "[default]\nregion = us-east-1\n");
+				expect(getEnvApiKey("bedrock-mantle")).toBeUndefined();
+			});
 		} finally {
 			await removeWithRetries(tmp);
 		}

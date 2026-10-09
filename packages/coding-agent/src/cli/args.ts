@@ -2,11 +2,11 @@
  * CLI argument parsing and help display
  */
 import * as path from "node:path";
-import { $env, APP_NAME, logger } from "@oh-my-pi/pi-utils";
+import { $env, APP_NAME } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
-import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
-import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
+import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
@@ -35,6 +35,8 @@ export interface Args {
 	smol?: string;
 	slow?: string;
 	plan?: string;
+	/** Objective for a fresh interactive goal session. */
+	goal?: string;
 	prewalk?: boolean;
 	noPrewalk?: boolean;
 	prewalkInto?: string;
@@ -43,11 +45,13 @@ export interface Args {
 	maxTime?: number;
 	apiKey?: string;
 	systemPrompt?: string;
+	systemPromptTemplate?: string;
 	appendSystemPrompt?: string;
 	thinking?: ConfiguredThinkingLevel;
 	serviceTier?: ServiceTierOpenAISettingValue;
 	hideThinking?: boolean;
 	advisor?: boolean;
+	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
 	fromClaude?: boolean;
@@ -79,6 +83,8 @@ export interface Args {
 	skills?: string[];
 	noRules?: boolean;
 	noTitle?: boolean;
+	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
+	noUi?: boolean;
 	autoApprove?: boolean;
 	approvalMode?: "always-ask" | "write" | "yolo";
 	messages: string[];
@@ -96,6 +102,59 @@ export interface Args {
 	 * session with the misparsed positionals as a prompt (issue #2459).
 	 */
 	unrecognizedFlags: string[];
+	/**
+	 * Usage errors for built-in enum flags (`--mode`, `--thinking`,
+	 * `--approval-mode`) given a value outside their set. Recorded rather than
+	 * thrown because the startup parse runs before extensions load, and an
+	 * extension may register a same-named flag that shadows the built-in; the
+	 * extension-aware reparse routes such a flag to {@link unknownFlags} and
+	 * records nothing. Whatever remains after that reparse is reported by
+	 * {@link reportInvalidFlagValues}.
+	 */
+	invalidFlagValues: string[];
+}
+
+/**
+ * Reject a `--goal` launch whose mode or session shape cannot host a fresh
+ * interactive goal. Judged on the startup parse, before session resolution:
+ * resume, fork, and import act on these same flags as they resolve, opening
+ * pickers and persisting forked or imported transcripts, so a rejection after
+ * them would leave those side effects behind.
+ */
+export function validateGoalLaunch(args: Args, interactive: boolean): void {
+	if (args.goal === undefined) return;
+	if (!interactive) {
+		throw new CliUsageError("--goal requires an interactive terminal (not --print or --mode).");
+	}
+	if (args.continue || args.resume || args.fork || args.fromClaude || args.fromCodex) {
+		throw new CliUsageError("--goal requires a fresh session (no resume, continue, fork, or import).");
+	}
+}
+
+/**
+ * Reject conflicting startup inputs before constructing an interactive goal
+ * session. Runs on the extension-aware reparse: an extension flag's value can
+ * look like a positional prompt to the startup parse.
+ */
+export function validateGoalStartup(
+	args: Args,
+	goalEnabled: boolean,
+	pipedInput?: string,
+	planStartsOnStartup = false,
+): void {
+	if (args.goal === undefined) return;
+	if (args.messages.length > 0 || args.fileArgs.length > 0 || pipedInput !== undefined) {
+		throw new CliUsageError("--goal cannot be combined with a positional message, @file, or stdin prompt.");
+	}
+	if (args.planYolo || args.noTools) {
+		throw new CliUsageError("--goal cannot be combined with --plan-yolo or --no-tools.");
+	}
+	if (planStartsOnStartup) {
+		throw new CliUsageError("--goal cannot be combined with plan.defaultOnStartup; disable startup plan mode first.");
+	}
+	if (!goalEnabled) {
+		throw new CliUsageError("--goal requires goal.enabled to be enabled.");
+	}
 }
 
 /**
@@ -105,9 +164,7 @@ export interface Args {
  * (which would otherwise trip the profile bootstrap's env-init ordering).
  */
 const PARSE_DEPS: ParseDeps = {
-	logger,
 	parseThinking: parseCliThinkingLevel,
-	builtinToolNames: [...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES],
 	normalizeToolNames,
 	thinkingEfforts: CLI_THINKING_LEVELS,
 };
@@ -147,11 +204,13 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 	// reparse in `runRootCommand` parses it a second time). Mutating the input
 	// would corrupt that later parse, so never touch the caller's array.
 	const args = [...inputArgs];
+	const parseDeps = PARSE_DEPS;
 	const result: Args = {
 		messages: [],
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 		sessionDir: $env.PI_CODING_AGENT_SESSION_DIR || undefined,
 	};
 
@@ -210,10 +269,22 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			// boundary sentinel: an extension-shadowable built-in like `--plan` (parsed
 			// here only when its boolean extension is NOT loaded) would otherwise swallow
 			// the marker as its value and drop the user's trailing message.
+			if (
+				arg === "--goal" &&
+				(i + 1 >= args.length ||
+					args[i + 1] === PROFILE_BOOTSTRAP_BOUNDARY_ARG ||
+					(equalsValueIndex === -1 && args[i + 1].startsWith("-")))
+			) {
+				result.invalidFlagValues.push("--goal requires an objective.");
+				// Like every string flag, a flag-looking token after `--goal` is its (rejected)
+				// value, never a flag of its own: `--goal --profile work` must not activate a profile.
+				if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) i++;
+				continue;
+			}
 			if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) {
 				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
 				i = consumed.index;
-				STRING_SETTERS[arg](result, consumed.value, PARSE_DEPS);
+				STRING_SETTERS[arg](result, consumed.value, parseDeps);
 			}
 		} else if (OPTIONAL_VALUE_FLAGS.has(arg)) {
 			const config = OPTIONAL_FLAGS[arg];
@@ -255,6 +326,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.hideThinking = true;
 		} else if (arg === "--advisor") {
 			result.advisor = true;
+		} else if (arg === "--external-thinking") {
+			result.externalThinking = true;
 		} else if (arg === "--prewalk") {
 			result.prewalk = true;
 		} else if (arg === "--no-prewalk") {
@@ -273,6 +346,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noRules = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
+		} else if (arg === "--no-ui") {
+			result.noUi = true;
 		} else if (arg === "--auto-approve" || arg === "--yolo") {
 			result.autoApprove = true;
 		} else if (arg.startsWith("@")) {
@@ -326,7 +401,44 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 	}
 
+	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {
+		throw new CliUsageError("--system-prompt and --system-prompt-template cannot be combined");
+	}
 	return result;
+}
+
+/**
+ * Reject requested tool names absent from the fully discovered session registry.
+ *
+ * The registry is already narrowed by the `--tools` filter, so it cannot say
+ * which tools *would* be available. A missing name from the built-in catalog is
+ * reported as unavailable in this session (e.g. `eval` without a working
+ * interpreter), never as unknown; the catalog is listed as "built-in tools",
+ * not as available ones.
+ */
+export function validateToolNames(requested: readonly string[] | undefined, known: readonly string[]): void {
+	if (!requested) return;
+	const knownNames = new Set(known);
+	const missing = requested.filter(name => !knownNames.has(name));
+	if (missing.length === 0) return;
+	const builtinNames = new Set<string>(BUILTIN_TOOL_NAMES);
+	const unavailable = missing.filter(name => builtinNames.has(name));
+	const unknown = missing.filter(name => !builtinNames.has(name));
+	const lines: string[] = [];
+	if (unknown.length > 0) {
+		lines.push(`Unknown tool${unknown.length === 1 ? "" : "s"} in --tools: ${unknown.join(", ")}.`);
+		const otherRegistered = known.filter(name => !builtinNames.has(name));
+		lines.push(
+			`Built-in tools: ${BUILTIN_TOOL_NAMES.join(", ")}.` +
+				(otherRegistered.length > 0 ? ` Other registered tools: ${otherRegistered.join(", ")}.` : ""),
+		);
+	}
+	if (unavailable.length > 0) {
+		lines.push(
+			`Built-in tool${unavailable.length === 1 ? "" : "s"} unavailable in this session: ${unavailable.join(", ")}.`,
+		);
+	}
+	throw new CliUsageError(lines.join("\n"));
 }
 
 /**
@@ -345,6 +457,20 @@ export function reportUnrecognizedFlags(
 	write(`${chalk.red(`Error: unknown flag${plural}: ${flags.join(", ")}`)}\n`);
 	write(`Run \`${APP_NAME} --help\` for available flags.\n`);
 	return true;
+}
+
+/**
+ * Emit one stderr error per rejected built-in flag value and return `true`
+ * when there were any. Like {@link reportUnrecognizedFlags}, callers run this
+ * only on the extension-aware parse, so a value meant for an extension flag
+ * that shadows the built-in never trips it.
+ */
+export function reportInvalidFlagValues(
+	args: Pick<Args, "invalidFlagValues">,
+	write: (text: string) => void = text => process.stderr.write(text),
+): boolean {
+	for (const message of args.invalidFlagValues) write(`${chalk.red(`Error: ${message}`)}\n`);
+	return args.invalidFlagValues.length > 0;
 }
 
 /** Emit a clean CLI usage error without an internal stack trace. */

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which, getRemoteHostDir, getSshControlDir, isEnoent, logger, postmortem, ptree } from "@oh-my-pi/pi-utils";
+import { assertOwnerPrivateDir } from "../utils/owner-private-dir";
 import { buildSshTarget, sanitizeHostName } from "./utils";
 
 export interface SSHConnectionTarget {
@@ -37,8 +38,84 @@ export interface SSHHostInfo {
 	compatEnabled: boolean;
 }
 
-const CONTROL_DIR = getSshControlDir();
-const CONTROL_PATH = path.join(CONTROL_DIR, "%C.sock");
+/**
+ * OpenSSH ControlPath sizing.
+ *
+ * The multiplexing master binds its listening socket at `ControlPath`, but
+ * `muxserver_listen` first binds a *temporary* path — the expanded `ControlPath`
+ * plus a "." and a 16-char random suffix — before atomically renaming it into
+ * place. That temporary path, not the final `%C.sock`, is what OpenSSH's
+ * `unix_listener()` length-checks against `sizeof(sockaddr_un.sun_path)`, so the
+ * budget below reserves it (issue #9070). A path whose length reaches the
+ * platform limit is rejected outright ("... too long for Unix domain socket").
+ */
+const CONTROL_SOCKET_BASENAME = "%C.sock";
+/** Bytes `%C.sock` expands to: a 40-char connection digest plus ".sock". */
+const CONTROL_SOCKET_NAME_BYTES = 40 + ".sock".length;
+/** "." + 16 random chars appended by `muxserver_listen` while binding. */
+const MUX_TEMP_SUFFIX_BYTES = 1 + 16;
+
+/**
+ * Whether `controlDir` leaves room for the whole `%C.sock` plus OpenSSH's mux
+ * temp bind within `sun_path` (104 bytes on macOS, 108 elsewhere; OpenSSH
+ * rejects lengths >= that). The worst case is dir + "/" + expanded `%C.sock`
+ * (40-hex digest + ".sock") + the mux temp suffix.
+ */
+export function controlPathFitsBudget(controlDir: string, platform: SshPlatform): boolean {
+	const sunPathLimit = platform === "darwin" ? 104 : 108;
+	const worstCase = Buffer.byteLength(controlDir) + 1 + CONTROL_SOCKET_NAME_BYTES + MUX_TEMP_SUFFIX_BYTES;
+	return worstCase < sunPathLimit;
+}
+
+/**
+ * Deterministic, depth-bounded control directory used when the canonical
+ * control directory would overflow `sun_path` (#9070). The digest keys both
+ * uid and the fully resolved canonical control directory, separated by NUL so
+ * their boundaries are unambiguous. This preserves isolation when the same
+ * profile resolves through different XDG state roots without spending variable
+ * path bytes on the decimal uid.
+ */
+export function sshControlFallbackDir(canonicalDir: string, uid: number, tmpBase = "/tmp"): string {
+	const key = new Bun.CryptoHasher("sha256")
+		.update(String(uid))
+		.update("\0")
+		.update(canonicalDir)
+		.digest("hex")
+		.slice(0, 20);
+	// Only ControlMaster (POSIX) platforms reach this, so the socket dir is a POSIX path.
+	return path.posix.join(tmpBase, `omp-${key}`);
+}
+
+interface ControlDirChoice {
+	dir: string;
+	/** True when `dir` is the shared-temp fallback and needs owner-private hardening. */
+	shared: boolean;
+}
+
+/**
+ * Choose the SSH control directory. Prefers the canonical profile-rooted path
+ * and only relocates to {@link sshControlFallbackDir} when the canonical path
+ * cannot hold the full `%C.sock` + mux temp bind within `sun_path`. Platforms
+ * without ControlMaster (Windows) or without a uid keep the canonical path.
+ */
+export function resolveSshControlDir(opts: {
+	canonicalDir: string;
+	platform: SshPlatform;
+	uid: number | undefined;
+	tmpBase?: string;
+}): ControlDirChoice {
+	const { canonicalDir, platform, uid, tmpBase } = opts;
+	if (!supportsSshControlMaster(platform) || uid === undefined) return { dir: canonicalDir, shared: false };
+	if (controlPathFitsBudget(canonicalDir, platform)) return { dir: canonicalDir, shared: false };
+	return { dir: sshControlFallbackDir(canonicalDir, uid, tmpBase), shared: true };
+}
+
+const { dir: CONTROL_DIR, shared: CONTROL_DIR_SHARED } = resolveSshControlDir({
+	canonicalDir: getSshControlDir(),
+	platform: process.platform,
+	uid: process.getuid?.(),
+});
+const CONTROL_PATH = path.join(CONTROL_DIR, CONTROL_SOCKET_BASENAME);
 const HOST_INFO_DIR = getRemoteHostDir();
 const HOST_INFO_VERSION = 4;
 
@@ -52,8 +129,19 @@ interface SSHArgsOptions {
 	allowStdin?: boolean;
 }
 
-function ensureControlDir() {
+/**
+ * Create the shared SSH ControlMaster directory and enforce its trust boundary.
+ *
+ * Both direct SSH connections and sshfs mounts MUST call this before launching
+ * OpenSSH so the bounded `/tmp` fallback cannot bypass the symlink, owner, or
+ * mode checks.
+ */
+export function ensureSshControlDir(): void {
 	fs.mkdirSync(CONTROL_DIR, { recursive: true, mode: 0o700 });
+	if (CONTROL_DIR_SHARED) {
+		assertOwnerPrivateDir(CONTROL_DIR, "SSH control directory");
+		return;
+	}
 	try {
 		fs.chmodSync(CONTROL_DIR, 0o700);
 	} catch (err) {
@@ -566,8 +654,34 @@ export async function buildRemoteCommand(
 
 let registered = false;
 
+/**
+ * How long a successful {@link ensureConnection} stays trusted. Within this
+ * window repeated ssh:// operations skip the `ssh -O check` spawn and the key
+ * stat; the control-dir ownership check still runs on every call. A master
+ * that died in the meantime is harmless: every command runs with
+ * `ControlMaster=auto`, which opens a new connection on demand.
+ */
+const CONNECTION_VERIFY_TTL_MS = 30_000;
+
+/** Per host: when the connection was last verified, and the target it was verified for. */
+const verifiedConnections = new Map<string, { at: number; fingerprint: string }>();
+
 export async function ensureConnection(host: SSHConnectionTarget): Promise<void> {
 	const key = host.name;
+	const fingerprint = `${host.username ?? ""}@${host.host}:${host.port ?? ""}\0${host.keyPath ?? ""}`;
+	const verified = verifiedConnections.get(key);
+	if (
+		verified &&
+		Date.now() - verified.at < CONNECTION_VERIFY_TTL_MS &&
+		verified.fingerprint === fingerprint &&
+		activeHosts.has(key) &&
+		hostInfoCache.has(key)
+	) {
+		// The socket directory can be replaced after verification; never hand
+		// OpenSSH an untrusted ControlPath.
+		ensureSshControlDir();
+		return;
+	}
 	const pending = pendingConnections.get(key);
 	if (pending) {
 		await pending;
@@ -576,7 +690,7 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 
 	const promise = (async () => {
 		ensureSshBinary();
-		ensureControlDir();
+		ensureSshControlDir();
 		await validateKeyPermissions(host.keyPath);
 
 		if (!registered) {
@@ -619,6 +733,7 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 	pendingConnections.set(key, promise);
 	try {
 		await promise;
+		verifiedConnections.set(key, { at: Date.now(), fingerprint });
 	} finally {
 		pendingConnections.delete(key);
 	}
@@ -627,6 +742,7 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 export async function invalidateHostMetadata(hostNames: Iterable<string>): Promise<void> {
 	const names = [...hostNames];
 	for (const hostName of names) {
+		verifiedConnections.delete(hostName);
 		hostInfoCache.delete(hostName);
 		await deleteHostInfoFromDisk(hostName);
 	}
@@ -655,6 +771,7 @@ export async function closeAllConnections(): Promise<void> {
 	for (const [name, host] of Array.from(activeHosts.entries())) {
 		await closeConnectionInternal(host);
 		activeHosts.delete(name);
+		verifiedConnections.delete(name);
 	}
 }
 

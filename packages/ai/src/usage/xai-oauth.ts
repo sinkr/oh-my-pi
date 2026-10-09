@@ -10,6 +10,7 @@
  */
 
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { isUsageLimitExhausted } from "../auth/usage-report";
 import {
 	buildXAICliBillingUrl,
 	extractXAIAccessTokenSubject,
@@ -17,6 +18,7 @@ import {
 	getXAICliBillingHeaders,
 } from "../registry/oauth/xai-oauth";
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -26,7 +28,7 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { DAY_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { DAY_MS, HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const PROVIDER_ID = "xai-oauth";
 const BILLING_SOURCE = "cli-chat-proxy.grok.com/v1/billing";
@@ -50,6 +52,7 @@ interface XaiWeeklyBillingConfig {
 	productUsage: XaiProductUsage[];
 	onDemandCap?: number;
 	onDemandUsed?: number;
+	inferredPercent?: boolean;
 }
 
 /**
@@ -137,7 +140,16 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		return null;
 	}
 
-	const creditUsagePercent = parsePercent(raw.creditUsagePercent);
+	// Fresh weekly periods (or accounts with 0 usage) omit creditUsagePercent;
+	// default to 0 only when the weekly period is active (end > now).
+	// Expired periods without explicit usage data are rejected to retain last good cache.
+	const inferredPercent = raw.creditUsagePercent === undefined || raw.creditUsagePercent === null;
+	let creditUsagePercent: number | undefined;
+	if (inferredPercent) {
+		creditUsagePercent = end > Date.now() ? 0 : undefined;
+	} else {
+		creditUsagePercent = parsePercent(raw.creditUsagePercent);
+	}
 	if (creditUsagePercent === undefined) return null;
 
 	const productUsage: XaiProductUsage[] = [];
@@ -146,7 +158,8 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		for (const item of raw.productUsage) {
 			if (!isRecord(item)) continue;
 			const product = typeof item.product === "string" ? item.product.trim() : "";
-			const usagePercent = parsePercent(item.usagePercent);
+			const usagePercent =
+				item.usagePercent === undefined || item.usagePercent === null ? 0 : parsePercent(item.usagePercent);
 			if (!product || usagePercent === undefined) continue;
 			productUsage.push({ product, usagePercent });
 		}
@@ -163,6 +176,7 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		productUsage,
 		onDemandCap: parseOnDemandAmount(raw.onDemandCap),
 		onDemandUsed: parseOnDemandAmount(raw.onDemandUsed),
+		inferredPercent,
 	};
 }
 
@@ -189,6 +203,13 @@ function parseMonthlyBillingConfig(raw: Record<string, unknown>): XaiMonthlyBill
 		onDemandCap: parseOnDemandAmount(raw.onDemandCap),
 		onDemandUsed: parseOnDemandAmount(raw.onDemandUsed),
 	};
+}
+
+function confirmsNoMonthlyQuota(raw: Record<string, unknown>): boolean {
+	const limit = parseOnDemandAmount(raw.monthlyLimit);
+	if (limit !== undefined) return limit === 0;
+	// Some weekly accounts return the credits shape from the default endpoint too.
+	return parseWeeklyBillingConfig(raw)?.inferredPercent === true;
 }
 
 function buildOnDemandLimit(
@@ -361,11 +382,42 @@ export const xaiOauthUsageProvider: UsageProvider = {
 					: null;
 		}
 
-		if (!weekly && !monthly) return null;
+		// A positive monthly quota normally wins over an inferred weekly percentage.
+		// If that monthly counter is already over its limit while weekly credits
+		// have an active period, the two shapes cannot establish which one gates
+		// requests. Keep the counter visible but do not use it for dispatch.
+		// A failed monthly fetch still rejects inferred weekly usage so
+		// AuthStorage can retain its last good snapshot.
+		let effectiveWeekly = weekly;
+		if (weekly?.inferredPercent && creditsLooksUnified) {
+			if (monthly) {
+				effectiveWeekly = null;
+			} else {
+				const monthlyConfig =
+					monthlyPayload && isRecord(monthlyPayload) && isRecord(monthlyPayload.config)
+						? monthlyPayload.config
+						: null;
+				if (!monthlyConfig || !confirmsNoMonthlyQuota(monthlyConfig)) {
+					effectiveWeekly = null;
+				}
+			}
+		}
+		const monthlyQuotaAdvisory =
+			weekly?.inferredPercent === true && creditsLooksUnified && monthly !== null && monthly.used >= monthly.limit;
+		if (!effectiveWeekly && !monthly) return null;
 
 		const limits: UsageLimit[] = [];
-		if (weekly) limits.push(...buildLimits(weekly, accountId));
-		if (monthly) limits.push(...buildLimits(monthly, accountId));
+		if (effectiveWeekly) limits.push(...buildLimits(effectiveWeekly, accountId));
+		if (monthly) {
+			const monthlyLimits = buildLimits(monthly, accountId);
+			if (monthlyQuotaAdvisory && monthlyLimits[0]) {
+				monthlyLimits[0].status = "unknown";
+				monthlyLimits[0].notes = [
+					"Monthly counter exceeds its limit, but active weekly credits leave enforcement uncertain.",
+				];
+			}
+			limits.push(...monthlyLimits);
+		}
 		// Deduplicate on-demand if both shapes carried the same cap (keep first).
 		const seen = new Set<string>();
 		const deduped = limits.filter(limit => {
@@ -375,12 +427,13 @@ export const xaiOauthUsageProvider: UsageProvider = {
 		});
 		if (deduped.length === 0) return null;
 
-		const billingKind = weekly && monthly ? "unified" : weekly ? "weekly" : "monthly";
-		const endpoint = weekly && monthly ? `${creditsUrl} + ${monthlyUrl}` : weekly ? creditsUrl : monthlyUrl;
+		const billingKind = effectiveWeekly && monthly ? "unified" : effectiveWeekly ? "weekly" : "monthly";
+		const endpoint =
+			effectiveWeekly && monthly ? `${creditsUrl} + ${monthlyUrl}` : effectiveWeekly ? creditsUrl : monthlyUrl;
 		const raw =
-			weekly && monthly
+			effectiveWeekly && monthly
 				? { credits: creditsPayload, monthly: monthlyPayload }
-				: weekly
+				: effectiveWeekly
 					? creditsPayload
 					: monthlyPayload;
 
@@ -392,10 +445,41 @@ export const xaiOauthUsageProvider: UsageProvider = {
 				endpoint,
 				source: BILLING_SOURCE,
 				billingKind,
+				...(monthlyQuotaAdvisory ? { monthlyQuotaAdvisory: true } : {}),
 				...(accountId ? { accountId } : {}),
 				...(email ? { email } : {}),
 			},
 			raw,
 		};
+	},
+};
+
+/**
+ * Ranks SuperGrok accounts by weekly credits (or unified monthly included quota).
+ * xAI reports no short window, so the meter maps to `secondary`, which drives drain ranking.
+ */
+export const xaiOauthRankingStrategy: CredentialRankingStrategy = {
+	scopeLimits(report) {
+		if (report.metadata?.monthlyQuotaAdvisory === true) return [];
+		// Spent credits/included quota keeps serving on the on-demand cap; only hard-block
+		// the credential once no on-demand headroom remains.
+		const onDemand = report.limits.find(limit => limit.id === `${PROVIDER_ID}:on-demand`);
+		if (onDemand && !isUsageLimitExhausted(onDemand)) return [];
+		return report.limits.filter(
+			limit => limit.id === `${PROVIDER_ID}:credits:1w` || limit.id === `${PROVIDER_ID}:included:1mo`,
+		);
+	},
+	findWindowLimits(report) {
+		if (report.metadata?.monthlyQuotaAdvisory === true) return {};
+		const credits = report.limits.find(limit => limit.id === `${PROVIDER_ID}:credits:1w`);
+		const included = report.limits.find(limit => limit.id === `${PROVIDER_ID}:included:1mo`);
+		return {
+			secondary: credits ?? included,
+		};
+	},
+	windowDefaults: {
+		// Inert: findWindowLimits never reports a primary window.
+		primaryMs: 5 * HOUR_MS,
+		secondaryMs: WEEK_MS,
 	},
 };

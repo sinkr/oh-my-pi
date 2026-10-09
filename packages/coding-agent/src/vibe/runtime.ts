@@ -1,3 +1,11 @@
+import {
+	type VibeSessionState,
+	type VibeScreenSnapshot,
+	type VibeSpawnOutcome,
+	type VibeSendOutcome,
+	type VibeKillOutcome,
+	type VibeWaitOutcome,
+} from "@oh-my-pi/pi-tui/tools/vibe";
 /**
  * Vibe mode worker-session runtime.
  *
@@ -18,8 +26,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
+import { validateAgentAccountPools } from "../config/account-pools";
 import { resolveAgentModelSelection } from "../config/model-resolver";
-import type { LocalProtocolOptions } from "../internal-urls";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
@@ -30,15 +39,25 @@ import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
-import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
+import { type AgentDefinition } from "../task/types";
+import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
-import { formatDuration } from "../tools/render-utils";
-import { ToolError } from "../tools/tool-errors";
+import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
-/** The two worker CLI flavors the director drives. */
-export type VibeCli = "fast" | "good";
+import {
+	parseLifecycleEvent,
+	VIBE_LIFECYCLE_CUSTOM_TYPE,
+	VIBE_LIFECYCLE_VERSION,
+	type VibeLifecycleBase,
+	type VibeLifecycleEvent,
+	type VibeSpawnLifecycleEvent,
+	type VibeTombstoneReason,
+} from "./lifecycle";
+import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 
+import { cfgTaskAgentAccountPools, cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
@@ -50,9 +69,6 @@ export const VIBE_CLI_AGENT: Record<VibeCli, string> = {
 	fast: "sonic",
 	good: "task",
 };
-
-/** Worker session lifecycle as shown to the director. */
-export type VibeSessionState = "starting" | "running" | "idle" | "dead";
 
 /** One completed tool call in the per-turn activity trace. */
 interface VibeTraceEntry {
@@ -71,9 +87,6 @@ const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const RESPONSE_PREVIEW_MAX = 6000;
 /** Grace period for Vibe cancellation/release cleanup before teardown detaches (ms). */
 const VIBE_TEARDOWN_GRACE_MS = 5_000;
-
-const VIBE_LIFECYCLE_CUSTOM_TYPE = "vibe-session-lifecycle";
-const VIBE_LIFECYCLE_VERSION = 1;
 
 export interface VibeOwnerScope {
 	ownerId: string;
@@ -94,44 +107,6 @@ export interface VibeParentSession {
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
 }
-
-type VibeTombstoneReason = "explicit-kill" | "mode-exit" | "spawn-failed" | "unrecoverable";
-
-interface VibeLifecycleBase {
-	version: typeof VIBE_LIFECYCLE_VERSION;
-	id: string;
-	ownerId: string;
-	parentSessionId: string;
-}
-
-interface VibeSpawnLifecycleEvent extends VibeLifecycleBase {
-	action: "spawn";
-	cli: VibeCli;
-	agent: string;
-	childSessionFile: string;
-	createdAt: number;
-}
-
-interface VibeTurnLifecycleEvent extends VibeLifecycleBase {
-	action: "turn-started" | "turn-settled";
-	turn: number;
-}
-
-interface VibeTombstoneLifecycleEvent extends VibeLifecycleBase {
-	action: "tombstone";
-	reason: VibeTombstoneReason;
-}
-
-interface VibeTombstoneRevocationEvent extends VibeLifecycleBase {
-	action: "tombstone-revoked";
-	reason: "mode-exit";
-}
-
-type VibeLifecycleEvent =
-	| VibeSpawnLifecycleEvent
-	| VibeTurnLifecycleEvent
-	| VibeTombstoneLifecycleEvent
-	| VibeTombstoneRevocationEvent;
 
 interface VibeRestoreCandidate {
 	spawn: VibeSpawnLifecycleEvent;
@@ -197,64 +172,6 @@ interface VibeRecord {
 	terminalPersisted: boolean;
 }
 
-/**
- * Live per-session "screen" for rich rendering: what the worker is doing right
- * now (tool trace, current tool, streamed text tail) plus roster metadata.
- * Every string is already one-line sanitized.
- */
-export interface VibeScreenSnapshot {
-	id: string;
-	cli: VibeCli;
-	state: VibeSessionState;
-	model?: string;
-	turns: number;
-	queued: number;
-	/** Start of the in-flight turn, when running. */
-	turnStartedAt?: number;
-	/** Gist of the message that started the in-flight turn. */
-	turnMessage?: string;
-	currentTool?: string;
-	currentToolArgs?: string;
-	lastIntent?: string;
-	/** Completed tool calls of the in-flight turn, oldest first (tail). */
-	trace: string[];
-	/** Latest streamed worker text lines, oldest first. */
-	outputTail: string[];
-	lastActivity?: string;
-	lastActivityAt: number;
-}
-
-export interface VibeSpawnOutcome {
-	id: string;
-	jobId: string;
-}
-
-export interface VibeSendOutcome {
-	id: string;
-	/**
-	 * - `turn`: a new background turn was started (`jobId` set).
-	 * - `steered`: worker was mid-turn and streaming; delivered as steering.
-	 * - `queued`: worker was mid-turn but not steerable; drained into the next turn.
-	 */
-	mode: "turn" | "steered" | "queued";
-	jobId?: string;
-}
-
-export interface VibeKillOutcome {
-	id: string;
-	/** True when an in-flight turn job was cancelled along the way. */
-	cancelledTurn: boolean;
-}
-
-export interface VibeWaitOutcome {
-	/** Watched sessions whose snapshotted turn settled during (or before) the wait.
-	 * May overlap `stillRunning` when a queued follow-up turn already started. */
-	settled: Array<{ id: string; jobId: string; status: "completed" | "failed" | "cancelled"; resultText: string }>;
-	/** Watched sessions with a turn in flight when the wait returned. */
-	stillRunning: string[];
-	timedOut: boolean;
-}
-
 type VibeTeardownStatus = "pending" | "settled" | "failed";
 
 interface TrackedVibeTeardown {
@@ -281,7 +198,7 @@ function trackVibeTeardown(promise: Promise<unknown>, onError: (error: unknown) 
 
 /** Wait for cleanup only until the caller's shared absolute deadline. */
 async function waitForVibeTeardown(tasks: readonly TrackedVibeTeardown[], deadline: number): Promise<boolean> {
-	if (tasks.length === 0 || tasks.every(task => task.status() !== "pending")) return true;
+	if (tasks.every(task => task.status() !== "pending")) return true;
 	const remainingMs = deadline - Date.now();
 	if (remainingMs <= 0) return false;
 	const timeout = Promise.withResolvers<void>();
@@ -313,77 +230,6 @@ function matchesScope(record: VibeRecord, scope: VibeOwnerScope): boolean {
 		record.parentSessionFile === scope.parentSessionFile
 	);
 }
-
-function objectRecord(value: unknown): Record<string, unknown> | undefined {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-	return value as Record<string, unknown>;
-}
-
-function parseLifecycleEvent(value: unknown): VibeLifecycleEvent | undefined {
-	const data = objectRecord(value);
-	if (!data || data.version !== VIBE_LIFECYCLE_VERSION) return undefined;
-	if (typeof data.id !== "string" || !data.id) return undefined;
-	if (typeof data.ownerId !== "string" || !data.ownerId) return undefined;
-	if (typeof data.parentSessionId !== "string" || !data.parentSessionId) return undefined;
-	const base: VibeLifecycleBase = {
-		version: VIBE_LIFECYCLE_VERSION,
-		id: data.id,
-		ownerId: data.ownerId,
-		parentSessionId: data.parentSessionId,
-	};
-	if (data.action === "spawn") {
-		const cli = data.cli === "fast" || data.cli === "good" ? data.cli : undefined;
-		if (!cli || typeof data.agent !== "string" || typeof data.childSessionFile !== "string") return undefined;
-		if (typeof data.createdAt !== "number" || !Number.isFinite(data.createdAt)) return undefined;
-		return {
-			...base,
-			action: "spawn",
-			cli,
-			agent: data.agent,
-			childSessionFile: data.childSessionFile,
-			createdAt: data.createdAt,
-		};
-	}
-	if (data.action === "turn-started" || data.action === "turn-settled") {
-		if (typeof data.turn !== "number" || !Number.isInteger(data.turn) || data.turn < 1) return undefined;
-		return { ...base, action: data.action, turn: data.turn };
-	}
-	if (data.action === "tombstone") {
-		const reason = data.reason;
-		if (
-			reason !== "explicit-kill" &&
-			reason !== "mode-exit" &&
-			reason !== "spawn-failed" &&
-			reason !== "unrecoverable"
-		) {
-			return undefined;
-		}
-		return { ...base, action: "tombstone", reason };
-	}
-	if (data.action === "tombstone-revoked" && data.reason === "mode-exit") {
-		return { ...base, action: "tombstone-revoked", reason: "mode-exit" };
-	}
-	return undefined;
-}
-
-/** Child ids claimed by valid Vibe spawn records from untrusted persisted JSON. */
-export function persistedVibeChildIds(entries: Iterable<unknown>): Set<string> {
-	const ids = new Set<string>();
-	for (const value of entries) {
-		const entry = objectRecord(value);
-		if (entry?.type !== "custom" || entry.customType !== VIBE_LIFECYCLE_CUSTOM_TYPE) continue;
-		const event = parseLifecycleEvent(entry.data);
-		if (
-			event?.action === "spawn" &&
-			/^[A-Za-z0-9_-]+$/.test(event.id) &&
-			event.childSessionFile === `${event.id}.jsonl`
-		) {
-			ids.add(event.id);
-		}
-	}
-	return ids;
-}
-
 /** Merge the monitor's rolling `recentTools` window (newest first) into the per-turn trace (oldest first). */
 function mergeTrace(turn: VibeTurn, progress: AgentProgress): void {
 	turn.toolCount = progress.toolCount;
@@ -421,24 +267,41 @@ export class VibeSessionRegistry {
 	}
 
 	/**
-	 * Insert a bare worker record without the spawn/job machinery. Test-only —
-	 * lets {@link aggregateVibeWorkerTokensPerSecond} be exercised against a
-	 * fake roster + AgentRegistry session without driving a real turn.
+	 * Insert a bare worker record without the spawn machinery. Test-only —
+	 * lets focused runtime tests attach an optional synthetic in-flight job.
+	 * Keyed like a real spawn in the `test-parent-session` scope (null file), so
+	 * id lookups (`vibe_wait` with named sessions, `vibe_kill`) resolve.
 	 */
-	registerRecordForTests(record: { id: string; cli?: VibeCli; ownerId: string; state?: VibeSessionState }): void {
-		this.#records.set(record.id, {
-			id: record.id,
-			cli: record.cli ?? "fast",
+	registerRecordForTests(record: {
+		id: string;
+		cli?: VibeCli;
+		ownerId: string;
+		state?: VibeSessionState;
+		killed?: boolean;
+		jobId?: string;
+	}): void {
+		const now = Date.now();
+		const scope: VibeOwnerScope = {
 			ownerId: record.ownerId,
 			parentSessionId: "test-parent-session",
 			parentSessionFile: null,
+		};
+		this.#records.set(scopeKey(scope, record.id), {
+			id: record.id,
+			cli: record.cli ?? "fast",
+			ownerId: record.ownerId,
+			parentSessionId: scope.parentSessionId,
+			parentSessionFile: scope.parentSessionFile,
 			agent: getBundledAgent("sonic")!,
 			state: record.state ?? "running",
-			createdAt: Date.now(),
-			lastActivityAt: Date.now(),
+			createdAt: now,
+			lastActivityAt: now,
+			turn: record.jobId
+				? { jobId: record.jobId, message: "test turn", startedAt: now, trace: [], toolCount: 0 }
+				: undefined,
 			queue: [],
 			turnCount: 0,
-			killed: false,
+			killed: record.killed ?? false,
 			suspended: false,
 			terminalPersisted: false,
 		});
@@ -493,7 +356,7 @@ export class VibeSessionRegistry {
 		if (!agent) {
 			throw new ToolError(`Bundled agent "${agentName}" for vibe cli "${cli}" is unavailable.`);
 		}
-		const agentModelOverrides = session.settings.get("task.agentModelOverrides");
+		const agentModelOverrides = cfgTaskAgentModelOverrides.get(session.settings);
 		// Same contract as the task spawn path: the expansion discards the role
 		// alias (`@task`, `@smol`), so patterns and role identity come from one
 		// call — the child's inherited retry-fallback chain is keyed off the role.
@@ -691,6 +554,7 @@ export class VibeSessionRegistry {
 			id: record.id,
 			cli: record.cli,
 			state: record.state,
+			killed: record.killed,
 			model: record.resolvedModel,
 			turns: record.turnCount,
 			queued: record.queue.length,
@@ -1044,7 +908,7 @@ export class VibeSessionRegistry {
 		if (record.turn) {
 			const live = registered?.session;
 			if (live?.isStreaming) {
-				await live.steer(message);
+				await live.steer(message, undefined, { attribution: "agent" });
 				record.lastActivityAt = Date.now();
 				return { id: record.id, mode: "steered" };
 			}
@@ -1113,25 +977,31 @@ export class VibeSessionRegistry {
 			if (job?.status === "running") runningJobs.push(job);
 		}
 
-		let waited = false;
+		let waitEndedByTimeout = false;
 		if (runningJobs.length > 0 && collectSettled().length === 0) {
-			waited = true;
 			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
 			const watchedJobIds = runningJobs.map(job => job.id);
 			manager.watchJobs(watchedJobIds);
-			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<void>();
-			const timeoutHandle = setTimeout(() => timeoutResolve(), timeoutMs);
-			const racePromises: Promise<unknown>[] = [...runningJobs.map(job => job.promise), timeoutPromise];
+			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
+			const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
+			const racePromises: Array<Promise<"settled" | "timeout" | "aborted">> = [
+				...runningJobs.map(job => job.promise.then(() => "settled" as const)),
+				timeoutPromise,
+			];
 			let abortCleanup: (() => void) | undefined;
 			if (args.signal) {
-				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
-				const onAbort = () => abortResolve();
-				args.signal.addEventListener("abort", onAbort, { once: true });
-				abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
+				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<"aborted">();
+				const onAbort = () => abortResolve("aborted");
+				if (args.signal.aborted) {
+					onAbort();
+				} else {
+					args.signal.addEventListener("abort", onAbort, { once: true });
+					abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
+				}
 				racePromises.push(abortPromise);
 			}
 			try {
-				await Promise.race(racePromises);
+				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
 			} finally {
 				manager.unwatchJobs(watchedJobIds);
 				clearTimeout(timeoutHandle);
@@ -1140,11 +1010,11 @@ export class VibeSessionRegistry {
 		}
 
 		const settled = collectSettled();
-		manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
+		manager.consumeJobResults(settled.map(entry => entry.jobId));
 		// Current in-flight state, independent of the snapshot: a session whose
 		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
-		return { settled, stillRunning, timedOut: waited && settled.length === 0 };
+		return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
 	}
 
 	/** Detach one parent's process-local workers without tombstoning their persisted conversations. */
@@ -1410,10 +1280,10 @@ export class VibeSessionRegistry {
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
 		await fs.mkdir(artifactsDir, { recursive: true });
 		if (!sessionArtifactsDir) registerArtifactsDir(artifactsDir);
-		const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
-			getArtifactsDir: session.getArtifactsDir ?? (() => null),
-			getSessionId: session.getSessionId ?? (() => null),
-		};
+		const localProtocolOptions = sessionLocalProtocolOptions(session);
+		// Same exact-name pool task dispatch and persisted revival apply, so a
+		// worker is restricted from its first turn, not only after a revive.
+		const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(session.settings));
 		return {
 			cwd: session.cwd,
 			agent: record.agent,
@@ -1431,13 +1301,15 @@ export class VibeSessionRegistry {
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
-			enableLsp: (session.enableLsp ?? true) && session.settings.get("task.enableLsp"),
+			enableLsp: (session.enableLsp ?? true) && cfgTaskEnableLsp.get(session.settings),
 			signal,
 			eventBus: session.eventBus,
+			subagentEventBus: session.subagentEventBus,
 			onProgress,
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
 			settings: session.settings,
+			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 			skills: [...(session.skills ?? [])],
@@ -1445,15 +1317,18 @@ export class VibeSessionRegistry {
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,
 			preloadedExtensionPaths: session.extensionPaths,
+			preloadedPreparedExtensions: session.preparedExtensions,
 			preloadedCustomToolPaths: session.customToolPaths,
 			localProtocolOptions,
 			parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 			parentHindsightSessionState: session.getHindsightSessionState?.(),
 			parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 			parentTelemetry: session.getTelemetry?.(),
-			parentEvalSessionId: session.getEvalSessionId?.() ?? undefined,
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+			oauthAccountPools: Object.hasOwn(agentAccountPools, record.agent.name)
+				? agentAccountPools[record.agent.name]
+				: undefined,
 			keepAlive: true,
 		};
 	}
@@ -1521,6 +1396,7 @@ export class VibeSessionRegistry {
 								signal,
 								onProgress,
 								eventBus: session.eventBus,
+								subagentEventBus: session.subagentEventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);

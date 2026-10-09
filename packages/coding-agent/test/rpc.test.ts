@@ -13,6 +13,7 @@ import {
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import type { BashExecutionMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { rejectionOf } from "./helpers/rejection";
 import { e2eApiKey } from "./utilities";
 
 type MessageEndEvent = Extract<AgentEvent, { type: "message_end" }>;
@@ -90,8 +91,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		const messageEndEvents = events.filter(e => e.type === "message_end");
 		expect(messageEndEvents.length).toBeGreaterThanOrEqual(2); // user + assistant
 
-		// Wait for file writes
-		await Bun.sleep(200);
+		// SessionManager appends each JSONL entry synchronously before the RPC response completes.
 
 		// Verify session file
 		const sessionsPath = path.join(sessionDir, "sessions");
@@ -130,8 +130,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		expect(result.summary).toBeDefined();
 		expect(result.tokensBefore).toBeGreaterThan(0);
 
-		// Wait for file writes
-		await Bun.sleep(200);
+		// Compaction persistence is synchronous with the completed RPC command.
 
 		// Verify compaction in session file
 		const sessionsPath = path.join(sessionDir, "sessions");
@@ -165,8 +164,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		const uniqueValue = `test-${Snowflake.next()}`;
 		await client.bash(`echo ${uniqueValue}`);
 
-		// Wait for file writes
-		await Bun.sleep(200);
+		// Bash context persistence is synchronous with the completed RPC command.
 
 		// Verify bash message in session
 		const sessionsPath = path.join(sessionDir, "sessions");
@@ -345,7 +343,7 @@ describe("RPC fast mode with unsupported Fireworks model and priority tier", () 
 	test("rejects enable but disable preserves Fireworks priority activity", async () => {
 		await client.start();
 
-		await expect(client.setFastMode(true)).rejects.toMatchObject({
+		expect(await rejectionOf(client.setFastMode(true))).toMatchObject({
 			message: "Fast mode is unavailable for the current model.",
 		});
 

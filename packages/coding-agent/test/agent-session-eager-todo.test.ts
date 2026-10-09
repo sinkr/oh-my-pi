@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -99,7 +99,10 @@ describe("AgentSession eager todo enforcement", () => {
 	let session: AgentSession;
 	let streamCallCount = 0;
 	let scriptedResponses: AssistantMessage[] = [];
-	let authStorage: AuthStorage | undefined;
+	let sharedDir: TempDir;
+	let sharedAuthStorage: AuthStorage;
+	let sharedModelRegistry: ModelRegistry;
+	let previousNoTitle: string | undefined;
 	const observedCalls: ObservedPromptCall[] = [];
 
 	async function createSession(
@@ -109,9 +112,7 @@ describe("AgentSession eager todo enforcement", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const modelRegistry = sharedModelRegistry;
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"todo.enabled": true,
@@ -196,8 +197,6 @@ describe("AgentSession eager todo enforcement", () => {
 		sessionOverride: Partial<AgentSessionConfig> = {},
 	): Promise<void> {
 		await session.dispose();
-		authStorage?.close();
-		authStorage = undefined;
 		streamCallCount = 0;
 		scriptedResponses = [];
 		observedCalls.length = 0;
@@ -215,7 +214,21 @@ describe("AgentSession eager todo enforcement", () => {
 		return promise;
 	}
 
+	beforeAll(async () => {
+		sharedDir = TempDir.createSync("@pi-agent-session-eager-todo-shared-");
+		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
+		sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
+		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
+	});
+
+	afterAll(() => {
+		sharedAuthStorage.close();
+		sharedDir.removeSync();
+	});
+
 	beforeEach(async () => {
+		previousNoTitle = Bun.env.PI_NO_TITLE;
+		delete Bun.env.PI_NO_TITLE;
 		tempDir = TempDir.createSync("@pi-agent-session-eager-todo-");
 		streamCallCount = 0;
 		scriptedResponses = [];
@@ -227,9 +240,9 @@ describe("AgentSession eager todo enforcement", () => {
 		if (session) {
 			await session.dispose();
 		}
-		authStorage?.close();
 		vi.restoreAllMocks();
-		authStorage = undefined;
+		if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+		else Bun.env.PI_NO_TITLE = previousNoTitle;
 		tempDir.removeSync();
 	});
 
@@ -318,6 +331,38 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(titleInput).toContain("I found the parser recovery path.");
 		expect(titleInput).toContain("The recovery heuristic should drive the replan title.");
 		expect(titleInput).toContain("replan parser diagnostics");
+		const metadata = completeSimpleMock.mock.calls[0]?.[2]?.metadata;
+		if (!metadata || typeof metadata.user_id !== "string") {
+			throw new Error("Expected title request metadata.user_id");
+		}
+		const userId: unknown = JSON.parse(metadata.user_id);
+		if (!userId || typeof userId !== "object" || !("session_id" in userId) || typeof userId.session_id !== "string") {
+			throw new Error("Expected title request metadata.user_id.session_id");
+		}
+		expect(userId.session_id).not.toBe(session.sessionId);
+	});
+
+	it("keeps a card title's icon and code when a replan refreshes it", async () => {
+		// Tern indexes parked panes by the card; the title model names none, so the refresh must carry it over.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("🧪 FLAKY: Fix flaky park tests", "auto");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Stabilize park test timing</title>" }],
+		} as never);
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Park", items: ["Stabilize park test timing"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		const titleApplied = waitForSessionName("🧪 FLAKY: Stabilize park test timing");
+		await session.prompt("replan the park tests");
+		await titleApplied;
+
+		expect(session.sessionManager.getSessionName()).toBe("🧪 FLAKY: Stabilize park test timing");
 	});
 
 	it("forwards the configured title system prompt to the replan refresh path", async () => {
@@ -458,6 +503,25 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
 	});
 
+	it("does not refresh todo-init titles when automatic titles are disabled", async () => {
+		Bun.env.PI_NO_TITLE = "1";
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("Old auto title", "auto");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("replan parser diagnostics");
+
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
+	});
+
 	it("skips eager todo enforcement for prompts ending with a question mark", async () => {
 		await session.prompt("list all work trees?");
 
@@ -508,7 +572,6 @@ describe("AgentSession eager todo enforcement", () => {
 
 	it("prepends the eager todo reminder without forcing the todo tool when todo.eager is preferred", async () => {
 		await session.dispose();
-		authStorage?.close();
 		await createSession({ "todo.eager": "preferred" });
 
 		await session.prompt("list all work trees");

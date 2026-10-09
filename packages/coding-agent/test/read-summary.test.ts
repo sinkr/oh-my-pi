@@ -6,8 +6,9 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { trySummarize } from "@oh-my-pi/pi-coding-agent/tools/read-summary";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 let artifactCounter = 0;
@@ -74,7 +75,7 @@ describe("read summary", () => {
 		const result = await tool.execute("read-summary-ts", { path: fixture });
 		const text = textOutput(result);
 		const firstLine = text.split("\n")[0];
-		expect(firstLine).toMatch(/^\[fixture\.ts#[0-9A-F]{4}\]$/);
+		expect(firstLine).toMatch(/^\[src\/fixture\.ts#[0-9A-F]{4}\]$/);
 
 		expect(text).toContain("export function alpha(value: string): string { … }");
 		expect(text).toContain("export function beta(): number { … }");
@@ -134,12 +135,13 @@ describe("read summary", () => {
 			});
 			expect(defaultResult.details?.contentType).toBeUndefined();
 
-			// Opt-in: tagged for the TUI preview while the model-facing text stays verbatim.
+			// Opt-in: tagged for the TUI preview. The preview text mirrors the addressable
+			// rows, so the file's terminal newline is not included (see splitAddressableFileLines).
 			const result = await previewTool.execute(`read-summary-markdown-${extension}`, { path: fixture });
 			const text = textOutput(result);
 
 			expect(result.details?.contentType).toBe("text/markdown");
-			expect(result.details?.displayContent?.text).toBe(markdown);
+			expect(result.details?.displayContent?.text).toBe("# Heading\n\nSome **bold** text.");
 			expect(text.split("\n")[0]).toMatch(new RegExp(`^\\[fixture\\.${extension}#[0-9A-F]{4}\\]$`));
 			expect(text).toContain("1:# Heading");
 			expect(text).toContain("3:Some **bold** text.");
@@ -353,5 +355,20 @@ describe("read summary", () => {
 		expect(text).not.toContain("elided regions");
 		expect(text).not.toContain(":raw");
 		expect(result.details?.summary).toBeUndefined();
+	});
+	it("keys the summary cache by parser language path", async () => {
+		const fixture = path.join(tmpDir, "mod.ts");
+		const code =
+			"export function alpha(value: string): string {\n\tconst clean = value.trim();\n\tconst label = clean || 'alpha';\n\treturn label.toUpperCase();\n}\n\nexport function beta(): number {\n\tconst one = 1;\n\tconst two = 2;\n\treturn one + two;\n}\n";
+		await fs.writeFile(fixture, code);
+		const session = createSession(tmpDir);
+		const size = Buffer.byteLength(code);
+		// Same bytes requested as TypeScript, then as Python (e.g. a symlink
+		// read through a `.py` lexical path): the second call must not reuse
+		// the cached TypeScript summary.
+		const first = await trySummarize(session, fixture, size, undefined, code, fixture);
+		expect(first?.parsed && first?.elided).toBe(true);
+		const second = await trySummarize(session, fixture, size, undefined, code, path.join(tmpDir, "mod.py"));
+		expect(second).not.toBe(first);
 	});
 });

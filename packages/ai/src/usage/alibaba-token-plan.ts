@@ -1,5 +1,8 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import {
+	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
+	parseAlibabaTokenPlanCredential,
+} from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import type {
 	CredentialRankingStrategy,
 	UsageFetchContext,
@@ -12,21 +15,44 @@ import { isRecord } from "../utils";
 import { HOUR_MS, parsePositiveTimestamp, WEEK_MS } from "./shared";
 
 const PROVIDER = "alibaba-token-plan";
-const CONSOLE_ORIGIN = "https://home.qwencloud.com";
-const DASHBOARD_URL = `${CONSOLE_ORIGIN}/billing/subscription/token-plan-individual`;
-const USER_INFO_URL = `${CONSOLE_ORIGIN}/tool/user/info.json`;
-const GATEWAY_ACTION = "IntlBroadScopeAspnGateway";
 const USAGE_API = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage";
-const USAGE_URL = `https://cs-data.qwencloud.com/data/api.json?product=sfm_bailian&action=${GATEWAY_ACTION}&api=${encodeURIComponent(USAGE_API)}`;
 const BROWSER_USER_AGENT =
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
-const CONSOLE_CORNERSTONE_PARAM = {
-	domain: "home.qwencloud.com",
-	consoleSite: "QWENCLOUD",
-	console: "ONE_CONSOLE",
-	xsp_lang: "en-US",
-	protocol: "V2",
-	productCode: "p_efm",
+const INTERNATIONAL_CONSOLE = {
+	origin: "https://home.qwencloud.com",
+	dashboardUrl: "https://home.qwencloud.com/billing/subscription/token-plan-individual",
+	sessionUrl: "https://home.qwencloud.com/tool/user/info.json",
+	gatewayAction: "IntlBroadScopeAspnGateway",
+	region: "ap-southeast-1",
+	usageUrl: `https://cs-data.qwencloud.com/data/api.json?product=sfm_bailian&action=IntlBroadScopeAspnGateway&api=${encodeURIComponent(USAGE_API)}`,
+	cornerstoneParam: {
+		domain: "home.qwencloud.com",
+		consoleSite: "QWENCLOUD",
+		console: "ONE_CONSOLE",
+		xsp_lang: "en-US",
+		protocol: "V2",
+		productCode: "p_efm",
+	},
+} as const;
+const CHINA_CONSOLE = {
+	origin: "https://bailian.console.aliyun.com",
+	dashboardUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan",
+	sessionUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan",
+	gatewayAction: "BroadScopeAspnGateway",
+	region: "cn-beijing",
+	usageUrl: `https://bailian-cs.console.aliyun.com/data/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=${encodeURIComponent(USAGE_API)}`,
+	cornerstoneParam: {
+		feURL: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/token-plan/personal",
+		protocol: "V2",
+		console: "ONE_CONSOLE",
+		productCode: "p_efm",
+		switchUserType: 3,
+		domain: "bailian.console.aliyun.com",
+		consoleSite: "BAILIAN_ALIYUN",
+		userNickName: "",
+		userPrincipalName: "",
+		xsp_lang: "zh-CN",
+	},
 } as const;
 
 function extractCookieValue(header: string, name: string): string | undefined {
@@ -67,9 +93,9 @@ function usageStatus(usedFraction: number): UsageLimit["status"] {
 }
 
 function buildLimit(
-	id: "5h" | "7d",
+	id: "5h" | "7d" | "monthly",
 	label: string,
-	durationMs: number,
+	durationMs: number | undefined,
 	usedFraction: number | undefined,
 	resetsAt: number | undefined,
 	accountId: string | undefined,
@@ -79,7 +105,7 @@ function buildLimit(
 		id: `credits:${id}`,
 		label,
 		scope: { provider: PROVIDER, ...(accountId ? { accountId } : {}), windowId: id },
-		window: { id, label, durationMs, ...(resetsAt ? { resetsAt } : {}) },
+		window: { id, label, ...(durationMs !== undefined ? { durationMs } : {}), ...(resetsAt ? { resetsAt } : {}) },
 		amount: { used: usedFraction * 100, usedFraction, unit: "percent" },
 		status: usageStatus(usedFraction),
 	};
@@ -102,35 +128,56 @@ async function fetchAlibabaTokenPlanUsage(
 	const credential = parseAlibabaTokenPlanCredential(params.credential.apiKey);
 	if (!credential?.cookie) return null;
 	const cookie = credential.cookie;
+	const isChina = credential.baseUrl === ALIBABA_TOKEN_PLAN_CN_BASE_URL;
+	const consoleConfig = isChina ? CHINA_CONSOLE : INTERNATIONAL_CONSOLE;
 
 	try {
-		const userResponse = await ctx.fetch(USER_INFO_URL, {
+		const sessionResponse = await ctx.fetch(consoleConfig.sessionUrl, {
 			headers: {
-				Accept: "application/json, text/plain, */*",
+				Accept: isChina
+					? "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8"
+					: "application/json, text/plain, */*",
 				Cookie: cookie,
-				Referer: `${CONSOLE_ORIGIN}/`,
+				Referer: `${consoleConfig.origin}/`,
 				"User-Agent": BROWSER_USER_AGENT,
 			},
 			redirect: "manual",
 			signal: params.signal,
 		});
-		if (!userResponse.ok) {
-			ctx.logger?.warn("QwenCloud session lookup failed", { provider: PROVIDER, status: userResponse.status });
+		if (!sessionResponse.ok) {
+			ctx.logger?.warn("Alibaba Token Plan session lookup failed", {
+				provider: PROVIDER,
+				status: sessionResponse.status,
+			});
 			return null;
 		}
-		const userPayload: unknown = await userResponse.json();
-		if (!isRecord(userPayload) || !isRecord(userPayload.data) || typeof userPayload.data.secToken !== "string") {
-			ctx.logger?.warn("QwenCloud session response invalid", { provider: PROVIDER });
-			return null;
+
+		let secToken: string | undefined;
+		let accountId: string | undefined;
+		if (isChina) {
+			const html = await sessionResponse.text();
+			secToken = /\bSEC_TOKEN\s*:\s*"([^"]+)"/.exec(html)?.[1];
+			if (!secToken) {
+				ctx.logger?.warn("Alibaba Token Plan China session response invalid", { provider: PROVIDER });
+				return null;
+			}
+		} else {
+			const userPayload: unknown = await sessionResponse.json();
+			if (!isRecord(userPayload) || !isRecord(userPayload.data) || typeof userPayload.data.secToken !== "string") {
+				ctx.logger?.warn("QwenCloud session response invalid", { provider: PROVIDER });
+				return null;
+			}
+			secToken = userPayload.data.secToken;
+			accountId = accountIdFromUserData(userPayload.data);
 		}
-		const secToken = userPayload.data.secToken;
+
 		const csrf = extractCookieValue(cookie, "login_aliyunid_csrf") ?? extractCookieValue(cookie, "csrf");
 		const headers: Record<string, string> = {
 			Accept: "application/json, text/plain, */*",
 			"Content-Type": "application/x-www-form-urlencoded",
 			Cookie: cookie,
-			Origin: CONSOLE_ORIGIN,
-			Referer: DASHBOARD_URL,
+			Origin: consoleConfig.origin,
+			Referer: consoleConfig.dashboardUrl,
 			"User-Agent": BROWSER_USER_AGENT,
 			"X-Requested-With": "XMLHttpRequest",
 		};
@@ -140,16 +187,21 @@ async function fetchAlibabaTokenPlanUsage(
 		}
 		const body = new URLSearchParams({
 			product: "sfm_bailian",
-			action: GATEWAY_ACTION,
-			region: "ap-southeast-1",
+			action: consoleConfig.gatewayAction,
+			region: consoleConfig.region,
 			sec_token: secToken,
 			params: JSON.stringify({
 				Api: USAGE_API,
-				Data: { cornerstoneParam: CONSOLE_CORNERSTONE_PARAM },
+				Data: {
+					cornerstoneParam: {
+						...(isChina ? { feTraceId: crypto.randomUUID() } : {}),
+						...consoleConfig.cornerstoneParam,
+					},
+				},
 				V: "1.0",
 			}),
 		});
-		const usageResponse = await ctx.fetch(USAGE_URL, {
+		const usageResponse = await ctx.fetch(consoleConfig.usageUrl, {
 			method: "POST",
 			headers,
 			body,
@@ -157,16 +209,25 @@ async function fetchAlibabaTokenPlanUsage(
 			signal: params.signal,
 		});
 		if (!usageResponse.ok) {
-			ctx.logger?.warn("QwenCloud usage fetch failed", { provider: PROVIDER, status: usageResponse.status });
+			ctx.logger?.warn("Alibaba Token Plan usage fetch failed", {
+				provider: PROVIDER,
+				status: usageResponse.status,
+			});
 			return null;
 		}
 		const payload: unknown = await usageResponse.json();
 		if (!isRecord(payload) || payload.successResponse === false || !isRecord(payload.data)) {
-			ctx.logger?.warn("QwenCloud usage response invalid", { provider: PROVIDER });
+			ctx.logger?.warn("Alibaba Token Plan usage response invalid", { provider: PROVIDER });
+			return null;
+		}
+		if (payload.data.success === false) {
+			ctx.logger?.warn("Alibaba Token Plan usage request rejected", {
+				provider: PROVIDER,
+				errorCode: typeof payload.data.errorCode === "string" ? payload.data.errorCode : "unknown",
+			});
 			return null;
 		}
 		const responseData = unwrapGatewayData(payload.data);
-		const accountId = accountIdFromUserData(userPayload.data);
 		const limits = [
 			buildLimit(
 				"5h",
@@ -184,16 +245,27 @@ async function fetchAlibabaTokenPlanUsage(
 				parsePositiveTimestamp(responseData.per1WeekResetTime),
 				accountId,
 			),
+			// Monthly-only plans report just this bucket, and the console never
+			// states its span (calendar months differ), so the window carries a
+			// reset deadline without a duration.
+			buildLimit(
+				"monthly",
+				"Monthly Credits",
+				undefined,
+				parseUsedFraction(responseData.per1MonthPercentage),
+				parsePositiveTimestamp(responseData.per1MonthResetTime),
+				accountId,
+			),
 		].filter((limit): limit is UsageLimit => limit !== undefined);
 		if (limits.length === 0) return null;
 		return {
 			provider: PROVIDER,
 			fetchedAt: Date.now(),
 			limits,
-			metadata: { source: "qwencloud-console", ...(accountId ? { accountId } : {}) },
+			metadata: { source: isChina ? "bailian-console" : "qwencloud-console", ...(accountId ? { accountId } : {}) },
 		};
 	} catch (error) {
-		ctx.logger?.warn("QwenCloud usage request failed", {
+		ctx.logger?.warn("Alibaba Token Plan usage request failed", {
 			provider: PROVIDER,
 			error: error instanceof Error ? error.name : "unknown",
 		});

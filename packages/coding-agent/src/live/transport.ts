@@ -1,4 +1,4 @@
-import { type AuthStorage, isAuthRetryableError, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { isAuthRetryableError, type AuthStorage, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	CODEX_BASE_URL,
@@ -32,7 +32,7 @@ interface LiveSignalingResult {
 	attestation: string | undefined;
 }
 
-class LiveSignalingError extends Error {
+export class LiveSignalingError extends Error {
 	status: number;
 	errorMessage: string;
 
@@ -105,10 +105,17 @@ function boundedErrorBody(body: string, statusText: string): string {
 	return `${normalized.slice(0, MAX_ERROR_BODY_LENGTH)}…`;
 }
 
-function isAuthError(error: unknown): boolean {
+/**
+ * Auth-retryable classification for live signaling: OpenAI's entitlement gate
+ * returns 404 {"detail":"Not Found"} (not 403) for accounts whose plan lacks
+ * Codex live. Treat it as rotation-worthy so withOAuthAccess tries sibling
+ * credentials (e.g. a work account without live vs a personal plan with it)
+ * instead of failing the call on whichever credential happened to be active.
+ */
+export function isAuthError(error: unknown): boolean {
+	if (error instanceof LiveSignalingError && error.status === 404) return true;
 	return isAuthRetryableError(error);
 }
-
 function abortReason(signal: AbortSignal | undefined): Error {
 	if (signal?.reason instanceof Error) return signal.reason;
 	return new DOMException("Live connection aborted", "AbortError");
@@ -156,19 +163,19 @@ export class CodexLiveTransport {
 		const peer = new LiveWebRtcPeer(
 			(error, payload) => {
 				if (error) {
-					this.#handlePeerFailure(error.message);
+					this.#reportFailure(error.message);
 				} else {
 					this.#handleServerEvent(payload);
 				}
 			},
 			(error, level) => {
 				if (error) {
-					this.#handlePeerFailure(error.message);
+					this.#reportFailure(error.message);
 				} else {
 					this.#handleOutputLevel(level);
 				}
 			},
-			(error, message) => this.#handlePeerFailure(error?.message ?? message),
+			(error, message) => this.#reportFailure(error?.message ?? message),
 		);
 		this.#peer = peer;
 		const offer = await peer.createOffer();
@@ -352,10 +359,6 @@ export class CodexLiveTransport {
 		try {
 			this.#options.callbacks.onOutputLevel(Math.min(1, Math.max(0, level)));
 		} catch {}
-	}
-
-	#handlePeerFailure(message: string): void {
-		this.#reportFailure(message);
 	}
 
 	#reportFailure(message: string): void {

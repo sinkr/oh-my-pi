@@ -2,6 +2,105 @@
 
 ## [Unreleased]
 
+## [18.8.7] - 2026-10-09
+
+### Fixed
+
+- Fixed proactive linking freezing the host for seconds per stored memory on large banks; a memory's graph links are now written in one commit instead of one per link ([#14998](https://github.com/can1357/oh-my-pi/issues/14998)).
+
+## [18.8.5] - 2026-10-08
+
+### Fixed
+
+- Fixed new memories gaining graph links (`related_to`, `references`, `ctx`) to memories that were already invalidated, superseded, or expired; proactive linking and consolidation now link only to memories recall can still return, so the graph stops growing toward retired memories ([#14427](https://github.com/can1357/oh-my-pi/pull/14427) by [@tickernelz](https://github.com/tickernelz)).
+
+## [18.5.1] - 2026-10-03
+
+### Changed
+
+- Upgraded local embedding support to fastembed 3.0.0. Models now download from Hugging Face into the updated cache layout, with interrupted downloads resuming automatically; existing models are migrated on first use while producing the same vectors.
+
+### Fixed
+
+- Fixed enhanced recall returning cached results from an unrelated longer query when answering a shorter query.
+- Fixed local embedding setup on fresh caches and Linux ARM64, including compatibility with current model downloads and ARM64 tokenization support.
+
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added per-instance `polyphonicRecall` and `enhancedRecall` options to `Mnemopi` and `BeamMemory`, so memories opened side by side can use different recall policies; `configureRecallFeatures` remains the process-wide default and the env vars still win
+
+### Fixed
+
+- Fixed `MNEMOPI_POLYPHONIC_RECALL` / `polyphonicRecall` having no effect: `recallEnhanced` now fuses its ranking with the vector, graph, fact and temporal voices, and extracted subject/predicate/object facts are consolidated so the fact voice has data ([#2323](https://github.com/can1357/oh-my-pi/issues/2323))
+- Fixed `MNEMOPI_ENHANCED_RECALL` / `enhancedRecall` having no effect: `recallEnhanced` now caches results, keyed on every recall option so a different limit, fact inclusion, channel, query time or bank never reuses another call's ranking, and any database write clears it ([#2323](https://github.com/can1357/oh-my-pi/issues/2323))
+- Fixed polyphonic recall's graph voice taking seconds on densely linked banks (`proactiveLinking`): it now walks from at most 16 seeds in one batched edge query per hop and reports at most 64 memories, and `recallEnhanced` no longer drops rows below `topK` to a token budget
+- Fixed a failed `consolidated_facts` backfill never being retried; backfill and fact consolidation failures are now logged
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed extracted facts still being recalled after their source memory was invalidated or expired. ([#12825](https://github.com/can1357/oh-my-pi/pull/12825) by [@Jpei1994](https://github.com/Jpei1994))
+
+## [18.3.3] - 2026-09-27
+
+### Fixed
+
+- Fixed recall search matching query terms inside unrelated words, improving result relevance and ensuring exact matches are prioritized.
+- Fixed sleep summaries replacing shortened terms within larger words, preventing unintended word corruption.
+
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved SQLite vector search and import performance by reducing repeated database metadata checks.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Fixed an explicitly invalidated memory still being returned by an identical repeat query until the recall cache expired.
+- Fixed recall continuing to serve a stale, pre-embedding ranking for up to an hour after background embeddings finished, when the enhanced recall cache is enabled.
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed working-memory recall returning too few or no results after matching memories were invalidated.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed working-memory search returning too few or no results when the most relevant matches had been superseded, ensuring valid older entries are still returned.
+
+## [18.0.0] - 2026-08-22
+
+### Fixed
+
+- Fixed false-positive location extraction in episodic gists by properly enforcing capitalization constraints for proper nouns.
+- Improved episodic gist participant extraction with Unicode support to properly capture names in non-Latin scripts (e.g., Cyrillic, Greek).
+
+## [17.3.8] - 2026-08-19
+
+### Added
+
+- Added optional task metadata to the runtime LLM completion interface so hosts can tell an extraction call from a consolidation call and choose the matching prompt
+
+## [17.3.5] - 2026-08-16
+
+### Fixed
+
+- Fixed an issue where transient provider failures (such as Anthropic overload or rate limit errors) were incorrectly treated as empty responses; these failures are now retried automatically before falling back.
+
+## [17.3.4] - 2026-08-14
+
+### Fixed
+
+- Fixed `recall()` silently dropping `scope='global'` rows whenever a `channelId` filter was active: `buildWhere()` appended a redundant hard `channel_id = ?` clause on top of the `(session_id = ? OR scope = 'global' OR channel_id = ?)` visibility clause, so global rows whose `channel_id` didn't match (e.g. imported rows with `channel_id NULL`) were excluded. Channel isolation is preserved by the visibility clause alone. This made imported/global episodic memory permanently unrecallable through callers that always pass a channel (such as the coding-agent memory backend). ([#8525](https://github.com/can1357/oh-my-pi/issues/8525))
+
 ## [17.2.11] - 2026-08-07
 
 ### Fixed

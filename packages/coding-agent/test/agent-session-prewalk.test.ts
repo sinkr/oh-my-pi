@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -9,13 +9,21 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	cfgPrewalkEnabled,
+	cfgRetryBaseDelayMs,
+	cfgRetryFallbackChains,
+	cfgRetryFallbackRevertPolicy,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 /**
  * Prewalk: one-way switch from the starting model to a fast/cheap target
@@ -29,16 +37,24 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 describe("AgentSession prewalk", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
 
-	beforeEach(async () => {
+	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-prewalk-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
 	afterEach(async () => {
 		if (session) await session.dispose();
+		session = undefined;
+		vi.restoreAllMocks();
+		modelRegistry.clearSuppressedSelectors();
+	});
+
+	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
 	});
@@ -100,31 +116,455 @@ describe("AgentSession prewalk", () => {
 		return { content: [{ type: "toolCall", id, name, arguments: {} }], stopReason: "toolUse" };
 	}
 
-	function contextMessagesHaveMarker(contextMessages: ReadonlyArray<{ role: string }>, marker: string): boolean {
-		return contextMessages.some(message => {
-			if (message.role !== "user" && message.role !== "developer") return false;
-			if (!("content" in message)) return false;
-			const content: unknown = message.content;
-			if (typeof content === "string") return content.includes(marker);
-			if (!Array.isArray(content)) return false;
-			return content.some(block => {
-				if (typeof block !== "object" || block === null) return false;
-				if (!("type" in block) || block.type !== "text") return false;
-				return "text" in block && typeof block.text === "string" && block.text.includes(marker);
-			});
+	function createLifecycleSession(
+		responses: MockResponse[],
+		options: {
+			enabled?: boolean;
+			armed?: boolean;
+			agentKind?: "main" | "sub";
+			sessionManager?: SessionManager;
+			target?: Model;
+			startupTarget?: Model;
+		} = {},
+	) {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = options.target ?? modelOrThrow("claude-sonnet-4-6");
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"prewalk.enabled": options.enabled ?? true,
 		});
+		// Resolution must honor role fallback lists and the target effort suffix.
+		settings.setModelRole("smol", `anthropic/missing-model,${target.provider}/${target.id}:low`);
+		const mock = createMockModel({ responses });
+		const requested: string[] = [];
+		const nudges: string[][] = [];
+		let requestNudges: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [todoTool as AgentTool, writeTool as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.High,
+			},
+			convertToLlm: messages => {
+				requestNudges = messages.flatMap(message =>
+					message.role === "custom" && message.customType.startsWith("prewalk-") ? [message.customType] : [],
+				);
+				return convertToLlm(messages);
+			},
+			streamFn: (model, context, streamOptions) => {
+				requested.push(model.id);
+				nudges.push(requestNudges);
+				return mock.stream(model, context, streamOptions);
+			},
+		});
+		const created = new AgentSession({
+			agent,
+			sessionManager: options.sessionManager ?? SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry,
+			thinkingLevel: Effort.High,
+			prewalk:
+				options.armed === false
+					? undefined
+					: { target: options.startupTarget ?? target, thinkingLevel: Effort.Low },
+			agentKind: options.agentKind,
+		});
+		session = created;
+		return { session: created, primary, target, settings, requested, nudges };
 	}
+
+	it("/new restores the previous prewalk source and effort, then requires a fresh todo before handoff", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+			toolCall("fresh-write-before-todo", "write"),
+			toolCall("fresh-todo", "todo"),
+			toolCall("fresh-write", "write"),
+			{ content: ["fresh done"] },
+		]);
+		await created.session.prompt("old task");
+		expect(created.session.model?.id).toBe(created.target.id);
+		expect(created.session.thinkingLevel).toBe(Effort.Low);
+		const boundary = created.requested.length;
+
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+		expect(created.session.getPrewalkState()?.target.id).toBe(created.target.id);
+		expect(created.session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([
+			created.primary.id,
+			created.primary.id,
+			created.primary.id,
+			created.target.id,
+		]);
+		expect(created.nudges[boundary]).not.toContain("prewalk-checklist");
+	});
+
+	it("/new restores the prewalk source and effort after automatic fallback and primary restoration", async () => {
+		const fallback = modelOrThrow("claude-opus-4-6");
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+			{ throw: "rate limit exceeded retry-after-ms=200" },
+			{ content: ["fallback done"] },
+			{ content: ["restored done"] },
+			toolCall("fresh-write-before-todo", "write"),
+			toolCall("fresh-todo", "todo"),
+			toolCall("fresh-write", "write"),
+			{ content: ["fresh done"] },
+		]);
+		cfgRetryBaseDelayMs.override(created.settings, 5);
+		cfgRetryFallbackChains.override(created.settings, {
+			[`${created.target.provider}/${created.target.id}`]: [`${fallback.provider}/${fallback.id}:high`],
+		});
+		cfgRetryFallbackRevertPolicy.override(created.settings, "cooldown-expiry");
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		mockSchedulerWaitWithClock();
+
+		await created.session.prompt("old task");
+		expect(created.session.model?.id).toBe(created.target.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+		const retryBoundary = created.requested.length;
+		await created.session.prompt("continue through a rate limit");
+		await created.session.waitForIdle();
+		expect(created.requested.slice(retryBoundary)).toEqual([created.target.id, fallback.id]);
+		expect(created.session.model?.id).toBe(fallback.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+
+		now += 240;
+		await created.session.prompt("continue after the primary cooldown");
+		await created.session.waitForIdle();
+		expect(created.requested.slice(retryBoundary)).toEqual([created.target.id, fallback.id, created.target.id]);
+		expect(created.session.model?.id).toBe(created.target.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+		expect(created.session.getPrewalkState()?.target.id).toBe(created.target.id);
+		expect(created.session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		const freshBoundary = created.requested.length;
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(freshBoundary)).toEqual([
+			created.primary.id,
+			created.primary.id,
+			created.primary.id,
+			created.target.id,
+		]);
+		expect(created.nudges[freshBoundary]).not.toContain("prewalk-checklist");
+	});
+
+	it("/new restores automatic effort after a prewalk handoff pins target effort", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+			toolCall("fresh-todo", "todo"),
+			toolCall("fresh-write", "write"),
+			{ content: ["fresh done"] },
+		]);
+		created.session.setThinkingLevel(AUTO_THINKING);
+		await created.session.prompt("old task");
+		expect(created.session.isAutoThinking).toBe(false);
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		const boundary = created.requested.length;
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([created.primary.id, created.primary.id, created.target.id]);
+		expect(created.session.isAutoThinking).toBe(false);
+	});
+
+	it("/new restores planning effort after an effort-only prewalk on the same model", async () => {
+		const created = createLifecycleSession(
+			[
+				toolCall("old-todo", "todo"),
+				toolCall("old-write", "write"),
+				{ content: ["old done"] },
+				toolCall("fresh-todo", "todo"),
+				toolCall("fresh-write", "write"),
+				{ content: ["fresh done"] },
+			],
+			{ target: modelOrThrow("claude-sonnet-4-5") },
+		);
+		await created.session.prompt("old task");
+		expect(created.session.thinkingLevel).toBe(Effort.Low);
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.thinkingLevel).toBe(Effort.High);
+		expect(created.session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		await created.session.prompt("fresh task");
+		expect(created.session.thinkingLevel).toBe(Effort.Low);
+		expect(created.session.getPrewalkState()).toBeUndefined();
+	});
+
+	it("/new resolves the configured target instead of reusing a custom startup target", async () => {
+		const startupTarget = modelOrThrow("claude-opus-4-6");
+		const created = createLifecycleSession(
+			[
+				toolCall("old-todo", "todo"),
+				toolCall("old-write", "write"),
+				{ content: ["old done"] },
+				toolCall("fresh-todo", "todo"),
+				toolCall("fresh-write", "write"),
+				{ content: ["fresh done"] },
+			],
+			{ startupTarget },
+		);
+		await created.session.prompt("old task");
+		expect(created.session.model?.id).toBe(startupTarget.id);
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.getPrewalkState()?.target.id).toBe(created.target.id);
+		const boundary = created.requested.length;
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([created.primary.id, created.primary.id, created.target.id]);
+	});
+
+	it("/new before handoff clears the old todo gate and injects fresh planning guidance", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			{ content: ["old plan"] },
+			{ content: ["old done"] },
+			toolCall("fresh-write-before-todo", "write"),
+			toolCall("fresh-todo", "todo"),
+			toolCall("fresh-write", "write"),
+			{ content: ["fresh done"] },
+		]);
+		await created.session.prompt("old task");
+		expect(created.session.model?.id).toBe(created.primary.id);
+		const boundary = created.requested.length;
+		expect(await created.session.newSession()).toBe(true);
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([
+			created.primary.id,
+			created.primary.id,
+			created.primary.id,
+			created.target.id,
+		]);
+		expect(created.nudges[boundary]).toEqual([]);
+		expect(created.nudges[boundary + 1]).toContain("prewalk-plan");
+	});
+
+	it("/new re-arms configured prewalk after session-only /prewalk off", async () => {
+		const created = createLifecycleSession([
+			toolCall("cancelled-write", "write"),
+			{ content: ["cancelled done"] },
+			toolCall("fresh-todo", "todo"),
+			toolCall("fresh-write", "write"),
+			{ content: ["fresh done"] },
+		]);
+		const ctx = {
+			session: created.session,
+			sessionManager: created.session.sessionManager,
+			settings: created.settings,
+			collabGuest: false,
+			showStatus: vi.fn(),
+			editor: { setText: vi.fn() },
+			refreshSlashCommandState: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		expect(await executeBuiltinSlashCommand("/prewalk off", { ctx })).toBe(true);
+		expect(cfgPrewalkEnabled.get(created.settings)).toBe(true);
+		await created.session.prompt("cancelled task");
+		expect(created.requested).toEqual([created.primary.id, created.primary.id]);
+		const boundary = created.requested.length;
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.getPrewalkState()?.target.id).toBe(created.target.id);
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([created.primary.id, created.primary.id, created.target.id]);
+	});
+
+	it("/new does not restore a prewalk source or re-arm when prewalk is disabled", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+			toolCall("fresh-write", "write"),
+			{ content: ["fresh done"] },
+		]);
+		await created.session.prompt("old task");
+		cfgPrewalkEnabled.override(created.settings, false);
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.target.id);
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		const boundary = created.requested.length;
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([created.target.id, created.target.id]);
+		expect(created.nudges[boundary]).toEqual([]);
+	});
+
+	it("/new drops an unfinished prewalk when disabled and a later enable needs a fresh todo", async () => {
+		const created = createLifecycleSession(
+			[
+				toolCall("old-todo", "todo"),
+				{ content: ["old plan"] },
+				{ content: ["old done"] },
+				toolCall("fresh-write-before-todo", "write"),
+				toolCall("fresh-todo", "todo"),
+				toolCall("fresh-write", "write"),
+				{ content: ["fresh done"] },
+			],
+			{ enabled: false },
+		);
+		await created.session.prompt("old task");
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		cfgPrewalkEnabled.override(created.settings, true);
+		const boundary = created.requested.length;
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([
+			created.primary.id,
+			created.primary.id,
+			created.primary.id,
+			created.target.id,
+		]);
+	});
+
+	it("/new preserves a deliberate manual model selection after prewalk handoff", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+			toolCall("fresh-todo", "todo"),
+			toolCall("fresh-write", "write"),
+			{ content: ["fresh done"] },
+		]);
+		await created.session.prompt("old task");
+		const manual = modelOrThrow("claude-opus-4-6");
+		await created.session.setModel(manual);
+		created.session.setThinkingLevel(Effort.Medium);
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(manual.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Medium);
+		const boundary = created.requested.length;
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([manual.id, manual.id, created.target.id]);
+	});
+
+	it("/new retains handoff ownership after a failed selection and no-op role cycle", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+		]);
+		await created.session.prompt("old task");
+		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValueOnce(false);
+		await expect(created.session.setModel(created.target)).rejects.toThrow("No API key");
+		expect(await created.session.cycleRoleModels(["smol"])).toBeUndefined();
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+		expect(created.session.getPrewalkState()?.target.id).toBe(created.target.id);
+	});
+
+	it("/new completes and stays on the handoff model when the planning model lost its credentials", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+			{ content: ["fresh done"] },
+		]);
+		await created.session.prompt("old task");
+		const oldSessionId = created.session.sessionId;
+		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockImplementation(model => model.id !== created.primary.id);
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.sessionId).not.toBe(oldSessionId);
+		expect(created.session.model?.id).toBe(created.target.id);
+		const boundary = created.requested.length;
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([created.target.id]);
+	});
+
+	it("/new preserves a deliberate selection of the same handoff model and effort", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+			{ content: ["fresh done"] },
+		]);
+		await created.session.prompt("old task");
+		await created.session.setModel(created.target);
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.target.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		const boundary = created.requested.length;
+		await created.session.prompt("fresh task");
+		expect(created.requested.slice(boundary)).toEqual([created.target.id]);
+	});
+
+	it("/new preserves a manual effort choice on the handoff model", async () => {
+		const created = createLifecycleSession([
+			toolCall("old-todo", "todo"),
+			toolCall("old-write", "write"),
+			{ content: ["old done"] },
+			toolCall("fresh-todo", "todo"),
+			toolCall("fresh-write", "write"),
+			{ content: ["fresh done"] },
+		]);
+		await created.session.prompt("old task");
+		created.session.setThinkingLevel(Effort.High);
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.target.id);
+		expect(created.session.thinkingLevel).toBe(Effort.High);
+		expect(created.session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		await created.session.prompt("fresh task");
+		expect(created.session.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("/new automatically arms only main sessions, including a startup session without prewalk", async () => {
+		const created = createLifecycleSession(
+			[toolCall("fresh-todo", "todo"), toolCall("fresh-write", "write"), { content: ["fresh done"] }],
+			{ armed: false },
+		);
+		expect(await created.session.newSession()).toBe(true);
+		await created.session.prompt("fresh task");
+		expect(created.requested).toEqual([created.primary.id, created.primary.id, created.target.id]);
+	});
+
+	it("/new does not automatically arm subagent sessions", async () => {
+		const created = createLifecycleSession([toolCall("fresh-write", "write"), { content: ["fresh done"] }], {
+			armed: false,
+			agentKind: "sub",
+		});
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		await created.session.prompt("fresh task");
+		expect(created.requested).toEqual([created.primary.id, created.primary.id]);
+	});
+
+	it("resuming an existing transcript does not automatically re-arm configured prewalk", async () => {
+		const created = createLifecycleSession([toolCall("resumed-write", "write"), { content: ["resumed done"] }], {
+			armed: false,
+			sessionManager: SessionManager.create(tempDir.path(), path.join(tempDir.path(), "resume-active")),
+		});
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "resume"));
+		manager.appendModelChange(`${created.target.provider}/${created.target.id}`);
+		manager.appendThinkingLevelChange(Effort.Low);
+		manager.appendMessage({ role: "user", content: "existing task", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected persisted resume fixture");
+		await manager.close();
+		expect(await created.session.switchSession(file)).toBe(true);
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		await created.session.prompt("resume task");
+		expect(created.requested).toEqual([created.target.id, created.target.id]);
+	});
 
 	it("prewalks at the first edit/write after the todo gate opens; bash and todo don't trigger", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const planMarker = "complete plan in your NEXT reply";
-		const checklistMarker = "grep for every other call site";
 
-		// Turn 1: read-only (nudge injected after). Turn 2: bash — excluded.
-		// Turn 3: todo — opens the gate, must NOT itself switch. Turn 4: write —
-		// first post-todo edit/write, switch.
+		// Turn 1: read-only. Turn 2: bash is excluded. Turn 3: todo opens the gate.
+		// Turn 4: write is the first post-todo edit/write, so it switches.
 		const mock = createMockModel({
 			responses: [
 				toolCall("t1", "record"),
@@ -134,7 +574,7 @@ describe("AgentSession prewalk", () => {
 				{ content: ["done"] },
 			],
 		});
-		const calls: Array<{ model: string; hasNudge: boolean; hasChecklist: boolean }> = [];
+		const calls: string[] = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -145,13 +585,9 @@ describe("AgentSession prewalk", () => {
 				thinkingLevel: Effort.Medium,
 			},
 			convertToLlm,
-			streamFn: (model, context, options) => {
-				calls.push({
-					model: `${model.provider}/${model.id}`,
-					hasNudge: contextMessagesHaveMarker(context.messages, planMarker),
-					hasChecklist: contextMessagesHaveMarker(context.messages, checklistMarker),
-				});
-				return mock.stream(model, context, options);
+			streamFn: (model, _context, options) => {
+				calls.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, _context, options);
 			},
 		});
 		session = new AgentSession({
@@ -165,29 +601,22 @@ describe("AgentSession prewalk", () => {
 
 		await session.prompt("do the task");
 
-		expect(calls.map(call => call.model)).toEqual([
+		expect(calls).toEqual([
 			`${primary.provider}/${primary.id}`,
 			`${primary.provider}/${primary.id}`,
 			`${primary.provider}/${primary.id}`,
 			`${primary.provider}/${primary.id}`,
 			`${target.provider}/${target.id}`,
 		]);
-		// Nudge absent on turn 1 (not yet injected), present turns 2-4, scrubbed after the switch.
-		expect(calls.map(call => call.hasNudge)).toEqual([false, true, true, true, false]);
-		// Checklist present only once the target model is running.
-		expect(calls.map(call => call.hasChecklist)).toEqual([false, false, false, false, true]);
 		expect(session.model?.id).toBe(target.id);
 	});
 
 	it("an edit before any todo call does not switch while a todo tool exists; the next edit after todo does", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const planMarker = "complete plan in your NEXT reply";
 
-		// Turn 1: exploration (nudge after). Turn 2: write with the gate still
-		// closed — no switch; the fast model must not inherit a todo-less run.
-		// Turn 3: todo — gate opens. Turn 4: write — switch.
+		// Turn 1: exploration. Turn 2: write while the gate is closed.
+		// Turn 3: todo opens the gate. Turn 4: write switches.
 		const mock = createMockModel({
 			responses: [
 				toolCall("t1", "record"),
@@ -197,7 +626,7 @@ describe("AgentSession prewalk", () => {
 				{ content: ["done"] },
 			],
 		});
-		const calls: Array<{ model: string; hasNudge: boolean }> = [];
+		const calls: string[] = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -208,12 +637,9 @@ describe("AgentSession prewalk", () => {
 				thinkingLevel: Effort.Medium,
 			},
 			convertToLlm,
-			streamFn: (model, context, options) => {
-				calls.push({
-					model: `${model.provider}/${model.id}`,
-					hasNudge: contextMessagesHaveMarker(context.messages, planMarker),
-				});
-				return mock.stream(model, context, options);
+			streamFn: (model, _context, options) => {
+				calls.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, _context, options);
 			},
 		});
 		session = new AgentSession({
@@ -227,22 +653,20 @@ describe("AgentSession prewalk", () => {
 
 		await session.prompt("do the task");
 
-		expect(calls.map(call => call.model)).toEqual([
+		expect(calls).toEqual([
 			`${primary.provider}/${primary.id}`,
 			`${primary.provider}/${primary.id}`,
 			`${primary.provider}/${primary.id}`,
 			`${primary.provider}/${primary.id}`,
 			`${target.provider}/${target.id}`,
 		]);
-		// The turn-2 write landed while the gate was closed — still primary on turn 3.
-		expect(calls.map(call => call.hasNudge)).toEqual([false, true, true, true, false]);
 		expect(session.model?.id).toBe(target.id);
 	});
 
 	it("keeps the todo gate closed after a failed todo call", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+
 		const failingTodoTool: AgentTool<typeof todoToolSchema, undefined> = {
 			...todoTool,
 			async execute() {
@@ -295,7 +719,6 @@ describe("AgentSession prewalk", () => {
 		// was written. The safety net must force one more turn.
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
 		const mock = createMockModel({
 			responses: [
@@ -352,7 +775,6 @@ describe("AgentSession prewalk", () => {
 		// reply end the run. No mock fallback: a stray extra turn rejects.
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
 		// Turn 1: record (nudge injected after). Turn 2: bash — not an action
 		// tool. Turn 3: prose — the single continuation fires. Turn 4: prose
@@ -407,7 +829,6 @@ describe("AgentSession prewalk", () => {
 	it("does not switch on a read-only xd:// device dispatched through write (issue #7312)", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
 		// A read-only lsp navigation is dispatched as `write xd://lsp`; the write
 		// result carries the wrapped tool's read tier. Like a bash step, it must
@@ -472,7 +893,6 @@ describe("AgentSession prewalk", () => {
 	it("switches on a write-tier xd:// device dispatched through write (issue #7312)", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
 		// An lsp rename is a write-tier device call — it must arm the hand-off
 		// just like a direct edit/write: the write turn stays on the strong model,
@@ -540,7 +960,6 @@ describe("AgentSession prewalk", () => {
 		// cannot end the run before edit/write.
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
 		// Turn 1: read-only (nudge injected after). Turn 2: prose plan —
 		// bridged. Turn 3: todo — gate opens and re-arms the net. Turn 4:
@@ -600,7 +1019,6 @@ describe("AgentSession prewalk", () => {
 		// cannot call an inactive tool — and prewalk never fired.
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
 		// Turn 1: read-only (nudge injected after). Turn 2: write — first
 		// edit/write must switch immediately; no todo call is possible.
@@ -646,7 +1064,7 @@ describe("AgentSession prewalk", () => {
 	it("armPrewalk (the /prewalk slash command) pre-arms the switch for the very next edit/write", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.appendCustomMessageEntry(
 			"prewalk-plan",
@@ -707,12 +1125,10 @@ describe("AgentSession prewalk", () => {
 		).toHaveLength(1);
 	});
 
-	it("armPrewalk rejects a same-model same-effort no-op before injecting the plan nudge", async () => {
+	it("armPrewalk rejects a same-model same-effort no-op", async () => {
 		const model = modelOrThrow("claude-sonnet-4-5");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const planMarker = "complete plan in your NEXT reply";
+
 		const mock = createMockModel({ responses: [{ content: ["status only"] }] });
-		const calls: Array<{ hasNudge: boolean }> = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -723,10 +1139,7 @@ describe("AgentSession prewalk", () => {
 				thinkingLevel: Effort.Medium,
 			},
 			convertToLlm,
-			streamFn: (streamModel, context, options) => {
-				calls.push({ hasNudge: contextMessagesHaveMarker(context.messages, planMarker) });
-				return mock.stream(streamModel, context, options);
-			},
+			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
 		session = new AgentSession({
 			agent,
@@ -744,14 +1157,13 @@ describe("AgentSession prewalk", () => {
 		expect(session.armPrewalk(model, Effort.Medium)).toBe(false);
 		await session.prompt("report current status");
 
-		expect(calls).toEqual([{ hasNudge: false }]);
 		expect(notices.some(message => message.includes("nothing to switch"))).toBe(true);
 	});
 
-	it("/prewalk reports success only when the requested arm remains active", async () => {
+	it("/prewalk commands report success only when the requested arm becomes active", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		const sessionManager = SessionManager.inMemory();
 		const agent = new Agent({
@@ -800,12 +1212,122 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("smol", `${primary.provider}/${primary.id}:medium`);
 		expect(await executeBuiltinSlashCommand("/prewalk", runtime)).toBe(true);
 		expect(showStatus).toHaveBeenCalledTimes(1);
+
+		// Restart must not move the active model when an existing arm rejects the requested target.
+		settings.setModelRole("default", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(showStatus).toHaveBeenCalledTimes(1);
+
+		// A matching arm remains active while restart restores the configured planning model.
+		await session.setModelTemporary(target, Effort.Medium, { ephemeral: true });
+		settings.setModelRole("default", `${primary.provider}/${primary.id}:medium`);
+		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(showStatus).toHaveBeenCalledTimes(2);
+
+		// If both roles now coincide, restart resets the model and clears the obsolete matching arm.
+		settings.setModelRole("default", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(target.id);
+		expect(session.getPrewalkState()).toBeUndefined();
+		expect(
+			agent.state.messages.some(message => message.role === "custom" && message.customType === "prewalk-plan"),
+		).toBe(false);
+		expect(showStatus).toHaveBeenCalledTimes(3);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
+	});
+
+	it("/prewalk restart returns to @default and re-arms @smol", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const mock = createMockModel({
+			responses: [
+				toolCall("first-todo", "todo"),
+				toolCall("first-write", "write"),
+				{ content: ["first done"] },
+				toolCall("second-todo", "todo"),
+				toolCall("second-write", "write"),
+				{ content: ["second done"] },
+			],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [todoTool as AgentTool, writeTool as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", `anthropic/missing-model,${primary.provider}/${primary.id}:medium`);
+		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			toolRegistry,
+			prewalk: { target, thinkingLevel: Effort.Medium },
+			thinkingLevel: Effort.Medium,
+		});
+
+		await session.prompt("first task");
+		expect(session.model?.id).toBe(target.id);
+		const firstRunCallCount = requested.length;
+
+		const showStatus = vi.fn();
+		const ctx = {
+			session,
+			sessionManager,
+			settings,
+			collabGuest: false,
+			showStatus,
+			editor: { setText: vi.fn() },
+			refreshSlashCommandState: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const runtime = { ctx } satisfies TuiSlashCommandRuntime;
+
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(showStatus).toHaveBeenCalledTimes(1);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk restarted"));
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining(`${primary.provider}/${primary.id}`));
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining(`${target.provider}/${target.id}`));
+
+		await session.prompt("second task");
+		expect(requested.slice(firstRunCallCount)).toEqual([
+			`${primary.provider}/${primary.id}`,
+			`${primary.provider}/${primary.id}`,
+			`${target.provider}/${target.id}`,
+		]);
+		expect(session.model?.id).toBe(target.id);
+
+		settings.setModelRole("smol", `${primary.provider}/${primary.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()).toBeUndefined();
+		expect(showStatus).toHaveBeenCalledTimes(2);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
 	});
 
 	it("requires a fresh todo before a later explicit prewalk can hand off", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+
 		const mock = createMockModel({
 			responses: [
 				toolCall("first-todo", "todo"),
@@ -865,14 +1387,11 @@ describe("AgentSession prewalk", () => {
 		// as a no-op. On a reasoning model the effort is the bulk of the cost, so
 		// this must still switch.
 		const model = modelOrThrow("claude-sonnet-4-5");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const checklistMarker = "grep for every other call site";
 
 		// todo excluded from the active slate → the gate opens; record then write.
 		const mock = createMockModel({
 			responses: [toolCall("t1", "record"), toolCall("t2", "write"), { content: ["done"] }],
 		});
-		const calls: Array<{ model: string; hasChecklist: boolean }> = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -883,13 +1402,7 @@ describe("AgentSession prewalk", () => {
 				thinkingLevel: Effort.Medium,
 			},
 			convertToLlm,
-			streamFn: (streamModel, context, options) => {
-				calls.push({
-					model: `${streamModel.provider}/${streamModel.id}`,
-					hasChecklist: contextMessagesHaveMarker(context.messages, checklistMarker),
-				});
-				return mock.stream(streamModel, context, options);
-			},
+			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
 		session = new AgentSession({
 			agent,
@@ -908,23 +1421,15 @@ describe("AgentSession prewalk", () => {
 		// The model id never changes, but the effort drops after the first write.
 		expect(session.model?.id).toBe(model.id);
 		expect(session.thinkingLevel).toBe(Effort.Low);
-		// The switch ran: the post-switch checklist is present on the final turn.
-		expect(calls.at(-1)?.hasChecklist).toBe(true);
 	});
 
-	it("emits a notice and skips the checklist when the prewalk target is a genuine no-op", async () => {
-		// Same model AND same effective thinking level: nothing to switch. The
-		// early return must be visible (a notice), not silent, and must not fire
-		// the post-switch checklist.
+	it("emits a notice when the prewalk target is a genuine no-op", async () => {
+		// Same model and same effective thinking level: no state change.
 		const model = modelOrThrow("claude-sonnet-4-5");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const planMarker = "complete plan in your NEXT reply";
-		const checklistMarker = "grep for every other call site";
 
 		const mock = createMockModel({
 			responses: [toolCall("t1", "record"), toolCall("t2", "write"), { content: ["done"] }],
 		});
-		const calls: Array<{ hasNudge: boolean; hasChecklist: boolean }> = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -935,13 +1440,7 @@ describe("AgentSession prewalk", () => {
 				thinkingLevel: Effort.Medium,
 			},
 			convertToLlm,
-			streamFn: (streamModel, context, options) => {
-				calls.push({
-					hasNudge: contextMessagesHaveMarker(context.messages, planMarker),
-					hasChecklist: contextMessagesHaveMarker(context.messages, checklistMarker),
-				});
-				return mock.stream(streamModel, context, options);
-			},
+			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
 		session = new AgentSession({
 			agent,
@@ -963,25 +1462,16 @@ describe("AgentSession prewalk", () => {
 		expect(session.thinkingLevel).toBe(Effort.Medium);
 		// The no-op is announced, not silent.
 		expect(notices.some(message => message.includes("nothing to switch"))).toBe(true);
-		// The checklist steer only fires on a real switch.
-		// A genuine no-op must be rejected before the disruptive plan nudge is injected.
-		expect(calls.every(call => !call.hasNudge)).toBe(true);
-		expect(calls.every(call => !call.hasChecklist)).toBe(true);
 	});
 
 	it("treats a target effort the model clamps back to the active effort as a no-op", async () => {
-		// Review edge case: a model capped at `high` running at `high` with a
-		// prewalk target of `xhigh`. The raw selectors differ, but the target
-		// clamps to `high`, so switching would reset the model and inject the
-		// nudges for no effective change — it must be recognized as a no-op.
+		// A model capped at high resolves an xhigh target back to high.
+		// The equal effective settings must be recognized as a no-op.
 		const model = modelOrThrow("claude-sonnet-4-6"); // supported efforts cap at high
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const checklistMarker = "grep for every other call site";
 
 		const mock = createMockModel({
 			responses: [toolCall("t1", "record"), toolCall("t2", "write"), { content: ["done"] }],
 		});
-		const calls: Array<{ hasChecklist: boolean }> = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -992,10 +1482,7 @@ describe("AgentSession prewalk", () => {
 				thinkingLevel: Effort.High,
 			},
 			convertToLlm,
-			streamFn: (streamModel, context, options) => {
-				calls.push({ hasChecklist: contextMessagesHaveMarker(context.messages, checklistMarker) });
-				return mock.stream(streamModel, context, options);
-			},
+			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
 		session = new AgentSession({
 			agent,
@@ -1015,7 +1502,6 @@ describe("AgentSession prewalk", () => {
 
 		expect(session.thinkingLevel).toBe(Effort.High);
 		expect(notices.some(message => message.includes("nothing to switch"))).toBe(true);
-		expect(calls.every(call => !call.hasChecklist)).toBe(true);
 	});
 
 	it("switches when a same-model target clears auto mode even though efforts both resolve to undefined", async () => {
@@ -1024,13 +1510,10 @@ describe("AgentSession prewalk", () => {
 		// per-turn classification, so this is a real change and must switch — not
 		// collapse to a no-op.
 		const model = modelOrThrow("claude-sonnet-4-5");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-		const checklistMarker = "grep for every other call site";
 
 		const mock = createMockModel({
 			responses: [toolCall("t1", "record"), toolCall("t2", "write"), { content: ["done"] }],
 		});
-		const calls: Array<{ hasChecklist: boolean }> = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -1041,10 +1524,7 @@ describe("AgentSession prewalk", () => {
 				thinkingLevel: Effort.Medium,
 			},
 			convertToLlm,
-			streamFn: (streamModel, context, options) => {
-				calls.push({ hasChecklist: contextMessagesHaveMarker(context.messages, checklistMarker) });
-				return mock.stream(streamModel, context, options);
-			},
+			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
 		session = new AgentSession({
 			agent,
@@ -1064,9 +1544,8 @@ describe("AgentSession prewalk", () => {
 
 		await session.prompt("do the task");
 
-		// The hand-off ran: auto is cleared and the post-switch checklist fired.
+		// The hand-off clears automatic thinking.
 		expect(session.isAutoThinking).toBe(false);
 		expect(notices.some(message => message.includes("nothing to switch"))).toBe(false);
-		expect(calls.at(-1)?.hasChecklist).toBe(true);
 	});
 });

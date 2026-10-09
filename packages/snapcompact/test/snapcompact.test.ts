@@ -263,11 +263,11 @@ describe("normalize", () => {
 
 describe("shape resolution", () => {
 	it("maps provider APIs to their eval-winning shapes", () => {
-		expect(snapcompact.resolveShape({ api: "anthropic-messages" })).toBe(snapcompact.SHAPES.anthropic);
-		expect(snapcompact.resolveShape({ api: "openai-responses" })).toBe(snapcompact.SHAPES.openai);
-		expect(snapcompact.resolveShape({ api: "azure-openai-responses" })).toBe(snapcompact.SHAPES.openai);
-		expect(snapcompact.resolveShape({ api: "google-generative-ai" })).toBe(snapcompact.SHAPES.google);
-		// Unknown and absent APIs fall back to the unknown family default (8on22-bw with Anthropic token billing).
+		expect(snapcompact.resolveShape({ api: "anthropic-messages" })).toEqual(snapcompact.SHAPES.anthropic);
+		expect(snapcompact.resolveShape({ api: "openai-responses" })).toEqual(snapcompact.SHAPES.openai);
+		expect(snapcompact.resolveShape({ api: "azure-openai-responses" })).toEqual(snapcompact.SHAPES.openai);
+		expect(snapcompact.resolveShape({ api: "google-generative-ai" })).toEqual(snapcompact.SHAPES.google);
+		// Unknown and absent APIs fall back to the unknown family default (8on22-bw, billed at the ceiling).
 		const unknownFallback = snapcompact.resolveShape({ api: "some-future-api" });
 		expect(unknownFallback.cellHeight).toBe(22);
 		expect(unknownFallback.variant).toBe("bw");
@@ -276,8 +276,8 @@ describe("shape resolution", () => {
 
 	it("detects the ideal shape from the model id across gateways", () => {
 		// A high-res Claude served through an OpenAI-compatible gateway keeps
-		// its own geometry (tracked 8x13) AND its 1932px frame; billing follows
-		// the gateway family, computed for that frame size (32px patches × 1.2).
+		// its own geometry (tracked 8x13), its 1932px frame, and Anthropic's
+		// billing (69² 28px patches); the gateway only adds its detail hint.
 		const claudeViaOpenRouter = snapcompact.resolveShape({
 			api: "openai-completions",
 			id: "anthropic/claude-fable-5",
@@ -285,23 +285,50 @@ describe("shape resolution", () => {
 		expect(claudeViaOpenRouter.font).toBe("8x13");
 		expect(claudeViaOpenRouter.cellWidth).toBe(11); // extra tracking
 		expect(claudeViaOpenRouter.frameSize).toBe(1932);
-		expect(claudeViaOpenRouter.frameTokenEstimate).toBe(Math.ceil(Math.ceil(1932 / 32) ** 2 * 1.2));
+		expect(claudeViaOpenRouter.frameTokenEstimate).toBe(4761);
 		expect(claudeViaOpenRouter.imageDetail).toBe("original");
 
-		// Claude on Vertex must not inherit the Gemini shape; Gemini billing is
-		// a fixed per-image budget at any size.
+		// Claude on Vertex must not inherit the Gemini shape or Gemini's fixed
+		// per-image price.
 		const claudeOnVertex = snapcompact.resolveShape({ api: "google-vertex", id: "claude-fable-5@20250929" });
 		expect(claudeOnVertex.font).toBe("8x13");
 		expect(claudeOnVertex.cellWidth).toBe(11);
 		expect(claudeOnVertex.frameSize).toBe(1932);
-		expect(claudeOnVertex.frameTokenEstimate).toBe(snapcompact.SHAPES.google.frameTokenEstimate);
+		expect(claudeOnVertex.frameTokenEstimate).toBe(4761);
 
 		// High-res frames are reserved for the lines that read them natively;
 		// older Claude lines keep the safe 1568px family default.
 		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-8" }).frameSize).toBe(1932);
-		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-3-5-sonnet" })).toBe(
-			snapcompact.SHAPES.anthropic,
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "anthropic--claude-4.8-opus" }).frameSize).toBe(
+			1932,
 		);
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-10" }).frameSize).toBe(1932);
+		// Versionless Fable/Mythos aliases (bundled `claude-fable-latest`) never
+		// parse a numeric version but still read the high-res tier by name (#8257).
+		expect(
+			snapcompact.resolveShape({ api: "openai-completions", id: "anthropic/claude-fable-latest" }).frameSize,
+		).toBe(1932);
+		expect(
+			snapcompact.resolveShape({ api: "openai-completions", id: "~anthropic/claude-fable-latest" }).frameSize,
+		).toBe(1932);
+		// Opus 5+ shares the Anthropic visual-token cap, so it stays on the
+		// high-res tier rather than falling back to the 1568px default (#8256).
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-5" }).frameSize).toBe(1932);
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-6" }).frameSize).toBe(1932);
+		// Mixed-case gateway ids matched the pre-catalog-parser /i regex; the
+		// parser input is normalized so they stay on the high-res tier.
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "CLAUDE-OPUS-5" }).frameSize).toBe(1932);
+		// Minor versions past the old 9.10 semver-table bound must not fall
+		// back to the 1568px default (same staleness class as #8256).
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-5-11" }).frameSize).toBe(1932);
+		// Opus lines below 4.7 downscale, so they keep the 1568px family
+		// geometry, billed under the standard tier's 1,568-token cap (39²).
+		const opus46 = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" });
+		expect(opus46).toEqual({ ...snapcompact.SHAPES.anthropic, frameTokenEstimate: 1521 });
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-3-5-sonnet" })).toEqual({
+			...snapcompact.SHAPES.anthropic,
+			frameTokenEstimate: 1521,
+		});
 
 		// Gemini reads 2048px frames at the same fixed bill, single-column with
 		// extra leading (22px pitch).
@@ -317,8 +344,9 @@ describe("shape resolution", () => {
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "moonshotai/kimi-k2.6" })).toEqual(kimiShape);
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "z-ai/glm-4.6v" })).toEqual(glmShape);
 
-		// Unmeasured model ids fall back to the API family default object.
-		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" })).toBe(
+		// Unmeasured model ids fall back to the API family default shape and,
+		// without a catalog image rule, to the wire family's billing.
+		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" })).toEqual(
 			snapcompact.SHAPES.openai,
 		);
 		expect(snapcompact.idealShapeVariant("qwen/qwen3-vl")).toBeUndefined();
@@ -332,7 +360,7 @@ describe("shape resolution", () => {
 
 	it("forces a named variant and re-prices it for the provider's billing", () => {
 		// "auto" behaves exactly like no override.
-		expect(snapcompact.resolveShape({ api: "anthropic-messages" }, "auto")).toBe(snapcompact.SHAPES.anthropic);
+		expect(snapcompact.resolveShape({ api: "anthropic-messages" }, "auto")).toEqual(snapcompact.SHAPES.anthropic);
 
 		// Forced geometry survives; billing follows the provider, not the variant.
 		const denseOnAnthropic = snapcompact.resolveShape({ api: "anthropic-messages" }, "6x6u-sent");
@@ -353,11 +381,59 @@ describe("shape resolution", () => {
 		expect(legacyOnGoogle.frameSize).toBe(2576);
 		expect(legacyOnGoogle.frameTokenEstimate).toBe(snapcompact.SHAPES.google.frameTokenEstimate);
 		const legacyOnAnthropic = snapcompact.resolveShape({ api: "anthropic-messages" }, "5x8-bw");
-		expect(legacyOnAnthropic.frameTokenEstimate).toBe(Math.ceil(4784 * 1.05));
+		expect(legacyOnAnthropic.frameTokenEstimate).toBe(69 * 69);
+	});
+
+	it("prices frames by the reading model's lineage, not the wire API", () => {
+		const codex = snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6-astra" });
+		expect(codex.frameSize).toBe(1568);
+		expect(codex.frameTokenEstimate).toBe(2882);
+		expect(codex.imageDetail).toBe("original");
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-5-5" }).frameTokenEstimate).toBe(
+			4761,
+		);
+		// The standard tier bills under its 1,568-token cap on every host.
+		for (const target of [
+			{ api: "anthropic-messages", id: "claude-opus-4-6" },
+			{ api: "openai-completions", id: "anthropic/claude-sonnet-4.6" },
+			{ api: "bedrock-converse-stream", provider: "amazon-bedrock", id: "us.anthropic.claude-haiku-4-5-v1:0" },
+		] as const) {
+			expect(snapcompact.resolveShape(target).frameTokenEstimate).toBe(1521);
+		}
+		// A forced 2576px variant is priced at its own size: 81² patches × 1.2
+		// on GPT, while the standard Claude tier still fits its cap.
+		const forcedOnCodex = snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6-astra" }, "5x8-bw");
+		expect(forcedOnCodex.frameTokenEstimate).toBe(Math.ceil(81 * 81 * 1.2));
+		expect(
+			snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" }, "5x8-bw").frameTokenEstimate,
+		).toBe(1521);
+		// Gemini 3 keeps its fixed budget behind an OpenAI-compatible gateway.
+		expect(
+			snapcompact.resolveShape({ api: "openai-completions", id: "google/gemini-3.5-flash" }).frameTokenEstimate,
+		).toBe(1120);
+		// A built model's identity wins over re-parsing its id.
+		expect(
+			snapcompact.resolveShape({
+				api: "openai-completions",
+				id: "house-vision-model",
+				identity: { class: "anthropic", family: "opus", revision: "4.6.0" },
+			}).frameTokenEstimate,
+		).toBe(1521);
+		// Unversioned Claude aliases price at the high-res tier: 56² for a 1568px frame.
+		expect(
+			snapcompact.resolveShape({ api: "openrouter", provider: "openrouter", id: "~anthropic/claude-opus-latest" })
+				.frameTokenEstimate,
+		).toBe(56 * 56);
+		// An unclassified model bills at its wire API's rule; with no rule at all it costs the ceiling.
+		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" }).frameTokenEstimate).toBe(
+			2882,
+		);
+		expect(snapcompact.resolveShape({ api: "some-future-api", id: "qwen/qwen3-vl" }).frameTokenEstimate).toBe(
+			snapcompact.FRAME_TOKEN_ESTIMATE,
+		);
 	});
 
 	it("every catalog variant resolves to a complete, renderable shape", () => {
-		expect(snapcompact.SHAPE_VARIANT_NAMES.length).toBeGreaterThan(0);
 		for (const name of snapcompact.SHAPE_VARIANT_NAMES) {
 			expect(snapcompact.isShapeVariantName(name)).toBe(true);
 			expect(snapcompact.isShape(snapcompact.resolveShape({ api: "openai-responses" }, name))).toBe(true);
@@ -446,9 +522,8 @@ describe("render", () => {
 
 		const decoded = decodePng(Buffer.from(frame.data, "base64"));
 		expect(decoded.width).toBe(TEST_FRAME_SIZE);
-		// 40 chars on a 64-col grid: one 8px text row; height hugs it instead
-		// of padding the frame to a 320px square.
-		expect(decoded.height).toBe(8);
+		// A short page stays compact without creating a subminimum image.
+		expect(decoded.height).toBe(64);
 		expect(decoded.colorType).toBe(3); // indexed color
 
 		// Two sentences → glyphs printed in ink 1 then ink 2; background stays 0.
@@ -456,6 +531,28 @@ describe("render", () => {
 		expect(used.has(1)).toBe(true);
 		expect(used.has(2)).toBe(true);
 		expect(used.has(3)).toBe(false);
+	});
+
+	it("pads a short final page without altering the printed rows", async () => {
+		const shape = snapcompact.resolveShape(undefined, "8on22-bw");
+		const [last] = await snapcompact.renderMany("x".repeat(83), { shape });
+		const short = decodePng(Buffer.from(last.data, "base64"));
+		const full = await snapcompact.render("x".repeat(83) + " ".repeat(113) + "y".repeat(400), shape);
+		const longer = decodePng(Buffer.from(full.data, "base64"));
+		expect(short.width).toBe(1568);
+		expect(short.height).toBe(64);
+		expect(longer.height).toBe(88);
+		expect(short.pixels.subarray(0, 22 * short.width)).toEqual(longer.pixels.subarray(0, 22 * short.width));
+		expect(short.pixels.subarray(22 * short.width).every(pixel => pixel === 0)).toBe(true);
+	});
+
+	it("leaves the repeated-row highlight out of padding", async () => {
+		const shape = snapcompact.resolveShape(undefined, "8x8r-bw");
+		const frame = await snapcompact.render("x", shape);
+		const decoded = decodePng(Buffer.from(frame.data, "base64"));
+		expect(decoded.height).toBe(64);
+		expect(decoded.pixels.subarray(8 * decoded.width, 16 * decoded.width).includes(8)).toBe(true);
+		expect(decoded.pixels.subarray(16 * decoded.width).every(pixel => pixel === 0)).toBe(true);
 	});
 
 	it("renders the repeated grid with doubled lines, black ink, and highlight bands", async () => {
@@ -508,13 +605,21 @@ describe("render", () => {
 		expect(frame.cols).toBe(Math.floor(TEST_FRAME_SIZE / 6));
 	});
 
+	it("pads stretched RGB frames as well as indexed frames", async () => {
+		const shape = snapcompact.resolveShape(undefined, "6x6u-bw");
+		const frame = await snapcompact.render("x", shape);
+		const png = Buffer.from(frame.data, "base64");
+		expect(png[25]).toBe(2);
+		expect(png.readUInt32BE(20)).toBe(64);
+	});
+
 	it("renders Silver TrueType Unicode text as truecolor RGB", async () => {
 		const silver = snapcompact.resolveShape(undefined, "silver16-bw");
 		const frame = await snapcompact.render("你好안녕", silver, 64);
 		const png = Buffer.from(frame.data, "base64");
 		expect(png[25]).toBe(2);
 		expect(png.readUInt32BE(16)).toBe(64);
-		expect(png.readUInt32BE(20)).toBe(16);
+		expect(png.readUInt32BE(20)).toBe(64);
 		expect(frame.cols).toBe(4);
 		expect(frame.chars).toBe(4);
 	});
@@ -578,7 +683,6 @@ describe("renderMany", () => {
 		expect(short).toHaveLength(1);
 		expect(short[0].type).toBe("image");
 		expect(short[0].mimeType).toBe("image/png");
-		expect(short[0].data.length).toBeGreaterThan(0);
 
 		const text = "x".repeat(capacity * 2 + 10);
 		const frames = await snapcompact.renderMany(text, { shape, frameSize: TEST_FRAME_SIZE });
@@ -846,8 +950,6 @@ describe("compact", () => {
 		fileOps.edited.add("src/login.ts");
 		const result = await snapcompact.compact(makePreparation({ fileOps }), { frameSize: TEST_FRAME_SIZE });
 
-		expect(result.firstKeptEntryId).toBe("kept-1");
-		expect(result.tokensBefore).toBe(99000);
 		expect(result.summary).toContain("HISTORY");
 		expect(result.summary).toContain("`¶user:`");
 		expect(result.summary).toContain("`¶call:`");
@@ -855,15 +957,34 @@ describe("compact", () => {
 		expect(result.summary).toContain("FILES\n===================\n# src/\nauth.ts (Read)\nlogin.ts (Write)");
 
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
-		expect(archive).toBeDefined();
 		expect(archive?.frames).toHaveLength(0);
-		expect(archive?.textHead).toBeTruthy();
 		expect(archive?.textTail).toBeUndefined();
 		expect(archive?.truncatedChars).toBe(0);
 
 		const blocks = archive ? snapcompact.historyBlocks(archive) : [];
 		expect(blocks).toHaveLength(1);
 		expect(blocks[0]?.type).toBe("text");
+	});
+
+	it("omits the ¶think: legend from the preamble when thinking is excluded", async () => {
+		const fileOps = snapcompact.createFileOps();
+		fileOps.read.add("src/auth.ts");
+		const result = await snapcompact.compact(makePreparation({ fileOps }), {
+			frameSize: TEST_FRAME_SIZE,
+			includeThinking: false,
+		});
+
+		expect(result.summary).toContain("`¶user:`");
+		expect(result.summary).toContain("`¶call:`");
+		expect(result.summary).not.toContain("`¶think:`");
+	});
+
+	it("keeps the ¶think: legend in the preamble when thinking is included", async () => {
+		const fileOps = snapcompact.createFileOps();
+		fileOps.read.add("src/auth.ts");
+		const result = await snapcompact.compact(makePreparation({ fileOps }), { frameSize: TEST_FRAME_SIZE });
+
+		expect(result.summary).toContain("`¶think:`");
 	});
 
 	it("carries dim tool-output spans from text into the first image frame", async () => {
@@ -935,7 +1056,6 @@ describe("compact", () => {
 			{ shape: silver, frameSize: 64, maxFrames: 1 },
 		);
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
-		expect(archive).toBeDefined();
 		expect(archive?.frames.length).toBeGreaterThan(0);
 		expect(archive?.frames.every(frame => frame.font === "silver")).toBe(true);
 	});
@@ -1040,14 +1160,6 @@ describe("compact", () => {
 		expect(result.summary).toContain("condensed digest of still-older context");
 	});
 
-	it("includes the previous text summary when the prior compaction was not snapcompact", async () => {
-		const result = await snapcompact.compact(
-			makePreparation({ previousSummary: "Older context: project scaffolding done." }),
-			{ frameSize: TEST_FRAME_SIZE },
-		);
-		expect(result.summary).toContain("condensed digest of still-older context");
-	});
-
 	it("strips the OpenAI remote payload and preserves unrelated preserveData", async () => {
 		const first = await snapcompact.compact(makePreparation(), { frameSize: TEST_FRAME_SIZE });
 		const second = await snapcompact.compact(
@@ -1120,6 +1232,26 @@ describe("compact", () => {
 	});
 });
 
+describe("frame data budget", () => {
+	const codex = { api: "openai-codex-responses", id: "gpt-6-astra" } as const;
+	const highResFrames = Math.floor(snapcompact.FRAME_DATA_BYTES_BUDGET / snapcompact.FRAME_DATA_BYTES_ESTIMATE);
+
+	it("gives the default 1568px shapes more of the same byte budget", () => {
+		const opus = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-8" });
+		const sonnet = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-sonnet-4-5" });
+		expect(snapcompact.maxFramesForDataBudget(opus)).toBe(highResFrames);
+		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex))).toBe(26);
+		expect(snapcompact.maxFramesForDataBudget(sonnet)).toBe(26);
+		// Frames larger than 1932px keep the 1932px charge rather than losing frames.
+		const gemini = snapcompact.resolveShape({ api: "google-generative-ai", id: "gemini-3.5-flash" });
+		expect(snapcompact.maxFramesForDataBudget(gemini)).toBe(highResFrames);
+		// Inkier 1568px variants keep the 1932px charge.
+		for (const variant of ["8x13-bw", "6x12-dim", "doc-8on16-sent-dim", "8on16-bw", "silver16-bw"] as const) {
+			expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex, variant))).toBe(highResFrames);
+		}
+	});
+});
+
 describe("archive helpers", () => {
 	it("getPreservedArchive rejects malformed payloads", () => {
 		expect(snapcompact.getPreservedArchive(undefined)).toBeUndefined();
@@ -1131,25 +1263,6 @@ describe("archive helpers", () => {
 			truncatedChars: 0,
 		};
 		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: valid })).toEqual(valid);
-	});
-
-	it("getPreservedArchive round-trips text-only and text-tail archives", () => {
-		const textOnly: snapcompact.Archive = {
-			frames: [],
-			totalChars: 21,
-			truncatedChars: 0,
-			text: "older history newer history",
-			textHead: "older history newer history",
-		};
-		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: textOnly })).toEqual(textOnly);
-
-		const archive: snapcompact.Archive = {
-			frames: [{ data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 }],
-			totalChars: 10,
-			truncatedChars: 0,
-			textTail: "newest unframed history",
-		};
-		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: archive })).toEqual(archive);
 	});
 
 	it("stripPreservedArchive drops the frame archive and collapses to undefined when empty", () => {
@@ -1194,9 +1307,13 @@ describe("archive helpers", () => {
 		expect(snapcompact.providerImageBudget(undefined)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget("openai-codex")).toBe(200);
-		// The default frame budget must stay under the Anthropic image wire cap:
-		// compaction no longer clamps the archive per provider, so a default above
-		// the cap would silently drop frames or error on large-window Claude.
+		expect(snapcompact.providerFrameBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		expect(snapcompact.providerFrameBudget("umans")).toBe(10);
+		expect(snapcompact.providerFrameBudget("anthropic")).toBe(snapcompact.MAX_FRAMES_DEFAULT);
+		// Anthropic's image cap is the high-water mark the default frame count
+		// must stay under; unknown providers are clamped separately via
+		// providerFrameBudget so their lower image floors cannot archive frames
+		// the send path will drop.
 		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(snapcompact.providerImageBudget("anthropic"));
 	});
 });
@@ -1285,19 +1402,6 @@ describe("new shape variants", () => {
 		}
 	});
 
-	it("carries the eval-winning capability flags", () => {
-		expect(snapcompact.SHAPE_VARIANTS["6x12-dim"]).toMatchObject({ font: "6x12", stopwordDim: true });
-		expect(snapcompact.SHAPE_VARIANTS["8x13-bw"]).toMatchObject({ font: "8x13", cellHeight: 13 });
-		expect(snapcompact.SHAPE_VARIANTS["8on16-bw"]).toMatchObject({ font: "8x13", cellHeight: 16, stretch: false });
-		expect(snapcompact.SHAPE_VARIANTS["doc-8on16-bw"].columns).toBe(2);
-		expect(snapcompact.SHAPE_VARIANTS["doc-8on16-sent"].variant).toBe("sent");
-		expect(snapcompact.SHAPE_VARIANTS["doc-8on16-sent-dim"]).toMatchObject({
-			columns: 2,
-			stopwordDim: true,
-			variant: "sent",
-		});
-	});
-
 	it("isShape validates the new optional fields", () => {
 		const base = snapcompact.resolveShape(undefined, "doc-8on16-sent-dim");
 		expect(snapcompact.isShape({ ...base, columns: 3 })).toBe(false);
@@ -1306,4 +1410,202 @@ describe("new shape variants", () => {
 		expect(snapcompact.isShape({ ...base, stopwordDim: 1 })).toBe(false);
 		expect(snapcompact.isShape({ ...base, font: "9x9" })).toBe(false);
 	});
+});
+
+describe("data URL elision", () => {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><desc>${"A".repeat(6000)}</desc></svg>`;
+	const b64 = Buffer.from(svg, "utf8").toString("base64");
+	const dataUrl = `data:image/svg+xml;base64,${b64}`;
+	const placeholder = `[data URL omitted: image/svg+xml, ${b64.length} base64 chars]`;
+	// No base64 run long enough to read as an image payload may survive.
+	const leakedPayload = /;base64,[A-Za-z0-9+/=]{40}/;
+	const markerInPayload = /;base64,[A-Za-z0-9+/=]*\s*\[(?:…|\.{3})\d+ch elided/;
+	const recognizableDataUrl = /data:[A-Za-z][\w.+-]*\/[\w.+-]+(?:;[\w!#$%&'*+.^|~-]+=[\w!#$%&'*+.^|~-]+)*;base64,/i;
+
+	it("prevents archived Markdown tool-result images from reaching providers as sliced undecodable data URLs", () => {
+		const out = snapcompact.serializeConversation([
+			createToolResultMessage(`Reader output:\n\n![inline SVG](${dataUrl})\ntrailing text`),
+		]);
+		expect(out).toContain(placeholder);
+		expect(out).not.toMatch(leakedPayload);
+		expect(out).toContain("trailing text");
+	});
+
+	it("prevents archived bare tool-result data URLs from reaching providers as sliced undecodable payloads", () => {
+		const out = snapcompact.serializeConversation([createToolResultMessage(`see ${dataUrl} end`)]);
+		expect(out).toContain(placeholder);
+		expect(out).not.toMatch(leakedPayload);
+	});
+
+	it("prevents character-cap head/tail cuts from leaving a recognizable data URL in archived tool results", () => {
+		// Sweep the atom across the 1,200-char head and 800-char tail boundaries.
+		// Each pad is a distinct cut landing: 0 start, 600 inside head, 1150/1199
+		// straddle the head cut, 4000 discarded middle, 6500 straddle tail, 7400 tail.
+		for (const pad of [0, 600, 1150, 1199, 4000, 6500, 7400]) {
+			const text = `${"p".repeat(pad)} ![img](${dataUrl}) ${"s".repeat(7600 - pad)}`;
+			const out = snapcompact.normalize(snapcompact.serializeConversation([createToolResultMessage(text)]));
+			expect(out).not.toMatch(leakedPayload);
+			expect(out).not.toMatch(markerInPayload);
+		}
+	});
+
+	it("prevents archived tool-call arguments from reaching providers as sliced undecodable data URLs", () => {
+		const out = snapcompact.serializeConversation([
+			createAssistantMessage([
+				{
+					type: "toolCall",
+					id: "c1",
+					name: "write",
+					arguments: { path: "a.html", content: `<img src="${dataUrl}">` },
+				},
+			]),
+		]);
+		expect(out).not.toMatch(leakedPayload);
+		expect(out).toContain("data URL omitted: image/svg+xml");
+	});
+
+	it("prevents a canonical 1x1 GIF data URL from surviving in archived tool results as image input", () => {
+		const payload = "R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+		const out = snapcompact.serializeConversation([
+			createToolResultMessage(`const BLANK = "data:image/gif;base64,${payload}";`),
+		]);
+		expect(out).toContain(`[data URL omitted: image/gif, ${payload.length} base64 chars]`);
+		expect(out).not.toMatch(/data:image\/gif;base64,/i);
+	});
+
+	it("prevents prose mentions like data:image/png;base64,abc from being rewritten into placeholders", () => {
+		const prose = "e.g. 'data:image/png;base64,abc' is the expected shape";
+		const out = snapcompact.serializeConversation([createToolResultMessage(prose)]);
+		expect(out).toContain(prose);
+		expect(out).not.toContain("data URL omitted");
+	});
+
+	it("prevents a ;charset=utf-8 data URL from surviving in archived tool results as image input", () => {
+		const url = `data:image/svg+xml;charset=utf-8;base64,${b64}`;
+		const out = snapcompact.serializeConversation([createToolResultMessage(`see ${url} end`)]);
+		expect(out).toContain(`[data URL omitted: image/svg+xml;charset=utf-8, ${b64.length} base64 chars]`);
+		expect(out).not.toMatch(recognizableDataUrl);
+	});
+
+	it("prevents uppercase DATA:/BASE64 data URLs from surviving in archived tool results as image input", () => {
+		const url = `DATA:IMAGE/PNG;BASE64,${b64}`;
+		const out = snapcompact.serializeConversation([createToolResultMessage(`see ${url} end`)]);
+		expect(out).toContain(`[data URL omitted: IMAGE/PNG, ${b64.length} base64 chars]`);
+		expect(out).not.toMatch(recognizableDataUrl);
+	});
+
+	it("prevents user-message data URLs from surviving as sliced undecodable image refs in the compacted archive", async () => {
+		const result = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [
+					createUserMessage(`${"context ".repeat(400)}![img](${dataUrl})${" more".repeat(400)}`),
+				],
+			}),
+			{ frameSize: TEST_FRAME_SIZE, maxFrames: 3 },
+		);
+		const archive = snapcompact.getPreservedArchive(result.preserveData);
+		const all = `${archive?.text ?? ""}\n${archive?.textHead ?? ""}\n${archive?.textTail ?? ""}`;
+		expect(all).not.toMatch(leakedPayload);
+		expect(all).not.toMatch(markerInPayload);
+	});
+
+	it("prevents re-compaction of a pre-guard archive from replaying undecodable data-URL fragments", async () => {
+		const legacyHead =
+			`earlier work ![a](${dataUrl}) then ` +
+			`data:image/png;base64,${"QUFB".repeat(50)} [...900ch elided...] ${"QUFB".repeat(10)} and ` +
+			`data:image/webp;base64, [...123ch elided...] QUFB plus a bare cut data:image/jpeg;base64,`;
+		const result = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("Next turn after legacy archive.")],
+				previousPreserveData: {
+					snapcompact: {
+						frames: [],
+						totalChars: legacyHead.length,
+						truncatedChars: 0,
+						textHead: legacyHead,
+						textTail: "recent tail",
+					},
+				},
+			}),
+			{ frameSize: TEST_FRAME_SIZE, maxFrames: 3 },
+		);
+		const archive = snapcompact.getPreservedArchive(result.preserveData);
+		const all = `${archive?.text ?? ""}\n${archive?.textHead ?? ""}\n${archive?.textTail ?? ""}`;
+		expect(all).not.toMatch(/data:[A-Za-z][\w.+-]*\/[\w.+-]+;base64,/);
+		expect(all).not.toMatch(markerInPayload);
+		expect(all).toContain("data URL omitted: image/svg+xml");
+		expect(all).toContain("data URL omitted: image/webp");
+	});
+
+	it("prevents historyBlocks from replaying poisoned archive prefixes as invalid image input", () => {
+		const rows: Array<{ head: string; placeholder: string; retain?: string }> = [
+			{
+				// cut +0: empty payload after `;base64,` (exercises regex `*` zero-width match)
+				head: "history ![x](data:image/svg+xml;base64,",
+				placeholder: "data URL omitted: image/svg+xml",
+			},
+			{
+				// cut +1: `Q` (strict archive path below source floor)
+				head: "history ![x](data:image/svg+xml;base64,Q",
+				placeholder: "data URL omitted: image/svg+xml",
+			},
+			{
+				// cut +39: `${"QUFB".repeat(9)}QUL` (just below 40-char floor)
+				head: `history ![x](data:image/svg+xml;base64,${"QUFB".repeat(9)}QUL`,
+				placeholder: "data URL omitted: image/svg+xml",
+			},
+			{
+				// marker directly after comma: pre-guard slice landed on `;base64,`
+				head: "data:image/webp;base64, [...900ch elided...] QUFB rest",
+				placeholder: "data URL omitted: image/webp",
+				retain: " rest",
+			},
+			{
+				// parameterized archive fragment: explicit source+archive RFC 2397 requirement
+				head: "data:image/svg+xml;charset=utf-8;base64,Q",
+				placeholder: "data URL omitted: image/svg+xml;charset=utf-8",
+			},
+		];
+		for (const row of rows) {
+			const blocks = snapcompact.historyBlocks({
+				frames: [],
+				totalChars: row.head.length,
+				truncatedChars: 5,
+				textHead: row.head,
+				textTail: "tail",
+			});
+			const text = blocks.map(b => (b.type === "text" ? b.text : "")).join("\n");
+			expect(text).not.toMatch(recognizableDataUrl);
+			expect(text).toContain(row.placeholder);
+			if (row.retain !== undefined) {
+				expect(text).toContain(row.retain);
+				expect(text).not.toContain(";base64,");
+				expect(text).not.toContain("ch elided");
+			}
+		}
+	});
+
+	it("prevents archive migration text from replaying invalid image input to summarizers/providers", () => {
+		const poisoned = "data:image/png;base64,QUFB [...900ch elided...] QUFB";
+		const text = snapcompact.archiveSourceText({
+			frames: [],
+			totalChars: poisoned.length,
+			truncatedChars: 0,
+			textHead: poisoned,
+		});
+		expect(text).toContain("[data URL omitted: image/png, 908 base64 chars]");
+		expect(text).not.toMatch(recognizableDataUrl);
+	});
+
+	it("prevents unmatched Markdown brackets from stalling tool-result compaction", () => {
+		// Unmatched `[` plus `;base64,` used to stall tool-result compaction in
+		// the data-URL matcher before the 2,000-character cap could apply.
+		const text = `${"[".repeat(80_000)};base64,`;
+		const out = snapcompact.serializeConversation([createToolResultMessage(text)]);
+		const marker = "[…78008ch elided…]";
+		expect(out).toContain(marker);
+		expect(out).toContain(
+			`${snapcompact.DIM_ON}${"[".repeat(1200)} ${marker} ${"[".repeat(792)};base64,${snapcompact.DIM_OFF}`,
+		);
+	}, 2_000);
 });

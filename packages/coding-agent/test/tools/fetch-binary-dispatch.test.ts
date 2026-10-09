@@ -7,10 +7,10 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { zip } from "@oh-my-pi/pi-coding-agent/utils/zip";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import * as scraperUtils from "@oh-my-pi/pi-coding-agent/web/scrapers/utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
 
 function makeSession(testDir: string): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
@@ -112,10 +112,10 @@ describe("read URL binary dispatch", () => {
 	});
 
 	it("lists a remote zip instead of dumping decoded bytes", async () => {
-		const zipBytes = zip({
-			"root.txt": Buffer.from("root file\n"),
-			"nested/data.txt": Buffer.from("nested file\n"),
-		});
+		const zipBytes = await encodeArchive("zip", [
+			["root.txt", "root file\n"],
+			["nested/data.txt", "nested file\n"],
+		]);
 		const url = uniqueUrl("archive", ".zip");
 		stubUrlBytes(zipBytes, "application/octet-stream");
 
@@ -129,6 +129,31 @@ describe("read URL binary dispatch", () => {
 		expect(text).toContain("nested/");
 		expect(text).not.toContain("PK\u0003\u0004");
 		expect(text).not.toContain("�");
+	});
+
+	it("downloads a generic-MIME convertible document body only once", async () => {
+		const url = uniqueUrl("report", ".pdf");
+		const bodyReads: string[] = [];
+		const loadPage = vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl, options) => {
+			const contentType = "application/octet-stream";
+			if (options?.skipBodyForContentType?.(contentType)) {
+				return { ok: true, status: 200, finalUrl: requestedUrl, contentType, content: "", bodySkipped: true };
+			}
+			bodyReads.push(requestedUrl);
+			return { ok: true, status: 200, finalUrl: requestedUrl, contentType, content: "%PDF-1.4 binary" };
+		});
+		const fetchBinary = vi
+			.spyOn(scraperUtils, "fetchBinary")
+			.mockImplementation(async () => ({ ok: false, error: "offline" }));
+
+		const tool = new ReadTool(makeSession(testDir));
+		const result = await tool.execute("read-url-generic-pdf", { path: url });
+
+		expect(loadPage).toHaveBeenCalledTimes(1);
+		expect(bodyReads).toEqual([]);
+		// One download even when it fails: the binary fallback reuses the conversion attempt.
+		expect(fetchBinary).toHaveBeenCalledTimes(1);
+		expect(textOutput(result).split("Binary fetch failed: offline").length - 1).toBe(1);
 	});
 
 	it("returns a metadata notice when a hinted binary refetch fails", async () => {

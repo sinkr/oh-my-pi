@@ -4,9 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	AstMatchStrictness,
-	astEdit,
 	astMatch,
-	blockRangeAt,
+	countTokens,
+	Encoding,
 	executeShell,
 	FileType,
 	fuzzyFind,
@@ -15,14 +15,18 @@ import {
 	getSupportedLanguages,
 	glob,
 	grep,
+	HighlightStream,
 	highlightCode,
 	htmlToMarkdown,
 	invalidateFsScanCache,
 	listWorkspace,
-	MacOSPowerAssertion,
+	macOSCheckSpelling,
+	macOSSpellCheckerAvailable,
 	matchesKey,
+	PowerAssertion,
 	PtySession,
 	parseKey,
+	pdfToMarkdown,
 	summarizeCode,
 	supportsLanguage,
 	truncateToWidth,
@@ -31,6 +35,28 @@ import {
 } from "../native/index.js";
 
 const addonUrl = new URL("../native/index.js", import.meta.url).href;
+
+describe("macOS spelling", () => {
+	it("reports platform capability and uses UTF-16 ranges", async () => {
+		const nonsense = "qzxvplmokn";
+		if (process.platform !== "darwin") {
+			expect(macOSSpellCheckerAvailable()).toBeFalse();
+			expect(await macOSCheckSpelling(nonsense)).toEqual([]);
+			return;
+		}
+
+		expect(macOSSpellCheckerAvailable()).toBeTrue();
+		expect(await macOSCheckSpelling(nonsense)).toContainEqual({ start: 0, length: nonsense.length });
+	});
+	it("returns only word spans, never the whole-string orthography result", async () => {
+		if (process.platform !== "darwin") return;
+		// With automatic language identification, checkString: also yields an
+		// orthography result spanning the entire string; leaking it as a typo
+		// range doubled editor text under the undercurl renderer.
+		const text = "hello qzxvplmokn world ";
+		expect(await macOSCheckSpelling(text)).toEqual([{ start: 6, length: 10 }]);
+	});
+});
 
 let testDir: string;
 
@@ -66,6 +92,21 @@ This is a test file.
 	await fs.writeFile(path.join(testDir, "history-search.ts"), "export const historySearch = true;\n");
 }
 
+describe("countTokens", () => {
+	it("counts native UTF-16 content without its N-API terminator and sums arrays", () => {
+		expect(countTokens("hello world", Encoding.O200kBase)).toBe(2);
+		expect(countTokens(["hello world", "hello world"], Encoding.O200kBase)).toBe(4);
+	});
+
+	it("round-trips every Encoding through the local addon", () => {
+		for (const encoding of Object.values(Encoding)) {
+			const n = countTokens("hello", encoding);
+			expect(typeof n).toBe("number");
+			expect(n).toBeGreaterThan(0);
+		}
+	});
+});
+
 async function cleanupFixtures() {
 	await fs.rm(testDir, { recursive: true, force: true });
 }
@@ -85,6 +126,30 @@ async function createFifo(fifoPath: string) {
 	}
 
 	throw new Error(await new Response(process.stderr).text());
+}
+
+function textPdf(text: string): Uint8Array {
+	const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+	const objects = [
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+	];
+	let document = "%PDF-1.4\n";
+	const offsets: number[] = [];
+	for (const [index, object] of objects.entries()) {
+		offsets.push(document.length);
+		document += `${index + 1} 0 obj\n${object}\nendobj\n`;
+	}
+	const xrefOffset = document.length;
+	document += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+	for (const offset of offsets) {
+		document += `${offset.toString().padStart(10, "0")} 00000 n \n`;
+	}
+	document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+	return Buffer.from(document);
 }
 
 describe("pi-natives", () => {
@@ -128,20 +193,6 @@ describe("pi-natives", () => {
 			expect(python.segments.at(-1)?.text).toContain("return");
 		});
 
-		it("summarizes Emacs Lisp function bodies through native inference", () => {
-			for (const path of ["fixture.el", ".emacs"]) {
-				const result = summarizeCode({
-					path,
-					code: '(defun greet (name)\n  "Doc."\n  (let ((message (format "Hello %s" name)))\n    (message "%s" message)\n    message)\n)\n',
-				});
-
-				expect(result.parsed).toBe(true);
-				expect(result.elided).toBe(true);
-				expect(result.language).toBe("emacs-lisp");
-				expect(result.segments.map(segment => segment.kind)).toEqual(["kept", "elided", "kept"]);
-			}
-		});
-
 		it("summarizes multiline literals and block comments", () => {
 			const result = summarizeCode({
 				path: "fixture.ts",
@@ -171,28 +222,6 @@ describe("pi-natives", () => {
 			const code = "function small() {\n\treturn 1;\n}\n";
 			expect(summarizeCode({ path: "fixture.ts", code }).elided).toBe(false);
 			expect(summarizeCode({ path: "fixture.ts", code, minBodyLines: 3 }).elided).toBe(true);
-		});
-	});
-
-	describe("blockRangeAt", () => {
-		it("resolves Emacs Lisp macro-style top-level forms", () => {
-			const range = blockRangeAt({
-				path: "init.el",
-				code: '(ert-deftest ogent-zen-test ()\n  "Doc."\n  (should t))\n',
-				line: 1,
-			});
-
-			expect(range).toEqual({ startLine: 1, endLine: 3 });
-		});
-
-		it("does not resolve a bare Emacs Lisp closing paren as a block", () => {
-			const range = blockRangeAt({
-				path: "init.el",
-				code: '(defun greet (name)\n  "Doc."\n  (message "Hello %s" name)\n)\n',
-				line: 4,
-			});
-
-			expect(range).toBeNull();
 		});
 	});
 
@@ -230,6 +259,41 @@ describe("pi-natives", () => {
 		});
 	});
 
+	describe("HighlightStream", () => {
+		const colors = {
+			comment: "<c>",
+			keyword: "<k>",
+			function: "<f>",
+			variable: "<v>",
+			string: "<s>",
+			number: "<n>",
+			type: "<t>",
+			operator: "<o>",
+			punctuation: "<p>",
+		};
+
+		it("chunked pushes are byte-identical to one-shot highlighting across multi-line state", () => {
+			// The streaming Markdown renderer commits chunk-highlighted rows to
+			// native scrollback and later repaints the block via highlightCode;
+			// any divergence shows as a visible seam. The docstring spans the
+			// chunk boundary, so this fails if parser state is not carried.
+			const code = 'def f():\n    """doc\n    string"""\n    return 1\n';
+			const whole = highlightCode(code, "python", colors);
+
+			const stream = new HighlightStream("python", colors);
+			expect(stream.supported).toBe(true);
+			const chunked =
+				stream.push("def f():\n") + stream.push('    """doc\n    string"""\n') + stream.push("    return 1\n");
+			expect(chunked).toBe(whole);
+		});
+
+		it("echoes input unchanged for an unresolved language", () => {
+			const stream = new HighlightStream("no-such-lang", colors);
+			expect(stream.supported).toBe(false);
+			expect(stream.push("plain text\n")).toBe("plain text\n");
+		});
+	});
+
 	describe("keys", () => {
 		it("matches Ghostty's super+alt Backspace Kitty wire", () => {
 			const ghosttyOptionBackspace = "\x1b[127;11u";
@@ -242,6 +306,124 @@ describe("pi-natives", () => {
 	});
 
 	describe("grep", () => {
+		it("completes concurrent provider searches without starving pooled filesystem reads", async () => {
+			const script = `
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { grep, glob } from ${JSON.stringify(addonUrl)};
+
+const root = await fs.mkdtemp(path.join(os.tmpdir(), "natives-provider-pool-"));
+try {
+	const fixture = path.join(root, "SKILL.md");
+	const temp = path.join(root, "result.md.tmp");
+	const artifact = path.join(root, "result.md");
+	await fs.writeFile(fixture, "# Heading\\nbody\\n");
+	const filesystem = {
+		nativeLocalPaths: true,
+		handler: async (_error, request) => {
+			await fs.stat(fixture);
+			return { local: request.path === "skill://stall" ? root : fixture };
+		},
+	};
+	const results = await Promise.all(Array.from({ length: 8 }, () =>
+		grep({ pattern: "^# ", path: "skill://stall/SKILL.md", filesystem, timeoutMs: 2_000 })
+	));
+	if (results.some(result => result.totalMatches !== 1)) throw new Error("provider grep missed heading");
+	const listings = await Promise.all(Array.from({ length: 8 }, () =>
+		glob({ pattern: "*.md", path: "skill://stall", filesystem, timeoutMs: 2_000 })
+	));
+	if (listings.some(result => result.totalMatches !== 1)) throw new Error("provider glob missed file");
+	await Bun.write(temp, "published");
+	const readback = await Bun.file(temp).slice(0, 1).arrayBuffer();
+	if (readback.byteLength !== 1) throw new Error("artifact verification read failed");
+	await fs.rename(temp, artifact);
+	const controller = new AbortController();
+	const entered = Promise.withResolvers();
+	const stalledFilesystem = {
+		nativeLocalPaths: true,
+		handler: async () => {
+			entered.resolve();
+			await Promise.withResolvers().promise;
+			return { local: fixture };
+		},
+	};
+	const cancelled = grep({
+		pattern: "^# ",
+		path: "skill://pending/SKILL.md",
+		filesystem: stalledFilesystem,
+		signal: controller.signal,
+	});
+	await entered.promise;
+	controller.abort();
+	try {
+		await cancelled;
+		throw new Error("cancelled search fulfilled");
+	} catch (error) {
+		if (error.name !== "AbortError") throw error;
+	}
+	// Exercise the native deadline against a provider Promise that cannot settle.
+	try {
+		await grep({ pattern: "^# ", path: "skill://pending/SKILL.md", filesystem: stalledFilesystem, timeoutMs: 50 });
+		throw new Error("timed-out search fulfilled");
+	} catch (error) {
+		if (!String(error).includes("Aborted: Timeout")) throw error;
+	}
+	if (await fs.readFile(artifact, "utf8") !== "published") throw new Error("artifact not published");
+	console.log("ok");
+} finally {
+	await fs.rm(root, { recursive: true, force: true });
+}
+`;
+			const child = Bun.spawn([process.execPath, "--eval", script], {
+				env: { ...process.env, UV_THREADPOOL_SIZE: "4" },
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			// A stuck native callback never reaches a JS timeout; kill the subprocess on regression.
+			const timer = setTimeout(() => child.kill("SIGKILL"), 6_000);
+			try {
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+					child.exited,
+				]);
+				expect({ stdout: stdout.trim(), stderr: stderr.trim(), exitCode }).toEqual({
+					stdout: "ok",
+					stderr: "",
+					exitCode: 0,
+				});
+			} finally {
+				clearTimeout(timer);
+				if (child.exitCode === null) child.kill("SIGKILL");
+			}
+		}, 10_000);
+
+		it("delivers a completed result after the JS thread resumes past its deadline", async () => {
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 1_000,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_200);
+
+			await expect(pending).resolves.toMatchObject({ totalMatches: 1 });
+		});
+
+		it("discards a completed result when an AbortSignal fires before settlement", async () => {
+			const controller = new AbortController();
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 5_000,
+				signal: controller.signal,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+			controller.abort();
+
+			await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		});
+
 		it("should find patterns in files", async () => {
 			const result = await grep({
 				pattern: "TODO",
@@ -275,16 +457,6 @@ describe("pi-natives", () => {
 			expect(result.totalMatches).toBe(2); // "Test" in title + "test" in body
 		});
 
-		it("should return filesWithMatches mode", async () => {
-			const result = await grep({
-				pattern: "return",
-				path: testDir,
-				mode: GrepOutputMode.FilesWithMatches,
-			});
-
-			expect(result.filesWithMatches).toBeGreaterThan(0);
-		});
-
 		it("counts files instead of line matches in filesWithMatches mode", async () => {
 			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-files-"));
 			try {
@@ -303,6 +475,49 @@ describe("pi-natives", () => {
 			} finally {
 				await fs.rm(scopedDir, { recursive: true, force: true });
 			}
+		});
+
+		it("streams matches through onMatches in bounded batches instead of returning them", async () => {
+			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-stream-"));
+			try {
+				const dense = "alpha beta\n".repeat(5_000);
+				for (let i = 0; i < 8; i++) await Bun.write(path.join(scopedDir, `dense-${i}.txt`), dense);
+				await Bun.write(path.join(scopedDir, "quiet.txt"), "nothing here\n");
+
+				const batchSizes: number[] = [];
+				const perFile = new Map<string, number>();
+				const result = await grep({
+					pattern: "beta",
+					path: scopedDir,
+					onMatches: matches => {
+						batchSizes.push(matches.length);
+						for (const match of matches) perFile.set(match.path, (perFile.get(match.path) ?? 0) + 1);
+					},
+				});
+
+				// Every batch has run by the time the promise settles.
+				expect(result).toMatchObject({ totalMatches: 40_000, filesWithMatches: 8, filesSearched: 9 });
+				expect(result.matches).toEqual([]);
+				expect(Math.max(...batchSizes)).toBeLessThanOrEqual(1_024);
+				expect(Object.fromEntries(perFile)).toEqual(
+					Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`dense-${i}.txt`, 5_000])),
+				);
+			} finally {
+				await fs.rm(scopedDir, { recursive: true, force: true });
+			}
+		});
+
+		it("rejects the search with the error an onMatches callback throws", async () => {
+			const failure = new Error("consumer failed");
+			await expect(
+				grep({
+					pattern: "TODO",
+					path: testDir,
+					onMatches: () => {
+						throw failure;
+					},
+				}),
+			).rejects.toBe(failure);
 		});
 
 		it("should treat unknown grep type filter as a strict extension filter", async () => {
@@ -681,6 +896,67 @@ describe("pi-natives", () => {
 			expect((await run).cancelled).toBeTrue();
 		});
 
+		// Needs this PR's rust; PR CI loads the published natives leaf.
+		it.skipIf(process.env.GITHUB_EVENT_NAME === "pull_request")(
+			"keeps a fast PTY child blocked while onChunk is stalled and still delivers every byte",
+			async () => {
+				if (process.platform === "win32") {
+					return;
+				}
+
+				const blockBytes = 64 * 1024;
+				const blocks = 80;
+				const scriptPath = path.join(testDir, "pty-slow-consumer.ts");
+				await Bun.write(
+					scriptPath,
+					`const block = Buffer.alloc(${blockBytes}, 0x78);\n` +
+						`for (let i = 0; i < ${blocks}; i++) process.stdout.write(block);\n` +
+						`process.stdout.write("END\\n");\n`,
+				);
+
+				const session = new PtySession();
+				let pid = 0;
+				let stalled = false;
+				let aliveDuringStall = false;
+				let output = "";
+				const result = await session.startArgv(
+					{
+						application: process.execPath,
+						args: [scriptPath],
+						cwd: testDir,
+						timeoutMs: 30_000,
+						cols: 400,
+						rows: 24,
+					},
+					(_error, chunk) => {
+						output += chunk;
+						if (stalled || !output.includes("x")) {
+							return;
+						}
+						stalled = true;
+						const until = Date.now() + 400;
+						while (Date.now() < until) {}
+						if (pid > 0) {
+							try {
+								process.kill(pid, 0);
+								aliveDuringStall = true;
+							} catch {}
+						}
+					},
+					(_error, childPid) => {
+						pid = childPid;
+					},
+				);
+
+				expect(result.timedOut).toBe(false);
+				expect(result.cancelled).toBe(false);
+				expect(result.exitCode).toBe(0);
+				expect(aliveDuringStall).toBe(true);
+				expect(output.split("x").length - 1).toBe(blockBytes * blocks);
+				expect(output.includes("END")).toBe(true);
+			},
+		);
+
 		it("should time out detached background workloads without hanging", async () => {
 			if (process.platform === "win32" || !Bun.which("bash")) {
 				return;
@@ -761,6 +1037,19 @@ describe("pi-natives", () => {
 
 			await Bun.sleep(600);
 			expect(await Bun.file(markerPath).exists()).toBe(false);
+		});
+	});
+
+	describe("pdfToMarkdown", () => {
+		it("isolates blocking conversion from later JavaScript buffer mutation", async () => {
+			const input = textPdf("Copied PDF bytes");
+			const conversion = pdfToMarkdown(input);
+			input.fill(0);
+
+			const result = await conversion;
+
+			expect(result.pageCount).toBe(1);
+			expect(result.markdown).toContain("Copied PDF bytes");
 		});
 	});
 	describe("htmlToMarkdown", () => {
@@ -893,12 +1182,42 @@ console.log("ok");
 		}, 30_000);
 	});
 
-	describe("MacOSPowerAssertion", () => {
-		it("should create a stoppable power assertion handle", () => {
-			const assertion = MacOSPowerAssertion.start({ reason: "pi-natives test" });
-			assertion.stop();
-			assertion.stop();
+	describe("PowerAssertion", () => {
+		it("should create a stoppable power assertion handle, or surface a descriptive bus/service failure where the host cannot provide one", () => {
+			let assertion: PowerAssertion | undefined;
+			try {
+				assertion = PowerAssertion.start({ reason: "pi-natives test" });
+			} catch (error) {
+				// A host with no bus must fail in the documented bus/service vocabulary,
+				// so a wrong export or a no-op stub fails on any other message.
+				const message = error instanceof Error ? error.message : String(error);
+				expect(message).toMatch(/(system|session) bus|login1|screensaver|inhibit/i);
+				return;
+			}
+			assertion?.stop();
+			assertion?.stop();
 		});
+
+		it.skipIf(process.platform !== "linux" || !Bun.which("systemd-inhibit"))(
+			"registers a login1 inhibitor for the handle's lifetime",
+			() => {
+				const reason = `pi-natives ${crypto.randomUUID()}`;
+				const held = (): boolean =>
+					Bun.spawnSync(["systemd-inhibit", "--list", "--no-pager"]).stdout.toString().includes(reason);
+				let assertion: PowerAssertion;
+				try {
+					assertion = PowerAssertion.start({ reason, idle: true });
+				} catch {
+					return; // No system bus here; the failure vocabulary is covered above.
+				}
+				try {
+					expect(held()).toBe(true);
+				} finally {
+					assertion.stop();
+				}
+				expect(held()).toBe(false);
+			},
+		);
 	});
 
 	describe("astMatch", () => {
@@ -928,38 +1247,6 @@ console.log("ok");
 			});
 			expect(same.totalMatches).toBe(1);
 			expect(diff.totalMatches).toBe(0);
-		});
-
-		it("matches Emacs Lisp patterns with public aliases and metavariables", async () => {
-			const match = await astMatch({
-				source: ["(defun greet (name)", '  (message "Hello %s" name)', ")"].join("\n"),
-				lang: "emacs-lisp",
-				patterns: ["(defun $NAME $$$BODY)"],
-				includeMeta: true,
-			});
-
-			expect(match.parseErrors).toBeUndefined();
-			expect(match.totalMatches).toBe(1);
-			expect(match.matches[0]?.metaVariables?.NAME).toBe("greet");
-		});
-
-		it("rewrites Emacs Lisp source with astEdit aliases", async () => {
-			const filePath = path.join(testDir, "emacs-ast-edit.el");
-			await fs.writeFile(filePath, '(defun greet (name)\n  (message "Hello %s" name))\n');
-
-			const result = await astEdit({
-				path: filePath,
-				lang: "elisp",
-				rewrites: {
-					"(message $FORMAT $ARG)": "(format-message $FORMAT $ARG)",
-				},
-				dryRun: false,
-			});
-
-			expect(result.applied).toBe(true);
-			expect(result.parseErrors).toBeUndefined();
-			expect(result.totalReplacements).toBe(1);
-			expect(await Bun.file(filePath).text()).toBe('(defun greet (name)\n  (format-message "Hello %s" name))\n');
 		});
 
 		it("reports parse errors for incomplete source without throwing", async () => {

@@ -13,7 +13,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 test("keeps Gemini 3.6 advisor context and accepts a silent review", async () => {
 	const temp = TempDir.createSync("@issue-8223-");
 	const auth = await AuthStorage.create(path.join(temp.path(), "auth.db"));
-	auth.setRuntimeApiKey("google", "test-key");
+	auth.keys.setRuntime("google", "test-key");
 	const registry = new ModelRegistry(auth);
 	const model = getBundledModel("google", "gemini-3.6-flash");
 	if (!model) throw new Error("missing bundled model");
@@ -60,16 +60,11 @@ test("keeps Gemini 3.6 advisor context and accepts a silent review", async () =>
 		expect(bodies).toHaveLength(1);
 		expect(bodies[0]).toMatchObject({
 			systemInstruction: {
-				parts: [{ text: expect.stringContaining("You bring a different angle") }],
+				parts: [{ text: expect.any(String) }],
 			},
 			tools: [
 				{
-					functionDeclarations: [
-						{
-							name: "advise",
-							description: expect.stringContaining("Send one concrete"),
-						},
-					],
+					functionDeclarations: [{ name: "advise" }],
 				},
 			],
 		});

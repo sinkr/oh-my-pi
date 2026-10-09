@@ -3,6 +3,8 @@ import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { fetchAntigravityDiscoveryModels } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 interface CapturedRequestBody {
@@ -103,6 +105,7 @@ function unroutedModel(): Model<"google-gemini-cli"> {
 async function captureRequest(
 	model: Model<"google-gemini-cli">,
 	reasoning: Effort | undefined,
+	options: { forceReasoningOff?: boolean } = {},
 ): Promise<{ body: CapturedRequestBody; attributedModel: string }> {
 	let requestBody: string | undefined;
 	const fetchMock: FetchImpl = (_input, init) => {
@@ -112,6 +115,7 @@ async function captureRequest(
 	const stream = streamSimple(model, context, {
 		apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
 		reasoning,
+		forceReasoningOff: options.forceReasoningOff,
 		fetch: fetchMock,
 	});
 	const result = await stream.result();
@@ -120,6 +124,61 @@ async function captureRequest(
 }
 
 describe("google-gemini-cli effort-tier variant routing", () => {
+	it("discovers one Claude 5.5 model per family and routes its supported efforts to the served tiers", async () => {
+		const tiers = [Effort.Low, Effort.Medium, Effort.High] as const;
+		const families = ["claude-opus-5-5", "claude-sonnet-5-5"];
+		const result = await fetchAntigravityDiscoveryModels({
+			token: "token",
+			userAgent: "test",
+			fetcher: async () =>
+				Response.json({
+					models: Object.fromEntries(
+						families.flatMap(id =>
+							tiers.map(tier => [
+								`${id}-${tier}`,
+								{
+									supportsThinking: true,
+									supportsImages: true,
+									maxTokens: 1_000_000,
+									maxOutputTokens: 128_000,
+								},
+							]),
+						),
+					),
+				}),
+		});
+		expect(result?.models.map(spec => spec.id)).toEqual(families);
+		if (!result || result.rejectedStatus !== undefined) throw new Error("discovery failed");
+		const specs = result.models;
+
+		for (const id of families) {
+			const spec = specs.find(spec => spec.id === id);
+			if (!spec) throw new Error(`missing logical model ${id}`);
+			const model = buildModel(spec);
+			for (const tier of tiers) {
+				expect(resolveVariantSelector("google-antigravity", `${id}-${tier}`)).toBe(id);
+				const request = await captureRequest(model, tier);
+				expect(request.body.model).toBe(`${id}-${tier}`);
+				expect(request.attributedModel).toBe(id);
+				expect(request.body.request?.generationConfig?.thinkingConfig?.thinkingBudget).toBeGreaterThan(0);
+				expect(request.body.request?.generationConfig?.thinkingConfig?.thinkingLevel).toBeUndefined();
+			}
+
+			// These SKUs always think: off and external scratchpads (an effort is
+			// selected but reasoning is forced off) must keep a valid backing tier
+			// rather than sending the unserved logical id.
+			for (const [reasoning, options] of [
+				[undefined, {}],
+				[Effort.High, { forceReasoningOff: true }],
+			] as const) {
+				const request = await captureRequest(model, reasoning, options);
+				expect(request.body.model).toBe(`${id}-low`);
+				expect(request.body.request?.generationConfig?.thinkingConfig?.includeThoughts).toBe(true);
+				expect(request.body.request?.generationConfig?.thinkingConfig?.thinkingBudget).toBe(4096);
+			}
+		}
+	});
+
 	it("routes each effort to its backing wire id with the per-tier budget and attributes usage to the logical id", async () => {
 		const high = await captureRequest(collapsedFlashModel(), Effort.High);
 		expect(high.body.model).toBe("gemini-3-flash-agent");
@@ -141,6 +200,15 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 
 	it("suppresses thinking with a zero budget on the wire when off and suppressWhenOff is set", async () => {
 		const off = await captureRequest(collapsedFlashModel(), undefined);
+		expect(off.body.model).toBe("gemini-3.5-flash-extra-low");
+		expect(off.body.request?.generationConfig?.thinkingConfig).toEqual({
+			includeThoughts: false,
+			thinkingBudget: 0,
+		});
+	});
+
+	it("routes to the explicit off wire shape when an external scratchpad replaces reasoning", async () => {
+		const off = await captureRequest(collapsedFlashModel(), Effort.High, { forceReasoningOff: true });
 		expect(off.body.model).toBe("gemini-3.5-flash-extra-low");
 		expect(off.body.request?.generationConfig?.thinkingConfig).toEqual({
 			includeThoughts: false,

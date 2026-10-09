@@ -36,7 +36,11 @@ export interface NormalizeSchemaOptions {
 	unsupportedFields: (key: string) => boolean;
 	normalizeFieldNames: boolean;
 	collapseNullFields: boolean;
-	normalizeTypeArrayToNullable: boolean;
+	/**
+	 * Target takes a scalar `type` only: `["T", "null"]` becomes `T` (+ `nullable`)
+	 * and a multi-type array becomes one `anyOf` branch per type.
+	 */
+	scalarizeTypeArrays: boolean;
 	stripNullableKeyword: boolean;
 	autoPropertyOrdering: boolean;
 	ensureObjectProperties: boolean;
@@ -86,7 +90,9 @@ const SNAKE_TO_CAMEL_RENAMES = new Map<string, string>([
 ]);
 
 const JSON_SCHEMA_COMBINERS = ["anyOf", "oneOf"] as const;
-const CCA_FORBIDDEN_COMBINERS = new Set(["anyOf", "oneOf", "allOf"]);
+/** The three JSON Schema composition keywords: `anyOf`, `oneOf`, `allOf`. */
+const SCHEMA_COMPOSITION_COMBINERS = ["allOf", "anyOf", "oneOf"] as const;
+type SchemaCombiner = (typeof SCHEMA_COMPOSITION_COMBINERS)[number];
 
 /**
  * Keywords whose value is a single subschema (draft 2020-12). A bare `true` /
@@ -98,7 +104,7 @@ const SUBSCHEMA_VALUE_KEYS: Record<string, true> = {
 	unevaluatedItems: true,
 	not: true,
 	if: true,
-	// biome-ignore lint/suspicious/noThenProperty: JSON Schema keyword
+	// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema keyword
 	then: true,
 	else: true,
 	contains: true,
@@ -288,6 +294,51 @@ function preHandleNullFields(obj: JsonObject): JsonObject {
 	return out;
 }
 
+/**
+ * Rewrites a multi-type `type` array (`["string", "array"]`) as one `anyOf`
+ * branch per non-null type, each carrying only the keywords that constrain its
+ * type. Collapsing to the first type instead narrows what the tool accepts and
+ * strands the other types' keywords: Gemini rejects `items` beside
+ * `type: "string"` with HTTP 400. A `null` member becomes `nullable: true`, as
+ * in the scalar collapse. Returns `obj` itself when it has fewer than two
+ * non-null types or already carries `anyOf`.
+ */
+function splitTypeArrayIntoAnyOf(obj: JsonObject): JsonObject {
+	if (!Array.isArray(obj.type) || Array.isArray(obj.anyOf)) return obj;
+	const types: string[] = [];
+	for (const type of obj.type) {
+		if (typeof type === "string" && type !== "null" && !types.includes(type)) types.push(type);
+	}
+	if (types.length < 2) return obj;
+	const branches = types.map(type => {
+		const schema: JsonObject = { type };
+		return { schema, keys: CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[type] ?? {} };
+	});
+	const out: JsonObject = {};
+	for (const key in obj) {
+		if (!Object.hasOwn(obj, key) || key === "type") continue;
+		const value = obj[key];
+		if (!Object.hasOwn(ALL_CCA_TYPE_SPECIFIC_KEYS, key)) {
+			out[key] = value;
+			continue;
+		}
+		for (const branch of branches) {
+			if (Object.hasOwn(branch.keys, key)) branch.schema[key] = value;
+		}
+	}
+	if (obj.type.includes("null")) out.nullable = true;
+	out.anyOf = branches.map(branch => branch.schema);
+	return out;
+}
+
+/** Deletes keywords that constrain a JSON type other than `type`, e.g. `items` on a string node. */
+function dropForeignTypeKeywords(schema: JsonObject, type: string): void {
+	const allowed = CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[type] ?? {};
+	for (const key in schema) {
+		if (Object.hasOwn(ALL_CCA_TYPE_SPECIFIC_KEYS, key) && !Object.hasOwn(allowed, key)) delete schema[key];
+	}
+}
+
 function outHasOwn(obj: JsonObject, key: string): boolean {
 	return Object.hasOwn(obj, key);
 }
@@ -373,6 +424,9 @@ function normalizeSchemaNode(value: unknown, options: NormalizeSchemaWalkOptions
 
 function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWalkOptions): unknown {
 	let obj = options.normalizeFieldNames && !options.insideSchemaMap ? applySnakeCaseRenames(value) : value;
+	if (options.scalarizeTypeArrays && !options.insideSchemaMap) {
+		obj = splitTypeArrayIntoAnyOf(obj);
+	}
 	if (options.collapseNullFields && !options.insideSchemaMap) {
 		obj = preHandleNullFields(obj);
 	}
@@ -477,13 +531,14 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			: entry;
 	}
 
-	if (options.normalizeTypeArrayToNullable && Array.isArray(result.type)) {
+	if (options.scalarizeTypeArrays && Array.isArray(result.type)) {
 		const types = (result.type as unknown[]).filter((t): t is string => typeof t === "string");
 		const nonNull = types.filter(t => t !== "null");
 		if (types.includes("null") && !options.stripNullableKeyword) {
 			result.nullable = true;
 		}
 		result.type = nonNull[0] ?? types[0];
+		if (typeof result.type === "string") dropForeignTypeKeywords(result, result.type);
 	}
 	if (constValue !== undefined) {
 		const existingEnum = Array.isArray(result.enum) ? result.enum : [];
@@ -578,7 +633,7 @@ export function copySchemaWithout(schema: JsonObject, combiner: string): JsonObj
 	return rest;
 }
 
-function mergeObjectCombinerVariants(schema: JsonObject, combiner: "anyOf" | "oneOf"): JsonObject {
+function mergeObjectCombinerVariants(schema: JsonObject, combiner: SchemaCombiner): JsonObject {
 	const variantsRaw = schema[combiner];
 	if (!Array.isArray(variantsRaw) || variantsRaw.length === 0) {
 		return schema;
@@ -630,23 +685,37 @@ function mergeObjectCombinerVariants(schema: JsonObject, combiner: "anyOf" | "on
 	nextSchema.type = "object";
 	nextSchema.properties = mergedProperties;
 
-	let requiredIntersection: string[] | undefined;
-	for (const variant of variants) {
-		const variantRequired = Array.isArray(variant.required)
-			? variant.required.filter((r): r is string => typeof r === "string")
-			: [];
-		if (requiredIntersection === undefined) {
-			requiredIntersection = [...variantRequired];
-		} else {
-			const reqSet = new Set(variantRequired);
-			requiredIntersection = requiredIntersection.filter(r => reqSet.has(r));
+	const branchRequired = variants.map(variant =>
+		Array.isArray(variant.required) ? variant.required.filter((r): r is string => typeof r === "string") : [],
+	);
+	let combinedRequired: string[];
+	if (combiner === "allOf") {
+		// allOf demands every branch, so the canonical `required` is the union of
+		// branch requirements — carrying that union does not narrow acceptance.
+		const union = new Set<string>();
+		for (const required of branchRequired) {
+			for (const name of required) union.add(name);
 		}
+		combinedRequired = [...union];
+	} else {
+		// anyOf/oneOf accept any single branch, so only fields every branch
+		// requires stay required in the widened projection.
+		let intersection: string[] | undefined;
+		for (const required of branchRequired) {
+			if (intersection === undefined) {
+				intersection = [...required];
+			} else {
+				const reqSet = new Set(required);
+				intersection = intersection.filter(r => reqSet.has(r));
+			}
+		}
+		combinedRequired = intersection ?? [];
 	}
 	const parentRequired = Array.isArray(schema.required)
 		? schema.required.filter((r): r is string => typeof r === "string")
 		: [];
 	const safeRequired = new Set<string>();
-	for (const name of requiredIntersection ?? []) {
+	for (const name of combinedRequired) {
 		if (Object.hasOwn(mergedProperties, name)) safeRequired.add(name);
 	}
 	for (const name of parentRequired) {
@@ -722,20 +791,8 @@ function collapseMixedTypeCombinerVariants(schema: JsonObject, combiner: "anyOf"
 	const chosenType: string = nonNullTypes[0] ?? variantTypes[0];
 	nextSchema.type = chosenType;
 	const chosenTypeAllowedKeys = CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS[chosenType] ?? {};
-
-	// Strip sibling keys that were copied from the parent and belong to a
-	// different type (e.g. `items` sibling on a now-string-typed schema).
-	for (const key in nextSchema) {
-		if (!Object.hasOwn(nextSchema, key)) continue;
-		if (key === "type") continue;
-		if (
-			Object.hasOwn(ALL_CCA_TYPE_SPECIFIC_KEYS, key) &&
-			!Object.hasOwn(chosenTypeAllowedKeys, key) &&
-			!Object.hasOwn(CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS, key)
-		) {
-			delete nextSchema[key];
-		}
-	}
+	// Sibling keys copied from the parent may belong to a different type.
+	dropForeignTypeKeywords(nextSchema, chosenType);
 
 	for (const key in mergedVariantFields) {
 		if (!Object.hasOwn(mergedVariantFields, key)) continue;
@@ -1051,7 +1108,7 @@ function hasResidualSchemaIncompatibilities(
 		if (checks.nullable && Object.hasOwn(value, "nullable")) return true;
 		if (checks.not && Object.hasOwn(value, "not")) return true;
 		if (checks.combiners) {
-			for (const combiner of CCA_FORBIDDEN_COMBINERS) {
+			for (const combiner of SCHEMA_COMPOSITION_COMBINERS) {
 				if (Array.isArray(value[combiner])) return true;
 			}
 		}
@@ -1065,6 +1122,147 @@ function hasResidualSchemaIncompatibilities(
 		}
 	}
 	return false;
+}
+
+/**
+ * True when a JSON Schema subtree carries any composition keyword (`anyOf`,
+ * `oneOf`, `allOf`) in a schema position. Property *names* that happen to equal
+ * a combiner keyword (living under `properties`/`patternProperties`) are not
+ * combiners and do not count.
+ */
+function containsSchemaCombiner(value: unknown, insideSchemaMap: boolean, epoch: number): boolean {
+	if (Array.isArray(value)) {
+		if (!once(value, epoch)) return false;
+		return value.some(entry => containsSchemaCombiner(entry, false, epoch));
+	}
+	if (!isJsonObject(value)) return false;
+	if (!once(value, epoch)) return false;
+	if (!insideSchemaMap) {
+		for (const combiner of SCHEMA_COMPOSITION_COMBINERS) {
+			if (Array.isArray(value[combiner])) return true;
+		}
+	}
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		const childKind = classifySchemaChild(key, value[key], insideSchemaMap);
+		if (childKind && containsSchemaCombiner(value[key], childKind === "map", epoch)) return true;
+	}
+	return false;
+}
+
+/**
+ * Fold every composition keyword out of one already child-projected node while
+ * only ever widening acceptance. Object-shaped `anyOf`/`oneOf`/`allOf` branches
+ * merge into the node's own `properties` via {@link mergeObjectCombinerVariants}
+ * (union properties, combiner-appropriate `required`); any combiner whose
+ * branches are not all object-shaped — scalar unions especially — is dropped so
+ * the node widens to accept-all rather than narrowing to one branch. Merging can
+ * itself synthesize a fresh `anyOf` inside a shared property (see
+ * {@link mergePropertySchemas}), so property values are re-projected until the
+ * node is combiner-free.
+ */
+function projectNodeCombinersForCursor(node: JsonObject): JsonObject {
+	let current = node;
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const combiner of SCHEMA_COMPOSITION_COMBINERS) {
+			if (!Array.isArray(current[combiner])) continue;
+			const source = current;
+			const merged = mergeObjectCombinerVariants(current, combiner);
+			if (merged !== current) {
+				current = merged;
+				const properties = current.properties;
+				if (isJsonObject(properties)) {
+					if (combiner !== "allOf") {
+						const sourceProperties = isJsonObject(source.properties) ? source.properties : {};
+						const sourceVariants = source[combiner] as JsonObject[];
+						for (const name in properties) {
+							if (!Object.hasOwn(properties, name)) continue;
+							if (Object.hasOwn(sourceProperties, name)) {
+								properties[name] = sourceProperties[name];
+								continue;
+							}
+							let widenedProperty: unknown;
+							for (const variant of sourceVariants) {
+								const variantProperties = isJsonObject(variant.properties) ? variant.properties : {};
+								let constraint: unknown;
+								if (Object.hasOwn(variantProperties, name)) {
+									constraint = variantProperties[name];
+								} else if (variant.additionalProperties === false) {
+									continue;
+								} else if (isJsonObject(variant.additionalProperties)) {
+									constraint = variant.additionalProperties;
+								} else {
+									constraint = {};
+								}
+								widenedProperty =
+									widenedProperty === undefined
+										? constraint
+										: mergePropertySchemas(widenedProperty, constraint);
+							}
+							properties[name] = widenedProperty ?? {};
+						}
+					}
+					for (const name in properties) {
+						if (Object.hasOwn(properties, name)) {
+							properties[name] = projectSchemaForCursor(properties[name], false);
+						}
+					}
+				}
+			} else {
+				current = copySchemaWithout(current, combiner);
+			}
+			changed = true;
+		}
+	}
+	return current;
+}
+
+function projectSchemaForCursor(value: unknown, insideSchemaMap: boolean): unknown {
+	if (Array.isArray(value)) {
+		if (!enter(value)) return [];
+		try {
+			return value.map(entry => projectSchemaForCursor(entry, false));
+		} finally {
+			exit(value);
+		}
+	}
+	if (!isJsonObject(value)) return value;
+	if (!enter(value)) return {};
+	try {
+		const result: JsonObject = {};
+		for (const key in value) {
+			if (!Object.hasOwn(value, key)) continue;
+			const entry = value[key];
+			// A `not` subschema is a negative constraint: widening its contents
+			// would make the negation reject a superset of the canonical schema.
+			// Cursor cannot carry the combiner, and no faithful widening exists, so
+			// drop the whole negation — always sound, since removing a restriction
+			// only broadens acceptance (fixes the `not: {}` inversion, issue #10432).
+			if (!insideSchemaMap && key === "not" && containsSchemaCombiner(entry, false, epochNext())) {
+				continue;
+			}
+			const childKind = classifySchemaChild(key, entry, insideSchemaMap);
+			result[key] = childKind ? projectSchemaForCursor(entry, childKind === "map") : entry;
+		}
+		return insideSchemaMap ? result : projectNodeCombinersForCursor(result);
+	} finally {
+		exit(value);
+	}
+}
+
+/**
+ * Project a tool's wire schema onto the subset Cursor's MCP tool catalog
+ * accepts. Cursor rejects the entire request with a provider 400 when any
+ * advertised schema carries a composition keyword (issue #10432); this removes
+ * `anyOf`/`oneOf`/`allOf` everywhere while preserving representable guidance and
+ * only ever widening acceptance, so every input the canonical schema accepts is
+ * still accepted by the advertised projection. The canonical schema (used for
+ * execution-time argument validation) is never mutated.
+ */
+export function sanitizeSchemaForCursor(schema: JsonObject): JsonObject {
+	return projectSchemaForCursor(dereferenceJsonSchema(schema), false) as JsonObject;
 }
 
 export function normalizeSchema(value: unknown, options: NormalizeSchemaOptions): unknown {
@@ -1099,7 +1297,7 @@ export function normalizeSchemaForGoogle(value: unknown): unknown {
 		unsupportedFields: isGoogleUnsupportedSchemaField,
 		normalizeFieldNames: true,
 		collapseNullFields: true,
-		normalizeTypeArrayToNullable: true,
+		scalarizeTypeArrays: true,
 		stripNullableKeyword: false,
 		autoPropertyOrdering: true,
 		ensureObjectProperties: true,
@@ -1122,7 +1320,7 @@ export function normalizeSchemaForCCA(value: unknown): unknown {
 		unsupportedFields: isGoogleUnsupportedSchemaField,
 		normalizeFieldNames: true,
 		collapseNullFields: false,
-		normalizeTypeArrayToNullable: true,
+		scalarizeTypeArrays: true,
 		stripNullableKeyword: true,
 		autoPropertyOrdering: false,
 		ensureObjectProperties: true,
@@ -1145,7 +1343,7 @@ export function normalizeSchemaForMCP(value: unknown): unknown {
 		unsupportedFields: isMcpUnsupportedSchemaField,
 		normalizeFieldNames: false,
 		collapseNullFields: false,
-		normalizeTypeArrayToNullable: false,
+		scalarizeTypeArrays: false,
 		foldOneOfIntoAnyOf: false,
 		stripNullableKeyword: true,
 		autoPropertyOrdering: false,
@@ -1173,8 +1371,9 @@ export function normalizeSchemaForMCP(value: unknown): unknown {
  *    rejected; collapse to `enum` with an inferred scalar `type`.
  *  - `oneOf` is not an MFJS combinator (only `anyOf` is); residual `oneOf` is
  *    folded into `anyOf`.
- *  - `type` must be a scalar string; `type: [...]` arrays are reduced to a
- *    single scalar (the `null` branch is dropped — `nullable` is unsupported).
+ *  - `type` must be a scalar string; `["T", "null"]` reduces to `T` (the
+ *    `null` member is dropped — `nullable` is unsupported) and a multi-type
+ *    array becomes one typed `anyOf` branch per type.
  *  - Enum-bearing nodes get an inferred `type` (the idiomatic MFJS form; a bare
  *    `enum` is valid too) so `anyOf` branches always carry a `type`.
  *  - Validation/decorative keywords (`minItems`, `maxItems`, `maxLength`,
@@ -1197,7 +1396,7 @@ export function normalizeSchemaForMoonshot(value: unknown): unknown {
 		unsupportedFields: isMoonshotUnsupportedSchemaField,
 		normalizeFieldNames: false,
 		collapseNullFields: false,
-		normalizeTypeArrayToNullable: true,
+		scalarizeTypeArrays: true,
 		stripNullableKeyword: true,
 		autoPropertyOrdering: false,
 		ensureObjectProperties: false,
@@ -1350,7 +1549,7 @@ const GRAMMAR_SCHEMA_VALUE_KEYS: Record<string, true> = {
 	contentSchema: true,
 	propertyNames: true,
 	if: true,
-	// biome-ignore lint/suspicious/noThenProperty: JSON Schema keyword
+	// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema keyword
 	then: true,
 	else: true,
 	not: true,
@@ -1720,12 +1919,12 @@ function inferStrictPrimitiveTypeFromEnumOrConst(node: Record<string, unknown>):
 }
 
 /**
- * Per-schema-object memoization slot. The result of `tryEnforceStrictSchema`
- * is stamped directly onto the input via `stamp(target, kStrictSchema, …)`
- * so repeated calls (different providers, retries, batching) reuse the same
+ * Per-schema-object memoization key. The result of `tryEnforceStrictSchema`
+ * is memoized against the input via `stamp(target, kStrictSchema, …)` so
+ * repeated calls (different providers, retries, batching) reuse the same
  * computed pair without re-walking the tree.
  */
-const kStrictSchema = Symbol("pi.schema.strict");
+const kStrictSchema = Symbol("omp.schema.strict");
 
 /**
  * A boolean schema (`true`/`false`) or the empty object schema `{}`: an

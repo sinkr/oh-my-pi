@@ -11,9 +11,9 @@
 //! # Contract
 //! - [`PlaybackDevice::start`] opens the default speaker and invokes `fill`
 //!   with a mono `f32` buffer roughly every [`DeviceConfig::period_ms`]. The
-//!   callback runs on a backend-owned audio thread and must not block. Backends
-//!   keep at most three periods queued OS-side; the engine's drain accounting
-//!   (`PLAYBACK_DRAIN_CALLBACKS`) depends on that bound.
+//!   callback runs on a backend-owned audio thread and must not block. Queue
+//!   depth varies by backend and stream config; [`playback_drain_periods`]
+//!   reports the bound used by the engine's drain accounting.
 //! - [`CaptureDevice::start`] opens the default microphone and invokes `sink`
 //!   with non-empty mono `f32` chunks at the requested sample rate, also from a
 //!   backend-owned thread.
@@ -71,13 +71,13 @@ impl DeviceConfig {
 
 /// Running default-speaker playback stream driven by a fill callback.
 pub struct PlaybackDevice {
-	inner: imp::PlaybackDevice,
+	inner: imp::Device,
 }
 
 impl PlaybackDevice {
 	/// Open and start the default speaker; `fill` runs on the audio thread.
 	pub fn start(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
-		Ok(Self { inner: imp::PlaybackDevice::start(config, fill)? })
+		Ok(Self { inner: imp::Device::start_playback(config, fill)? })
 	}
 
 	/// Stop playback and release the device. Idempotent; no callback runs
@@ -87,15 +87,32 @@ impl PlaybackDevice {
 	}
 }
 
+/// Periods of audio a backend may hold queued OS-side for a playback stream
+/// opened with this config, before a fill callback observing no new data
+/// can be trusted as genuine drain rather than an in-flight refill. Fixed
+/// at three for backends with a hardware/API-enforced queue depth
+/// (`CoreAudio` `AudioQueue` buffer count, WASAPI padding cap); `PulseAudio`
+/// scales this with the widened remote/`PULSE_LATENCY_MSEC` backlog before
+/// the stream even opens (see `linux::playback_drain_periods`).
+#[cfg(target_os = "linux")]
+pub fn playback_drain_periods(config: DeviceConfig) -> u32 {
+	imp::playback_drain_periods(config)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub const fn playback_drain_periods(_config: DeviceConfig) -> u32 {
+	3
+}
+
 /// Running default-microphone capture stream driven by a sink callback.
 pub struct CaptureDevice {
-	inner: imp::CaptureDevice,
+	inner: imp::Device,
 }
 
 impl CaptureDevice {
 	/// Open and start the default microphone; `sink` runs on the audio thread.
 	pub fn start(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
-		Ok(Self { inner: imp::CaptureDevice::start(config, sink)? })
+		Ok(Self { inner: imp::Device::start_capture(config, sink)? })
 	}
 
 	/// Stop capture and release the device. Idempotent; no callback runs

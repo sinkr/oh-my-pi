@@ -1,6 +1,6 @@
 import { decodeJwt } from "@oh-my-pi/pi-ai/registry/oauth/openai-codex";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { AuthStorage } from "../session/auth-storage";
-import * as git from "../utils/git";
 import { resolveExactSecurityOAuthAccess } from "./auth";
 import {
 	createSecurityEvidenceId,
@@ -203,6 +203,7 @@ export class CodexSecurityCloudClient {
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			const access = await resolveExactSecurityOAuthAccess(this.#authStorage, this.#account, {
 				forceRefresh: attempt > 0,
+				refreshReason: attempt > 0 ? "auth-recovery" : undefined,
 				signal: options.signal,
 			});
 			const body = typeof options.body === "function" ? options.body(access.accessToken) : options.body;
@@ -581,7 +582,8 @@ async function assertCloudRepositoryMatchesStore(
 	store: SecurityStore,
 	signal?: AbortSignal,
 ): Promise<void> {
-	const origin = await git.remote.url(store.repositoryRoot, "origin", signal);
+	const repo = vcs.git(store.repositoryRoot);
+	const origin = repo ? await repo.remoteUrl("origin", signal).catch(() => null) : null;
 	if (!origin) {
 		throw new Error(
 			"Codex Security cloud import requires a verifiable repository identity; this project has no 'origin' remote",
