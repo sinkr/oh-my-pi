@@ -34,6 +34,7 @@
 - Fixed a macOS background AX action that reports an error yet brings its app forward, such as `AXOpen` on a file in Chrome's Open panel, leaving that app in front of the user's for good; the focus guard now keeps watching after a failed action and sends the app back ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the macOS background focus guard able to put the user's app back in front just after they clicked the agent's target app themselves, when the click came between the guard's last check and its hand-back; macOS now refuses the hand-back if any key or click came after that check ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the user's typing landing in the macOS app a background action targets when that app brings itself to the front while they type; a click, ⌘/⌥/⌃ chord or Spotlight just before still counts as switching there on purpose
+- Fixed the user's typing landing in the macOS app a background action targets when that app brings itself to the front while they type
 - Fixed macOS background input sending the user back to their previous app after they opened the target app from Spotlight during the action
 
 ## [18.12.1] - 2026-10-17
