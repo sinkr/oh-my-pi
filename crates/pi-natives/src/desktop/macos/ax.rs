@@ -24,7 +24,7 @@ use objc2_core_foundation::{
 use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
-		backend::AxBackend,
+		backend::{AxBackend, is_raise_action},
 		control,
 		error::{CoreResult, DesktopError},
 		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
@@ -708,7 +708,7 @@ impl AxBackend for MacAx {
 		}
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
-		if native == "AXRaise" {
+		if is_raise_action(action) {
 			return element_action_result(&native, send_action(element, &native));
 		}
 		let pid = element_pid(element)?;
@@ -1767,9 +1767,9 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, CHILDREN, DESCRIPTION, ENABLED, NodeRead, NodeValues, ROLE, TITLE,
-		TextField, VALUE, ax_result, element_action_result, may_borrow_focus,
-		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
-		select_attached, stringify_value, text_readback,
+		TextField, VALUE, action_name, ax_result, element_action_result, is_raise_action,
+		may_borrow_focus, replace_utf16_selection, replace_whole_value, required_string,
+		secure_subrole, select_attached, stringify_value, text_readback,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -1928,6 +1928,15 @@ mod tests {
 		assert_eq!(code(AXError::InvalidUIElement), ErrorCode::StaleRef);
 		assert_eq!(code(AXError::ActionUnsupported), ErrorCode::AxFailed);
 		assert!(element_action_result("AXPress", AXError::Success).is_ok());
+	}
+
+	#[test]
+	fn the_escape_stop_arms_for_exactly_the_actions_that_run_as_axraise() {
+		for action in
+			["raise", " Raise ", "RAISE", "AXRaise", "axraise", "AXRAISE", "Raise", "press", "AXPress"]
+		{
+			assert_eq!(is_raise_action(action), action_name(action) == "AXRaise", "{action:?}");
+		}
 	}
 
 	#[test]
