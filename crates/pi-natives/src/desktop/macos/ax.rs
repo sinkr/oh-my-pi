@@ -1,5 +1,6 @@
 mod enablement;
 pub(crate) mod menus;
+pub(super) mod open_menu;
 mod popup;
 mod selection;
 
@@ -30,7 +31,7 @@ use super::{
 		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
 		types::{AxTextSelection, DesktopWindow},
 	},
-	date, permission, process, skylight,
+	capture, date, input, permission, process, skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -1002,6 +1003,9 @@ impl AxBackend for MacAx {
 
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
 		let element = mac_handle(h)?;
+		// Read before any probe of the target, as for background input
+		// ([`input::EntryFront`]).
+		let entry_front = input::EntryFront::now();
 		let native = action_name(action);
 		let actions = copy_strings_from_action_names(element)?;
 		if !actions.contains(&native) {
@@ -1017,8 +1021,29 @@ impl AxBackend for MacAx {
 		}
 		let pid = element_pid(element)?;
 		let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
-		skylight::with_background_guard(pid, || {
-			press_into_view(&native, scroll_first, |action| send_action(element, action))
+		let perform =
+			|| press_into_view(&native, scroll_first, |action| send_action(element, action));
+		// A menu that a background application opens takes the keyboard from
+		// the user's app, so it is closed before the action returns; a
+		// frontmost application's menu stays open for the next call.
+		let watch =
+			entry_front.behind(pid) && open_menu::may_open(&native, || copy_string(element, "AXRole"));
+		skylight::with_background_watch(pid, |visit| {
+			let before = if watch {
+				let before = capture::menu_windows(pid).ok_or_else(|| {
+					DesktopError::ax_failed(format!(
+						"cannot list the open menus of process {pid}, so a menu that {native} opens \
+						 could not be closed; nothing was performed"
+					))
+				})?;
+				activate_for_menu(element, pid, entry_front, visit)?;
+				Some(before)
+			} else {
+				None
+			};
+			open_menu::guard(open_menu::Press::Action(&native), before.as_deref(), perform, |before| {
+				open_menu::settle(pid, before, open_menu::CONTROL_MENU_TIMEOUT)
+			})
 		})
 	}
 
@@ -1241,6 +1266,43 @@ fn answered<T>(read: &Result<Option<T>, AXError>) -> bool {
 		.as_ref()
 		.err()
 		.is_none_or(|error| *error == AXError::NoValue || *error == AXError::AttributeUnsupported)
+}
+
+/// Makes the window holding `element` key within its background
+/// application, as a background click does, before an action that opens a
+/// menu: `AppKit` validates a menu's items when it opens, and an inactive
+/// Finder read every Action-menu command but three as disabled. An element
+/// whose window cannot be resolved is acted on as it is.
+fn activate_for_menu(
+	element: &AXUIElement,
+	pid: libc::pid_t,
+	entry_front: input::EntryFront,
+	visit: skylight::TargetVisit<'_>,
+) -> CoreResult<()> {
+	let Some(wid) = element_window(element).as_deref().and_then(window_id) else {
+		return Ok(());
+	};
+	let Ok(window) = capture::window_by_id(&wid.to_string()) else {
+		return Ok(());
+	};
+	let prepared = input::make_key_in_background(
+		&input::source()?,
+		pid,
+		wid,
+		&window,
+		entry_front,
+		false,
+		visit,
+	)?;
+	input::await_key_window(pid, wid)?;
+	input::recheck_background(
+		prepared,
+		pid,
+		wid,
+		skylight::front_pid,
+		|| visit.happened(),
+		|| Ok(()),
+	)
 }
 
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
