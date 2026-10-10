@@ -1,6 +1,7 @@
 mod enablement;
 pub(crate) mod menus;
 mod popup;
+mod selection;
 
 use std::{
 	collections::VecDeque,
@@ -26,7 +27,8 @@ use super::{
 		backend::AxBackend,
 		control,
 		error::{CoreResult, DesktopError},
-		types::DesktopWindow,
+		text_range::{TextSelectRequest, Utf16Range, utf16_slice},
+		types::{AxTextSelection, DesktopWindow},
 	},
 	date, permission, process, skylight,
 };
@@ -767,6 +769,14 @@ impl AxBackend for MacAx {
 		})
 	}
 
+	fn select_text(
+		&mut self,
+		h: &AxHandle,
+		request: &TextSelectRequest,
+	) -> CoreResult<AxTextSelection> {
+		selection::select(mac_handle(h)?, request)
+	}
+
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>> {
 		ensure_trusted()?;
 		if !x.is_finite()
@@ -1132,17 +1142,9 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	let Some(before) = copy_string(&element, "AXValue") else {
 		return Ok(false);
 	};
-	let Some(selection) = copy_attribute(&element, "AXSelectedTextRange")
-		.and_then(|value| value.downcast::<AXValue>().ok())
-	else {
+	let Some(range) = copy_range(&element, "AXSelectedTextRange") else {
 		return Ok(false);
 	};
-	let mut range = CFRange { location: 0, length: 0 };
-	// SAFETY: The output is a live CFRange and the AXValue accessor validates
-	// the requested type before writing it.
-	if !unsafe { selection.value(AXValueType::CFRange, NonNull::from(&mut range).cast()) } {
-		return Ok(false);
-	}
 	let Some(expected) = replace_utf16_selection(&before, range.location, range.length, text) else {
 		return Ok(false);
 	};
@@ -1540,6 +1542,16 @@ fn copy_bool(element: &AXUIElement, attribute: &str) -> Option<bool> {
 		.downcast::<CFBoolean>()
 		.ok()
 		.map(|value| value.as_bool())
+}
+
+fn copy_range(element: &AXUIElement, attribute: &str) -> Option<CFRange> {
+	let value = copy_attribute(element, attribute)?
+		.downcast::<AXValue>()
+		.ok()?;
+	let mut range = CFRange { location: 0, length: 0 };
+	// SAFETY: The output is a live CFRange and the AXValue accessor validates
+	// the requested type before writing it.
+	unsafe { value.value(AXValueType::CFRange, NonNull::from(&mut range).cast()) }.then_some(range)
 }
 
 fn copy_element(element: &AXUIElement, attribute: &str) -> Option<CFRetained<AXUIElement>> {

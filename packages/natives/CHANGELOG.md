@@ -17,6 +17,10 @@
 
 - Fixed native memory growing without bound, and eventually crashing the process, when files in a downloaded (WASM) grammar language such as C# were parsed repeatedly ([#16067](https://github.com/can1357/oh-my-pi/issues/16067))
 
+### Added
+
+- Added `DesktopSession.axSelectText` (macOS) to select text in an accessibility element's value by UTF-16 range, refusing missing or ambiguous matches and returning the selection read back
+
 ## [18.12.0] - 2026-10-17
 
 ### Breaking Changes
