@@ -2,6 +2,7 @@ mod ax;
 mod capture;
 mod date;
 mod input;
+pub(super) mod permission;
 mod process;
 mod session;
 mod skylight;
@@ -44,9 +45,7 @@ impl MacosBackend {
 		if ax::is_trusted() {
 			Ok(())
 		} else {
-			Err(DesktopError::permission_denied(
-				"macOS Accessibility permission is required for native input",
-			))
+			Err(permission::denied("Accessibility"))
 		}
 	}
 }
@@ -76,9 +75,9 @@ impl Backend for MacosBackend {
 			menus: input_permission,
 			held_input: input_permission,
 			spaces: spaces::supported(),
-			global_escape: true,
+			global_escape: permission::listen_events(),
 			capture_permission: permission_label(capture_permission),
-			input_permission: permission_label(input_permission),
+			input_permission: permission_label(permission::post_events()),
 			ax_permission: permission_label(input_permission),
 			display_count,
 			screen_locked: screen.locked,
