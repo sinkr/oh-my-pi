@@ -1419,14 +1419,13 @@ fn text_surface(element: &AXUIElement) -> TextSurface {
 fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
 	if process::is_terminal(element_pid(element)?) {
 		return Err(DesktopError::ax_failed(
-			"terminal AX text represents its rendered grid, not terminal input; use win.type or \
-			 takeover:true instead",
+			"terminal AX text represents its rendered grid, not terminal input; use win.type instead",
 		));
 	}
 	if text_surface(element) != TextSurface::Native {
 		return Err(DesktopError::ax_failed(
 			"AX text writes cannot be verified in web content or an incomplete AX ancestry; use a \
-			 pixel click followed by win.type, or takeover:true input instead",
+			 pixel click followed by win.type instead",
 		));
 	}
 	Ok(())

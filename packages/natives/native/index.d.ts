@@ -2288,6 +2288,11 @@ export interface HoldOptions {
   button?: string
   keys?: Array<string>
   takeover?: boolean
+  /**
+   * With `takeover`, hand focus back to the user's app even after their
+   * input during the hold; see `PointerOptions.returnFocus`.
+   */
+  returnFocus?: boolean
 }
 
 /**
@@ -2889,6 +2894,12 @@ export interface PointerOptions {
    * default background delivery.
    */
   takeover?: boolean
+  /**
+   * With `takeover`, hand focus back to the user's app even if they typed
+   * or clicked during the action; only a third app they switched to keeps
+   * it. The host sets this when it reruns a refused background action.
+   */
+  returnFocus?: boolean
   /**
    * Item path to choose in the menu a click opens, matched like a menu-bar
    * path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the

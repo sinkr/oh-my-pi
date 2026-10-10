@@ -224,7 +224,7 @@ enum Request {
 		target:   Target,
 		keys:     Vec<keys::KeyName>,
 		duration: Duration,
-		takeover: Option<bool>,
+		takeover: Takeover,
 		reply:    Reply,
 	},
 	HoldMouse {
@@ -234,7 +234,7 @@ enum Request {
 		button:   MouseButton,
 		keys:     Vec<keys::KeyName>,
 		duration: Duration,
-		takeover: Option<bool>,
+		takeover: Takeover,
 		reply:    Reply,
 	},
 	Click {
@@ -248,7 +248,7 @@ enum Request {
 		target:   Target,
 		x:        f64,
 		y:        f64,
-		takeover: Option<bool>,
+		takeover: Takeover,
 		reply:    Reply,
 	},
 	Drag {
@@ -263,19 +263,19 @@ enum Request {
 		y:        f64,
 		dx:       f64,
 		dy:       f64,
-		takeover: Option<bool>,
+		takeover: Takeover,
 		reply:    Reply,
 	},
 	TypeText {
 		target:   Target,
 		text:     String,
-		takeover: Option<bool>,
+		takeover: Takeover,
 		reply:    Reply,
 	},
 	KeyChord {
 		target:   Target,
 		keys:     Vec<keys::KeyName>,
-		takeover: Option<bool>,
+		takeover: Takeover,
 		reply:    Reply,
 	},
 	RaiseWindow {
@@ -478,7 +478,7 @@ struct ParsedPointerOptions {
 	count:     u32,
 	modifiers: backend::Modifiers,
 	keys:      Vec<keys::KeyName>,
-	takeover:  Option<bool>,
+	takeover:  Takeover,
 	menu:      Option<Vec<String>>,
 }
 impl ParsedPointerOptions {
@@ -492,13 +492,13 @@ impl ParsedPointerOptions {
 			count:     options.count.unwrap_or(1).max(1),
 			modifiers: parse_modifiers(options.modifiers.as_deref().unwrap_or_default())?,
 			keys:      parse_keys(options.keys.as_deref().unwrap_or_default())?,
-			takeover:  options.takeover,
+			takeover:  Takeover::new(options.takeover, options.return_focus),
 			menu:      options.menu,
 		})
 	}
 
 	const fn mode(&self) -> DeliveryMode {
-		DeliveryMode::from_takeover(self.takeover)
+		self.takeover.mode()
 	}
 
 	/// Sends the click `event`, choosing [`Self::menu`] in the menu it opens
@@ -515,6 +515,23 @@ impl ParsedPointerOptions {
 			Some(path) => backend.pointer_menu(target, event, path, frame, self.mode(), token),
 			None => backend.pointer(target, event, frame, self.mode(), token),
 		}
+	}
+}
+
+/// The `takeover` and `returnFocus` options of one input request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Takeover {
+	requested:    Option<bool>,
+	return_focus: bool,
+}
+
+impl Takeover {
+	const fn new(requested: Option<bool>, return_focus: Option<bool>) -> Self {
+		Self { requested, return_focus: matches!(return_focus, Some(true)) }
+	}
+
+	const fn mode(self) -> DeliveryMode {
+		DeliveryMode::from_takeover(self.requested).returning_focus(self.return_focus)
 	}
 }
 
@@ -962,13 +979,9 @@ impl Worker {
 			},
 			Request::HoldKeys { target, keys, duration, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
-				self.backend()?.hold_keys(
-					target,
-					keys,
-					*duration,
-					DeliveryMode::from_takeover(*takeover),
-					token,
-				)?;
+				self
+					.backend()?
+					.hold_keys(target, keys, *duration, takeover.mode(), token)?;
 				Ok(Response::Unit)
 			},
 			Request::HoldMouse { target, x, y, button, keys, duration, takeover, .. } => {
@@ -986,7 +999,7 @@ impl Worker {
 						duration: *duration,
 					},
 					&frame,
-					DeliveryMode::from_takeover(*takeover),
+					takeover.mode(),
 					token,
 				)?;
 				Ok(Response::Unit)
@@ -1061,7 +1074,7 @@ impl Worker {
 					target,
 					PointerEvent::Move { x, y },
 					&frame,
-					DeliveryMode::from_takeover(*takeover),
+					takeover.mode(),
 					token,
 				)?;
 				Ok(Response::Unit)
@@ -1095,29 +1108,23 @@ impl Worker {
 					target,
 					PointerEvent::Scroll { x, y, dx: *dx, dy: *dy },
 					&frame,
-					DeliveryMode::from_takeover(*takeover),
+					takeover.mode(),
 					token,
 				)?;
 				Ok(Response::Unit)
 			},
 			Request::TypeText { target, text, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
-				self.backend()?.type_text(
-					target,
-					text,
-					DeliveryMode::from_takeover(*takeover),
-					token,
-				)?;
+				self
+					.backend()?
+					.type_text(target, text, takeover.mode(), token)?;
 				Ok(Response::Unit)
 			},
 			Request::KeyChord { target, keys, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
-				self.backend()?.key_chord(
-					target,
-					keys,
-					DeliveryMode::from_takeover(*takeover),
-					token,
-				)?;
+				self
+					.backend()?
+					.key_chord(target, keys, takeover.mode(), token)?;
 				Ok(Response::Unit)
 			},
 			Request::RaiseWindow { id, .. } => {
@@ -1655,7 +1662,7 @@ impl DesktopSession {
 			target: Target::parse(&target),
 			keys,
 			duration,
-			takeover: options.takeover,
+			takeover: Takeover::new(options.takeover, options.return_focus),
 			reply,
 		}))
 	}
@@ -1679,7 +1686,7 @@ impl DesktopSession {
 			button,
 			keys,
 			duration,
-			takeover: options.takeover,
+			takeover: Takeover::new(options.takeover, options.return_focus),
 			reply,
 		}))
 	}
@@ -3740,17 +3747,23 @@ mod capture_tests {
 		assert_eq!(hold_duration(0.0).unwrap(), Duration::ZERO);
 		assert_eq!(hold_duration(100.0).unwrap(), Duration::from_secs(100));
 		let default = ParsedPointerOptions::parse(None).unwrap();
-		assert_eq!(default.takeover, None);
+		assert_eq!(default.takeover.requested, None);
 		assert_eq!(default.mode(), DeliveryMode::Background);
-		for (takeover, expected) in
-			[(false, DeliveryMode::Background), (true, DeliveryMode::Foreground)]
-		{
+		for (takeover, return_focus, expected) in [
+			(false, None, DeliveryMode::Background),
+			(true, None, DeliveryMode::Foreground),
+			(true, Some(false), DeliveryMode::Foreground),
+			(true, Some(true), DeliveryMode::ForegroundReturnFocus),
+			// Returning focus never turns background input into a takeover.
+			(false, Some(true), DeliveryMode::Background),
+		] {
 			let options = ParsedPointerOptions::parse(Some(PointerOptions {
 				takeover: Some(takeover),
+				return_focus,
 				..PointerOptions::default()
 			}))
 			.unwrap();
-			assert_eq!(options.takeover, Some(takeover));
+			assert_eq!(options.takeover.requested, Some(takeover));
 			assert_eq!(options.mode(), expected);
 		}
 	}
@@ -3791,6 +3804,7 @@ mod capture_tests {
 				..PointerOptions::default()
 			}))
 			.unwrap();
+			let takeover = options.takeover;
 			let (reply, _rx) = flume::bounded(1);
 			let click = Request::Click { target: target.clone(), x: 10.0, y: 10.0, options, reply };
 			worker.process(&click, &token).unwrap();
