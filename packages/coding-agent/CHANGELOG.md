@@ -4,11 +4,11 @@
 
 ### Breaking Changes
 
-- Removed `preparePageForScreenshot` (`tools/browser/tab-worker`), `shouldPreserveConnectedBrowserFocus` (`tools/browser/attach`) and the tab worker's `activateForScreenshot` init option: Chromium screenshots no longer activate their tab
+- Removed `preparePageForScreenshot` (`tools/browser/tab-worker`), `shouldPreserveConnectedBrowserFocus` (`tools/browser/attach`) and the tab worker's `activateForScreenshot` init option: Chromium screenshots no longer activate their tab ([#15174](https://github.com/can1357/oh-my-pi/pull/15174) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
-- Fixed browser `tab.screenshot()` raising Chrome over the app you were typing in and switching its visible tab; background tabs and windows behind other apps are now captured in place, as is a relay or `app.cdp_url` tab the user switched away from
+- Fixed browser `tab.screenshot()` raising Chrome over the app you were typing in and switching its visible tab; background tabs and windows behind other apps are now captured in place, as is a relay or `app.cdp_url` tab the user switched away from ([#15174](https://github.com/can1357/oh-my-pi/pull/15174) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.0] - 2026-10-17
 
