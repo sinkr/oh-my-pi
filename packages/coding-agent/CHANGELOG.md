@@ -8,12 +8,17 @@
 - Added `el.selectText(text, { prefix?, suffix?, select? })` to the macOS `computer` tool: it selects text (or places a caret) in a background app's text field without taking focus, moving the pointer or sending keys, so typing into that field replaces it ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `{ takeover: true }` to computer-use `win.move`, so a hover that a window refuses in the background can be retried in the foreground ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a `menu` option to the computer tool's `win.click`, `el.click`, `el.press` and `el.perform`: on macOS the call that opens a context menu or menu button's menu chooses that item, e.g. `menu: ["Add to", "Fonts"]`, and leaves no menu open ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `computer.backgroundFallback` (`takeover` by default, or `refuse`). When a `computer` window input call's background route is unavailable, the tool reruns that one call in takeover, hands focus back to your app even if you kept typing, and says so in its result (`click ran in takeover because …; focus returned to …`); `refuse` fails the call without taking over. `/computer status` shows the setting
 
 ### Changed
 
 - Computer-use window input with `takeover` omitted now stays in the background after `computer.control.acquire`, so an acquired grant no longer activates the target app or moves the user's pointer; pass `takeover: true` for foreground input ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
 - Computer-use `win.menu.items` now needs `exec` approval and is rejected in `read_only` runs, since on macOS it makes the window key in its own application before reading its menus ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - The `computer` tool's instructions now tell the model that macOS drags and mouse holds on sliders, scroll bars, splitters and steppers, modified clicks, right-clicks and scrolls run in the background, so it no longer reaches for `takeover` for them ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+- The `computer` tool's instructions now tell the model that macOS drags, mouse holds, modified clicks, right-clicks and scrolls run in the background, so it no longer reaches for `takeover` for them ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+- The `computer` tool and its errors no longer tell the model to retry with `takeover: true` after `BackgroundUnavailable`; the tool decides by `computer.backgroundFallback`
+- The `computer` tool and its errors no longer tell the model to retry with `takeover: true` after `BackgroundUnavailable`; the tool decides by `computer.backgroundFallback` ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
+- The `computer` tool's instructions now tell the model never to call `raise()` or `apps.open(…, { activate: true })` to make input work, since both bring the app forward and take your keyboard, while launching, reopening and window input run in the background ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
