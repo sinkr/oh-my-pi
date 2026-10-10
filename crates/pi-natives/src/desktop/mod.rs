@@ -28,7 +28,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery};
+pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
 use ax::{AxRegistry, register_node};
 use backend::{Backend, DeliveryMode, DisplayAwakeHold, MouseButton, PointerEvent};
 use control::{CancellationSource, InputLease, OperationToken};
@@ -153,7 +153,7 @@ enum Response {
 	Capture(DesktopCapture),
 	Observation(DesktopObservation),
 	Applications(Vec<Application>),
-	Application(Application),
+	OpenedApplication(OpenedApplication),
 	MenuItems(Vec<DesktopMenuItem>),
 	Unit,
 	Snapshot(AxSnapshot),
@@ -914,7 +914,7 @@ impl Worker {
 				Ok(Response::Applications(applications::list(options.clone())?))
 			},
 			Request::OpenApplication { id, options, .. } => {
-				Ok(Response::Application(applications::open(id, options.clone())?))
+				Ok(Response::OpenedApplication(applications::open(id, options.clone())?))
 			},
 			Request::MenuItems { target, path, .. } => {
 				let window = self.explicit_window(target)?;
@@ -1535,7 +1535,7 @@ impl DesktopSession {
 		&self,
 		id: String,
 		options: Option<ApplicationOpenOptions>,
-	) -> Result<task::Promise<Application>> {
+	) -> Result<task::Promise<OpenedApplication>> {
 		let c = Arc::clone(&self.core);
 		let token = c.cancellation.token();
 		Ok(task::blocking("desktop.openApplication", (), move |_| {
@@ -1544,7 +1544,7 @@ impl DesktopSession {
 				options: options.unwrap_or_default(),
 				reply,
 			})? {
-				Response::Application(value) => Ok(value),
+				Response::OpenedApplication(value) => Ok(value),
 				_ => Err(DesktopError::internal("unexpected response")),
 			}
 			.map_err(Into::into)
