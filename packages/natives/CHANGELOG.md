@@ -36,6 +36,7 @@
 - Fixed a macOS background AX action that reports an error yet brings its app forward, such as `AXOpen` on a file in Chrome's Open panel, leaving that app in front of the user's for good; the focus guard now keeps watching after a failed action and sends the app back ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the macOS background focus guard able to put the user's app back in front just after they clicked the agent's target app themselves, when the click came between the guard's last check and its hand-back; macOS now refuses the hand-back if any key or click came after that check ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a macOS background right-click or Control-click that opened a context menu leaving the menu open, which kept the keyboard from the user's app; the menu now closes and the click throws `InputFailed`, since it was delivered ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a macOS background `press()`, `perform("AXShowMenu")` or click on a menu button or popup button leaving its menu open, which took every key from the user's app; the menu now closes and the call throws `InputFailed` listing its items ([#15185](https://github.com/can1357/oh-my-pi/pull/15185) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.1] - 2026-10-17
 
