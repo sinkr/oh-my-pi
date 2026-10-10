@@ -36,6 +36,8 @@
 - Fixed the user's typing landing in the macOS app a background action targets when that app brings itself to the front while they type; a click, ⌘/⌥/⌃ chord or Spotlight just before still counts as switching there on purpose
 - Fixed the user's typing landing in the macOS app a background action targets when that app brings itself to the front while they type
 - Fixed macOS background input sending the user back to their previous app after they opened the target app from Spotlight during the action
+- Fixed the user's typing landing in the macOS app a background action targets when that app brings itself to the front while they type ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background input sending the user back to their previous app after they opened the target app from Spotlight during the action ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.1] - 2026-10-17
 
