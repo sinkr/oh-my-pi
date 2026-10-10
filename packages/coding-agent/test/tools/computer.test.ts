@@ -2948,7 +2948,8 @@ describe("display hold follows the agent turn", () => {
 });
 
 describe("computer background fallback", () => {
-	const reason = "window 42 (Wish) reads the hardware pointer for button presses; nothing was sent";
+	const reason = "window 42 (Wish) reads the hardware pointer for button presses";
+	const ran = `click ran in takeover because ${reason}; the input was delivered, and `;
 	const clickTarget = 'await (await desktop.window("42")).click(1, 2)';
 
 	/**
@@ -2958,7 +2959,7 @@ describe("computer background fallback", () => {
 	 */
 	class RefusingSession extends FakeNativeSession {
 		readonly sent: Array<PointerOptions | null | undefined> = [];
-		refusal = `BackgroundUnavailable: ${reason}`;
+		refusal = `BackgroundUnavailable: ${reason}; nothing was sent`;
 		report: DesktopFocusReturn | null = { handedBack: true, previousPid: 300, frontPid: 300 };
 
 		override async listWindows(): Promise<DesktopWindow[]> {
@@ -2985,8 +2986,8 @@ describe("computer background fallback", () => {
 	function notice(result: Extract<ComputerWorkerOutbound, { type: "result" }>): string {
 		const [text, ...rest] = texts(result);
 		expect(rest).toEqual([]);
-		expect(text).toStartWith(`click ran in takeover because ${reason}; `);
-		return text.slice(`click ran in takeover because ${reason}; `.length);
+		expect(text).toStartWith(ran);
+		return text.slice(ran.length);
 	}
 
 	async function run(
@@ -3028,6 +3029,15 @@ describe("computer background fallback", () => {
 		if (failed.ok) return;
 		expect(failed.error.message).toStartWith("InputFailed: window 42 rejected the event");
 		expect(failing.sent).toHaveLength(1);
+	});
+
+	it("reports a rerun as delivered, dropping the refused attempt's 'nothing was sent'", async () => {
+		for (const unsent of ["; nothing was sent", ", so nothing was sent", "; no input was sent"]) {
+			const native = new RefusingSession();
+			native.refusal = `BackgroundUnavailable: ${reason}${unsent}`;
+			const result = await run(native, clickTarget, "takeover");
+			expect(texts(result), unsent).toEqual([`${ran}focus returned to Notes`]);
+		}
 	});
 
 	it("refuses without a takeover under refuse, and tells the model so without suggesting one", async () => {
