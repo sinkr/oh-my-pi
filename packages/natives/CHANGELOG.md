@@ -50,6 +50,7 @@
 - Fixed a macOS `takeover: true` click or key that opened a document or closed a sheet or panel leaving its app in front for good; focus now returns to your app unless you typed or clicked during the takeover ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 background input refusing with `BackgroundUnavailable` and "no input was sent" after part of the call was already sent (a later click of a double-click, a later scroll detent, a pointer event after held keys); it now throws `InputFailed` saying input may already have landed
 - Fixed X11 background input refusing with `BackgroundUnavailable` and "no input was sent" after part of the call was already sent (a later click of a double-click, a later scroll detent, a pointer event after held keys); it now throws `InputFailed` saying input may already have landed ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS takeover `InputFailed` naming only the target window when another held focus; it now names the app's focused window, such as an alert or sheet, or the app that stayed in front ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.1] - 2026-10-17
 
