@@ -287,7 +287,9 @@ impl MacAx {
 /// One accessibility top-level window of an application, mapped to its
 /// `WindowServer` id.
 pub(super) struct AxWindowRecord {
-	pub(super) id:        u32,
+	/// `None` when `_AXUIElementGetWindow` cannot map the entry, as for
+	/// Finder's desktop, which `AXWindows` lists as an `AXScrollArea`.
+	pub(super) id:        Option<u32>,
 	/// `AXMinimized`; `None` when the attribute could not be read.
 	pub(super) minimized: Option<bool>,
 }
@@ -332,15 +334,18 @@ pub(super) fn window_records(pid: libc::pid_t) -> Option<Vec<AxWindowRecord>> {
 	// accessibility; only the first content read waits for it.
 	enablement::activate(&app);
 	let windows = copy_elements_optional(&app, "AXWindows")?;
-	// An unmappable sibling is still a possible keyboard destination. Dropping
-	// it would turn an incomplete AX tree into false proof of exclusivity.
+	Some(window_records_of(&windows))
+}
+
+/// An entry `_AXUIElementGetWindow` cannot map is still a possible keyboard
+/// destination, so it stays as a record with no id: dropping it would turn an
+/// incomplete AX tree into false proof of exclusivity.
+fn window_records_of(windows: &[CFRetained<AXUIElement>]) -> Vec<AxWindowRecord> {
 	windows
 		.iter()
-		.map(|window| {
-			Some(AxWindowRecord {
-				id:        window_id(window)?,
-				minimized: copy_bool(window, "AXMinimized"),
-			})
+		.map(|window| AxWindowRecord {
+			id:        window_id(window),
+			minimized: copy_bool(window, "AXMinimized"),
 		})
 		.collect()
 }
@@ -1766,10 +1771,10 @@ mod tests {
 	use objc2_core_foundation::{CFArray, CFNumber, CFString, CFType, CFURL, Type, kCFNull};
 
 	use super::{
-		AttachedCandidate, CHILDREN, DESCRIPTION, ENABLED, NodeRead, NodeValues, ROLE, TITLE,
-		TextField, VALUE, ax_result, element_action_result, may_borrow_focus,
-		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
-		select_attached, stringify_value, text_readback,
+		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, NodeRead, NodeValues,
+		ROLE, TITLE, TextField, VALUE, ax_result, create_system_wide, element_action_result,
+		may_borrow_focus, replace_utf16_selection, replace_whole_value, required_string,
+		secure_subrole, select_attached, stringify_value, text_readback, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -2284,5 +2289,13 @@ mod tests {
 			run(true, AXError::Success, true),
 			(Err(ErrorCode::Cancelled), vec![SCROLL_TO_VISIBLE.to_owned()])
 		);
+	}
+
+	#[test]
+	fn ax_windows_without_a_window_id_stay_as_records() {
+		// Finder lists its desktop in AXWindows, and `_AXUIElementGetWindow`
+		// cannot map it; the system-wide element is unmappable the same way.
+		let records = window_records_of(&[create_system_wide()]);
+		assert!(matches!(records.as_slice(), [AxWindowRecord { id: None, .. }]));
 	}
 }
