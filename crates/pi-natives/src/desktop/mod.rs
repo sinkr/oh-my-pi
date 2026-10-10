@@ -410,6 +410,25 @@ impl Request {
 		)
 	}
 
+	/// Whether this mutation is delivered as takeover (foreground) input, which
+	/// arms the physical-Escape stop. Held control armed the stop when it was
+	/// granted, so every operation under it keeps the stop.
+	fn takes_over(&self) -> bool {
+		let takeover = match self {
+			Self::HoldKeys { takeover, .. }
+			| Self::HoldMouse { takeover, .. }
+			| Self::MoveMouse { takeover, .. }
+			| Self::Scroll { takeover, .. }
+			| Self::TypeText { takeover, .. }
+			| Self::KeyChord { takeover, .. } => *takeover,
+			Self::Click { options, .. }
+			| Self::Drag { options, .. }
+			| Self::AxClick { options, .. } => options.takeover,
+			_ => None,
+		};
+		DeliveryMode::from_takeover(takeover) == DeliveryMode::Foreground
+	}
+
 	const fn frame_target(&self) -> Option<&Target> {
 		match self {
 			Self::Capture { target, .. } | Self::Observe { target, .. } => Some(target),
@@ -803,7 +822,7 @@ impl Worker {
 		let _scope = token.enter();
 		let lease = request
 			.is_mutation()
-			.then(|| InputLease::acquire(token))
+			.then(|| InputLease::acquire(token, request.takes_over()))
 			.transpose()?;
 		token.check()?;
 		// A full capture replaces coordinates only if it completes in its
@@ -3715,6 +3734,47 @@ mod capture_tests {
 			background, background, background, background, foreground, foreground, foreground,
 			foreground
 		]);
+	}
+
+	#[test]
+	fn only_takeover_requests_arm_the_physical_escape_stop() {
+		let reply = || flume::unbounded().0;
+		let typing = |takeover| Request::TypeText {
+			target: Target::Desktop,
+			text: "abc".to_string(),
+			takeover,
+			reply: reply(),
+		};
+		let holding = |takeover| Request::HoldKeys {
+			target: Target::Desktop,
+			keys: parse_keys(&["shift".to_string()]).unwrap(),
+			duration: Duration::ZERO,
+			takeover,
+			reply: reply(),
+		};
+		let clicking = |takeover| Request::Click {
+			target:  Target::Desktop,
+			x:       0.0,
+			y:       0.0,
+			options: ParsedPointerOptions::parse(Some(PointerOptions {
+				takeover,
+				..PointerOptions::default()
+			}))
+			.unwrap(),
+			reply:   reply(),
+		};
+		for request in [typing(None), typing(Some(false)), holding(None), clicking(Some(false))] {
+			assert!(!request.takes_over(), "background input leaves Escape to the user");
+		}
+		for request in [typing(Some(true)), holding(Some(true)), clicking(Some(true))] {
+			assert!(request.takes_over(), "takeover input keeps the Escape stop");
+		}
+		let semantic = Request::AxPerform {
+			reference: "e1".to_string(),
+			action:    "AXPress".to_string(),
+			reply:     reply(),
+		};
+		assert!(!semantic.takes_over());
 	}
 
 	#[test]
