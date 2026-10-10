@@ -1002,49 +1002,11 @@ impl AxBackend for MacAx {
 	}
 
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
-		let element = mac_handle(h)?;
-		// Read before any probe of the target, as for background input
-		// ([`input::EntryFront`]).
-		let entry_front = input::EntryFront::now();
-		let native = action_name(action);
-		let actions = copy_strings_from_action_names(element)?;
-		if !actions.contains(&native) {
-			return Err(DesktopError::ax_failed(format!(
-				"AX action '{native}' is not supported by this element; available actions: {}",
-				actions.join(", "),
-			)));
-		}
-		// AXRaise is an explicit request to change stacking, including the
-		// takeover preparation path. Other semantic actions must stay background.
-		if native == "AXRaise" {
-			return element_action_result(&native, send_action(element, &native));
-		}
-		let pid = element_pid(element)?;
-		let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
-		let perform =
-			|| press_into_view(&native, scroll_first, |action| send_action(element, action));
-		// A menu that a background application opens takes the keyboard from
-		// the user's app, so it is closed before the action returns; a
-		// frontmost application's menu stays open for the next call.
-		let watch =
-			entry_front.behind(pid) && open_menu::may_open(&native, || copy_string(element, "AXRole"));
-		skylight::with_background_watch(pid, |visit| {
-			let before = if watch {
-				let before = capture::menu_windows(pid).ok_or_else(|| {
-					DesktopError::ax_failed(format!(
-						"cannot list the open menus of process {pid}, so a menu that {native} opens \
-						 could not be closed; nothing was performed"
-					))
-				})?;
-				activate_for_menu(element, pid, entry_front, visit)?;
-				Some(before)
-			} else {
-				None
-			};
-			open_menu::guard(open_menu::Press::Action(&native), before.as_deref(), perform, |before| {
-				open_menu::settle(pid, before, open_menu::CONTROL_MENU_TIMEOUT)
-			})
-		})
+		perform_choosing(mac_handle(h)?, action, None)
+	}
+
+	fn perform_menu(&mut self, h: &AxHandle, action: &str, path: &[String]) -> CoreResult<()> {
+		perform_choosing(mac_handle(h)?, action, Some(path))
 	}
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
@@ -1266,6 +1228,67 @@ fn answered<T>(read: &Result<Option<T>, AXError>) -> bool {
 		.as_ref()
 		.err()
 		.is_none_or(|error| *error == AXError::NoValue || *error == AXError::AttributeUnsupported)
+}
+
+/// Performs `action` on `element`; with `path`, chooses that item path in the
+/// menu the action opens.
+fn perform_choosing(
+	element: &AXUIElement,
+	action: &str,
+	path: Option<&[String]>,
+) -> CoreResult<()> {
+	// Read before any probe of the target, as for background input
+	// ([`input::EntryFront`]).
+	let entry_front = input::EntryFront::now();
+	let native = action_name(action);
+	let actions = copy_strings_from_action_names(element)?;
+	if !actions.contains(&native) {
+		return Err(DesktopError::ax_failed(format!(
+			"AX action '{native}' is not supported by this element; available actions: {}",
+			actions.join(", "),
+		)));
+	}
+	// AXRaise is an explicit request to change stacking, including the
+	// takeover preparation path. Other semantic actions must stay background.
+	if native == "AXRaise" {
+		if path.is_some() {
+			return Err(DesktopError::invalid_target("AXRaise opens no menu to choose an item from"));
+		}
+		return element_action_result(&native, send_action(element, &native));
+	}
+	let pid = element_pid(element)?;
+	let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
+	let perform = || press_into_view(&native, scroll_first, |action| send_action(element, action));
+	// A menu that a background application opens takes the keyboard from the
+	// user's app, so it is closed before the action returns; a frontmost
+	// application's menu stays open for the next call unless an item is asked
+	// for.
+	let background = entry_front.behind(pid);
+	let watch = path.is_some()
+		|| (background && open_menu::may_open(&native, || copy_string(element, "AXRole")));
+	skylight::with_background_watch(pid, |visit| {
+		let before = if watch {
+			let before = capture::menu_windows(pid).ok_or_else(|| {
+				DesktopError::ax_failed(format!(
+					"cannot list the open menus of process {pid}, so a menu that {native} opens could \
+					 not be closed; nothing was performed"
+				))
+			})?;
+			if background {
+				activate_for_menu(element, pid, entry_front, visit)?;
+			}
+			Some(before)
+		} else {
+			None
+		};
+		open_menu::guard(
+			open_menu::Press::Action(&native),
+			before.as_deref(),
+			path,
+			perform,
+			|before, path| open_menu::settle(pid, before, path, open_menu::CONTROL_MENU_TIMEOUT),
+		)
+	})
 }
 
 /// Makes the window holding `element` key within its background
