@@ -3631,11 +3631,16 @@ mod capture_tests {
 			let keys = parse_keys(&["a".to_string()]).unwrap();
 			let chord = Request::KeyChord { target: target.clone(), keys, takeover, reply };
 			worker.process(&chord, &token).unwrap();
+			let (reply, _rx) = flume::bounded(1);
+			let hover =
+				Request::MoveMouse { target: target.clone(), x: 10.0, y: 10.0, takeover, reply };
+			worker.process(&hover, &token).unwrap();
 		}
 		source.release_control();
 		let (background, foreground) = (DeliveryMode::Background, DeliveryMode::Foreground);
 		assert_eq!(*modes.lock(), [
-			background, background, background, foreground, foreground, foreground
+			background, background, background, background, foreground, foreground, foreground,
+			foreground
 		]);
 	}
 
