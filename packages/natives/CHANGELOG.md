@@ -52,6 +52,10 @@
 - Fixed standalone binaries extracting unused native addon variants on first launch ([#15462](https://github.com/can1357/oh-my-pi/issues/15462))
 - Fixed Git diffs failing when staged or committed changes update a submodule pin ([#15457](https://github.com/can1357/oh-my-pi/issues/15457))
 
+### Fixed
+
+- Fixed macOS computer use reporting a working physical Escape stop (`globalEscape: true`) when it could not see keys, and refusing input when the stop failed to start; input now runs without it, `inputPermission` reports event-posting access, and permission errors name the terminal or IDE to grant ([#15157](https://github.com/can1357/oh-my-pi/pull/15157) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.10.4] - 2026-10-13
 
 ### Fixed
@@ -116,10 +120,6 @@
 
 - Fixed macOS computer use reporting `AxFailed` instead of `StaleRef` for a ref whose element the app had removed ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS `el.press()` and `el.perform()` reporting `AxFailed` when the app did not answer in time, such as a press that opens a modal dialog; they now report `AxUnconfirmed` ([#15156](https://github.com/can1357/oh-my-pi/pull/15156) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed macOS computer use reporting a working physical Escape stop (`globalEscape: true`) when it could not see keys, and refusing input when the stop failed to start; input now runs without it, `inputPermission` reports event-posting access, and permission errors name the terminal or IDE to grant
 
 ## [18.8.7] - 2026-10-09
 
