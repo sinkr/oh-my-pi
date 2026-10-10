@@ -54,6 +54,7 @@ import { generateTaskName, sanitizeAgentId } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import { resolveSeanceSource, type ResolvedSeanceSource } from "./seance";
+import { SEANCE_AGENT_NAME } from "./seance-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
 import type {
 	AgentProgress,
@@ -378,7 +379,7 @@ export async function resolveEffectiveSubagentPolicy(
 			`Agent "${agentName}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
 		);
 	}
-	const isSeance = agentName === "seance";
+	const isSeance = agentName === SEANCE_AGENT_NAME;
 	if (request.sourceSession !== undefined && !isSeance) {
 		throw new StructuredSubagentError("preflight", "`sourceSession` is only supported by the `seance` agent.");
 	}
@@ -728,9 +729,9 @@ function buildExecutorOptions(
 		onRelease:
 			seance && lease.temporary
 				? async () => {
-					await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-					lease.unregister?.();
-				}
+						await fs.rm(lease.artifactsDir, { recursive: true, force: true });
+						lease.unregister?.();
+					}
 				: undefined,
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,

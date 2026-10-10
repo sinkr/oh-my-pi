@@ -42,6 +42,7 @@ import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { SEANCE_AGENT_NAME } from "./seance-policy";
 import {
 	type AgentDefinition,
 	canSpawnAtDepth,
@@ -138,7 +139,7 @@ export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
 export type { AgentDefinition, SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "./types";
 export type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-export type { TaskItem, TaskParams } from "./types";
+export type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 export * from "./result-summary";
 export {
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -147,6 +148,19 @@ export {
 	taskSchema,
 } from "./types";
 
+function isSeanceSpawnable(
+	agents: readonly AgentDefinition[],
+	disabledAgents: readonly string[],
+	parentSpawns: string | boolean | null | undefined,
+): boolean {
+	const policy = resolveSpawnPolicy(parentSpawns);
+	return (
+		policy.enabled &&
+		(policy.allowedAgents === null || policy.allowedAgents.includes(SEANCE_AGENT_NAME)) &&
+		!disabledAgents.includes(SEANCE_AGENT_NAME) &&
+		agents.some(agent => agent.name === SEANCE_AGENT_NAME && agent.source === "bundled")
+	);
+}
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
 	sessionAgents: readonly AgentDefinition[];
@@ -159,7 +173,6 @@ interface TaskDescriptionOptions {
 	structured: boolean;
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
-	asyncGuidance: string;
 	parentSpawns: string;
 }
 
@@ -201,10 +214,10 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasStructuredAgents: renderedAgents.some(agent => agent.structured),
 		hasModelMentions: options.sessionAgents.length > 0,
 		ircEnabled: options.ircEnabled,
-		asyncGuidance: options.asyncGuidance,
+		seanceAgentName: SEANCE_AGENT_NAME,
+		seanceEnabled: isSeanceSpawnable(options.agents, options.disabledAgents, options.parentSpawns),
 	});
 }
-
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 	return {
 		content: [{ type: "text", text }],
@@ -233,7 +246,7 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 		params.tasks !== undefined &&
 		(params.sourceSession !== undefined || params.model !== undefined)
 	) {
-		return "Put `sourceSession` and `model` on the individual `seance` item inside `tasks[]`.";
+		return `Put \`sourceSession\` and \`model\` on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
 	}
 	return undefined;
 }
@@ -255,15 +268,16 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 function validateSeanceFields(item: TaskItem, agent: string, label: string): string | undefined {
-	if (agent !== "seance") {
-		if (item.sourceSession !== undefined) return `\`sourceSession\` is only accepted for the \`seance\` agent.`;
-		if (item.model !== undefined) return `\`model\` is only accepted for the \`seance\` agent.`;
+	if (agent !== SEANCE_AGENT_NAME) {
+		if (item.sourceSession !== undefined)
+			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
+		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
 		return undefined;
 	}
 	if (typeof item.sourceSession !== "string" || item.sourceSession.trim().length === 0) {
-		return `${label} selects the \`seance\` agent and requires a non-empty \`sourceSession\`.`;
+		return `${label} selects the \`${SEANCE_AGENT_NAME}\` agent and requires a non-empty \`sourceSession\`.`;
 	}
-	if (item.tools?.length) return `${label} cannot pass custom tools to the read-only \`seance\` agent.`;
+	if (item.tools?.length) return `${label} cannot pass custom tools to the read-only \`${SEANCE_AGENT_NAME}\` agent.`;
 	const model: unknown = item.model;
 	if (
 		model !== undefined &&
@@ -732,6 +746,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			defaultAgent: this.#defaultAgent(),
+			seanceEnabled: isSeanceSpawnable(
+				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+					this.#discoveredAgents,
+				cfgTaskDisabledAgents.get(this.session.settings),
+				this.session.getSessionSpawns(),
+			),
 		});
 	}
 
@@ -767,7 +787,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			structured: this.#isStructured(),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-			asyncGuidance: this.delegationGuidance,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
 	}
@@ -1730,7 +1749,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				// call returns. Without this, a temporary (in-memory session)
 				// artifacts directory is deleted immediately on completion and the
 				// advertised URL 404s by the time delivery happens.
-				retainArtifacts: detached || params.agent === "seance",
+				retainArtifacts: detached || params.agent === SEANCE_AGENT_NAME,
 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
@@ -1792,7 +1811,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
 		const summary = formatTaskResultSummary(result, { totalDurationMs, mergeSummary });
-
 		return {
 			content: [{ type: "text", text: summary }],
 			details: {

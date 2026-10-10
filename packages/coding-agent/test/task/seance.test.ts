@@ -26,6 +26,30 @@ function modelChange(id: string, parentId: string | null, model: string, role: s
 	};
 }
 
+function modelUsage(id: string, parentId: string, activeLeafId: string | null) {
+	return {
+		type: "model_usage",
+		id,
+		parentId,
+		timestamp: "2026-10-01T00:00:02.000Z",
+		purpose: "task-completion-probe",
+		role: "smol",
+		api: "openai-completions",
+		provider: "openai",
+		model: "gpt-4o",
+		usage: {
+			input: 11,
+			output: 2,
+			cacheRead: 3,
+			cacheWrite: 0,
+			totalTokens: 16,
+			cost: { input: 0.0011, output: 0.0004, cacheRead: 0.00003, cacheWrite: 0, total: 0.00153 },
+		},
+		stopReason: "stop",
+		activeLeafId,
+	};
+}
+
 async function writeSession(file: string, id: string, cwd: string, entries: unknown[] = []): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	await Bun.write(file, `${[sessionHeader(id, cwd), ...entries].map(entry => JSON.stringify(entry)).join("\n")}\n`);
@@ -55,6 +79,34 @@ describe("seance source resolution", () => {
 			modelSelectors: ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"],
 		});
 		expect(await fs.readFile(file)).toEqual(original);
+	});
+
+	it("restores the model from the active branch after late usage and returns no models for a null active leaf", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-active-model-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const file = path.join(sessionDir, "late-usage.jsonl");
+		const entries = [
+			modelChange("default-model", null, "anthropic/claude-sonnet-4-5", "default"),
+			modelChange("probe-owner", "default-model", "openai/gpt-4o", "fast"),
+			modelChange("active-model", "default-model", "anthropic/claude-sonnet-4-6", "fast"),
+			modelUsage("late-usage", "probe-owner", "active-model"),
+		];
+		await writeSession(file, "active-model-source", cwd, entries);
+		await expect(resolveSeanceSource(file, { cwd, sessionDirHint: sessionDir })).resolves.toMatchObject({
+			id: "active-model-source",
+			modelSelectors: ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"],
+		});
+
+		const clearedFile = path.join(sessionDir, "cleared-usage.jsonl");
+		await writeSession(clearedFile, "cleared-model-source", cwd, [
+			...entries.slice(0, 3),
+			modelUsage("cleared-usage", "probe-owner", null),
+		]);
+		await expect(resolveSeanceSource(clearedFile, { cwd, sessionDirHint: sessionDir })).resolves.toMatchObject({
+			id: "cleared-model-source",
+			modelSelectors: [],
+		});
 	});
 
 	it("fails closed for missing paths and IDs, ambiguous prefixes, and files without a session header", async () => {

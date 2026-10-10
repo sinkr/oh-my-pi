@@ -1,8 +1,4 @@
-import type {
-	AgentSource,
-	TaskItem as SharedTaskItem,
-	TaskParams as SharedTaskParams,
-} from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 export {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -16,16 +12,6 @@ import { $env } from "@oh-my-pi/pi-utils";
 
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-export type TaskItem = Omit<SharedTaskItem, "model" | "sourceSession"> & {
-	model?: string | string[];
-	sourceSession?: string;
-};
-
-export type TaskParams = Omit<SharedTaskParams, "model" | "sourceSession" | "tasks"> & {
-	model?: string | string[];
-	sourceSession?: string;
-	tasks?: TaskItem[];
-};
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
@@ -69,7 +55,6 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	...seanceTaskFields,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -80,7 +65,6 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	...seanceTaskFields,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -93,7 +77,6 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	...seanceTaskFields,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -105,7 +88,6 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	...seanceTaskFields,
 	"+": "delete",
 });
 const taskSchemaBatch = type({
@@ -143,6 +125,7 @@ function createTaskSchema(options: {
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
 	structured: boolean;
+	seanceEnabled: boolean;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
@@ -150,6 +133,7 @@ function createTaskSchema(options: {
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
+	const seanceFields = options.seanceEnabled ? seanceTaskFields : {};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -160,7 +144,7 @@ function createTaskSchema(options: {
 				...effortField,
 				...schemaFields,
 				...toolsField,
-				...seanceTaskFields,
+				...seanceFields,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -178,7 +162,7 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
-			...seanceTaskFields,
+			...seanceFields,
 			"+": "delete",
 		});
 		return type.raw({
@@ -196,7 +180,7 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
-			...seanceTaskFields,
+			...seanceFields,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -209,7 +193,7 @@ function createTaskSchema(options: {
 		...effortField,
 		...schemaFields,
 		...toolsField,
-		...seanceTaskFields,
+		...seanceFields,
 		"+": "delete",
 	});
 }
@@ -224,19 +208,29 @@ export function getTaskSchema(options: {
 	/** Advertise `outputSchema`/`schemaMode` (`task.structured`); default on. */
 	structured?: boolean;
 	defaultAgent?: string;
+	/** Advertise historical-consult fields only when the bundled agent is spawnable. */
+	seanceEnabled?: boolean;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
 	const structured = options.structured ?? true;
-	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && structured) {
+	const seanceEnabled = options.seanceEnabled ?? false;
+	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && structured && !seanceEnabled) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${seanceEnabled ? "seance" : "no-seance"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
-	const schema = createTaskSchema({ ...options, effortEnabled, evalToolsEnabled, structured, defaultAgent });
+	const schema = createTaskSchema({
+		...options,
+		effortEnabled,
+		evalToolsEnabled,
+		structured,
+		defaultAgent,
+		seanceEnabled,
+	});
 	taskSchemaCache.set(key, schema);
 	return schema;
 }

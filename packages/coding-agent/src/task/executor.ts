@@ -106,6 +106,7 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { seanceIsolationOptions } from "./seance-policy";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
@@ -2739,6 +2740,8 @@ interface FinalizeRunArgs {
 	 * This finalize is a revival/wake or explicit follow-up turn, not the initial
 	 * run. Structured turns only republish a real `yield`; message-result turns
 	 * republish successful, non-empty reports only when requested by the parent.
+	 * These follow-up message results exclude peer replies and cancelled turns;
+	 * the initial run is unaffected.
 	 */
 	followUpTurn?: boolean;
 	publishMessageResult?: boolean;
@@ -3551,8 +3554,10 @@ export interface FollowUpTurnOptions {
 	parentToolCallId?: string;
 	/**
 	 * When set, a turn that yields or completes a successful, non-empty message
-	 * result (re)writes `<artifactsDir>/<id>.md` so `agent://<id>` tracks the latest
-	 * completion. Structured turns without a yield leave the existing artifact intact.
+	 * result when requested by the parent (re)writes `<artifactsDir>/<id>.md` so
+	 * `agent://<id>` tracks the latest completion. Structured turns without a
+	 * yield and failed, empty, or cancelled message-result turns leave the
+	 * existing artifact intact.
 	 */
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
@@ -3769,6 +3774,8 @@ interface SubagentSessionSpec {
 		| "resolveServiceTierByFamily"
 		| "onFirstChatDispatch"
 	>;
+	/** Explicit source-fork capability; independent of the optional prompt label. */
+	seanceFork: boolean;
 	prompt: SubagentPromptInputs;
 }
 
@@ -3792,10 +3799,11 @@ function buildSubagentSessionOptions(
 	launch?: SubagentLaunchInputs,
 ): CreateAgentSessionOptions {
 	const inputs = spec.prompt;
+	const seance = spec.seanceFork;
 	// MCP proxies are minted per build, not captured in the spec: a kept-alive
 	// subagent revived after `/mcp reload` must see the manager's current tools.
-	const mcpTools = spec.options.mcpManager ? createMCPProxyTools(spec.options.mcpManager) : [];
-	const customTools = spec.options.customTools ?? [];
+	const mcpTools = !seance && spec.options.mcpManager ? createMCPProxyTools(spec.options.mcpManager) : [];
+	const customTools = seance ? [] : (spec.options.customTools ?? []);
 	return {
 		...spec.options,
 		taskPromptCacheKey: launch ? spec.options.taskPromptCacheKey : undefined,
@@ -3806,6 +3814,7 @@ function buildSubagentSessionOptions(
 		expectedAgentRef,
 		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
+		...(seance ? seanceIsolationOptions() : undefined),
 		systemPrompt: defaultPrompt => {
 			const ircRoster = inputs.ircEnabled
 				? collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile)
@@ -3836,9 +3845,9 @@ function buildSubagentSessionOptions(
 			// prompt prefix as a cache hit.
 			const seancePrompt = inputs.sourceSession
 				? prompt.render(seanceAssignmentTemplate, {
-					sourceSession: inputs.sourceSession,
-					model: inputs.model ?? "",
-				})
+						sourceSession: inputs.sourceSession,
+						model: inputs.model ?? "",
+					})
 				: undefined;
 			return [...defaultPrompt, subagentPrompt, ...(seancePrompt ? [seancePrompt] : [])];
 		},
@@ -4034,9 +4043,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const advisorSelection = options.sourceSession
 		? undefined
 		: resolveAgentAdvisorSelection({
-		settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-		agentAdvisor: agent.advisor,
-	});
+				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
+				agentAdvisor: agent.advisor,
+			});
 	const advisorRolePattern = advisorSelection?.model
 		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
 		: undefined;
@@ -4345,19 +4354,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			const sessionManagerPromise = options.sourceSession
 				? SessionManager.forkFrom(options.sourceSession, effectiveCwd, undefined, undefined, {
-					sessionFile: subtaskSessionFile!,
-					resetInheritedCost: true,
-					repairInterruptedTail: true,
-					suppressBreadcrumb: true,
-					neutralizeInheritedSessionInit: true,
-				})
-				: sessionFile
-				? SessionManager.open(sessionFile, undefined, undefined, {
-						initialCwd: effectiveCwd,
-						parentSession: options.sessionFile ?? undefined,
+						sessionFile: subtaskSessionFile!,
+						resetInheritedCost: true,
+						repairInterruptedTail: true,
 						suppressBreadcrumb: true,
+						neutralizeInheritedSessionInit: true,
 					})
-				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+				: sessionFile
+					? SessionManager.open(sessionFile, undefined, undefined, {
+							initialCwd: effectiveCwd,
+							parentSession: options.sessionFile ?? undefined,
+							suppressBreadcrumb: true,
+						})
+					: Promise.resolve(SessionManager.inMemory(effectiveCwd));
 			pendingSessionManager = sessionManagerPromise;
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
@@ -4372,9 +4381,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const prewalkPattern = options.sourceSession
 				? undefined
 				: resolveAgentPrewalkPattern({
-				settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-			});
+						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+					});
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
@@ -4508,6 +4517,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					localProtocolOptions: options.sourceSession ? undefined : options.localProtocolOptions,
 					telemetry: subagentTelemetry,
 				},
+				/** Explicit source-fork capability; independent of the optional prompt label. */
+				seanceFork: options.sourceSession !== undefined,
 				prompt: {
 					id,
 					sourceSession: options.sourceSessionLabel,
