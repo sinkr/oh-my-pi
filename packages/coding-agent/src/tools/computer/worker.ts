@@ -315,6 +315,20 @@ function guardRun(context: ComputerRunContext, method: string): void {
 type Fallback = { takeover: true; returnFocus: true };
 const FALLBACK: Fallback = { takeover: true, returnFocus: true };
 const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
+const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
+
+/**
+ * Under `computer.backgroundFallback: "refuse"` the user's setting beats the
+ * model: a call that would bring an application forward or drive the user's
+ * own pointer or keyboard is refused before anything is sent. `effect` says
+ * what the call would do; `route` names the background way to the same end.
+ */
+function refuseForeground(context: ComputerRunContext, call: string, effect: string, route: string): void {
+	if (context.snapshot.backgroundFallback !== "refuse") return;
+	throw new ToolError(
+		`${BACKGROUND_UNAVAILABLE}${call} would ${effect}, and the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background; nothing was sent. ${route}`,
+	);
+}
 
 /** App names by pid from the window list, empty when the listing fails. */
 async function appNames(session: NativeDesktopSession, signal: AbortSignal): Promise<Map<number, string>> {
@@ -351,11 +365,12 @@ async function focusReport(
 }
 
 /**
- * Sends one window input call. When its background route throws
- * `BackgroundUnavailable` and the call did not set `takeover`,
- * `computer.backgroundFallback` decides: `takeover` reruns that call in
- * takeover, handing focus back to the user's app, and reports it in the run
- * output; `refuse` fails without taking over.
+ * Sends one window input call. A model-supplied `takeover: true` is refused
+ * under `computer.backgroundFallback: "refuse"`. When the background route
+ * throws `BackgroundUnavailable` and the call did not set `takeover`, the
+ * setting decides: `takeover` reruns that call in takeover, handing focus back
+ * to the user's app, and reports it in the run output; `refuse` fails without
+ * taking over.
  */
 async function sendInput(
 	session: NativeDesktopSession,
@@ -365,6 +380,14 @@ async function sendInput(
 	send: (fallback?: Fallback) => InputCall,
 	target?: number,
 ): Promise<void> {
+	if (takeover === true) {
+		refuseForeground(
+			context,
+			`${method} with takeover: true`,
+			"bring its application to the front and take the user's keyboard and pointer",
+			"Call it without takeover: window input runs in the background.",
+		);
+	}
 	try {
 		await nativeCall(context.signal, () => send());
 		return;
@@ -373,7 +396,9 @@ async function sendInput(
 			throw error;
 		const reason = error.message.slice(BACKGROUND_UNAVAILABLE.length);
 		if (context.snapshot.backgroundFallback === "refuse") {
-			throw new ToolError(`${error.message}; computer.backgroundFallback is "refuse", so no takeover happened`);
+			throw new ToolError(
+				`${error.message}; the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background, so no takeover happened`,
+			);
 		}
 		if (!session.capabilities.takeover) {
 			throw new ToolError(`${error.message}; this desktop backend has no takeover, so no takeover happened`);
@@ -521,6 +546,15 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
+		// The names native `axPerform` runs as `AXRaise` (its `action_name` mapping).
+		if (action.trim().toLowerCase() === "raise" || action === "AXRaise") {
+			refuseForeground(
+				context,
+				`perform(${JSON.stringify(action)})`,
+				"bring the window's application to the front",
+				RAISE_ROUTE,
+			);
+		}
 		const menu = menuOption(options);
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
 	}
@@ -718,9 +752,26 @@ class Win {
 		return captureScreenshot(this.#session, this.#getContext, this.id, options, region);
 	}
 
-	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
+	/**
+	 * `guardRun` for an input call. Under `refuse`, input to the desktop or a
+	 * display target is refused: it drives the user's own pointer and keyboard.
+	 */
+	#guardInput(method: string): ComputerRunContext {
 		const context = this.#getContext();
-		guardRun(context, "click");
+		guardRun(context, method);
+		if (this.id === "desktop" || this.id.startsWith("display:")) {
+			refuseForeground(
+				context,
+				`${method} on the ${this.id} target`,
+				"drive the user's own pointer and keyboard",
+				"Send it to a window handle from computer.window(...), which takes input in the background.",
+			);
+		}
+		return context;
+	}
+
+	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
+		const context = this.#guardInput("click");
 		await sendInput(
 			this.#session,
 			context,
@@ -732,8 +783,7 @@ class Win {
 	}
 
 	async doubleClick(x: number, y: number, options?: Omit<ClickOptions, "count">): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "doubleClick");
+		const context = this.#guardInput("doubleClick");
 		await sendInput(
 			this.#session,
 			context,
@@ -745,8 +795,7 @@ class Win {
 	}
 
 	async move(x: number, y: number, options?: InputOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "move");
+		const context = this.#guardInput("move");
 		await sendInput(
 			this.#session,
 			context,
@@ -758,8 +807,7 @@ class Win {
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "drag");
+		const context = this.#guardInput("drag");
 		await sendInput(
 			this.#session,
 			context,
@@ -776,8 +824,7 @@ class Win {
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "scroll");
+		const context = this.#guardInput("scroll");
 		await sendInput(
 			this.#session,
 			context,
@@ -790,8 +837,7 @@ class Win {
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "type");
+		const context = this.#guardInput("type");
 		validateString(text, "type(text)");
 		await sendInput(
 			this.#session,
@@ -804,8 +850,7 @@ class Win {
 	}
 
 	async press(chord: string | string[], options?: InputOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "press");
+		const context = this.#guardInput("press");
 		const keys = chordKeys(chord);
 		if (!isStringList(keys) || keys.length === 0) {
 			throw new ToolError(
@@ -823,8 +868,7 @@ class Win {
 	}
 
 	async holdKeys(keys: string[], options: HoldOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "holdKeys");
+		const context = this.#guardInput("holdKeys");
 		validateHold(options);
 		validateKeys(keys, "keys");
 		await sendInput(
@@ -843,8 +887,7 @@ class Win {
 	}
 
 	async holdMouse(x: number, y: number, options: HoldMouseOptions): Promise<void> {
-		const context = this.#getContext();
-		guardRun(context, "holdMouse");
+		const context = this.#guardInput("holdMouse");
 		validateHold(options);
 		if (options.keys !== undefined) validateKeys(options.keys, "keys");
 		await sendInput(
@@ -917,6 +960,7 @@ class Win {
 	async raise(): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "raise");
+		refuseForeground(context, "raise()", "bring the window's application to the front", RAISE_ROUTE);
 		await nativeCall(context.signal, () => this.#session.raiseWindow(this.id));
 	}
 
@@ -1099,6 +1143,9 @@ export class ComputerWorkerCore {
 			throwIfAborted(signal);
 			const { displayTurn } = active;
 			if (displayTurn !== undefined && displayTurn > this.#releasedTurn) session.holdDisplayUntilReleased();
+			// Under `refuse` no foreground control stands, including a grant the
+			// model acquired before the user chose `refuse`.
+			if (message.session.backgroundFallback === "refuse" && session.controlState().active) session.releaseControl();
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);
@@ -1359,6 +1406,14 @@ export class ComputerWorkerCore {
 					const context = getContext();
 					guardRun(context, "apps.open");
 					validateString(id, "apps.open(id)", { nonEmpty: true });
+					if (options?.activate === true) {
+						refuseForeground(
+							context,
+							"apps.open with activate: true",
+							"bring the application to the front",
+							"Call apps.open without activate, which opens the application behind the user's.",
+						);
+					}
 					const { window: shown, ...application } = await nativeCall(context.signal, () =>
 						session.openApplication(id, options),
 					);
@@ -1369,6 +1424,12 @@ export class ComputerWorkerCore {
 				acquire: async (options: { reason: string }): Promise<{ active: boolean }> => {
 					const context = getContext();
 					guardRun(context, "control.acquire");
+					refuseForeground(
+						context,
+						"control.acquire",
+						"hand the agent foreground control of the desktop",
+						"Window input needs no control; it runs in the background.",
+					);
 					strictObject(options, ["reason"], "control.acquire");
 					if (typeof options.reason !== "string" || !options.reason.trim())
 						throw new ToolError("control.acquire requires a non-empty reason");
