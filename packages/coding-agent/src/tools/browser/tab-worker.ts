@@ -1467,22 +1467,6 @@ export function describeScreenshot(opts?: ScreenshotOptions): string {
 	if (opts?.fullPage) return "tab.screenshot({ fullPage: true })";
 	return "tab.screenshot()";
 }
-export async function preparePageForScreenshot(
-	page: Pick<Page, "bringToFront" | "evaluate">,
-	signal: AbortSignal | undefined,
-	activate: boolean,
-): Promise<void> {
-	if (activate) {
-		await untilAborted(signal, () => page.bringToFront()).catch(() => undefined);
-		return;
-	}
-	const visible = await untilAborted(signal, () => page.evaluate(() => document.visibilityState === "visible")).catch(
-		() => false,
-	);
-	if (!visible) {
-		throw new ToolError("The attached browser tab is not visible; switch to it before taking a screenshot");
-	}
-}
 
 /** Summarize still-running helpers (oldest first) so a cell timeout names what stalled. */
 export function describeInflight(inflight: Map<number, InflightOp>): string {
@@ -1509,7 +1493,6 @@ export class WorkerCore {
 	#isolated: boolean;
 	#uninstallRejectionGuard: () => void;
 	#mode?: WorkerInitPayload["mode"];
-	#activateForScreenshot = true;
 	/** The upload route this worker's browser connection takes, and the tab's staging folder. */
 	#uploads?: UploadStaging;
 	#dialogs?: RuntimeDialogController;
@@ -1676,7 +1659,6 @@ export class WorkerCore {
 	async #init(payload: WorkerInitPayload): Promise<void> {
 		try {
 			this.#mode = payload.mode;
-			this.#activateForScreenshot = payload.mode === "headless" || payload.activateForScreenshot !== false;
 			this.#uploads = new UploadStaging(payload.uploadDir);
 			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
 			registerSemanticQueryHandlers(puppeteer);
@@ -3055,7 +3037,6 @@ export class WorkerCore {
 		opts: ScreenshotOptions = {},
 	): Promise<string | ScreenshotChangeResult> {
 		const page = this.#requirePage();
-		await preparePageForScreenshot(page, signal, this.#activateForScreenshot);
 		screenshotQuality(opts);
 		const threshold = screenshotThreshold(opts.threshold);
 		const changeDetection = opts.ifChanged === true || opts.threshold !== undefined;
@@ -3159,7 +3140,6 @@ export class WorkerCore {
 		opts: DiffScreenshotOptions = {},
 	): Promise<DiffScreenshotResult> {
 		const page = this.#requirePage();
-		await preparePageForScreenshot(page, signal, this.#activateForScreenshot);
 		const absoluteBaseline = resolveToCwd(baselinePath, session.cwd);
 		const baseline = await untilAborted(signal, () => fs.promises.readFile(absoluteBaseline));
 		const current = await captureScreenshotBuffer(page, {}, signal, async () => null, "png");

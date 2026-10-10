@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed browser `tab.screenshot()` raising Chrome over the app you were typing in and switching its visible tab; background tabs and windows behind other apps are now captured in place, as is a relay or `app.cdp_url` tab the user switched away from
+
 ## [18.12.0] - 2026-10-17
 
 ### Added
