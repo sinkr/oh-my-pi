@@ -126,6 +126,8 @@ A system Open or Save panel, and the Go to Folder sheet it opens, is a window of
 
 A macOS background shortcut with a modifier throws `InputFailed` when its application stops answering accessibility requests right after it: the shortcut was sent, but whether it took effect is unknown. Inspect the application before retrying.
 
+On macOS, typed text is pressed on the keys of the current keyboard layout, with Shift held for the characters that need it, so applications that read key codes see the same text as those that read the event's characters; a character no unmodified or Shift key types goes out as event text. Remote screens, recognised by the Apple screen-sharing framework the application links (Screen Sharing, iPhone Mirroring), forward key codes and ignore event text: there `type` also uses Option keys, and text no key types (emoji, other scripts) throws `InvalidKey` before anything is typed, in background and takeover alike. Shortcuts and held keys reach Screen Sharing in the background. iPhone Mirroring gets slower key pacing, taps held long enough for the phone to see them, and a scroll that first moves the phone's pointer to the scroll point.
+
 Wayland per-window native input and `raise()` remain unavailable without compositor-specific integration; use AX actions, or desktop input after focusing the target yourself.
 
 `await win.observe({ silent?, all?, maxDepth? })` captures a full screenshot and accessibility tree together. It returns screenshot metadata plus `ax`, `nodeCount`, and `truncated`, and normally emits both image and tree. A failed or canceled observation does not replace the previous delivered click frame.
