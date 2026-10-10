@@ -78,7 +78,7 @@ impl CancellationSource {
 			return Err(busy());
 		}
 		if state.is_none() {
-			*state = Some(Arc::new(ControlLease::acquire_takeover(self)?));
+			*state = Some(Arc::new(ControlLease::acquire(self, true)?));
 		}
 		Ok(())
 	}
@@ -327,28 +327,47 @@ impl ControlLease {
 	/// Physical Escape anywhere stops takeover input only. A background
 	/// operation leaves the user's keyboard alone, so an Escape they press in
 	/// their own app cancels nothing; the host interrupt still cancels it.
+	#[cfg(target_os = "macos")]
+	fn acquire(source: &CancellationSource, takeover: bool) -> CoreResult<Self> {
+		Self::acquire_arming(source, takeover, macos::EscapeMonitor::start)
+	}
+
+	#[cfg(target_os = "macos")]
+	fn acquire_arming(
+		source: &CancellationSource,
+		takeover: bool,
+		start: impl FnOnce(EmergencyStop) -> CoreResult<macos::EscapeMonitor>,
+	) -> CoreResult<Self> {
+		if !takeover {
+			return Self::background();
+		}
+		let kernel = KernelOwner::acquire()?;
+		let escape = start(EmergencyStop(Arc::downgrade(&source.0)))?;
+		Ok(Self { _escape: Some(escape), _kernel: kernel, running: AtomicBool::new(false) })
+	}
+
+	#[cfg(not(target_os = "macos"))]
 	fn acquire(source: &CancellationSource, takeover: bool) -> CoreResult<Self> {
 		if takeover {
 			Self::acquire_takeover(source)
 		} else {
-			Ok(Self {
-				_escape: None,
-				_kernel: KernelOwner::acquire()?,
-				running: AtomicBool::new(false),
-			})
+			Self::background()
 		}
 	}
 
+	fn background() -> CoreResult<Self> {
+		Ok(Self { _escape: None, _kernel: KernelOwner::acquire()?, running: AtomicBool::new(false) })
+	}
+
+	#[cfg(not(target_os = "macos"))]
 	fn acquire_takeover(source: &CancellationSource) -> CoreResult<Self> {
 		let kernel = KernelOwner::acquire()?;
-		#[cfg(target_os = "macos")]
-		let escape = macos::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		#[cfg(windows)]
 		let escape = windows::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		#[cfg(target_os = "linux")]
 		let escape = linux::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		Ok(Self {
-			#[cfg(any(target_os = "macos", windows))]
+			#[cfg(windows)]
 			_escape: Some(escape),
 			#[cfg(target_os = "linux")]
 			_escape: escape,
@@ -667,15 +686,21 @@ mod tests {
 
 	#[cfg(target_os = "macos")]
 	#[test]
-	fn takeover_input_arms_physical_escape() {
+	fn only_takeover_leases_start_the_escape_monitor() {
 		let _serial = OWNERSHIP_TEST.lock();
 		let source = CancellationSource::default();
-		// Without an event tap (no Accessibility in a test runner) takeover is
-		// refused rather than run without its stop.
-		if let Ok(lease) = InputLease::acquire(&source.token(), true) {
-			assert!(lease.owner._escape.is_some(), "takeover input runs under the Escape stop");
-			drop(lease);
-		}
+		let starts = Cell::new(0);
+		let start = |_| {
+			starts.set(starts.get() + 1);
+			Err(DesktopError::permission_denied("no event tap in tests"))
+		};
+		drop(ControlLease::acquire_arming(&source, false, start).expect("background lease"));
+		assert_eq!(starts.get(), 0, "background input must not start the Escape monitor");
+		assert!(
+			ControlLease::acquire_arming(&source, true, start).is_err(),
+			"a takeover whose Escape stop cannot start is refused"
+		);
+		assert_eq!(starts.get(), 1, "takeover input starts the Escape monitor");
 		drop(KernelOwner::acquire().expect("takeover input releases kernel ownership"));
 		remove_test_lock();
 	}
