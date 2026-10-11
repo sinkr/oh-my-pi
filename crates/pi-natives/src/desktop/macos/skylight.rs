@@ -607,16 +607,17 @@ impl BackgroundFocusLease {
 		now: Instant,
 	) -> FocusDecision {
 		self.user.observe(signals, front, now);
-		// The target came forward right after a user switch: the user picked it.
-		// Otherwise it activated itself, even while the user kept typing.
+		// An app came forward right after a user switch: the user picked it.
+		// Otherwise the action brought it, whether the target activated itself
+		// or asked another app to open something, as Finder's ⌘O does with
+		// TextEdit, even while the user kept typing.
 		let picked = now
 			.checked_sub(USER_SWITCH_WINDOW)
 			.and_then(|start| self.user.since(start))
 			.is_some();
 		if self.disarmed
-			|| (front != self.previous && front != self.target)
 			|| (front == self.previous && key.is_some_and(|key| Some(key) != self.key))
-			|| (front == self.target && picked)
+			|| (front != self.previous && picked)
 		{
 			// The target in front now is the user's: they acted there, or the
 			// lease no longer sends it back.
@@ -624,10 +625,10 @@ impl BackgroundFocusLease {
 			self.disarmed = true;
 			return FocusDecision::Disarm;
 		}
-		if front == self.target {
-			FocusDecision::Restore
-		} else {
+		if front == self.previous {
 			FocusDecision::Observe
+		} else {
+			FocusDecision::Restore
 		}
 	}
 
@@ -685,12 +686,12 @@ pub(super) fn with_background_guard<T>(
 
 /// Contains asynchronous self-activation during background input and its
 /// bounded post-action settle, without a process-lived observer or run loop.
-/// A third app, a changed prior key window, or the target coming forward right
-/// after a click, a ⌘/⌃ chord or a Spotlight-style panel permanently disarms
-/// the lease; typing does not. Only the addressed target can be sent back
-/// behind the original front app; unrelated activations are never undone.
-/// `action` gets the [`TargetVisit`] the guard records, which keeps being
-/// watched after the lease disarms.
+/// The target, or a third app the action brings forward (Finder's ⌘O opening
+/// a document in `TextEdit`), is sent back behind the original front app. A
+/// changed prior key window, or any app coming forward right after a click, a
+/// ⌘/⌃ chord or a Spotlight-style panel, permanently disarms the lease; typing
+/// does not. `action` gets the [`TargetVisit`] the guard records, which keeps
+/// being watched after the lease disarms.
 pub(super) fn with_background_watch<T>(
 	pid: pid_t,
 	action: impl FnOnce(TargetVisit<'_>) -> CoreResult<T>,
@@ -776,14 +777,15 @@ pub(super) fn with_background_watch<T>(
 								// switch. `WindowServer` then refuses the hand-back if
 								// the user pressed a key or clicked after the re-check
 								// began.
+								let brought = front.psn;
 								let handed_back = request_after_check(
 									event_clock_now,
 									|| {
-										front_process(spi.get_front).is_some_and(|front| front.psn == target)
+										front_process(spi.get_front).is_some_and(|front| front.psn == brought)
 											&& {
 												let now = Instant::now();
 												lease.observe(
-													target,
+													brought,
 													None,
 													SwitchSignals::read(spi, now, chord),
 													now,
@@ -1482,14 +1484,67 @@ mod tests {
 	fn user_focus_changes_permanently_disarm_background_restoration() {
 		let t0 = Instant::now();
 		let idle = input(0, NO_MODIFIERS);
+		// The user clicks a third app forward.
 		let mut guard = lease_at(t0, None);
 		assert_eq!(guard.observe(TARGET, None, idle, t0), FocusDecision::Restore);
-		assert_eq!(guard.observe(THIRD, None, idle, t0 + ms(10)), FocusDecision::Disarm);
+		assert_eq!(
+			guard.observe(THIRD, None, input(1, NO_MODIFIERS), t0 + ms(10)),
+			FocusDecision::Disarm
+		);
 		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(20)), FocusDecision::Disarm);
 
 		let mut guard = lease_at(t0, None);
 		assert_eq!(guard.observe(PREVIOUS, Some(43), idle, t0 + ms(10)), FocusDecision::Disarm);
 		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(20)), FocusDecision::Disarm);
+	}
+
+	#[test]
+	fn a_third_app_the_action_brings_forward_is_sent_back_like_the_target() {
+		// Finder's ⌘O opens a file in TextEdit, which comes forward 100-220 ms
+		// later while the user types on, with no click, chord or panel.
+		let t0 = Instant::now();
+		for flags in [NO_MODIFIERS, SHIFT, OPTION] {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), input(0, flags), t0 + ms(10)),
+				FocusDecision::Observe
+			);
+			assert_eq!(
+				guard.observe(THIRD, None, input(0, flags), t0 + ms(220)),
+				FocusDecision::Restore,
+				"flags {flags:#x}"
+			);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), input(0, flags), t0 + ms(240)),
+				FocusDecision::Observe
+			);
+		}
+		// The third app holding the keyboard as it comes forward is no panel.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(THIRD, None, keyboard_in(THIRD), t0 + ms(20)),
+			FocusDecision::Restore
+		);
+		// A third app the user ⌘-Tabs or Spotlights to stays.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(42), input(0, COMMAND), t0 + ms(100)),
+			FocusDecision::Observe
+		);
+		assert_eq!(
+			guard.observe(THIRD, None, input(0, NO_MODIFIERS), t0 + ms(113)),
+			FocusDecision::Disarm
+		);
+		let mut guard = lease_at(t0, None);
+		let spotlight = ProcessSerialNumber { high: 0, low: 10 };
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(42), keyboard_in(spotlight), t0 + ms(100)),
+			FocusDecision::Observe
+		);
+		assert_eq!(
+			guard.observe(THIRD, None, keyboard_in(THIRD), t0 + ms(116)),
+			FocusDecision::Disarm
+		);
 	}
 
 	#[test]
@@ -1682,18 +1737,18 @@ mod tests {
 	#[test]
 	fn a_visit_to_the_target_is_kept_after_the_user_leaves_it() {
 		let t0 = Instant::now();
-		let idle = input(0, NO_MODIFIERS);
+		let clicked = input(1, NO_MODIFIERS);
 		// The user clicks the target, then goes back to their app.
 		let mut guard = lease_at(t0, None);
-		guard.observe(TARGET, None, input(1, NO_MODIFIERS), t0 + ms(10));
-		guard.observe(PREVIOUS, Some(42), input(1, NO_MODIFIERS), t0 + ms(20));
+		guard.observe(TARGET, None, clicked, t0 + ms(10));
+		guard.observe(PREVIOUS, Some(42), clicked, t0 + ms(20));
 		assert!(guard.visited);
-		// After a switch to a third app the lease stands down, yet still sees
-		// the user come to the target.
+		// After the user clicks a third app forward the lease stands down, yet
+		// still sees the user come to the target.
 		let mut guard = lease_at(t0, None);
-		guard.observe(THIRD, None, idle, t0 + ms(10));
+		guard.observe(THIRD, None, clicked, t0 + ms(10));
 		assert!(!guard.visited);
-		guard.observe(TARGET, None, idle, t0 + ms(20));
+		guard.observe(TARGET, None, clicked, t0 + ms(500));
 		assert!(guard.visited);
 		// The target's own activation, sent back even while the user types, is
 		// not a visit; a refused hand-back is.
