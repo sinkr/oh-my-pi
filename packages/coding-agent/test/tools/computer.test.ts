@@ -3212,7 +3212,9 @@ describe("computer background fallback", () => {
 			expect(elsewhere.calls).toEqual(["focus:e1"]);
 
 			class MacSession extends ForegroundSession {
-				override readonly capabilities = { ...capabilities, backend: "quartz" };
+				override get capabilities(): DesktopCapabilities {
+					return { ...super.capabilities, backend: "quartz" };
+				}
 			}
 			const mac = new MacSession();
 			expect((await run(mac, 'await (await desktop.ref("e1")).focus()', "refuse")).ok).toBe(true);
