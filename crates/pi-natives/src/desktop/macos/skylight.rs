@@ -1,5 +1,6 @@
 use std::{
 	ffi::c_void,
+	ptr,
 	sync::{
 		LazyLock,
 		atomic::{AtomicBool, Ordering},
@@ -891,7 +892,7 @@ struct WindowQuerySpi {
 }
 
 static WINDOW_QUERY: LazyLock<Option<WindowQuerySpi>> = LazyLock::new(|| {
-	ensure_skylight_loaded()?;
+	route::load_skylight()?;
 	Some(WindowQuerySpi {
 		connection: symbol(c"CGSMainConnectionID")?,
 		query:      symbol(c"SLSWindowQueryWindows")?,
@@ -937,7 +938,7 @@ struct WindowOwnerSpi {
 }
 
 static WINDOW_OWNER: LazyLock<Option<WindowOwnerSpi>> = LazyLock::new(|| {
-	ensure_skylight_loaded()?;
+	route::load_skylight()?;
 	Some(WindowOwnerSpi {
 		connection: symbol(c"CGSMainConnectionID")?,
 		owner:      symbol(c"SLSGetWindowOwner")?,
