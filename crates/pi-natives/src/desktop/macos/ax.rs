@@ -430,10 +430,19 @@ pub(super) fn key_focus(pid: libc::pid_t) -> KeyFocus {
 	probe_application(pid).map_or_else(KeyFocus::default, |app| read_key_focus(&app).0)
 }
 
-fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement>>) {
-	let window = copy_element(app, "AXFocusedWindow").map_or(FocusedWindow::Unreported, |window| {
+/// `pid`'s `AXFocusedWindow`, read alone.
+pub(super) fn focused_window(pid: libc::pid_t) -> FocusedWindow {
+	probe_application(pid).map_or(FocusedWindow::Unreported, |app| read_focused_window(&app))
+}
+
+fn read_focused_window(app: &AXUIElement) -> FocusedWindow {
+	copy_element(app, "AXFocusedWindow").map_or(FocusedWindow::Unreported, |window| {
 		window_id(&window).map_or(FocusedWindow::Unmapped, FocusedWindow::Id)
-	});
+	})
+}
+
+fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement>>) {
+	let window = read_focused_window(app);
 	let element = copy_element(app, "AXFocusedUIElement");
 	let (element_window, element_mapped) = element
 		.as_deref()
