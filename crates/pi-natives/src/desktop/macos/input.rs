@@ -736,7 +736,7 @@ fn pressed_point(event: &PointerEvent) -> Option<(f64, f64)> {
 /// application reports no focused window, as Finder does while its rename
 /// field, an overlay window of its own, has focus, the focused element's
 /// window stands for it.
-fn takes_overlay_focus(
+pub(super) fn takes_overlay_focus(
 	wid: u32,
 	focus: ax::KeyFocus,
 	parent_of: impl Fn(u32) -> Option<u32>,
