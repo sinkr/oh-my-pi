@@ -53,6 +53,11 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 		let (elements, items) = children(&menu, &actual_path, pid)?;
 		let index = match_index(&items, &path[path.len() - 1])?;
 		let element = &elements[index];
+		let reread = || {
+			describe(element, &actual_path, pid)?.ok_or_else(|| {
+				DesktopError::ax_failed("menu command lost its title; nothing was dispatched")
+			})
+		};
 		// A disabled command may be stale rather than unavailable, as TextEdit's
 		// File > Save right after background typing was.
 		let item = if items[index].enabled {
@@ -61,7 +66,7 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 			settle(
 				items[index].clone(),
 				MENU_SETTLE_TIMEOUT,
-				|| describe(element, &actual_path, pid),
+				reread,
 				|_, now| now.enabled,
 				|| control::wait(MENU_SETTLE_POLL),
 			)?
@@ -75,9 +80,7 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 		}
 		// Re-read the chosen command after all path/provider queries. A menu may
 		// validate itself in response to a key-window change.
-		let item = describe(element, &actual_path, pid)?.ok_or_else(|| {
-			DesktopError::ax_failed("menu command lost its title; nothing was dispatched")
-		})?;
+		let item = reread()?;
 		require_command(&item)?;
 		require_key_context(pid, wid)?;
 		control::check()?;
