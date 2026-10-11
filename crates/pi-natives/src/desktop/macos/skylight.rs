@@ -45,8 +45,9 @@ const ACTIVATION_POLL: Duration = Duration::from_millis(10);
 /// count as the user's own switch. Measured on a VM: ⌘-Tab activates the chosen
 /// app about 3 ms after ⌘ is released.
 const USER_SWITCH_WINDOW: Duration = Duration::from_millis(250);
-/// How often the chord sampler reads whether ⌘ or ⌃ is held: well inside the
-/// ~100 ms a ⌘-Tab holds ⌘, on a thread no AX probe blocks.
+/// How often the sampler reads whether ⌘ or ⌃ is held and which app is in
+/// front: well inside the ~100 ms a ⌘-Tab holds ⌘, on a thread no AX probe
+/// blocks.
 const CHORD_SAMPLE: Duration = Duration::from_millis(5);
 /// Keeps the target frontmost until it has consumed foreground input.
 const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
@@ -414,16 +415,19 @@ const SWITCH_MODIFIERS: u64 = 0x0010_0000 | 0x0004_0000;
 #[derive(Clone, Copy)]
 struct SwitchSignals {
 	/// HID counters of `MOUSE_BUTTON_EVENTS`.
-	buttons:    [u32; 6],
+	buttons:     [u32; 6],
 	/// When a mouse button last went down or up.
-	last_click: Option<Instant>,
+	last_click:  Option<Instant>,
 	/// A switch modifier is held now.
-	chord:      bool,
+	chord:       bool,
 	/// When the chord sampler last saw ⌘ or ⌃ held, however long this poll
 	/// was blocked.
-	last_chord: Option<Instant>,
+	last_chord:  Option<Instant>,
 	/// The process that has the keyboard.
-	key_focus:  Option<ProcessSerialNumber>,
+	key_focus:   Option<ProcessSerialNumber>,
+	/// The app the sampler last saw in front and when it first saw it there,
+	/// however long this poll was blocked.
+	front_since: Option<(ProcessSerialNumber, Instant)>,
 }
 
 impl SwitchSignals {
@@ -434,10 +438,23 @@ impl SwitchSignals {
 		last_chord: Option<Instant>,
 		key_focus: Option<ProcessSerialNumber>,
 	) -> Self {
-		Self { buttons, last_click, chord: flags & SWITCH_MODIFIERS != 0, last_chord, key_focus }
+		Self {
+			buttons,
+			last_click,
+			chord: flags & SWITCH_MODIFIERS != 0,
+			last_chord,
+			key_focus,
+			front_since: None,
+		}
 	}
 
-	fn read(spi: &ForegroundSpi, now: Instant, last_chord: &Mutex<Option<Instant>>) -> Self {
+	/// These signals with the sampler's reading that `front` came forward at
+	/// `at`.
+	const fn with_front_since(self, front: ProcessSerialNumber, at: Instant) -> Self {
+		Self { front_since: Some((front, at)), ..self }
+	}
+
+	fn read(spi: &ForegroundSpi, now: Instant, sampled: &Sampled) -> Self {
 		// SAFETY: HIDSystemState and these public CGEventType values are defined
 		// by CGEventSource.h / CGEventTypes.h; these are read-only queries.
 		let buttons = MOUSE_BUTTON_EVENTS.map(|event_type| unsafe {
@@ -453,7 +470,7 @@ impl SwitchSignals {
 			.min()
 			.and_then(|since| now.checked_sub(since));
 		let flags = modifier_flags();
-		let last_chord = *last_chord.lock();
+		let last_chord = *sampled.chord.lock();
 		let key_focus = spi.get_key_focus.and_then(|get_key_focus| {
 			let mut psn = ProcessSerialNumber::default();
 			let mut status = 0u8;
@@ -461,7 +478,11 @@ impl SwitchSignals {
 			// which writes the 8-byte PSN and one status byte.
 			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 		});
-		Self::new(buttons, last_click, flags, last_chord, key_focus)
+		let signals = Self::new(buttons, last_click, flags, last_chord, key_focus);
+		match *sampled.front.lock() {
+			Some((front, at)) => signals.with_front_since(front, at),
+			None => signals,
+		}
 	}
 }
 
@@ -470,12 +491,34 @@ fn modifier_flags() -> u64 {
 	unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) }
 }
 
+/// What the sampler thread, which no AX probe blocks, has seen.
+#[derive(Default)]
+struct Sampled {
+	/// When ⌘ or ⌃ was last seen held ([`sample_chord`]).
+	chord: Mutex<Option<Instant>>,
+	/// The app in front and when it was first seen there ([`sample_front`]).
+	front: Mutex<Option<(ProcessSerialNumber, Instant)>>,
+}
+
 /// One chord-sampler reading: `now` becomes the latest time ⌘ or ⌃ was seen
 /// held. Other modifiers leave it alone, so Shift or ⌥ while a poll is
 /// blocked never looks like a chord.
 fn sample_chord(last_chord: &Mutex<Option<Instant>>, flags: u64, now: Instant) {
 	if flags & SWITCH_MODIFIERS != 0 {
 		*last_chord.lock() = Some(now);
+	}
+}
+
+/// One front-app reading: an app newly in front is timed from `now`, so a
+/// poll that sees it late still knows when it came forward.
+fn sample_front(
+	seen: &Mutex<Option<(ProcessSerialNumber, Instant)>>,
+	front: ProcessSerialNumber,
+	now: Instant,
+) {
+	let mut seen = seen.lock();
+	if seen.is_none_or(|(psn, _)| psn != front) {
+		*seen = Some((front, now));
 	}
 }
 
@@ -610,8 +653,14 @@ impl BackgroundFocusLease {
 		// An app came forward right after a user switch: the user picked it.
 		// Otherwise the action brought it, whether the target activated itself
 		// or asked another app to open something, as Finder's ⌘O does with
-		// TextEdit, even while the user kept typing.
-		let picked = now
+		// TextEdit, even while the user kept typing. The switch is timed against
+		// when the app came forward, which a poll blocked in an AX probe sees
+		// late.
+		let came_forward = signals
+			.front_since
+			.filter(|(psn, _)| *psn == front)
+			.map_or(now, |(_, at)| at.min(now));
+		let picked = came_forward
 			.checked_sub(USER_SWITCH_WINDOW)
 			.and_then(|start| self.user.since(start))
 			.is_some();
@@ -728,12 +777,12 @@ pub(super) fn with_background_watch<T>(
 		})?
 		.window();
 	let now = Instant::now();
-	let last_chord = Mutex::new(None);
+	let sampled = Sampled::default();
 	let mut lease = BackgroundFocusLease::new(
 		previous.psn,
 		target,
 		previous_key,
-		SwitchSignals::read(spi, now, &last_chord),
+		SwitchSignals::read(spi, now, &sampled),
 		now,
 	);
 	let stopped = AtomicBool::new(false);
@@ -747,7 +796,7 @@ pub(super) fn with_background_watch<T>(
 	thread::scope(|scope| {
 		let stop = &stopped;
 		let visit = &visited;
-		let chord = &last_chord;
+		let sampled = &sampled;
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
 			.spawn_scoped(scope, move || -> CoreResult<()> {
@@ -769,7 +818,7 @@ pub(super) fn with_background_watch<T>(
 								None
 							};
 							let now = Instant::now();
-							if lease.observe(front.psn, key, SwitchSignals::read(spi, now, chord), now)
+							if lease.observe(front.psn, key, SwitchSignals::read(spi, now, sampled), now)
 								== FocusDecision::Restore
 							{
 								// Re-check immediately before changing focus: an AX
@@ -787,7 +836,7 @@ pub(super) fn with_background_watch<T>(
 												lease.observe(
 													brought,
 													None,
-													SwitchSignals::read(spi, now, chord),
+													SwitchSignals::read(spi, now, sampled),
 													now,
 												) == FocusDecision::Restore
 											}
@@ -828,7 +877,7 @@ pub(super) fn with_background_watch<T>(
 							lease.reactivated(
 								restored,
 								front.psn,
-								SwitchSignals::read(spi, now, chord),
+								SwitchSignals::read(spi, now, sampled),
 								now,
 							)
 						}) {
@@ -855,14 +904,18 @@ pub(super) fn with_background_watch<T>(
 			}
 		}
 		let stop = StopObserver { stopped: &stopped, thread: observer.thread().clone() };
-		// Watches ⌘/⌃ apart from the observer, whose AX probes can block it for
-		// up to half a second, until the action ends.
+		// Watches ⌘/⌃ and the front app apart from the observer, whose AX probes
+		// can block it for up to half a second, until the action ends.
 		let stopped = &stopped;
 		thread::Builder::new()
-			.name("desktop-chord-sampler".to_string())
+			.name("desktop-switch-sampler".to_string())
 			.spawn_scoped(scope, move || {
 				while !stopped.load(Ordering::Acquire) {
-					sample_chord(chord, modifier_flags(), Instant::now());
+					let now = Instant::now();
+					sample_chord(&sampled.chord, modifier_flags(), now);
+					if let Some(front) = front_process(spi.get_front) {
+						sample_front(&sampled.front, front.psn, now);
+					}
 					thread::sleep(CHORD_SAMPLE);
 				}
 			})
@@ -1702,6 +1755,39 @@ mod tests {
 		let mut guard = lease_at(t0, None);
 		assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(10)), FocusDecision::Observe);
 		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(100)), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_switch_right_before_the_target_came_forward_counts_when_the_poll_sees_it_late() {
+		// The observer's AX probe stalled for its 0.5 s timeout while the user
+		// clicked the target forward; its next poll sees the target 500 ms
+		// after the click, but the sampler saw it come forward 10 ms after.
+		let t0 = Instant::now();
+		let click = clicked_at(t0 + ms(10));
+		let late = t0 + ms(520);
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(TARGET, None, click.with_front_since(TARGET, t0 + ms(20)), late),
+			FocusDecision::Disarm
+		);
+		// The target coming forward long after the click is the action's doing.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(TARGET, None, click.with_front_since(TARGET, t0 + ms(400)), late),
+			FocusDecision::Restore
+		);
+		// A reading for another app says nothing about when the target came.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(TARGET, None, click.with_front_since(THIRD, t0 + ms(20)), late),
+			FocusDecision::Restore
+		);
+		// The sampler times an app from the first reading that has it in front.
+		let seen = Mutex::new(None);
+		sample_front(&seen, PREVIOUS, t0);
+		sample_front(&seen, TARGET, t0 + ms(20));
+		sample_front(&seen, TARGET, t0 + ms(25));
+		assert!(*seen.lock() == Some((TARGET, t0 + ms(20))));
 	}
 
 	#[test]
