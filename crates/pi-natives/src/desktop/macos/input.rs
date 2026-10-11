@@ -831,7 +831,7 @@ const fn pointer_kind(event: &PointerEvent) -> &'static str {
 }
 
 /// Refuses background pointer input the target is known to drop or misplace,
-/// before anything is posted.
+/// or that holds a key with no key code, before anything is posted.
 fn background_guard(
 	window: &DesktopWindow,
 	pid: libc::pid_t,
@@ -860,6 +860,13 @@ fn refuse_pointer(
 			window.id, window.app,
 		)))
 	};
+	// Preparing a held press can make the target's window key, so a key that
+	// cannot be pressed refuses first.
+	if let PointerEvent::Drag { keys, .. } | PointerEvent::Hold { keys, .. } = event {
+		for &key in keys {
+			key_code(key)?;
+		}
+	}
 	let kind = pointer_kind(event);
 	let app = window.app.to_ascii_lowercase();
 	let canvas_or_game = ["blender", "unity", "godot", "unreal"]
@@ -882,6 +889,20 @@ fn refuse_pointer(
 		return refuse(
 			"could open a context menu on this secondary-button hold or drag, which would take the \
 			 keyboard from the user's app until the button is released",
+		);
+	}
+	// Each later click of a multi-click waits its gap before the menu the first
+	// one opened can be closed.
+	if let PointerEvent::Click { count, .. } = event
+		&& *count > 1
+		&& may_open_context_menu(event)
+	{
+		return refuse(
+			format!(
+				"could open a context menu on the first of these {count} secondary-button clicks, \
+				 which would take the keyboard from the user's app while the later clicks are sent"
+			)
+			.as_str(),
 		);
 	}
 	if presses_button(event) && reads_hardware_pointer() {
@@ -4084,6 +4105,56 @@ mod tests {
 			modifiers: Modifiers::default(),
 		};
 		assert_eq!(verdict(&right_click), Ok(()));
+	}
+
+	#[test]
+	fn repeated_clicks_that_can_open_a_context_menu_are_refused_before_anything_is_sent() {
+		// The menu the first click opens would hold the user's keyboard while
+		// the later clicks wait their gaps.
+		let window = background_window("Google Chrome");
+		let click = |button, count, ctrl| PointerEvent::Click {
+			x: 10.0,
+			y: 10.0,
+			button,
+			count,
+			modifiers: Modifiers { ctrl, ..Modifiers::default() },
+		};
+		let verdict = |event: &PointerEvent| {
+			refuse_pointer(&window, event, || false, || false).map_err(|error| error.code.as_str())
+		};
+		assert_eq!(verdict(&click(MouseButton::Right, 2, false)), Err("BackgroundUnavailable"));
+		assert_eq!(verdict(&click(MouseButton::Left, 50, true)), Err("BackgroundUnavailable"));
+		assert_eq!(verdict(&click(MouseButton::Right, 1, false)), Ok(()));
+		assert_eq!(verdict(&click(MouseButton::Left, 1, true)), Ok(()));
+		assert_eq!(verdict(&click(MouseButton::Left, 3, false)), Ok(()));
+		assert_eq!(verdict(&click(MouseButton::Middle, 2, true)), Ok(()));
+	}
+
+	#[test]
+	fn held_keys_without_a_key_code_refuse_before_the_target_is_prepared() {
+		// `parse_keys` accepts "é", which has no macOS key code; the press
+		// preparation would already have made the target's window key.
+		let window = background_window("Google Chrome");
+		let verdict = |event: &PointerEvent| {
+			refuse_pointer(&window, event, || false, || false).map_err(|error| error.code.as_str())
+		};
+		let drag = |keys| PointerEvent::Drag {
+			path: vec![(10.0, 10.0), (90.0, 40.0)],
+			button: MouseButton::Left,
+			modifiers: Modifiers::default(),
+			keys,
+		};
+		let hold = |keys| PointerEvent::Hold {
+			x: 10.0,
+			y: 10.0,
+			button: MouseButton::Left,
+			keys,
+			duration: Duration::from_secs(1),
+		};
+		assert_eq!(verdict(&drag(vec![KeyName::Char('é')])), Err("InvalidKey"));
+		assert_eq!(verdict(&hold(vec![KeyName::Shift, KeyName::Char('é')])), Err("InvalidKey"));
+		assert_eq!(verdict(&drag(vec![KeyName::Shift])), Ok(()));
+		assert_eq!(verdict(&hold(vec![KeyName::Char('a')])), Ok(()));
 	}
 
 	#[test]
