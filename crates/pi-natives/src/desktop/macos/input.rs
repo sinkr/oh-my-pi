@@ -1423,13 +1423,14 @@ const fn button_types(
 
 /// Background pointer input for window `wid` of `pid`. The events go to the
 /// process and window that take the window's input, which `owner` reads
-/// ([`input_owner`], through [`pointer_owner`]); making the window key still
-/// goes to its own application. `in_overlay` says `wid` is a sheet or popover
-/// on the application's focused window ([`takes_overlay_focus`]), so a left
-/// click sends only the activation, without the press outside its frame that
-/// would close a popover or reach the window the sheet is attached to. Each
-/// press of a left click that made the window key first passes
-/// [`recheck_background`], with `visit` from the focus guard.
+/// ([`input_owner`], through [`pointer_owner`]) and which also shows any menu
+/// they open; making the window key still goes to its own application.
+/// `in_overlay` says `wid` is a sheet or popover on the application's focused
+/// window ([`takes_overlay_focus`]), so a left click sends only the
+/// activation, without the press outside its frame that would close a popover
+/// or reach the window the sheet is attached to. Each press of a left click
+/// that made the window key first passes [`recheck_background`], with `visit`
+/// from the focus guard.
 fn background_pointer(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1445,17 +1446,18 @@ fn background_pointer(
 	let prepare =
 		|| make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit);
 	let (prepared, (to, to_wid)) = pointer_owner(&event, prepare, owner)?;
+	let menu_pid = to;
 	// An open menu takes the keyboard from the user's app: a context menu, or
 	// the menu of a menu button or popup button that a left click lands on.
 	let timeout = if may_open_context_menu(&event) {
 		Some(ax::open_menu::CONTEXT_MENU_TIMEOUT)
-	} else if menu.is_some() || clicks_menu_control(&event, pid) {
+	} else if menu.is_some() || clicks_menu_control(&event, pid, menu_pid) {
 		Some(ax::open_menu::CONTROL_MENU_TIMEOUT)
 	} else {
 		None
 	};
 	let before = match timeout {
-		Some(_) => Some(capture::menu_windows(pid).ok_or_else(|| {
+		Some(_) => Some(capture::menu_windows(menu_pid).ok_or_else(|| {
 			DesktopError::background_unavailable(format!(
 				"cannot list the open menus of window {} ({}), so a menu this {} opens could not be \
 				 closed; nothing was sent; retry with takeover:true or use ax actions",
@@ -1483,18 +1485,21 @@ fn background_pointer(
 				visit,
 			)
 		},
-		|before, path| ax::open_menu::settle(pid, before, path, timeout.unwrap_or_default()),
+		|before, path| {
+			ax::open_menu::settle(menu_pid, pid, before, path, timeout.unwrap_or_default())
+		},
 	)
 }
 
 /// Whether `event` is a left click that lands on a menu button or popup
-/// button of `pid` while another application is frontmost; the control opens
-/// its menu on the click. Other clicks pay no accessibility hit-test.
-fn clicks_menu_control(event: &PointerEvent, pid: libc::pid_t) -> bool {
+/// button drawn by `owner` (the window's application, or the process drawing
+/// its content) while another application than `pid` is frontmost; the control
+/// opens its menu on the click. Other clicks pay no accessibility hit-test.
+fn clicks_menu_control(event: &PointerEvent, pid: libc::pid_t, owner: libc::pid_t) -> bool {
 	let PointerEvent::Click { x, y, button: MouseButton::Left, .. } = *event else {
 		return false;
 	};
-	skylight::front_pid() != Some(pid) && ax::open_menu::opens_menu_at(pid, x, y)
+	skylight::front_pid() != Some(pid) && ax::open_menu::opens_menu_at(owner, x, y)
 }
 
 fn background_gesture(
@@ -2544,7 +2549,7 @@ fn foreground_pointer(
 							Some(&before),
 							Some(path),
 							|| global_pointer(source, event),
-							|before, path| ax::open_menu::settle(pid, before, path, timeout),
+							|before, path| ax::open_menu::settle(pid, pid, before, path, timeout),
 						)
 					},
 				});
