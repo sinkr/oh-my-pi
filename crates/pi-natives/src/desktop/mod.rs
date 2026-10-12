@@ -3515,9 +3515,9 @@ mod capture_tests {
 			}
 		};
 		for request in [hold(true, None), drag(Some(true), None)] {
-			let refused = worker
-				.process(&request, &token)
-				.expect_err("a press on a menu control refuses");
+			let Err(refused) = worker.process(&request, &token) else {
+				panic!("a press on a menu control refuses");
+			};
 			assert_eq!(refused.code, ErrorCode::BackgroundUnavailable);
 		}
 		assert!(clicks.lock().is_empty(), "nothing may be sent before the refusal");

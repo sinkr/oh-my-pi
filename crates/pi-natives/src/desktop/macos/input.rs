@@ -1651,10 +1651,10 @@ fn attached_window(
 }
 
 /// Refuses background `event` on window `target` when it presses the left
-/// button on a menu button or popup button: a click lands there, a mouse hold
-/// or a drag starts there, and the control would open its menu, which takes
-/// the user's keyboard while it is open. A window whose input goes nowhere is
-/// left for the input itself to refuse.
+/// button on a menu button or popup button ([`presses_menu_control`]): a click
+/// lands there, a mouse hold or a drag starts there, and the control would
+/// open its menu, which takes the user's keyboard while it is open. A window
+/// whose input goes nowhere is left for the input itself to refuse.
 pub(super) fn refuse_menu_press(
 	target: &Target,
 	event: &PointerEvent,
@@ -1663,15 +1663,9 @@ pub(super) fn refuse_menu_press(
 	let Target::Window(id) = target else {
 		return Ok(());
 	};
-	let (verb, (x, y)) = match event {
-		PointerEvent::Click { x, y, button: MouseButton::Left, .. } => ("lands", (*x, *y)),
-		PointerEvent::Hold { x, y, button: MouseButton::Left, .. } => ("starts", (*x, *y)),
-		PointerEvent::Drag { path, button: MouseButton::Left, .. } => match path.first() {
-			Some(&start) => ("starts", start),
-			None => return Ok(()),
-		},
-		_ => return Ok(()),
-	};
+	if left_press(event).is_none() {
+		return Ok(());
+	}
 	let window = capture.window(id)?;
 	let (pid, wid) = window_identity(&window)?;
 	let (window, wid) = attached_window(capture, window, pid, wid, event)?;
@@ -1680,7 +1674,12 @@ pub(super) fn refuse_menu_press(
 	else {
 		return Ok(());
 	};
-	if skylight::front_pid() != Some(pid) && ax::open_menu::opens_menu_at(owner, x, y) {
+	if presses_menu_control(event, pid, owner) {
+		let verb = if matches!(event, PointerEvent::Click { .. }) {
+			"lands"
+		} else {
+			"starts"
+		};
 		return Err(DesktopError::background_unavailable(format!(
 			"the {} on window {} ({}), which {verb} on a menu button or popup button, would open its \
 			 menu; nothing was sent",
