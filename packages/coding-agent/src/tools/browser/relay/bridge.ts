@@ -64,6 +64,8 @@ interface SessionRef {
 	runtimeEpoch: number;
 	/** Sent `Target.setAutoAttach`; only such a session is told about real child targets. */
 	autoAttach: boolean;
+	/** Asked for `Page.setInterceptFileChooserDialog`; the tab keeps it on while any of its sessions does. */
+	interceptsFileChooser: boolean;
 }
 
 interface TargetInfo {
@@ -613,6 +615,17 @@ export class RelayBridge {
 				};
 				if (!(await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref.autoAttach ? announce : undefined))) {
 					ref.autoAttach = previous;
+				}
+				return;
+			}
+			if (msg.method === "Page.setInterceptFileChooserDialog") {
+				// Every session of a tab shares one debugger attachment, so interception is tab-wide here: one
+				// session switching it off must not cancel another session's chooser wait.
+				const previous = ref.interceptsFileChooser;
+				ref.interceptsFileChooser = msg.params?.enabled === true;
+				const params = { ...msg.params, enabled: this.#interceptsFileChooser(ref.tabKey) };
+				if (!(await this.#forwardToTab(conn, { ...msg, params }, ref.tabKey, undefined))) {
+					ref.interceptsFileChooser = previous;
 				}
 				return;
 			}
@@ -1370,6 +1383,7 @@ export class RelayBridge {
 			runtimeEnabling: null,
 			runtimeEpoch: 0,
 			autoAttach: false,
+			interceptsFileChooser: false,
 		});
 		return sessionId;
 	}
@@ -1438,6 +1452,16 @@ export class RelayBridge {
 			if (conn.sessionsForTab(tabKey).length > 0) out.push(conn);
 		}
 		return out;
+	}
+
+	/** Whether any live session on a tab, across connections, has file chooser interception on. */
+	#interceptsFileChooser(tabKey: string): boolean {
+		for (const conn of this.#conns.values()) {
+			for (const ref of conn.sessions.values()) {
+				if (ref.tabKey === tabKey && ref.interceptsFileChooser) return true;
+			}
+		}
+		return false;
 	}
 
 	#emitTabAttached(conn: CdpConnection, tab: TabState): void {
