@@ -219,7 +219,7 @@
 
 ### Fixed
 
-- Browser `uploadFile` in Chrome fails on an element that neither opens a file chooser nor accepts a drop, instead of reporting success with no file attached
+- Fixed browser `uploadFile` in Chrome reporting success with no file attached when the element neither opens a file chooser nor takes the dropped files; it now fails and says what to target ([#15491](https://github.com/can1357/oh-my-pi/pull/15491) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.10.2] - 2026-10-12
 
