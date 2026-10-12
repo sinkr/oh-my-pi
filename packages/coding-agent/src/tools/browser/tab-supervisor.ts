@@ -245,15 +245,29 @@ const OPEN_NAVIGATION_REPORT_MS = 500;
 // vanished instead of a bare "not alive". Cleared when the name is opened again.
 const killedTabs = new Map<string, string>();
 const DEFAULT_TAB_CLOSE_TIMEOUT_MS = 5_000;
+// What every worker replacement resets, for results that report one.
+const WORKER_RESETS =
+	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals)";
 // What a worker recycle (`recycleTimedOutWorkerTab`) resets, for results that report one.
-const RECYCLE_RESETS =
-	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals), any open dialog was dismissed, and any page still loading was stopped.";
+const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any page still loading was stopped.`;
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
+const DEBUGGER_DETACH_CAUSE =
+	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu, or when the user cancels Chrome's debugging bar";
 class RecoverableWorkerError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
 /** The page's renderer crashed; the run that reports it recycles the worker. */
 class RendererCrashedError extends ToolError {}
+/** Chrome ended the debugger attachment of a relay tab; the worker runs nothing more and the tab is re-adopted. */
+class DebuggerDetachedError extends ToolError {
+	constructor(
+		message: string,
+		/** `during`: the run's code had started, so its input may already have landed. */
+		readonly when: "during" | "before",
+	) {
+		super(message);
+	}
+}
 const REPORTED_INIT_FAILURE = Symbol("reported-init-failure");
 
 type ReportedInitFailure = Error & { [REPORTED_INIT_FAILURE]?: true };
@@ -825,7 +839,14 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 
 async function runInTabWithSnapshot(
 	name: string,
-	opts: { code: string; timeoutMs: number; signal?: AbortSignal; session?: ToolSession },
+	opts: {
+		code: string;
+		timeoutMs: number;
+		signal?: AbortSignal;
+		session?: ToolSession;
+		/** This run follows a re-adoption that a detach before the previous attempt caused; it is not retried again. */
+		readopted?: boolean;
+	},
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
 	const tab = tabs.get(name);
@@ -984,6 +1005,30 @@ async function runInTabWithSnapshot(
 						: `${error.message}; the tab could not be reattached and was closed.`,
 				);
 			}
+			if (error instanceof DebuggerDetachedError) {
+				// Re-adopt the same Chrome tab on a new worker. No `recover` pass: the page is healthy, and stopping
+				// its loading would cancel a navigation the call itself started.
+				const detached = `${error.message}. ${DEBUGGER_DETACH_CAUSE}${error.when === "during" ? "; input this call sent before the detach may already have landed" : ""}`;
+				const lost = `${detached}. omp could not reattach to the tab, so it was closed; open it again once the other extension's frame is gone`;
+				const reattached = await recoverWorkerTab(tab, name, opts.timeoutMs, lost, {
+					recover: false,
+					failedReason: lost,
+				});
+				if (!reattached) throw new ToolError(lost);
+				if (error.when === "during" || opts.readopted) {
+					throw new ToolError(
+						`${detached}. omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
+					);
+				}
+				// Nothing ran: run the call on the new worker. Its pending entry must go first, or the tab reads as busy.
+				tab.pending.delete(id);
+				const result = await runInTabWithSnapshot(name, { ...opts, readopted: true }, snapshot);
+				result.displays.unshift({
+					type: "text",
+					text: `Chrome had detached omp from this tab since the last call (${DEBUGGER_DETACH_CAUSE}); omp reattached to the same tab on a new worker, without reloading it, and then ran this call. ${WORKER_RESETS}.`,
+				});
+				return result;
+			}
 			const runTimedOut =
 				error instanceof ToolError && error.message.startsWith("Browser code execution timed out after ");
 			if (runTimedOut || error instanceof RecoverableWorkerError) {
@@ -1012,6 +1057,12 @@ async function recoverWorkerTab(
 	name: string,
 	timeoutMs: number,
 	reason: string,
+	opts: {
+		/** Unblock the page (dismiss a dialog, stop loading) before adopting it; default true. */
+		recover?: boolean;
+		/** Kill reason when the recycle fails; defaults to a generic recovery failure. */
+		failedReason?: string;
+	} = {},
 ): Promise<boolean> {
 	// The kills go by name: a tab closed meanwhile may have been reopened under it, and that one is not ours to kill.
 	const killTab = async (killReason: string): Promise<false> => {
@@ -1020,12 +1071,12 @@ async function recoverWorkerTab(
 	};
 	try {
 		if (tab.worker.mode === "inline") return await killTab(reason);
-		return await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS);
+		return await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS, { recover: opts.recover });
 	} catch (recycleError) {
 		logger.warn("Failed to recycle browser tab worker; killing tab", {
 			error: recycleError instanceof Error ? recycleError.message : String(recycleError),
 		});
-		return await killTab("Browser tab worker recovery failed; tab killed");
+		return await killTab(opts.failedReason ?? "Browser tab worker recovery failed; tab killed");
 	}
 }
 
@@ -1742,7 +1793,11 @@ function safeSend(tab: WorkerTabSession, msg: WorkerInbound): void {
 }
 
 /** Resolves `false` when the tab was closed while its new worker started; the new worker is then discarded. */
-async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number): Promise<boolean> {
+async function recycleTimedOutWorkerTab(
+	tab: WorkerTabSession,
+	timeoutMs: number,
+	opts: { recover?: boolean } = {},
+): Promise<boolean> {
 	// Same deadline carry-over as acquireTabImpl: the inline-fallback retry
 	// must not restart the recycle's init budget.
 	const startedAt = performance.now();
@@ -1760,7 +1815,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		allowedDomains: tab.allowedDomains,
 		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
 		// otherwise init stalls, times out, and the tab gets force-killed.
-		recover: true,
+		recover: opts.recover ?? true,
 		emulateFocus: tab.kindTag === "headless",
 		activateForScreenshot: tab.activateForScreenshot,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
@@ -1982,6 +2037,11 @@ async function targetIdForTarget(target: Target): Promise<string> {
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {
+	if (payload.debuggerDetached) {
+		const error = new DebuggerDetachedError(payload.message, payload.debuggerDetached);
+		if (payload.stack) error.stack = payload.stack;
+		return error;
+	}
 	const error = payload.rendererCrashed
 		? new RendererCrashedError(payload.message)
 		: payload.recoverTab

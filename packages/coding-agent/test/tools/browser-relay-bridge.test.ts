@@ -773,6 +773,55 @@ describe("RelayBridge Runtime sessions", () => {
 });
 
 describe("RelayBridge attachment release", () => {
+	it("keeps a tab Chrome detached on its own adoptable, but bans it after the user cancels the debugging bar", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: {} }));
+		await flush();
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const created = () =>
+			cdp.messages.filter(
+				m => m.method === "Target.targetCreated" && JSON.stringify(m.params).includes(`"PAGE${ANON}.1"`),
+			).length;
+		expect(created()).toBe(1);
+
+		// Another extension's frame started loading in the tab: Chrome drops the debugger on its own.
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		expect(
+			cdp.messages.some(
+				m =>
+					m.method === "Target.detachedFromTarget" &&
+					m.params !== null &&
+					typeof m.params === "object" &&
+					"sessionId" in m.params &&
+					m.params.sessionId === sessionId,
+			),
+		).toBe(true);
+		// Announced again at once and still listed, so an open can adopt the same tab.
+		expect(created()).toBe(2);
+		expect(bridge.listTargets().map(t => t.id)).toEqual([`PAGE${ANON}.1`]);
+		const readopted = await attachPage(bridge, ext, cdp, connId, 1);
+		expect(readopted).not.toBe(sessionId);
+
+		// The user pressing Cancel on the debugging bar is a refusal: the tab is hidden until it navigates.
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }));
+		await flush();
+		expect(created()).toBe(2);
+		expect(bridge.listTargets()).toEqual([]);
+		const refusedId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: refusedId, method: "Target.attachToTarget", params: { targetId: `PAGE${ANON}.1` } }),
+		);
+		await flush();
+		expect(ext.pending("attach")).toEqual([]);
+		expect(cdp.messages.some(m => m.id === refusedId && "error" in m)).toBe(true);
+	});
+
 	it("detaches cleanly on explicit last-session release and permits reattachment", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();

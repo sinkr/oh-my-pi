@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { formatBytes, postmortem, Snowflake, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { formatBytes, isRecord, postmortem, Snowflake, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import type { HTMLElement } from "@oh-my-pi/pi-utils/dom";
 import type {
 	Accessibility,
@@ -926,6 +926,24 @@ class NavigationTimeoutError extends ToolError {}
 /** The page's renderer crashed; every later call on the page stalls until its timeout. */
 class RendererCrashedError extends ToolError {}
 
+/** Chrome ended the debugger attachment the page is driven through (omp browser relay); the page itself lives on. */
+class DebuggerDetachedError extends ToolError {
+	constructor(
+		reason: string,
+		/** `during`: the run's code had started, so its input may already have landed. */
+		readonly when: "during" | "before",
+	) {
+		super(
+			`Chrome detached omp from this tab (${reason}) ${when === "during" ? "during this call" : "before this call, so its code did not run"}`,
+		);
+	}
+}
+
+/** Chrome's answer to a command in flight when it ends the debugger attachment. */
+const DETACHED_COMMAND_ERROR = /Detached while handling command/;
+/** How long a run that failed with {@link DETACHED_COMMAND_ERROR} waits for the relay's detach event. */
+const DETACH_EVENT_GRACE_MS = 1_000;
+
 interface RunPageScope {
 	page: Page;
 	/** Restore the page's own listener methods and remove every handler this run registered. */
@@ -1133,6 +1151,7 @@ function errorPayload(error: unknown): RunErrorPayload {
 	const recoverTab = error instanceof RequestInterceptionCleanupError || undefined;
 	const navigationTimeout = error instanceof NavigationTimeoutError || undefined;
 	const rendererCrashed = error instanceof RendererCrashedError || undefined;
+	const debuggerDetached = error instanceof DebuggerDetachedError ? error.when : undefined;
 	if (error instanceof ToolAbortError) {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: true };
 	}
@@ -1146,6 +1165,7 @@ function errorPayload(error: unknown): RunErrorPayload {
 			recoverTab,
 			navigationTimeout,
 			rendererCrashed,
+			debuggerDetached,
 		};
 	}
 	if (error instanceof Error) {
@@ -1525,6 +1545,28 @@ export class WorkerCore {
 		this.#transport.send({ type: "result", id: run.id, ok: false, error: errorPayload(error) });
 	};
 
+	/**
+	 * The reason Chrome gave for ending the relay's debugger attachment on this tab (another extension's frame
+	 * loaded in it, or the user cancelled the debugging bar); `undefined` while attached. Every later page call
+	 * fails or stalls, so this worker runs nothing more and the supervisor re-adopts the tab on a new one.
+	 */
+	#debuggerDetached: string | undefined;
+	/** Resolved by the relay's detach event. */
+	readonly #debuggerDetachedEvent = Promise.withResolvers<void>();
+	/** The omp browser relay's `OMP.debuggerDetached` event, sent to the page's sessions ahead of their detach. */
+	readonly #onDebuggerDetached = (params: unknown): void => {
+		if (this.#debuggerDetached !== undefined) return;
+		const reason = isRecord(params) && typeof params.reason === "string" ? params.reason : "no reason given";
+		this.#debuggerDetached = reason;
+		this.#debuggerDetachedEvent.resolve();
+		const run = this.#started ? this.#unanswered : null;
+		if (!run) return;
+		this.#unanswered = null;
+		run.ac.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Chrome detached omp from this tab")));
+		const error = new DebuggerDetachedError(reason, "during");
+		this.#transport.send({ type: "result", id: run.id, ok: false, error: errorPayload(error) });
+	};
+
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
 		this.#isolated = isolated;
@@ -1663,6 +1705,7 @@ export class WorkerCore {
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
 			this.#page.mainFrame().client.on("Page.frameNavigated", this.#onFrameNavigated);
+			this.#page.mainFrame().client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
 			this.#page.on("error", this.#onPageCrashed);
 			if (payload.mode === "headless" || payload.emulateFocus) {
 				// Background Chromium tabs stop producing frames, stalling rAF,
@@ -1846,6 +1889,11 @@ export class WorkerCore {
 			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(error) });
 			return;
 		}
+		if (this.#debuggerDetached !== undefined) {
+			const error = new DebuggerDetachedError(this.#debuggerDetached, "before");
+			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(error) });
+			return;
+		}
 		if (this.#active) {
 			this.#transport.send({
 				type: "result",
@@ -1999,11 +2047,19 @@ export class WorkerCore {
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
 		}
-		// A renderer crash answers the run itself.
+		// A renderer crash or a debugger detach answers the run itself.
 		if (this.#unanswered !== active) return;
 		if (failure) {
+			// Chrome's answer to the command in flight can overtake the relay's detach event; give the event the
+			// chance to answer the run. Without it (not a relay tab, or a session other than the page's), the
+			// failure stands.
+			const { error } = failure;
+			if (error instanceof Error && DETACHED_COMMAND_ERROR.test(error.message)) {
+				await Promise.race([this.#debuggerDetachedEvent.promise, Bun.sleep(DETACH_EVENT_GRACE_MS)]);
+				if (this.#unanswered !== active) return;
+			}
 			this.#unanswered = null;
-			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
+			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(error) });
 			return;
 		}
 		if (completed) {

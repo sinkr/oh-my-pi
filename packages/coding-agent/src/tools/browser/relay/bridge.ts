@@ -157,7 +157,7 @@ class TabState {
 	groupId: number;
 	/** Whether `chrome.debugger` is currently attached to this tab. */
 	attached = false;
-	/** Set when attach failed or the user cancelled the debugger; cleared on navigation. */
+	/** Set when attach failed or the user cancelled the debugger bar; cleared on navigation. */
 	banned = false;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
@@ -1134,11 +1134,22 @@ export class RelayBridge {
 		tab.attached = false;
 		tab.attaching = null;
 		this.#resetRuntime(tab);
-		tab.banned = true;
-		// The user dismissed the debugger infobar (or the attach was torn
-		// down): release the tab's omp-group membership too.
+		// Only the user pressing Cancel on Chrome's debugging bar is a refusal. Chrome also detaches when
+		// another extension's frame (a password manager's inline menu) starts loading in the tab: that tab
+		// stays adoptable and is announced again at once; an attach Chrome refuses still bans it (#ensureAttached).
+		const cancelledByUser = reason === "canceled_by_user";
+		if (cancelledByUser) tab.banned = true;
+		// A user cancel releases the tab's omp-group membership; any other detach keeps it.
 		this.#syncTabGrouping(tab);
+		// Relay-private event, ahead of the sessions' detach: a client driving the tab learns that Chrome
+		// ended the attachment, not the page, and can re-adopt it instead of waiting on a dead session.
+		for (const conn of this.#conns.values()) {
+			for (const pageSession of conn.sessionsForTab(tabKey, "page")) {
+				this.#emit(conn, "OMP.debuggerDetached", { reason }, pageSession);
+			}
+		}
 		this.#retractTab(tab);
+		if (!cancelledByUser && this.#eligible(tab) && !tab.discarded) this.#announceTab(tab);
 	}
 
 	#onTabRemoved(tabKey: string): void {
@@ -1183,17 +1194,7 @@ export class RelayBridge {
 		const eligible = this.#eligible(tab);
 		this.#syncTabGrouping(tab);
 		if (eligible && !tab.announced && !tab.discarded) {
-			tab.announced = true;
-			for (const conn of this.#conns.values()) {
-				if (!conn.discover) continue;
-				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
-				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
-			}
-			for (const conn of this.#conns.values()) {
-				if (!conn.autoAttach) continue;
-				this.#attachForAutoAttach(tab);
-				break;
-			}
+			this.#announceTab(tab);
 			return;
 		}
 		if ((!eligible || tab.discarded) && tab.announced) {
@@ -1209,6 +1210,17 @@ export class RelayBridge {
 				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#pageInfo(tab, tab.attached) });
 			}
 		}
+	}
+
+	/** Announce an unannounced tab to discovering connections and attach it for auto-attaching ones. */
+	#announceTab(tab: TabState): void {
+		tab.announced = true;
+		for (const conn of this.#conns.values()) {
+			if (!conn.discover) continue;
+			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
+			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
+		}
+		this.#attachForAutoAttach(tab);
 	}
 
 	#attachForAutoAttach(tab: TabState): void {

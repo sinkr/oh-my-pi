@@ -139,6 +139,11 @@ export interface RunErrorPayload {
 	navigationTimeout?: boolean;
 	/** The page's renderer crashed; the worker runs nothing more and must be recycled. */
 	rendererCrashed?: boolean;
+	/**
+	 * Chrome ended the debugger attachment the page is driven through (omp browser relay) `during` this run, after
+	 * its code started, or `before` it, so nothing ran; the worker runs nothing more and the tab must be re-adopted.
+	 */
+	debuggerDetached?: "during" | "before";
 }
 
 export type WorkerOutbound =
