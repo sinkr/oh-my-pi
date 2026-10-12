@@ -1911,7 +1911,11 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 		const error = postmortem.markExpectedCleanupError(
 			new ToolError(`${exited}; the tab is being reattached to a new worker on the same page. ${WORKER_RESETS}.`),
 		);
-		for (const pending of tab.pending.values()) pending.reject(error);
+		// The tab stays alive, so a host tool call left running would reply to the replacement worker.
+		for (const pending of tab.pending.values()) {
+			for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);
+			pending.reject(error);
+		}
 		const recovery = recoverWorkerTab(tab, tab.name, WORKER_EXIT_REATTACH_TIMEOUT_MS, `${exited}; tab closed`, {
 			// Keep the page as the worker left it: stopping its loading would cancel a navigation the agent started.
 			recover: false,
@@ -2265,8 +2269,8 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 			};
 		},
 		onExit(handler) {
-			const onClose = (event: Event): void => {
-				if (!terminated) handler((event as CloseEvent).code);
+			const onClose = (event: CloseEvent): void => {
+				if (!terminated) handler(event.code);
 			};
 			worker.addEventListener("close", onClose);
 			return () => worker.removeEventListener("close", onClose);

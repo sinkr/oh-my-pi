@@ -1,6 +1,7 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import {
 	getTab,
@@ -97,6 +98,29 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 
 		expect(listTabs().some(tab => tab.name === name)).toBe(true);
 		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.mark);")).toBe("kept");
+	}, 30_000);
+
+	it("aborts the host tool calls the crashed run had in flight", async () => {
+		const name = "worker-exit-tool-call";
+		await open(name, "alive");
+		const started = Promise.withResolvers<AbortSignal>();
+		const callTool = spyOn(toolBridge, "callSessionTool").mockImplementation(async (_name, _args, options) => {
+			const signal = options.signal!;
+			started.resolve(signal);
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			throw signal.reason;
+		});
+		try {
+			// The tool call is posted before the rejection ends the worker, so the host registers it first.
+			const crash = messageOf(run(name, `void __omp_call_tool__("probe", {}); ${UNOWNED_REJECTION}`));
+			const signal = await started.promise;
+			expect(await crash).toContain("the tab is being reattached");
+			expect(signal.aborted).toBe(true);
+		} finally {
+			callTool.mockRestore();
+		}
 	}, 30_000);
 
 	it("closes the tab when the new worker exits again right away", async () => {
