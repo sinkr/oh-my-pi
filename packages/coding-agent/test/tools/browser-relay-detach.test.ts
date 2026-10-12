@@ -307,6 +307,25 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"runs a call on the re-adopted tab when Chrome detached omp before its code started",
+		async () => {
+			const ext = await openRelayTab();
+			// A user agent set by an earlier call is reapplied before each call's code starts.
+			await invoke({ action: "run", code: 'await tab.emulate({ userAgent: "omp-detach-test" });', timeout: 10 });
+			const reapplying = ext.nextSend("Network.setUserAgentOverride");
+			const next = invoke(readMark);
+			await reapplying;
+			await ext.chromeDetach("target_closed");
+			const result = await next;
+			expect(result.value).toBe("kept");
+			expect(result.text).toContain(
+				"omp reattached to the same tab on a new worker, without reloading it, and then ran this call",
+			);
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"fails fast once Chrome refuses the re-adoption",
 		async () => {
 			const ext = await openRelayTab();
