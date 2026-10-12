@@ -356,8 +356,17 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {
 			expect(ready.info.targetId).toBe(target._targetId);
 			await retried.close();
 			retried = undefined;
-			// Closing the worker that owns the page closes it.
-			expect(page.isClosed()).toBeTrue();
+			// Closing the worker that owns the page closes it. Ask Chrome: this connection's `page`
+			// learns of the close only once its own target event arrives.
+			const { targetInfos } = await launched.browser
+				.target()
+				.createCDPSession()
+				.then(async session => {
+					const targets = await session.send("Target.getTargets");
+					await session.detach();
+					return targets;
+				});
+			expect(targetInfos.map(info => info.targetId)).not.toContain(target._targetId);
 		} finally {
 			await retried?.close();
 			await failed.close();
