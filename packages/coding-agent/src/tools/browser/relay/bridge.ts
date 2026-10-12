@@ -1007,6 +1007,12 @@ export class RelayBridge {
 				const active = msg.params?.background === true ? false : undefined;
 				const result = (await this.#rpc({ op: "createTab", url, active }, inst)) as { tab: TabSnapshot };
 				this.#onTabUpsert(result.tab, inst.instanceId);
+				// The client left while Chrome created the tab (omp gave up on a slow open), so nobody
+				// can learn its id to close it later: close it now instead of leaving it in the user's browser.
+				if (this.#conns.get(conn.id) !== conn) {
+					await this.#rpc({ op: "removeTab", tabId: result.tab.tabId }, inst);
+					return;
+				}
 				// Creating a tab is an explicit act of driving it.
 				const createdKey = tabKeyOf(inst.code, result.tab.tabId);
 				this.#claimTab(conn, createdKey);

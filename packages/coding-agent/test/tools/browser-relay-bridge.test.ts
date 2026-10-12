@@ -271,6 +271,21 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext.rpcs("group")).toHaveLength(0);
 	});
 
+	it("closes a tab Target.createTarget made for a client that disconnected before it opened", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, []);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: { url: "https://example.com/" } }),
+		);
+		bridge.cdpClosed(connId);
+		ack(bridge, ext, "createTab", { tab: tab({ tabId: 9 }) });
+		await flush();
+		expect(ext.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([9]);
+	});
+
 	it("auto-claims a tab created through Target.createTarget", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();

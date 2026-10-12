@@ -916,3 +916,48 @@ describe("browser tabs whose renderer crashed", () => {
 		45_000,
 	);
 });
+
+describe("closing an OMP-owned page", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"closes the page by id when its worker reports closed without closing it",
+		async () => {
+			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+			holdBrowser(browser);
+			const name = `unconfirmed-close-${process.pid}`;
+			try {
+				await acquireTab(name, browser, { timeoutMs: 30_000 });
+				const tab = getTab(name);
+				if (tab?.backend !== "worker") throw new Error("Expected a worker tab");
+				const targetId = tab.targetId;
+				// A worker whose page close failed (its CDP socket broke) still answers `closed`.
+				const handlers = new Set<(msg: WorkerOutbound) => void>();
+				const subscribe = tab.worker.onMessage.bind(tab.worker);
+				spyOn(tab.worker, "onMessage").mockImplementation(handler => {
+					handlers.add(handler);
+					const unsubscribe = subscribe(handler);
+					return () => {
+						handlers.delete(handler);
+						unsubscribe();
+					};
+				});
+				const send = tab.worker.send.bind(tab.worker);
+				spyOn(tab.worker, "send").mockImplementation((msg, transfer) => {
+					if (msg.type !== "close") return send(msg, transfer);
+					queueMicrotask(() => {
+						for (const handler of [...handlers]) handler({ type: "closed" });
+					});
+				});
+				await releaseTab(name, { kill: false });
+				const watcher = await browser.browser.target().createCDPSession();
+				const { targetInfos } = await watcher.send("Target.getTargets");
+				await watcher.detach();
+				expect(targetInfos.map(info => info.targetId)).not.toContain(targetId);
+			} finally {
+				await releaseTab(name, { kill: true });
+				await releaseBrowser(browser, { kill: true });
+			}
+		},
+		45_000,
+	);
+});
