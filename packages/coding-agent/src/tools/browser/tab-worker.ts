@@ -2004,10 +2004,6 @@ export class WorkerCore {
 							runtime.run(msg.code, `browser-run-${msg.id}.js`, hooks, {
 								runId: msg.id,
 								cwd: msg.session.cwd,
-								// Compiling the cell can wait (the first run loads Babel); a detach then still ran nothing.
-								beforeEvaluate: () => {
-									active.codeStarted = true;
-								},
 							}),
 							cancelRejection,
 							floatingFailure.promise,
@@ -2096,6 +2092,10 @@ export class WorkerCore {
 			callTool: (name, args) => {
 				throwIfAborted(active.signal);
 				return this.#callTool(active, name, args);
+			},
+			// Compiling the cell can wait (the first run loads Babel); a detach then still ran nothing.
+			onEvaluate: () => {
+				active.codeStarted = true;
 			},
 		};
 	}

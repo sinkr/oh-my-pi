@@ -34,6 +34,8 @@ export interface RuntimeHooks {
 	onText(chunk: string): void;
 	onDisplay(output: JsDisplayOutput): void;
 	callTool(name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown>;
+	/** Called by `run` right before the cell's code is evaluated, once compiling it (which may load Babel) finished. */
+	onEvaluate?(): void;
 }
 
 /**
@@ -535,13 +537,7 @@ export class JsRuntime {
 		code: string,
 		filename: string | undefined,
 		hooks: RuntimeHooks,
-		options: {
-			runId?: string;
-			cwd?: string;
-			localRoots?: Record<string, string>;
-			/** Called right before the cell's code is evaluated, after compiling it (which may load Babel) finished. */
-			beforeEvaluate?: () => void;
-		} = {},
+		options: { runId?: string; cwd?: string; localRoots?: Record<string, string> } = {},
 	): Promise<unknown> {
 		this.#activateGlobals("run code");
 		this.#namespaceRevision++;
@@ -560,7 +556,7 @@ export class JsRuntime {
 			return await this.#als.run(context, async () => {
 				const wrapped = await wrapCode(code);
 				let value: unknown;
-				options.beforeEvaluate?.();
+				hooks.onEvaluate?.();
 				try {
 					value = indirectEval(wrapped.source, filename);
 				} catch (error) {
