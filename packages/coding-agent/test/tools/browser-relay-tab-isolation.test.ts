@@ -95,7 +95,7 @@ async function launchRelayFixture(
 			const route = new URL(request.url).pathname;
 			const html =
 				route === "/first"
-					? `<title>First</title><button onclick="this.textContent='clicked'">First</button>`
+					? `<title>First</title><button onclick="this.textContent='clicked'">First</button><p id="hover" onmouseover="this.textContent='hovered'">Hover</p>`
 					: route === "/second"
 						? "<title>Second</title><button>Second</button>"
 						: "<title>Human sentinel</title><h1>Keep me</h1>";
@@ -213,6 +213,14 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				session,
 			});
 			expect(clicked.returnValue).toBe("clicked");
+			// Hover waits for a rendered frame, which a hidden tab never produces: this passes only while the
+			// unselected tab is focus-emulated.
+			const hovered = await runInTab(names[0]!, {
+				code: "await tab.hover('#hover'); return await tab.text('#hover');",
+				timeoutMs: 10_000,
+				session,
+			});
+			expect(hovered.returnValue).toBe("hovered");
 
 			await releaseTab(names[0]!);
 			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toBeNull();
