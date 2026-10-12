@@ -2307,6 +2307,11 @@ export interface HoldOptions {
    * input during the hold; see `PointerOptions.returnFocus`.
    */
   returnFocus?: boolean
+  /**
+   * Refuse a background left hold that starts on a control that opens a
+   * menu; see `PointerOptions.refuseMenu`.
+   */
+  refuseMenu?: boolean
 }
 
 /**
@@ -2922,9 +2927,9 @@ export interface PointerOptions {
   menu?: Array<string>
   /**
    * Refuse a background left click that lands on a control that opens a
-   * menu (on macOS a menu button or popup button) with
-   * `BackgroundUnavailable` before anything is sent. The host sets this
-   * when the user refuses foreground takeover: an open menu takes their
+   * menu (on macOS a menu button or popup button), or a drag that starts on
+   * one, with `BackgroundUnavailable` before anything is sent. The host sets
+   * this when the user refuses foreground takeover: an open menu takes their
    * keyboard.
    */
   refuseMenu?: boolean
