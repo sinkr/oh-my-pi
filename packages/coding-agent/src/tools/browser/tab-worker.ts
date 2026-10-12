@@ -1996,7 +1996,6 @@ export class WorkerCore {
 			try {
 				const hooks = this.#hooksForActiveRun();
 				if (!hooks) throw new ToolError("Browser runtime started without an active run");
-				active.codeStarted = true;
 				returnValue = await withBrowserPromiseCombinatorTracking(
 					active.rejectionOwner,
 					onFloatingRejection,
@@ -2005,6 +2004,10 @@ export class WorkerCore {
 							runtime.run(msg.code, `browser-run-${msg.id}.js`, hooks, {
 								runId: msg.id,
 								cwd: msg.session.cwd,
+								// Compiling the cell can wait (the first run loads Babel); a detach then still ran nothing.
+								beforeEvaluate: () => {
+									active.codeStarted = true;
+								},
 							}),
 							cancelRejection,
 							floatingFailure.promise,

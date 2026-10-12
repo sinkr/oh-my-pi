@@ -1010,6 +1010,8 @@ async function runInTabWithSnapshot(
 				// its loading would cancel a navigation the call itself started.
 				const detached = `${error.message}. ${DEBUGGER_DETACH_CAUSE}${error.when === "during" ? "; input this call sent before the detach may already have landed" : ""}`;
 				const lost = `${detached}. omp could not reattach to the tab, so it was closed; open it again once the other extension's frame is gone`;
+				// Host tool calls the detached run started would otherwise keep running, and reply to the new worker.
+				for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);
 				const reattached = await recoverWorkerTab(tab, name, opts.timeoutMs, lost, {
 					recover: false,
 					failedReason: lost,

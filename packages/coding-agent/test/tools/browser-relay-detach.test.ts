@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as rewriteImports from "@oh-my-pi/pi-coding-agent/eval/js/shared/rewrite-imports";
+import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
@@ -292,6 +294,37 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"aborts the host tool calls the detached call had in flight",
+		async () => {
+			const ext = await openRelayTab();
+			const started = Promise.withResolvers<AbortSignal>();
+			const callTool = spyOn(toolBridge, "callSessionTool").mockImplementation(async (_name, _args, options) => {
+				const signal = options.signal!;
+				started.resolve(signal);
+				const aborted = Promise.withResolvers<void>();
+				signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				throw signal.reason;
+			});
+			try {
+				const evaluating = ext.nextSend("Runtime.callFunctionOn");
+				const code = `void __omp_call_tool__("probe", {}); ${HANG.code}`;
+				const stalled = invoke({ action: "run", code, timeout: HANG.timeout }).catch((error: unknown) => error);
+				const signal = await started.promise;
+				await evaluating;
+				await ext.chromeDetach("target_closed");
+				expect(String(await stalled)).toContain(
+					"Chrome detached omp from this tab (target_closed) during this call",
+				);
+				expect(signal.aborted).toBe(true);
+			} finally {
+				callTool.mockRestore();
+			}
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"re-adopts a tab Chrome detached between calls and runs the next call there",
 		async () => {
 			const ext = await openRelayTab();
@@ -321,6 +354,49 @@ describe("relay tabs Chrome detaches omp from", () => {
 			expect(result.text).toContain(
 				"omp reattached to the same tab on a new worker, without reloading it, and then ran this call",
 			);
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"counts a detach while the call's code is still compiling as before it ran",
+		async () => {
+			// An inline tab worker runs in this process, so the compile step can be held. Worker threads failing to
+			// start is what puts a tab on one. It cannot be re-adopted, so the call reports the tab closed.
+			const RealWorker = globalThis.Worker;
+			Object.defineProperty(globalThis, "Worker", {
+				configurable: true,
+				writable: true,
+				value: function UnavailableWorker(): never {
+					throw new Error("Worker threads unavailable");
+				},
+			});
+			let ext: ChromeBackedExtension;
+			try {
+				ext = await openRelayTab();
+			} finally {
+				globalThis.Worker = RealWorker;
+			}
+			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
+			const wrapCode = rewriteImports.wrapCode;
+			const compiling = Promise.withResolvers<void>();
+			const compiled = Promise.withResolvers<void>();
+			const held = spyOn(rewriteImports, "wrapCode").mockImplementation(async code => {
+				compiling.resolve();
+				await compiled.promise;
+				return await wrapCode(code);
+			});
+			try {
+				const next = invoke(readMark).catch((error: unknown) => error);
+				await compiling.promise;
+				await ext.chromeDetach("target_closed");
+				expect(String(await next)).toContain(
+					"Chrome detached omp from this tab (target_closed) before this call, so its code did not run",
+				);
+			} finally {
+				compiled.resolve();
+				held.mockRestore();
+			}
 		},
 		60_000,
 	);
