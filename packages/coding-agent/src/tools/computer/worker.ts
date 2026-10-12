@@ -405,14 +405,23 @@ function refusePointerMenu(
 
 /**
  * Under `refuse` on macOS, asks native to refuse a background click that lands
- * on a popup button or menu button, whose menu would take the user's keyboard;
- * only native can tell what a pixel click lands on.
+ * on a popup button or menu button, or a hold or drag that starts on one, whose
+ * menu would take the user's keyboard; only native can tell what a pixel lands
+ * on.
  */
-function refuseMenuClick(session: NativeDesktopSession, context: ComputerRunContext, native: PointerOptions): void {
+function refuseMenuPress(
+	session: NativeDesktopSession,
+	context: ComputerRunContext,
+	native: { refuseMenu?: boolean },
+): void {
 	if (session.capabilities.backend === "quartz" && context.snapshot.backgroundFallback === "refuse") {
 		native.refuseMenu = true;
 	}
 }
+
+/** Native's `refuseMenu` refusal; its first group is the press, as `refuseMenu`'s `call`. */
+const MENU_CONTROL_REFUSAL =
+	/^BackgroundUnavailable: (the .+, which (?:lands|starts) on a menu button or popup button,) would open its menu; nothing was sent$/;
 
 /** App names by pid from the window list, empty when the listing fails. */
 async function appNames(session: NativeDesktopSession, signal: AbortSignal): Promise<Map<number, string>> {
@@ -480,6 +489,8 @@ async function sendInput(
 			throw error;
 		const reason = error.message.slice(BACKGROUND_UNAVAILABLE.length);
 		if (context.snapshot.backgroundFallback === "refuse") {
+			const control = MENU_CONTROL_REFUSAL.exec(error.message);
+			if (control) refuseMenu(session, context, control[1], "its menu", MENU_CONTROL_ROUTE);
 			throw new ToolError(
 				`${error.message}; the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background, so no takeover happened`,
 			);
@@ -669,7 +680,7 @@ class El {
 		guardRun(context, "click");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "click", native, this.nativeRole);
-		refuseMenuClick(this.#session, context, native);
+		refuseMenuPress(this.#session, context, native);
 		await sendInput(this.#session, context, "click", native.takeover, fallback =>
 			this.#session.axClick(this.ref, { ...native, ...fallback }),
 		);
@@ -680,7 +691,7 @@ class El {
 		guardRun(context, "doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
 		refusePointerMenu(this.#session, context, "doubleClick", native, this.nativeRole);
-		refuseMenuClick(this.#session, context, native);
+		refuseMenuPress(this.#session, context, native);
 		await sendInput(this.#session, context, "doubleClick", native.takeover, fallback =>
 			this.#session.axClick(this.ref, { ...native, ...fallback }),
 		);
@@ -890,7 +901,7 @@ class Win {
 		const context = this.#guardInput("click");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "click", native);
-		refuseMenuClick(this.#session, context, native);
+		refuseMenuPress(this.#session, context, native);
 		await sendInput(
 			this.#session,
 			context,
@@ -905,7 +916,7 @@ class Win {
 		const context = this.#guardInput("doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
 		refusePointerMenu(this.#session, context, "doubleClick", native);
-		refuseMenuClick(this.#session, context, native);
+		refuseMenuPress(this.#session, context, native);
 		await sendInput(
 			this.#session,
 			context,
@@ -933,6 +944,7 @@ class Win {
 		const context = this.#guardInput("drag");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "drag", native);
+		refuseMenuPress(this.#session, context, native);
 		await sendInput(
 			this.#session,
 			context,
@@ -1018,12 +1030,14 @@ class Win {
 		validateHold({ duration, takeover });
 		if (keys !== undefined) validateKeys(keys, "keys");
 		refusePointerMenu(this.#session, context, "holdMouse", { button, keys });
+		const native: NativeHoldOptions = { duration, button, keys, takeover };
+		refuseMenuPress(this.#session, context, native);
 		await sendInput(
 			this.#session,
 			context,
 			"holdMouse",
 			takeover,
-			fallback => this.#session.holdMouse(this.id, x, y, { duration, button, keys, takeover, ...fallback }),
+			fallback => this.#session.holdMouse(this.id, x, y, { ...native, ...fallback }),
 			this.pid,
 		);
 	}

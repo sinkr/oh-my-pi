@@ -1650,11 +1650,12 @@ fn attached_window(
 	}
 }
 
-/// Refuses a background left click on window `target` that lands on a menu
-/// button or popup button ([`presses_menu_control`]): the control would open
-/// its menu, which takes the user's keyboard while it is open. A window whose
-/// input goes nowhere is left for the click itself to refuse.
-pub(super) fn refuse_menu_click(
+/// Refuses background `event` on window `target` when it presses the left
+/// button on a menu button or popup button: a click lands there, a mouse hold
+/// or a drag starts there, and the control would open its menu, which takes
+/// the user's keyboard while it is open. A window whose input goes nowhere is
+/// left for the input itself to refuse.
+pub(super) fn refuse_menu_press(
 	target: &Target,
 	event: &PointerEvent,
 	capture: &MacCapture,
@@ -1662,9 +1663,15 @@ pub(super) fn refuse_menu_click(
 	let Target::Window(id) = target else {
 		return Ok(());
 	};
-	if !matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) {
-		return Ok(());
-	}
+	let (verb, (x, y)) = match event {
+		PointerEvent::Click { x, y, button: MouseButton::Left, .. } => ("lands", (*x, *y)),
+		PointerEvent::Hold { x, y, button: MouseButton::Left, .. } => ("starts", (*x, *y)),
+		PointerEvent::Drag { path, button: MouseButton::Left, .. } => match path.first() {
+			Some(&start) => ("starts", start),
+			None => return Ok(()),
+		},
+		_ => return Ok(()),
+	};
 	let window = capture.window(id)?;
 	let (pid, wid) = window_identity(&window)?;
 	let (window, wid) = attached_window(capture, window, pid, wid, event)?;
@@ -1673,10 +1680,10 @@ pub(super) fn refuse_menu_click(
 	else {
 		return Ok(());
 	};
-	if presses_menu_control(event, pid, owner) {
+	if skylight::front_pid() != Some(pid) && ax::open_menu::opens_menu_at(owner, x, y) {
 		return Err(DesktopError::background_unavailable(format!(
-			"the {} on window {} ({}) lands on a menu button or popup button, which would open its \
-			 menu, and an open menu takes the user's keyboard; nothing was sent",
+			"the {} on window {} ({}), which {verb} on a menu button or popup button, would open its \
+			 menu; nothing was sent",
 			pointer_kind(event),
 			window.id,
 			window.app,

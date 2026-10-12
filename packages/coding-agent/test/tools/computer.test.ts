@@ -3416,6 +3416,17 @@ describe("computer background fallback", () => {
 					override async axClick(_ref: string, opts?: PointerOptions | null): Promise<void> {
 						this.calls.push(`axClick:${opts?.refuseMenu ?? "-"}`);
 					}
+					override async drag(target: string, _points: DesktopPoint[], opts?: PointerOptions | null): Promise<void> {
+						this.calls.push(`drag:${target}:${opts?.refuseMenu ?? "-"}`);
+					}
+					override async holdMouse(
+						target: string,
+						_x: number,
+						_y: number,
+						options: NativeHoldOptions,
+					): Promise<void> {
+						this.calls.push(`holdMouse:${target}:${options.refuseMenu ?? "-"}`);
+					}
 				}
 
 				/** Each element call that opens a popup button's or menu button's menu, as measured on guest B. */
@@ -3516,20 +3527,34 @@ describe("computer background fallback", () => {
 					expect(elsewhere.calls).toEqual(["perform:press", "axClick:-"]);
 				});
 
-				it("asks native to refuse a click landing on one only under refuse on macOS", async () => {
-					const code = [`${win}.click(1, 2);`, `${win}.doubleClick(1, 2);`, `${el}.click();`].join("\n");
+				it("asks native to refuse a click landing on one, or a hold or drag starting on one, only under refuse on macOS", async () => {
+					const code = [
+						`${win}.click(1, 2);`,
+						`${win}.doubleClick(1, 2);`,
+						`${el}.click();`,
+						`${win}.holdMouse(1, 2, { duration: 0 });`,
+						`${win}.drag([[1, 2], [3, 4]]);`,
+					].join("\n");
 					const refusing = new ControlSession();
 					expect((await run(refusing, code, "refuse")).ok).toBe(true);
-					expect(refusing.calls).toEqual(["click:42:true", "click:42:true", "axClick:true"]);
+					expect(refusing.calls).toEqual([
+						"click:42:true",
+						"click:42:true",
+						"axClick:true",
+						"holdMouse:42:true",
+						"drag:42:true",
+					]);
 
 					const taking = new ControlSession();
 					expect((await run(taking, code, "takeover")).ok).toBe(true);
-					expect(taking.calls).toEqual(["click:42:-", "click:42:-", "axClick:-"]);
+					expect(taking.calls).toEqual(["click:42:-", "click:42:-", "axClick:-", "holdMouse:42:-", "drag:42:-"]);
 				});
 
-				it("reports native's refusal of such a click with the setting and no takeover", async () => {
-					const refusal =
-						"BackgroundUnavailable: the click on window 42 (Code) lands on a menu button or popup button, which would open its menu, and an open menu takes the user's keyboard; nothing was sent";
+				it("reports native's refusal of such a press with the reason, the setting and the alternatives", async () => {
+					const refusals = {
+						click: "the click on window 42 (Code), which lands on a menu button or popup button,",
+						drag: "the drag on window 42 (Code), which starts on a menu button or popup button,",
+					};
 					class LandingSession extends ControlSession {
 						override async click(
 							target: string,
@@ -3538,17 +3563,28 @@ describe("computer background fallback", () => {
 							opts?: PointerOptions | null,
 						): Promise<void> {
 							await super.click(target, x, y, opts);
-							if (opts?.refuseMenu) throw new Error(refusal);
+							if (opts?.refuseMenu)
+								throw new Error(`BackgroundUnavailable: ${refusals.click} would open its menu; nothing was sent`);
+						}
+						override async drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<void> {
+							await super.drag(target, points, opts);
+							if (opts?.refuseMenu)
+								throw new Error(`BackgroundUnavailable: ${refusals.drag} would open its menu; nothing was sent`);
 						}
 					}
-					const native = new LandingSession();
-					const result = await run(native, `${win}.click(1, 2)`, "refuse");
-					expect(result.ok).toBe(false);
-					if (result.ok) return;
-					expect(result.error.message).toStartWith(refusal);
-					expect(result.error.message).toContain('computer.backgroundFallback setting is "refuse"');
-					expect(result.error.message).toContain("no takeover happened");
-					expect(native.calls).toEqual(["click:42:true"]);
+					for (const [method, code] of [
+						["click", `${win}.click(1, 2)`],
+						["drag", `${win}.drag([[1, 2], [3, 4]])`],
+					] as const) {
+						const native = new LandingSession();
+						const result = await run(native, code, "refuse");
+						expect(result.ok, code).toBe(false);
+						if (result.ok) continue;
+						expect(result.error.message, code).toBe(
+							`BackgroundUnavailable: ${refusals[method]} would open its menu, which takes the user's keyboard while it is open, and the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background; nothing was sent. Its options are chosen only through that menu: use the window's menu bar with win.menu.select(...) if it has the same command, or tell the user the step needs their screen.`,
+						);
+						expect(native.calls, code).toEqual([`${method}:42:true`]);
+					}
 				});
 			});
 		});
