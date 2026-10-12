@@ -3227,7 +3227,8 @@ describe("computer background fallback", () => {
 					return { ...super.capabilities, backend: "quartz" };
 				}
 			}
-			for (const action of ["AXOpen", "open", " Open "]) {
+			// Native `action_name` runs exactly these two as AXOpen.
+			for (const action of ["AXOpen", "Open"]) {
 				const code = `await (await desktop.ref("e1")).perform(${JSON.stringify(action)})`;
 				const mac = new MacSession();
 				const refused = await run(mac, code, "refuse");
@@ -3243,6 +3244,14 @@ describe("computer background fallback", () => {
 				expect((await run(mac, code, "takeover")).ok, action).toBe(true);
 				expect(mac.calls, action).toEqual([`perform:${action}`]);
 			}
+
+			// Other spellings reach native as other actions ("AXopen", "AX Open ").
+			const other = new MacSession();
+			const others = ['perform("open")', 'perform(" Open ")'].map(
+				call => `await (await desktop.ref("e1")).${call};`,
+			);
+			expect((await run(other, others.join("\n"), "refuse")).ok).toBe(true);
+			expect(other.calls).toEqual(["perform:open", "perform: Open "]);
 
 			const elsewhere = new ForegroundSession();
 			expect((await run(elsewhere, 'await (await desktop.ref("e1")).perform("AXOpen")', "refuse")).ok).toBe(true);

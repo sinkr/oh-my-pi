@@ -654,17 +654,15 @@ class El {
 				RAISE_ROUTE,
 			);
 		}
-		// The names native `axPerform` runs as `AXOpen`. On an item in a macOS Open or
-		// Save panel it brings the panel's application to the front about 35 ms
-		// after the call returns, even when the action fails, and it stays there.
-		if (
-			this.#session.capabilities.backend === "quartz" &&
-			(action.trim().toLowerCase() === "open" || action === "AXOpen")
-		) {
+		// The names native `axPerform` runs as `AXOpen` (`action_name` prefixes "AX"
+		// to any other name). On an item in Chrome's Open panel it brings the
+		// panel's application to the front, even when the action fails, and it
+		// stays there.
+		if (this.#session.capabilities.backend === "quartz" && (action === "AXOpen" || action === "Open")) {
 			refuseForeground(
 				context,
 				`perform(${JSON.stringify(action)})`,
-				"bring the window's application to the front, as it does on an item in an Open or Save panel even when the action fails",
+				"bring the window's application to the front, as it can on an item in an Open panel even when the action fails",
 				OPEN_ROUTE,
 			);
 		}
