@@ -1014,6 +1014,8 @@ async function runInTabWithSnapshot(
 					recover: false,
 					failedReason: lost,
 				});
+				// A cancel that landed while the tab was re-adopted wins over the detach report and the retry.
+				if (opts.signal?.aborted) throw new ToolAbortError();
 				if (!reattached) throw new ToolError(lost);
 				if (error.when === "during" || opts.readopted) {
 					throw new ToolError(

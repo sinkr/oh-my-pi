@@ -822,6 +822,36 @@ describe("RelayBridge attachment release", () => {
 		expect(cdp.messages.some(m => m.id === refusedId && "error" in m)).toBe(true);
 	});
 
+	it("tells the driving session why Chrome detached before failing its command in flight", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const clickId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: clickId,
+				sessionId,
+				method: "Input.dispatchMouseEvent",
+				params: { type: "mousePressed" },
+			}),
+		);
+		await flush();
+
+		// Chrome answers the command in flight before it reports the detach.
+		nack(bridge, ext, "send", "Detached while handling command.");
+		await flush();
+		expect(cdp.messages.some(m => m.id === clickId)).toBe(false);
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		const told = cdp.messages.findIndex(m => m.method === "OMP.debuggerDetached" && m.sessionId === sessionId);
+		expect(told).toBeGreaterThanOrEqual(0);
+		expect(cdp.messages.findIndex(m => m.id === clickId && "error" in m)).toBeGreaterThan(told);
+	});
+
 	it("detaches cleanly on explicit last-session release and permits reattachment", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();

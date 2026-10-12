@@ -939,11 +939,6 @@ class DebuggerDetachedError extends ToolError {
 	}
 }
 
-/** Chrome's answer to a command in flight when it ends the debugger attachment. */
-const DETACHED_COMMAND_ERROR = /Detached while handling command/;
-/** How long a run that failed with {@link DETACHED_COMMAND_ERROR} waits for the relay's detach event. */
-const DETACH_EVENT_GRACE_MS = 1_000;
-
 interface RunPageScope {
 	page: Page;
 	/** Restore the page's own listener methods and remove every handler this run registered. */
@@ -1551,14 +1546,11 @@ export class WorkerCore {
 	 * fails or stalls, so this worker runs nothing more and the supervisor re-adopts the tab on a new one.
 	 */
 	#debuggerDetached: string | undefined;
-	/** Resolved by the relay's detach event. */
-	readonly #debuggerDetachedEvent = Promise.withResolvers<void>();
 	/** The omp browser relay's `OMP.debuggerDetached` event, sent to the page's sessions ahead of their detach. */
 	readonly #onDebuggerDetached = (params: unknown): void => {
 		if (this.#debuggerDetached !== undefined) return;
 		const reason = isRecord(params) && typeof params.reason === "string" ? params.reason : "no reason given";
 		this.#debuggerDetached = reason;
-		this.#debuggerDetachedEvent.resolve();
 		const run = this.#started ? this.#unanswered : null;
 		if (!run) return;
 		this.#unanswered = null;
@@ -2050,16 +2042,8 @@ export class WorkerCore {
 		// A renderer crash or a debugger detach answers the run itself.
 		if (this.#unanswered !== active) return;
 		if (failure) {
-			// Chrome's answer to the command in flight can overtake the relay's detach event; give the event the
-			// chance to answer the run. Without it (not a relay tab, or a session other than the page's), the
-			// failure stands.
-			const { error } = failure;
-			if (error instanceof Error && DETACHED_COMMAND_ERROR.test(error.message)) {
-				await Promise.race([this.#debuggerDetachedEvent.promise, Bun.sleep(DETACH_EVENT_GRACE_MS)]);
-				if (this.#unanswered !== active) return;
-			}
 			this.#unanswered = null;
-			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(error) });
+			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
 			return;
 		}
 		if (completed) {

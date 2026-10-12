@@ -1,12 +1,13 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
-import { releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { getTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import puppeteer, { type Browser } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
@@ -319,6 +320,45 @@ describe("relay tabs Chrome detaches omp from", () => {
 			expect(failure).toContain("could not reattach");
 			const later = String(await invoke(readMark).catch((error: unknown) => error));
 			expect(later).toContain("could not reattach");
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"reports a cancel that lands during the re-adoption as a cancel",
+		async () => {
+			const ext = await openRelayTab();
+			const tab = getTab(name);
+			if (tab?.backend !== "worker") throw new Error("expected a worker tab");
+			// Hold the re-adoption once the detached worker is gone, so the cancel lands while it is under way.
+			const terminate = tab.worker.terminate.bind(tab.worker);
+			const readopting = Promise.withResolvers<void>();
+			const resume = Promise.withResolvers<void>();
+			const held = spyOn(tab.worker, "terminate").mockImplementation(async () => {
+				await terminate();
+				readopting.resolve();
+				await resume.promise;
+			});
+			try {
+				const ac = new AbortController();
+				const evaluating = ext.nextSend("Runtime.callFunctionOn");
+				const stalled = runInTab(name, {
+					code: HANG.code,
+					timeoutMs: 30_000,
+					session: tool,
+					signal: ac.signal,
+				}).catch((error: unknown) => error);
+				await evaluating;
+				await ext.chromeDetach("target_closed");
+				await readopting.promise;
+				ac.abort();
+				resume.resolve();
+				expect(await stalled).toBeInstanceOf(ToolAbortError);
+				expect((await invoke(readMark)).value).toBe("kept");
+			} finally {
+				resume.resolve();
+				held.mockRestore();
+			}
 		},
 		60_000,
 	);

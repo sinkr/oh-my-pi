@@ -191,6 +191,8 @@ class TabState {
 	rootRuntimeEnabling: Promise<void> | null = null;
 	/** Invalidates an in-flight Runtime enable when the debugger detaches. */
 	runtimeGeneration = 0;
+	/** Settled by the next detach Chrome reports on its own (not one the relay requested). */
+	chromeDetach = Promise.withResolvers<void>();
 
 	constructor(
 		readonly instanceId: string,
@@ -225,6 +227,10 @@ const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chro
 const RPC_TIMEOUT_MS = 20_000;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
+/** Chrome's answer to a command in flight when it ends the debugger attachment. */
+const DETACHED_COMMAND_ERROR = /Detached while handling command/;
+/** How long such a failure waits for the extension to report the detach itself. */
+const CHROME_DETACH_REPORT_MS = 1_000;
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -782,7 +788,13 @@ export class RelayBridge {
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 			return true;
 		} catch (err) {
-			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
+			const message = err instanceof Error ? err.message : String(err);
+			// Chrome fails the root session's command in flight before it reports the detach. Hold the failure
+			// until the detach is reported, so the client gets `OMP.debuggerDetached` first and knows why.
+			if (realSessionId === undefined && tab.attached && DETACHED_COMMAND_ERROR.test(message)) {
+				await Promise.race([tab.chromeDetach.promise, Bun.sleep(CHROME_DETACH_REPORT_MS)]);
+			}
+			this.#replyError(conn, msg, message);
 			return false;
 		}
 	}
@@ -1148,6 +1160,9 @@ export class RelayBridge {
 				this.#emit(conn, "OMP.debuggerDetached", { reason }, pageSession);
 			}
 		}
+		// Failures of commands that were in flight are released behind the event (#forwardToTab).
+		tab.chromeDetach.resolve();
+		tab.chromeDetach = Promise.withResolvers<void>();
 		this.#retractTab(tab);
 		if (!cancelledByUser && this.#eligible(tab) && !tab.discarded) this.#announceTab(tab);
 	}
