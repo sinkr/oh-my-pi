@@ -428,7 +428,24 @@ export async function focusTextEntryTarget(
 }
 
 /**
- * Focus a field that can take text, clear any existing value, then retype.
+ * Input types set through a picker or slider, with an example of the value each takes. Typing into
+ * one fills its segments by keystroke rules (`2026-10-12` became `61012-02-02`) or nothing at all
+ * (a colour stayed `#000000`, a range at its midpoint), so fill sets their value instead.
+ */
+const PICKER_VALUE_EXAMPLES: Record<string, string> = {
+	color: '"#ff8800"',
+	date: '"2026-10-12"',
+	"datetime-local": '"2026-10-12T14:30"',
+	month: '"2026-10"',
+	time: '"14:30"',
+	week: '"2026-W41"',
+	range: "a number within its min, max and step",
+};
+const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
+
+/**
+ * Focus a field that can take text, clear any existing value, then retype. A colour, date, time or
+ * range input gets its value set the way its picker would, and refuses one it rejects.
  *
  * Every step is a DOM evaluation or an input dispatch, so this works on tabs
  * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
@@ -446,33 +463,65 @@ export async function fillViaHandle(
 	type: (text: string) => Promise<unknown> = text => handle.type(text, { delay: 0 }),
 ): Promise<void> {
 	await focusTextEntryTarget(handle, "fill", signal);
-	await untilAborted(signal, () =>
-		handle.evaluate((el, clearing) => {
-			const node = el as unknown as {
-				value?: string;
-				focus?: () => void;
-				isContentEditable?: boolean;
-				innerText?: string;
-				dispatchEvent(event: unknown): boolean;
-			};
-			node.focus?.();
-			const before = node.isContentEditable ? node.innerText : node.value;
-			if (node.isContentEditable) node.innerText = "";
-			else if ("value" in node) {
+	const picker = await untilAborted(signal, () =>
+		handle.evaluate(
+			(el, wanted, pickerTypes) => {
+				const node = el as unknown as {
+					tagName?: string;
+					type?: string;
+					value?: string;
+					focus?: () => void;
+					isContentEditable?: boolean;
+					innerText?: string;
+					dispatchEvent(event: unknown): boolean;
+				};
+				node.focus?.();
 				// The prototype setter bypasses value trackers that frameworks (React) install on the
-				// element, so they see the cleared value as a change instead of their own write.
+				// element, so they see the new value as a change instead of their own write.
 				const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), "value")?.set;
-				if (setValue) setValue.call(node, "");
-				else node.value = "";
-			}
-			// Typing a value fires its own input events; an empty value types nothing,
-			// so report the clear itself when there was something to clear.
-			if (!clearing || !before) return;
-			const { Event } = globalThis as unknown as PageGlobals;
-			node.dispatchEvent(new Event("input", { bubbles: true }));
-			node.dispatchEvent(new Event("change", { bubbles: true }));
-		}, value === ""),
+				const write = (next: string) => (setValue ? setValue.call(node, next) : (node.value = next));
+				const report = () => {
+					const { Event } = globalThis as unknown as PageGlobals;
+					node.dispatchEvent(new Event("input", { bubbles: true }));
+					node.dispatchEvent(new Event("change", { bubbles: true }));
+				};
+				const kind = node.type?.toLowerCase() ?? "";
+				if (node.tagName === "INPUT" && pickerTypes.includes(kind)) {
+					const before = node.value ?? "";
+					write(wanted);
+					// The browser normalises what it accepts (a colour to lower case, a time's seconds), turns
+					// what it rejects into "" (a colour into #000000, a range into its midpoint) and clamps a
+					// range. Only the date and time types can be cleared.
+					const actual = node.value ?? "";
+					const refused =
+						kind === "color"
+							? actual !== wanted.toLowerCase()
+							: kind === "range"
+								? wanted.trim() === "" || Number(actual) !== Number(wanted)
+								: wanted !== "" && actual === "";
+					if (refused) write(before);
+					// A picker reports a pick that changes the value, not one that keeps it.
+					else if (actual !== before) report();
+					return { kind, refused };
+				}
+				const before = node.isContentEditable ? node.innerText : node.value;
+				if (node.isContentEditable) node.innerText = "";
+				else if ("value" in node) write("");
+				// Typing a value fires its own input events; an empty value types nothing,
+				// so report the clear itself when there was something to clear.
+				if (wanted === "" && before) report();
+				return null;
+			},
+			value,
+			PICKER_INPUT_TYPES,
+		),
 	);
+	if (picker?.refused) {
+		throw new ToolError(
+			`<input type=${picker.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[picker.kind]}`,
+		);
+	}
+	if (picker) return;
 	await untilAborted(signal, () => type(value));
 }
 

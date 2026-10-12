@@ -605,6 +605,104 @@ return { value: await tab.value("#q"), reported: await tab.evaluate(() => window
 		}
 	}, 40_000);
 
+	test("fills colour, date, time and range inputs with their value instead of typing into them", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `pickers-${crypto.randomUUID()}`;
+		const pickersHtml = `<!doctype html><input id="color" type="color"><input id="date" type="date">
+<input id="time" type="time"><input id="datetime-local" type="datetime-local"><input id="month" type="month">
+<input id="week" type="week"><input id="range" type="range" min="0" max="10">
+<script>
+window.reported = [];
+for (const field of document.querySelectorAll("input")) {
+  field.addEventListener("input", () => reported.push("input:" + field.id + "=" + field.value));
+  field.addEventListener("change", () => reported.push("change:" + field.id + "=" + field.value));
+}
+</script>`;
+		const context = { session, toolCallId: "browser-pickers" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(pickersHtml)}` },
+			context,
+		);
+		try {
+			// Typing left the colour at #000000, turned the date into 61012-02-02, the range at 5, and a
+			// second time fill emptied the field.
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const filled = {
+  color: "#FF8800",
+  date: "2026-10-12",
+  time: "14:30",
+  "datetime-local": "2026-10-12T14:30",
+  month: "2026-10",
+  week: "2026-W41",
+  range: "7",
+};
+for (const [id, value] of Object.entries(filled)) await tab.fill("#" + id, value);
+await tab.fill("#time", "16:45");
+await tab.fill("#month", "");
+// Filling the value a field already holds changes nothing, so it reports nothing.
+await tab.fill("#week", "2026-W41");
+const read = async () => {
+  const values = {};
+  for (const id of Object.keys(filled)) values[id] = await tab.value("#" + id);
+  return values;
+};
+const values = await read();
+const refused = [];
+for (const [id, value] of [["date", "12/10/2026"], ["color", "red"], ["color", ""], ["range", "11"], ["range", ""]]) {
+  try { await tab.fill("#" + id, value); } catch (error) { refused.push(error.message); }
+}
+return { values, reported: await tab.evaluate(() => window.reported), refused, after: await read() };`,
+					timeout: 25,
+				},
+				context,
+			);
+			const value = valueFrom<{
+				values: Record<string, string>;
+				reported: string[];
+				refused: string[];
+				after: Record<string, string>;
+			}>(result);
+			expect(value.values).toEqual({
+				color: "#ff8800",
+				date: "2026-10-12",
+				time: "16:45",
+				"datetime-local": "2026-10-12T14:30",
+				month: "",
+				week: "2026-W41",
+				range: "7",
+			});
+			// Each fill reports its value once, the way a pick in the native picker does; a refused one reports nothing.
+			expect(value.reported).toEqual(
+				[
+					["color", "#ff8800"],
+					["date", "2026-10-12"],
+					["time", "14:30"],
+					["datetime-local", "2026-10-12T14:30"],
+					["month", "2026-10"],
+					["week", "2026-W41"],
+					["range", "7"],
+					["time", "16:45"],
+					["month", ""],
+				].flatMap(([id, filled]) => [`input:${id}=${filled}`, `change:${id}=${filled}`]),
+			);
+			expect(value.refused).toEqual([
+				expect.stringContaining('<input type=date> does not accept "12/10/2026"'),
+				expect.stringContaining('<input type=color> does not accept "red"'),
+				expect.stringContaining('<input type=color> does not accept ""'),
+				expect.stringContaining('<input type=range> does not accept "11"'),
+				expect.stringContaining('<input type=range> does not accept ""'),
+			]);
+			// A refused fill leaves the value it found.
+			expect(value.after).toEqual(value.values);
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	// Backgrounded headless tabs deliver no animation frames, which stalls every
 	// Puppeteer `Locator` precondition (viewport/stability/enabled) forever.
 	// Virtual time pinned at "pause" reproduces that state deterministically.
