@@ -18,7 +18,7 @@ import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } 
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
-import type { BuildSessionContextOptions, SessionContext } from "./session-context";
+import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import type { SessionManager } from "./session-manager";
 
 import {
@@ -136,15 +136,18 @@ export class SessionProviderBoundary {
 		return undefined;
 	}
 
-	/** Builds the full display-only transcript context. */
-	buildTranscriptSessionContext(
-		options?: Pick<BuildSessionContextOptions, "collapseCompactedHistory" | "keepDanglingToolCalls">,
-	): SessionContext {
+	/**
+	 * Builds the full display-only transcript context. `keepInFlightToolCalls`
+	 * keeps only the unpaired calls of the turn the agent loop is still executing;
+	 * abandoned calls from earlier turns (interrupted, host restarted) are stripped
+	 * so a mid-turn rebuild never revives them as active tool cards.
+	 */
+	buildTranscriptSessionContext(options?: TranscriptSessionContextOptions): SessionContext {
 		return deobfuscateSessionContext(
 			this.#host.sessionManager.buildSessionContext({
 				transcript: true,
 				collapseCompactedHistory: options?.collapseCompactedHistory,
-				keepDanglingToolCalls: options?.keepDanglingToolCalls,
+				inFlightToolCallIds: options?.keepInFlightToolCalls ? this.#inFlightToolCallIds() : undefined,
 			}),
 			this.#host.obfuscator(),
 		);
