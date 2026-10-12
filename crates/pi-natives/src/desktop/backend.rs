@@ -183,6 +183,13 @@ pub trait Backend: Send {
 			"choosing a menu item in the click that opens the menu is available only on macOS",
 		))
 	}
+	/// Refuses, before anything is sent, a background click `ev` on `target`
+	/// that would open a control's menu. Only macOS opens one for a plain
+	/// background click (a menu button or popup button), so other backends
+	/// accept every click.
+	fn refuse_menu_click(&mut self, _target: &Target, _ev: &PointerEvent) -> CoreResult<()> {
+		Ok(())
+	}
 	fn type_text(
 		&mut self,
 		target: &Target,

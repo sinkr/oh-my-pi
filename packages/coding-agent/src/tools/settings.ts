@@ -674,7 +674,7 @@ export const cfgComputerBackgroundFallback = register({
 		group: "Computer",
 		label: "Computer Background Fallback",
 		description:
-			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground or opening macOS context menus itself",
+			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground or opening macOS menus itself",
 		options: [
 			{
 				value: "takeover",
@@ -686,7 +686,7 @@ export const cfgComputerBackgroundFallback = register({
 				value: "refuse",
 				label: "Refuse",
 				description:
-					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open, desktop input and macOS context menus (which take your keyboard while open) are refused too",
+					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
 			},
 		],
 	},

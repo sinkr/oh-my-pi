@@ -141,6 +141,10 @@ impl Backend for MacosBackend {
 			.pointer(target, event, Some(path), mode, &self.capture)
 	}
 
+	fn refuse_menu_click(&mut self, target: &Target, event: &PointerEvent) -> CoreResult<()> {
+		input::refuse_menu_click(target, event, &self.capture)
+	}
+
 	fn type_text(
 		&mut self,
 		target: &Target,

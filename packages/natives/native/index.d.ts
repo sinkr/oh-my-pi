@@ -2920,6 +2920,14 @@ export interface PointerOptions {
    * menu, presses the item and returns with the menu closed.
    */
   menu?: Array<string>
+  /**
+   * Refuse a background left click that lands on a control that opens a
+   * menu (on macOS a menu button or popup button) with
+   * `BackgroundUnavailable` before anything is sent. The host sets this
+   * when the user refuses foreground takeover: an open menu takes their
+   * keyboard.
+   */
+  refuseMenu?: boolean
 }
 
 /**

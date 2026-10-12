@@ -337,28 +337,51 @@ function refuseForeground(context: ComputerRunContext, call: string, effect: str
 
 const MENU_ROUTE =
 	"Use the window's menu bar with win.menu.select(...), or an element action such as press(), instead.";
+/** AX roles of the controls that open a menu when pressed, as native's `open_menu` reads them. */
+const MENU_CONTROL_ROLES = ["AXPopUpButton", "AXMenuButton"];
+const MENU_CONTROL_ROUTE =
+	"Its options are chosen only through that menu: use the window's menu bar with win.menu.select(...) if it has the same command, or tell the user the step needs their screen.";
 
 /**
  * Under `refuse`, a macOS call that opens a menu is refused before anything is
  * sent: `WindowServer` sends the user's keys to an open menu, so even one
  * closed at once costs the user about a keystroke.
  */
-function refuseMenu(session: NativeDesktopSession, context: ComputerRunContext, call: string, menu: string): void {
+function refuseMenu(
+	session: NativeDesktopSession,
+	context: ComputerRunContext,
+	call: string,
+	menu: string,
+	route = MENU_ROUTE,
+): void {
 	if (session.capabilities.backend !== "quartz") return;
-	refuseForeground(context, call, `open ${menu}, which takes the user's keyboard while it is open`, MENU_ROUTE);
+	refuseForeground(context, call, `open ${menu}, which takes the user's keyboard while it is open`, route);
+}
+
+/** `refuseMenu` for an element call that opens the menu of a popup button or menu button. */
+function refuseControlMenu(
+	session: NativeDesktopSession,
+	context: ComputerRunContext,
+	call: string,
+	role: string,
+): void {
+	if (!MENU_CONTROL_ROLES.includes(role)) return;
+	refuseMenu(session, context, `${call} on an ${role}`, "its menu", MENU_CONTROL_ROUTE);
 }
 
 /**
  * `refuseMenu` for pointer input: a secondary press (the right button, or the
  * left with Control held, as native's `may_open_context_menu` reads it) opens
- * a context menu in most views, and a `menu` option names an item of the menu
- * the press opens.
+ * a context menu in most views, a primary click on a popup button or menu
+ * button (`role`, for an element click) opens its menu, and a `menu` option
+ * names an item of the menu the press opens.
  */
 function refusePointerMenu(
 	session: NativeDesktopSession,
 	context: ComputerRunContext,
 	method: string,
 	{ button, modifiers, keys, menu }: PointerOptions,
+	role?: string,
 ): void {
 	const pressed = typeof button === "string" ? button.trim().toLowerCase() : "left";
 	const control = [modifiers, keys].some(
@@ -374,8 +397,21 @@ function refusePointerMenu(
 		refuseMenu(session, context, `${method} with button: "right"`, "a context menu");
 	} else if (pressed === "left" && control) {
 		refuseMenu(session, context, `${method} with Control held`, "a context menu");
+	} else if (pressed === "left" && role !== undefined) {
+		refuseControlMenu(session, context, method, role);
 	}
 	if (menu !== undefined) refuseMenu(session, context, `${method} with menu`, "a menu");
+}
+
+/**
+ * Under `refuse` on macOS, asks native to refuse a background click that lands
+ * on a popup button or menu button, whose menu would take the user's keyboard;
+ * only native can tell what a pixel click lands on.
+ */
+function refuseMenuClick(session: NativeDesktopSession, context: ComputerRunContext, native: PointerOptions): void {
+	if (session.capabilities.backend === "quartz" && context.snapshot.backgroundFallback === "refuse") {
+		native.refuseMenu = true;
+	}
 }
 
 /** App names by pid from the window list, empty when the listing fails. */
@@ -563,6 +599,8 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "setValue");
 		validateString(value, "setValue(value)");
+		// Native chooses a popup's option by opening its menu and pressing the item.
+		if (this.nativeRole === "AXPopUpButton") refuseControlMenu(this.#session, context, "setValue()", this.nativeRole);
 		await nativeCall(context.signal, () => this.#session.axSetValue(this.ref, value));
 	}
 
@@ -610,6 +648,10 @@ class El {
 			refuseMenu(this.#session, context, `perform(${JSON.stringify(action)})`, "a context menu");
 		}
 		if (menu !== undefined) refuseMenu(this.#session, context, "perform with menu", "a menu");
+		// The names native `axPerform` runs as `AXPress`.
+		if (action.trim().toLowerCase() === "press" || action === "AXPress") {
+			refuseControlMenu(this.#session, context, `perform(${JSON.stringify(action)})`, this.nativeRole);
+		}
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
 	}
 
@@ -618,6 +660,7 @@ class El {
 		guardRun(context, "press");
 		const menu = menuOption(options);
 		if (menu !== undefined) refuseMenu(this.#session, context, "press with menu", "a menu");
+		refuseControlMenu(this.#session, context, "press()", this.nativeRole);
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press", menu));
 	}
 
@@ -625,7 +668,8 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "click");
 		const native = pointerOptions(options);
-		refusePointerMenu(this.#session, context, "click", native);
+		refusePointerMenu(this.#session, context, "click", native, this.nativeRole);
+		refuseMenuClick(this.#session, context, native);
 		await sendInput(this.#session, context, "click", native.takeover, fallback =>
 			this.#session.axClick(this.ref, { ...native, ...fallback }),
 		);
@@ -635,7 +679,8 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
-		refusePointerMenu(this.#session, context, "doubleClick", native);
+		refusePointerMenu(this.#session, context, "doubleClick", native, this.nativeRole);
+		refuseMenuClick(this.#session, context, native);
 		await sendInput(this.#session, context, "doubleClick", native.takeover, fallback =>
 			this.#session.axClick(this.ref, { ...native, ...fallback }),
 		);
@@ -845,6 +890,7 @@ class Win {
 		const context = this.#guardInput("click");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "click", native);
+		refuseMenuClick(this.#session, context, native);
 		await sendInput(
 			this.#session,
 			context,
@@ -859,6 +905,7 @@ class Win {
 		const context = this.#guardInput("doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
 		refusePointerMenu(this.#session, context, "doubleClick", native);
+		refuseMenuClick(this.#session, context, native);
 		await sendInput(
 			this.#session,
 			context,

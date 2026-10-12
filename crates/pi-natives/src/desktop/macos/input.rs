@@ -78,21 +78,9 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
-						// A sheet or popover is a window of its own, but its elements
-						// report the window it is attached to as theirs, so input for
-						// a point inside it goes to the attached window on top there.
 						let (entry_front, (window, wid, in_overlay)) =
 							EntryFront::before(skylight::front_pid, || {
-								let (window, wid) = match pressed_point(&event) {
-									Some(point) => {
-										let windows = capture.windows_of(pid)?;
-										match attached_at(wid, point, &windows, skylight::window_parent) {
-											Some(overlay) => (overlay.clone(), window_identity(overlay)?.1),
-											None => (window, wid),
-										}
-									},
-									None => (window, wid),
-								};
+								let (window, wid) = attached_window(capture, window, pid, wid, &event)?;
 								let in_overlay =
 									takes_overlay_focus(wid, ax::key_focus(pid), skylight::window_parent);
 								background_guard(&window, pid, &event)?;
@@ -1639,6 +1627,62 @@ fn left_press(event: &PointerEvent) -> Option<(f64, f64)> {
 		PointerEvent::Drag { path, button: MouseButton::Left, .. } => path.first().copied(),
 		_ => None,
 	}
+}
+
+/// The window and window number that background `event` on `window` (number
+/// `wid` of `pid`) reaches. A sheet or popover is a window of its own, but its
+/// elements report the window it is attached to as theirs, so input for a
+/// point inside it goes to the attached window on top there.
+fn attached_window(
+	capture: &MacCapture,
+	window: DesktopWindow,
+	pid: libc::pid_t,
+	wid: u32,
+	event: &PointerEvent,
+) -> CoreResult<(DesktopWindow, u32)> {
+	let Some(point) = pressed_point(event) else {
+		return Ok((window, wid));
+	};
+	let windows = capture.windows_of(pid)?;
+	match attached_at(wid, point, &windows, skylight::window_parent) {
+		Some(overlay) => Ok((overlay.clone(), window_identity(overlay)?.1)),
+		None => Ok((window, wid)),
+	}
+}
+
+/// Refuses a background left click on window `target` that lands on a menu
+/// button or popup button ([`presses_menu_control`]): the control would open
+/// its menu, which takes the user's keyboard while it is open. A window whose
+/// input goes nowhere is left for the click itself to refuse.
+pub(super) fn refuse_menu_click(
+	target: &Target,
+	event: &PointerEvent,
+	capture: &MacCapture,
+) -> CoreResult<()> {
+	let Target::Window(id) = target else {
+		return Ok(());
+	};
+	if !matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) {
+		return Ok(());
+	}
+	let window = capture.window(id)?;
+	let (pid, wid) = window_identity(&window)?;
+	let (window, wid) = attached_window(capture, window, pid, wid, event)?;
+	let Ok((owner, _)) =
+		input_owner(pid, wid, ax::window_content(pid, &window), ax::focused_window_id)
+	else {
+		return Ok(());
+	};
+	if presses_menu_control(event, pid, owner) {
+		return Err(DesktopError::background_unavailable(format!(
+			"the {} on window {} ({}) lands on a menu button or popup button, which would open its \
+			 menu, and an open menu takes the user's keyboard; nothing was sent",
+			pointer_kind(event),
+			window.id,
+			window.app,
+		)));
+	}
+	Ok(())
 }
 
 /// Posts background pointer `event` for window `wid` of `pid` to `to_wid` of

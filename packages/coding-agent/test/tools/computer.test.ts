@@ -3392,6 +3392,165 @@ describe("computer background fallback", () => {
 				expect((await run(elsewhere, menu, "refuse")).ok).toBe(true);
 				expect(elsewhere.calls).toEqual(["click:42:-", "perform:AXShowMenu", "perform:press"]);
 			});
+
+			describe("popup buttons and menu buttons", () => {
+				/** A macOS session whose elements are controls of `role`, recording the `refuseMenu` native gets. */
+				class ControlSession extends MacSession {
+					constructor(readonly role = "AXButton") {
+						super();
+					}
+					override async axNode(ref: string): Promise<AxNode> {
+						return { ...axNode, ref, nativeRole: this.role };
+					}
+					override async axSetValue(_ref: string, value: string): Promise<void> {
+						this.calls.push(`setValue:${value}`);
+					}
+					override async click(
+						target: string,
+						_x: number,
+						_y: number,
+						opts?: PointerOptions | null,
+					): Promise<void> {
+						this.calls.push(`click:${target}:${opts?.refuseMenu ?? "-"}`);
+					}
+					override async axClick(_ref: string, opts?: PointerOptions | null): Promise<void> {
+						this.calls.push(`axClick:${opts?.refuseMenu ?? "-"}`);
+					}
+				}
+
+				/** Each element call that opens a popup button's or menu button's menu, as measured on guest B. */
+				const controls: Array<{ role: string; code: string; call: string; named: string }> = [
+					{
+						role: "AXPopUpButton",
+						code: `${el}.press()`,
+						call: "perform:press",
+						named: "press() on an AXPopUpButton",
+					},
+					{
+						role: "AXMenuButton",
+						code: `${el}.press()`,
+						call: "perform:press",
+						named: "press() on an AXMenuButton",
+					},
+					{
+						role: "AXPopUpButton",
+						code: 'await desktop.ref("e1").press()',
+						call: "perform:press",
+						named: "press() on an AXPopUpButton",
+					},
+					{
+						role: "AXPopUpButton",
+						code: `${el}.perform("AXPress")`,
+						call: "perform:AXPress",
+						named: 'perform("AXPress") on an AXPopUpButton',
+					},
+					{
+						role: "AXMenuButton",
+						code: `${el}.perform(" Press ")`,
+						call: "perform: Press ",
+						named: 'perform(" Press ") on an AXMenuButton',
+					},
+					{
+						role: "AXPopUpButton",
+						code: `${el}.setValue("Large")`,
+						call: "setValue:Large",
+						named: "setValue() on an AXPopUpButton",
+					},
+					{ role: "AXPopUpButton", code: `${el}.click()`, call: "axClick:-", named: "click on an AXPopUpButton" },
+					{
+						role: "AXMenuButton",
+						code: `${el}.doubleClick()`,
+						call: "axClick:-",
+						named: "doubleClick on an AXMenuButton",
+					},
+				];
+
+				it("refuses each under refuse before anything is sent, naming the keyboard and the menu bar", async () => {
+					for (const { role, code, named } of controls) {
+						const native = new ControlSession(role);
+						const result = await run(native, code, "refuse");
+						expect(result.ok, code).toBe(false);
+						if (result.ok) continue;
+						expect(result.error.message, code).toStartWith("BackgroundUnavailable: ");
+						expect(result.error.message, code).toContain(`${named} would open its menu`);
+						expect(result.error.message, code).toContain("which takes the user's keyboard while it is open");
+						expect(result.error.message, code).toContain('computer.backgroundFallback setting is "refuse"');
+						expect(result.error.message, code).toContain("win.menu.select(...)");
+						expect(result.error.message, code).toContain("tell the user the step needs their screen");
+						expect(native.calls, code).toEqual([]);
+					}
+				});
+
+				it("sends each as before under takeover", async () => {
+					for (const { role, code, call } of controls) {
+						const native = new ControlSession(role);
+						expect((await run(native, code, "takeover")).ok, code).toBe(true);
+						expect(native.calls, code).toEqual([call]);
+					}
+				});
+
+				it("still presses, sets and clicks other controls under refuse, and menu buttons off macOS", async () => {
+					const button = new ControlSession();
+					const code = [
+						`${el}.press();`,
+						`${el}.perform("AXPress");`,
+						`${el}.setValue("x");`,
+						`${el}.click();`,
+					].join("\n");
+					expect((await run(button, code, "refuse")).ok).toBe(true);
+					expect(button.calls).toEqual(["perform:press", "perform:AXPress", "setValue:x", "axClick:true"]);
+
+					// A menu button's menu is a pull-down, so setValue and other actions do not open it.
+					const menuButton = new ControlSession("AXMenuButton");
+					const other = [`${el}.setValue("x");`, `${el}.perform("AXShowDefaultUI");`].join("\n");
+					expect((await run(menuButton, other, "refuse")).ok).toBe(true);
+					expect(menuButton.calls).toEqual(["setValue:x", "perform:AXShowDefaultUI"]);
+
+					class ElsewhereSession extends ForegroundSession {
+						override async axNode(ref: string): Promise<AxNode> {
+							return { ...axNode, ref, nativeRole: "AXPopUpButton" };
+						}
+					}
+					const elsewhere = new ElsewhereSession();
+					expect((await run(elsewhere, `${el}.press();\n${el}.click();`, "refuse")).ok).toBe(true);
+					expect(elsewhere.calls).toEqual(["perform:press", "axClick:-"]);
+				});
+
+				it("asks native to refuse a click landing on one only under refuse on macOS", async () => {
+					const code = [`${win}.click(1, 2);`, `${win}.doubleClick(1, 2);`, `${el}.click();`].join("\n");
+					const refusing = new ControlSession();
+					expect((await run(refusing, code, "refuse")).ok).toBe(true);
+					expect(refusing.calls).toEqual(["click:42:true", "click:42:true", "axClick:true"]);
+
+					const taking = new ControlSession();
+					expect((await run(taking, code, "takeover")).ok).toBe(true);
+					expect(taking.calls).toEqual(["click:42:-", "click:42:-", "axClick:-"]);
+				});
+
+				it("reports native's refusal of such a click with the setting and no takeover", async () => {
+					const refusal =
+						"BackgroundUnavailable: the click on window 42 (Code) lands on a menu button or popup button, which would open its menu, and an open menu takes the user's keyboard; nothing was sent";
+					class LandingSession extends ControlSession {
+						override async click(
+							target: string,
+							x: number,
+							y: number,
+							opts?: PointerOptions | null,
+						): Promise<void> {
+							await super.click(target, x, y, opts);
+							if (opts?.refuseMenu) throw new Error(refusal);
+						}
+					}
+					const native = new LandingSession();
+					const result = await run(native, `${win}.click(1, 2)`, "refuse");
+					expect(result.ok).toBe(false);
+					if (result.ok) return;
+					expect(result.error.message).toStartWith(refusal);
+					expect(result.error.message).toContain('computer.backgroundFallback setting is "refuse"');
+					expect(result.error.message).toContain("no takeover happened");
+					expect(native.calls).toEqual(["click:42:true"]);
+				});
+			});
 		});
 
 		it("refuses control.acquire without asking the user", async () => {

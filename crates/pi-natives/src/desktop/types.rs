@@ -190,6 +190,12 @@ pub struct PointerOptions {
 	/// path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the
 	/// menu, presses the item and returns with the menu closed.
 	pub menu:         Option<Vec<String>>,
+	/// Refuse a background left click that lands on a control that opens a
+	/// menu (on macOS a menu button or popup button) with
+	/// `BackgroundUnavailable` before anything is sent. The host sets this
+	/// when the user refuses foreground takeover: an open menu takes their
+	/// keyboard.
+	pub refuse_menu:  Option<bool>,
 }
 
 #[napi(object)]
