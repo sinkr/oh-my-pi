@@ -100,13 +100,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.mark);")).toBe("kept");
 	}, 30_000);
 
-	it("aborts the host tool calls the crashed run had in flight", async () => {
+	it("aborts the host tool calls a crashed run had in flight, on reattach and on the crash-loop close", async () => {
 		const name = "worker-exit-tool-call";
 		await open(name, "alive");
-		const started = Promise.withResolvers<AbortSignal>();
+		const signals: AbortSignal[] = [];
 		const callTool = spyOn(toolBridge, "callSessionTool").mockImplementation(async (_name, _args, options) => {
 			const signal = options.signal!;
-			started.resolve(signal);
+			signals.push(signal);
 			const aborted = Promise.withResolvers<void>();
 			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
 			await aborted.promise;
@@ -114,10 +114,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		});
 		try {
 			// The tool call is posted before the rejection ends the worker, so the host registers it first.
-			const crash = messageOf(run(name, `void __omp_call_tool__("probe", {}); ${UNOWNED_REJECTION}`));
-			const signal = await started.promise;
-			expect(await crash).toContain("the tab is being reattached");
-			expect(signal.aborted).toBe(true);
+			const code = `void __omp_call_tool__("probe", {}); ${UNOWNED_REJECTION}`;
+			expect(await messageOf(run(name, code))).toContain("the tab is being reattached");
+			expect(await messageOf(run(name, code))).toContain("again right after being replaced");
+			expect(signals.map(signal => signal.aborted)).toEqual([true, true]);
 		} finally {
 			callTool.mockRestore();
 		}
