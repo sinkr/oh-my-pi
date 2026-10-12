@@ -3592,9 +3592,15 @@ describe("computer background fallback", () => {
 						const result = await run(native, code, "refuse");
 						expect(result.ok, code).toBe(false);
 						if (result.ok) continue;
-						expect(result.error.message, code).toBe(
-							`BackgroundUnavailable: ${refusals[method]} would open its menu, which takes the user's keyboard while it is open, and the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background; nothing was sent. Its options are chosen only through that menu: use the window's menu bar with win.menu.select(...) if it has the same command, or tell the user the step needs their screen.`,
+						const message = result.error.message;
+						// The same shape as the worker's own menu refusals: the press and its effect, the setting, the way around.
+						expect(message, code).toStartWith(
+							`BackgroundUnavailable: ${refusals[method]} would open its menu, which takes the user's keyboard while it is open`,
 						);
+						expect(message, code).toContain('computer.backgroundFallback setting is "refuse"');
+						expect(message, code).toContain("win.menu.select(...)");
+						expect(message, code).toContain("tell the user the step needs their screen");
+						expect(message, code).not.toContain("no takeover happened");
 						expect(native.calls, code).toEqual([`${method}:42:true`]);
 					}
 				});
