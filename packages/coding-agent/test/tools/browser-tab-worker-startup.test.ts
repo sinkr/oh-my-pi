@@ -945,7 +945,7 @@ describe("closing an OMP-owned page", () => {
 				spyOn(tab.worker, "send").mockImplementation((msg, transfer) => {
 					if (msg.type !== "close") return send(msg, transfer);
 					queueMicrotask(() => {
-						for (const handler of [...handlers]) handler({ type: "closed" });
+						for (const handler of handlers) handler({ type: "closed" });
 					});
 				});
 				await releaseTab(name, { kill: false });
