@@ -48,6 +48,8 @@ export interface SessionProviderBoundaryHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	/** Current secret obfuscator; swapped when `secrets.enabled` turns on mid-session. */
 	obfuscator(): SecretObfuscator | undefined;
+	/** Tool calls emitted by assistant turns of the current agent run. */
+	runToolCallIds(): ReadonlySet<string>;
 }
 
 /** Owns the transformations at the session/provider boundary. */
@@ -138,16 +140,18 @@ export class SessionProviderBoundary {
 
 	/**
 	 * Builds the full display-only transcript context. `keepInFlightToolCalls`
-	 * keeps only the unpaired calls of the turn the agent loop is still executing;
-	 * abandoned calls from earlier turns (interrupted, host restarted) are stripped
-	 * so a mid-turn rebuild never revives them as active tool cards.
+	 * keeps unpaired calls only when the current agent run emitted them; calls
+	 * left unpaired by earlier runs (interrupted, host restarted) are stripped so
+	 * a mid-turn rebuild never revives them as active tool cards. This holds even
+	 * before the run's prompt (user, custom or developer message) is persisted.
 	 */
 	buildTranscriptSessionContext(options?: TranscriptSessionContextOptions): SessionContext {
+		const keepLive = options?.keepInFlightToolCalls === true && this.#host.agent.state.isStreaming;
 		return deobfuscateSessionContext(
 			this.#host.sessionManager.buildSessionContext({
 				transcript: true,
 				collapseCompactedHistory: options?.collapseCompactedHistory,
-				inFlightToolCallIds: options?.keepInFlightToolCalls ? this.#inFlightToolCallIds() : undefined,
+				inFlightToolCallIds: keepLive ? this.#host.runToolCallIds() : undefined,
 			}),
 			this.#host.obfuscator(),
 		);

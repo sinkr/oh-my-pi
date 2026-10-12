@@ -50,7 +50,7 @@ describe("issue #12247 mid-turn transcript rebuild", () => {
 		return ids;
 	}
 
-	it("keeps the in-flight call and strips an abandoned call from an earlier turn", async () => {
+	function createSession() {
 		const mock = createMockModel({
 			provider: "anthropic",
 			responses: [
@@ -81,7 +81,8 @@ describe("issue #12247 mid-turn transcript rebuild", () => {
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		for (const message of history) sessionManager.appendMessage(message);
 
-		const rebuilds: string[][] = [];
+		const duringRequest: string[][] = [];
+		const duringTool: string[][] = [];
 		const probe: AgentTool = {
 			name: "probe",
 			label: "Probe",
@@ -89,24 +90,42 @@ describe("issue #12247 mid-turn transcript rebuild", () => {
 			parameters: type({}),
 			execute: async () => {
 				if (!session) throw new Error("Expected a live session");
-				rebuilds.push(transcriptToolCallIds(session, true), transcriptToolCallIds(session, false));
+				duringTool.push(transcriptToolCallIds(session, true), transcriptToolCallIds(session, false));
 				return { content: [{ type: "text", text: "ok" }], details: {} };
 			},
 		};
-		session = new AgentSession({
+		const live = new AgentSession({
 			agent: new Agent({
 				getApiKey: () => "test-key",
 				initialState: { model: mock, systemPrompt: [], tools: [probe], messages: history },
-				streamFn: mock.stream,
+				streamFn: (model, context, options) => {
+					if (session) duringRequest.push(transcriptToolCallIds(session, true));
+					return mock.stream(model, context, options);
+				},
 			}),
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false }),
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
 			toolRegistry: new Map([[probe.name, probe]]),
 		});
+		session = live;
+		return { live, duringRequest, duringTool };
+	}
 
-		await session.prompt("continue");
+	it("keeps the in-flight call and strips an abandoned call from an earlier turn", async () => {
+		const { live, duringRequest, duringTool } = createSession();
 
-		expect(rebuilds).toEqual([["live"], []]);
+		await live.prompt("continue");
+
+		expect(duringRequest[0]).toEqual([]);
+		expect(duringTool).toEqual([["live"], []]);
+	});
+
+	it("strips the abandoned call while a turn started by a custom message awaits its first reply", async () => {
+		const { live, duringRequest } = createSession();
+
+		await live.promptCustomMessage({ customType: "issue-12247", content: "continue", display: true });
+
+		expect(duringRequest[0]).toEqual([]);
 	});
 });
