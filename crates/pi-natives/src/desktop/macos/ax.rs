@@ -1336,6 +1336,13 @@ fn activate_for_menu(
 		in_overlay,
 		visit,
 	)?;
+	// The press that makes the window key waits in the application's event
+	// queue, while the action that follows is handled as soon as it arrives:
+	// `AXShowMenu` sent right behind the press opened its menu first, and the
+	// press, landing outside the menu, closed it again.
+	if prepared && !in_overlay {
+		control::wait(input::POINTER_SETTLE)?;
+	}
 	// A popover never becomes the focused window; the one it is on already is.
 	if !in_overlay {
 		input::await_key_window(pid, wid)?;
