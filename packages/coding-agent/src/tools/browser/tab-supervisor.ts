@@ -4,6 +4,7 @@ import {
 	logger,
 	postmortem,
 	Snowflake,
+	untilAborted,
 	withTimeout,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
@@ -61,6 +62,8 @@ interface WorkerHandle {
 	send(msg: WorkerInbound, transferList?: Transferable[]): void;
 	onMessage(handler: (msg: WorkerOutbound) => void): () => void;
 	onError(handler: (error: Error) => void): () => void;
+	/** Fires when the worker exits on its own (crash, `process.exit`); never after `terminate()`. */
+	onExit(handler: (exitCode: number) => void): () => void;
 	terminate(): Promise<void>;
 	readonly mode: "worker" | "inline";
 }
@@ -131,6 +134,10 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	 * does, and goes with the page when omp closes it; a page left open in the user's browser keeps it until the sweep.
 	 */
 	uploadDir: string;
+	/** In flight while a worker that exited on its own is replaced; runs wait for it before driving the tab. */
+	workerRecovery?: Promise<boolean>;
+	/** `Date.now()` of the last unexpected worker exit; a second one soon after closes the tab instead. */
+	workerExitedAt?: number;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -257,6 +264,10 @@ const DEBUGGER_DETACH_REFUSAL =
 	"Chrome refuses the attach while another extension's frame, such as a password manager's inline autofill menu, is open in it";
 /** Chrome's `chrome.debugger.onDetach` reason when the user pressed Cancel on its debugging bar. */
 const USER_CANCELLED_DEBUGGER = "canceled_by_user";
+// Init budget for the worker that replaces one that exited on its own; adopting a live page takes well under a second.
+const WORKER_EXIT_REATTACH_TIMEOUT_MS = 10_000;
+// A replacement worker that exits on its own this soon after the previous exit closes the tab instead of looping.
+const WORKER_EXIT_RETRY_WINDOW_MS = 10_000;
 class RecoverableWorkerError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
@@ -588,7 +599,7 @@ async function acquireTabImpl(
 		frozen: false,
 		uploadDir: initPayload.uploadDir,
 	};
-	worker.onMessage(msg => handleTabMessage(tab, msg));
+	attachTabWorker(tab, worker);
 	tabs.set(name, tab);
 	sweepClosedTabUploads();
 	// Durably record ownership so another live omp process can reap this page if
@@ -855,6 +866,29 @@ async function runInTabWithSnapshot(
 	},
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
+	// A worker that exited on its own is being replaced: wait for that within this call's budget, and run only on the
+	// same tab. A tab closed and reopened under this name meanwhile is not the one this call was meant for.
+	const recovering = tabs.get(name);
+	if (recovering?.backend === "worker" && recovering.workerRecovery) {
+		if (opts.signal?.aborted) throw new ToolAbortError();
+		recovering.lastActivityAt = Date.now();
+		const waitStartedAt = performance.now();
+		try {
+			await raceWithTimeout(
+				untilAborted(opts.signal, recovering.workerRecovery),
+				opts.timeoutMs,
+				`Tab ${JSON.stringify(name)}'s worker was still being reattached after ${opts.timeoutMs}ms`,
+			);
+		} catch (error) {
+			if (opts.signal?.aborted) throw new ToolAbortError();
+			throw error;
+		}
+		const current = tabs.get(name);
+		if (current && current !== recovering) {
+			throw new ToolError(`Tab ${JSON.stringify(name)} was closed while its worker was being reattached.`);
+		}
+		opts = { ...opts, timeoutMs: Math.max(1, opts.timeoutMs - Math.round(performance.now() - waitStartedAt)) };
+	}
 	const tab = tabs.get(name);
 	if (!tab || tab.state === "dead") {
 		const killed = killedTabs.get(name);
@@ -969,14 +1003,22 @@ async function runInTabWithSnapshot(
 	if (opts.signal?.aborted) abort();
 	else opts.signal?.addEventListener("abort", abort, { once: true });
 	try {
-		tab.worker.send({
-			type: "run",
-			id,
-			name,
-			code: opts.code,
-			timeoutMs: opts.timeoutMs,
-			session: snapshot,
-		});
+		try {
+			tab.worker.send({
+				type: "run",
+				id,
+				name,
+				code: opts.code,
+				timeoutMs: opts.timeoutMs,
+				session: snapshot,
+			});
+		} catch (error) {
+			// Bun throws `InvalidStateError` once the worker is gone, which can precede its exit event.
+			if (!(error instanceof DOMException && error.name === "InvalidStateError")) throw error;
+			throw new ToolError(
+				`Tab ${JSON.stringify(name)}'s worker exited before this call reached it; omp reattaches the tab to a new worker, so retry the call.`,
+			);
+		}
 		try {
 			const result = await raceWithTimeout(
 				promise,
@@ -1832,6 +1874,57 @@ function safeSend(tab: WorkerTabSession, msg: WorkerInbound): void {
 	}
 }
 
+/**
+ * Route a tab worker's messages to the supervisor and recover from its exit on its own (uncaught error,
+ * a rejection no run owns, `process.exit`). The runs in flight fail at once with the cause, and a new
+ * worker adopts the same page so the next call continues on it; the tab is closed when that fails or
+ * when the new worker exits too within {@link WORKER_EXIT_RETRY_WINDOW_MS}.
+ */
+function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
+	worker.onMessage(msg => handleTabMessage(tab, msg));
+	let lastError: Error | undefined;
+	worker.onError(error => {
+		lastError = error;
+	});
+	worker.onExit(exitCode => {
+		// A release or recycle owns a worker it replaced or is tearing down.
+		if (tabs.get(tab.name) !== tab || tab.worker !== worker || tab.state !== "alive" || releaseInflight.has(tab))
+			return;
+		// Bun's ErrorEvent message embeds a source excerpt; keep only its `error: …` line.
+		const cause = lastError && (/^error: (.+)$/m.exec(lastError.message)?.[1] ?? lastError.message.split("\n", 1)[0]);
+		const exited = `Browser tab worker exited unexpectedly (exit code ${exitCode}${cause ? `, ${cause}` : ""})`;
+		logger.warn("Browser tab worker exited unexpectedly", { name: tab.name, exitCode, error: lastError?.message });
+		const now = Date.now();
+		const looping = tab.workerExitedAt !== undefined && now - tab.workerExitedAt < WORKER_EXIT_RETRY_WINDOW_MS;
+		tab.workerExitedAt = now;
+		const logCleanupFailure = (cleanupError: unknown): false => {
+			logger.warn("Failed to recover browser tab after its worker exited", {
+				name: tab.name,
+				error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+			});
+			return false;
+		};
+		if (looping) {
+			forceKillTab(tab.name, `${exited} again right after being replaced; tab closed`).catch(logCleanupFailure);
+			return;
+		}
+		const error = postmortem.markExpectedCleanupError(
+			new ToolError(`${exited}; the tab is being reattached to a new worker on the same page. ${WORKER_RESETS}.`),
+		);
+		for (const pending of tab.pending.values()) pending.reject(error);
+		const recovery = recoverWorkerTab(tab, tab.name, WORKER_EXIT_REATTACH_TIMEOUT_MS, `${exited}; tab closed`, {
+			// Keep the page as the worker left it: stopping its loading would cancel a navigation the agent started.
+			recover: false,
+			failedReason: `${exited}; it could not be reattached to a new worker, so the tab was closed`,
+		})
+			.catch(logCleanupFailure)
+			.finally(() => {
+				if (tab.workerRecovery === recovery) tab.workerRecovery = undefined;
+			});
+		tab.workerRecovery = recovery;
+	});
+}
+
 /** Resolves `false` when the tab was closed while its new worker started; the new worker is then discarded. */
 async function recycleTimedOutWorkerTab(
 	tab: WorkerTabSession,
@@ -1871,7 +1964,7 @@ async function recycleTimedOutWorkerTab(
 		tab.info = info;
 		tab.state = "alive";
 		tab.reattached = true;
-		replacement.onMessage(msg => handleTabMessage(tab, msg));
+		attachTabWorker(tab, replacement);
 		return true;
 	};
 	let worker = await spawnTabWorker();
@@ -2149,6 +2242,7 @@ async function spawnTabWorker(): Promise<WorkerHandle> {
 }
 
 function wrapBunWorker(worker: Worker): WorkerHandle {
+	let terminated = false;
 	return {
 		mode: "worker",
 		send(msg, transferList) {
@@ -2170,7 +2264,15 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 				worker.removeEventListener("messageerror", onMessageError);
 			};
 		},
+		onExit(handler) {
+			const onClose = (event: Event): void => {
+				if (!terminated) handler((event as CloseEvent).code);
+			};
+			worker.addEventListener("close", onClose);
+			return () => worker.removeEventListener("close", onClose);
+		},
 		async terminate() {
+			terminated = true;
 			worker.terminate();
 		},
 	};
@@ -2209,6 +2311,7 @@ async function spawnInlineWorker(): Promise<WorkerHandle> {
 			return () => hostListeners.delete(handler);
 		},
 		onError: () => () => {},
+		onExit: () => () => {},
 		async terminate() {},
 	};
 }
