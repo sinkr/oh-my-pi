@@ -480,9 +480,10 @@ export async function fillViaHandle(
 				// element, so they see the new value as a change instead of their own write.
 				const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), "value")?.set;
 				const write = (next: string) => (setValue ? setValue.call(node, next) : (node.value = next));
+				// Like the browser's own, input leaves a shadow root and change stays inside it.
 				const report = () => {
 					const { Event } = globalThis as unknown as PageGlobals;
-					node.dispatchEvent(new Event("input", { bubbles: true }));
+					node.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
 					node.dispatchEvent(new Event("change", { bubbles: true }));
 				};
 				const kind = node.type?.toLowerCase() ?? "";

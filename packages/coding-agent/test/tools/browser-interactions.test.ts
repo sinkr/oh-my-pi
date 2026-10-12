@@ -611,12 +611,19 @@ return { value: await tab.value("#q"), reported: await tab.evaluate(() => window
 		const tabName = `pickers-${crypto.randomUUID()}`;
 		const pickersHtml = `<!doctype html><input id="color" type="color"><input id="date" type="date">
 <input id="time" type="time"><input id="datetime-local" type="datetime-local"><input id="month" type="month">
-<input id="week" type="week"><input id="range" type="range" min="0" max="10">
+<input id="week" type="week"><input id="range" type="range" min="0" max="10"><div id="host"></div>
 <script>
 window.reported = [];
 for (const field of document.querySelectorAll("input")) {
   field.addEventListener("input", () => reported.push("input:" + field.id + "=" + field.value));
   field.addEventListener("change", () => reported.push("change:" + field.id + "=" + field.value));
+}
+document.querySelector("#host").attachShadow({ mode: "open" }).innerHTML = '<input id="shadow-date" type="date">';
+// What crosses the shadow boundary to a listener on the document.
+for (const type of ["input", "change"]) {
+  document.addEventListener(type, event => {
+    if (event.target.id === "host") reported.push(type + ":host=" + event.composedPath()[0].value);
+  });
 }
 </script>`;
 		const context = { session, toolCallId: "browser-pickers" };
@@ -645,6 +652,7 @@ await tab.fill("#time", "16:45");
 await tab.fill("#month", "");
 // Filling the value a field already holds changes nothing, so it reports nothing.
 await tab.fill("#week", "2026-W41");
+await tab.fill("pierce/#shadow-date", "2026-10-12");
 const read = async () => {
   const values = {};
   for (const id of Object.keys(filled)) values[id] = await tab.value("#" + id);
@@ -678,8 +686,8 @@ return { values, reported: await tab.evaluate(() => window.reported), refused, a
 				range: "7",
 			});
 			// Each fill reports its value once, the way a pick in the native picker does; a refused one reports nothing.
-			expect(value.reported).toEqual(
-				[
+			expect(value.reported).toEqual([
+				...[
 					["color", "#ff8800"],
 					["date", "2026-10-12"],
 					["time", "14:30"],
@@ -690,7 +698,9 @@ return { values, reported: await tab.evaluate(() => window.reported), refused, a
 					["time", "16:45"],
 					["month", ""],
 				].flatMap(([id, filled]) => [`input:${id}=${filled}`, `change:${id}=${filled}`]),
-			);
+				// Like Chrome's own events, input leaves a shadow root and change stays inside it.
+				"input:host=2026-10-12",
+			]);
 			expect(value.refused).toEqual([
 				expect.stringContaining('<input type=date> does not accept "12/10/2026"'),
 				expect.stringContaining('<input type=color> does not accept "red"'),
