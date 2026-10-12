@@ -3416,7 +3416,11 @@ describe("computer background fallback", () => {
 					override async axClick(_ref: string, opts?: PointerOptions | null): Promise<void> {
 						this.calls.push(`axClick:${opts?.refuseMenu ?? "-"}`);
 					}
-					override async drag(target: string, _points: DesktopPoint[], opts?: PointerOptions | null): Promise<void> {
+					override async drag(
+						target: string,
+						_points: DesktopPoint[],
+						opts?: PointerOptions | null,
+					): Promise<void> {
 						this.calls.push(`drag:${target}:${opts?.refuseMenu ?? "-"}`);
 					}
 					override async holdMouse(
@@ -3564,12 +3568,20 @@ describe("computer background fallback", () => {
 						): Promise<void> {
 							await super.click(target, x, y, opts);
 							if (opts?.refuseMenu)
-								throw new Error(`BackgroundUnavailable: ${refusals.click} would open its menu; nothing was sent`);
+								throw new Error(
+									`BackgroundUnavailable: ${refusals.click} would open its menu; nothing was sent`,
+								);
 						}
-						override async drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<void> {
+						override async drag(
+							target: string,
+							points: DesktopPoint[],
+							opts?: PointerOptions | null,
+						): Promise<void> {
 							await super.drag(target, points, opts);
 							if (opts?.refuseMenu)
-								throw new Error(`BackgroundUnavailable: ${refusals.drag} would open its menu; nothing was sent`);
+								throw new Error(
+									`BackgroundUnavailable: ${refusals.drag} would open its menu; nothing was sent`,
+								);
 						}
 					}
 					for (const [method, code] of [
