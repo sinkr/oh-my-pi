@@ -385,6 +385,8 @@ export class SessionTools {
 	#promptSurfaceScope = new AsyncLocalStorage<PromptSurface>();
 	#toolRegistryMutationTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
+	/** Memory recall committed for the turn in flight; a base rebuilt mid-turn drops it until reapplied. */
+	#turnRecall: string | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	/**
@@ -2075,6 +2077,7 @@ export class SessionTools {
 		isCurrent: () => boolean,
 		signal?: AbortSignal,
 	): Promise<SystemPromptPreparation> {
+		this.#turnRecall = undefined;
 		const backend = await resolveMemoryBackend(this.#host.settings);
 		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
 
@@ -2114,6 +2117,7 @@ export class SessionTools {
 					const currentBase = this.#baseSystemPrompt;
 					this.#host.captureMemoryPromotionSnapshot(currentBase);
 					this.#baseSystemPrompt = currentBase === preparedBase ? stablePrompt : [...currentBase, injected];
+					this.#turnRecall = injected;
 					this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 					return true;
 				},
@@ -2125,6 +2129,16 @@ export class SessionTools {
 			});
 			return { systemPrompt: this.#baseSystemPrompt };
 		}
+	}
+
+	/** Re-attaches this turn's committed memory recall to a base prompt rebuilt after a model switch. */
+	reapplyTurnRecall(): void {
+		const injected = this.#turnRecall;
+		if (!injected) return;
+		const base = this.#baseSystemPrompt;
+		this.#host.captureMemoryPromotionSnapshot(base);
+		this.#baseSystemPrompt = [...base, injected];
+		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 	}
 
 	/**

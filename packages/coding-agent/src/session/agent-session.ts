@@ -112,6 +112,7 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
+import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
@@ -399,6 +400,7 @@ import {
 } from "./messages";
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import {
+	type AutoPrewalkSelection,
 	isPrewalkPlanNudge,
 	PrewalkCoordinator,
 	type PrewalkCoordinatorHost,
@@ -487,7 +489,7 @@ function jobSnapshotItem(job: AsyncJob): AsyncJobSnapshotItem {
 }
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
-import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
@@ -500,6 +502,8 @@ import {
 	cfgDefaultThinkingLevel,
 	cfgExternalThinking,
 	cfgPowerSleepPrevention,
+	cfgPrewalkAutoSource,
+	cfgPrewalkAutoTarget,
 	cfgPrewalkEnabled,
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
@@ -1658,9 +1662,13 @@ export class AgentSession implements SettingsScope {
 		return this.#prewalk.arm(target, thinkingLevel);
 	}
 
-	/** Cancel only this session's pending prewalk without changing the active model or settings. */
+	/**
+	 * Cancel only this session's pending prewalk without changing the active model or settings, and keep
+	 * `prewalk.auto` from re-arming it until `/new`.
+	 */
 	disarmPrewalk(): void {
 		this.#prewalk.disarm();
+		this.#prewalk.suppressAuto();
 	}
 
 	/** Restore a planning model and re-arm prewalk without partially applying a rejected restart. */
@@ -1783,6 +1791,24 @@ export class AgentSession implements SettingsScope {
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
 			restoreThinkingLevel: level => this.#models.restoreThinkingLevel(level),
 			resolveDefaultPrewalk: () => this.#resolveDefaultPrewalk(),
+			resolveAutoPrewalk: () => this.#resolveAutoPrewalk(),
+			captureThinking: () => {
+				const { thinkingLevel, isAutoThinking, autoResolvedThinkingLevel } = this.#models;
+				return () => this.#models.restoreThinkingSnapshot(thinkingLevel, isAutoThinking, autoResolvedThinkingLevel);
+			},
+			promptGeneration: () => this.#promptGeneration,
+			classifyAutoPrewalk: (request, signal) =>
+				classifyAutoPrewalk(
+					{ request, history: this.agent.state.messages },
+					{
+						settings: this.settings,
+						registry: this.#modelRegistry,
+						sessionId: this.sessionId,
+						signal,
+						onUsage: journalJudgmentUsage(this.sessionManager),
+						telemetry: this.agent.telemetry,
+					},
+				),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
@@ -1803,6 +1829,7 @@ export class AgentSession implements SettingsScope {
 		this.#prewalk = new PrewalkCoordinator(prewalkHost, {
 			prewalk: config.prewalk,
 			planYolo: config.planYolo,
+			suppressAutoPrewalk: config.suppressAutoPrewalk,
 		});
 		const todoHost: TodoTrackerHost = {
 			agent: this.agent,
@@ -2625,29 +2652,55 @@ export class AgentSession implements SettingsScope {
 		});
 	}
 
-	/** Resolve the configured startup/new-session handoff using the settings-change selection path. */
-	#resolveDefaultPrewalk(): Prewalk | undefined {
+	/** Resolves `selector` like `--prewalk-into`: role aliases, scoped models, match preferences, disabled providers. */
+	#resolvePrewalkSelector(selector: string): { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | string {
 		const scoped = this.scopedModels.map(entry => entry.model);
 		const resolved = resolveCliModel({
-			cliModel: DEFAULT_PREWALK_TARGET,
+			cliModel: selector,
 			modelRegistry: this.#modelRegistry,
 			availableModels: scoped.length > 0 ? scoped : undefined,
 			settings: this.settings,
 			preferences: getModelMatchPreferences(this.settings),
 		});
-		const target = resolved.model;
-		const problem = !target
-			? (resolved.error ?? `model "${DEFAULT_PREWALK_TARGET}" not found`)
-			: cfgDisabledProviders.get(this.settings).includes(target.provider)
-				? `provider "${target.provider}" is disabled`
-				: !this.#modelRegistry.hasConfiguredAuth(target)
-					? `no API key for ${target.provider}/${target.id}`
-					: undefined;
-		if (!target || problem) {
-			this.emitNotice("warning", `Prewalk not armed: ${problem}.`, "prewalk");
+		const model = resolved.model;
+		if (!model) return resolved.error ?? `model "${selector}" not found`;
+		if (cfgDisabledProviders.get(this.settings).includes(model.provider)) {
+			return `provider "${model.provider}" is disabled`;
+		}
+		if (!this.#modelRegistry.hasConfiguredAuth(model)) return `no API key for ${model.provider}/${model.id}`;
+		return { model, thinkingLevel: resolved.thinkingLevel };
+	}
+
+	/** Resolve the configured startup/new-session handoff using the settings-change selection path. */
+	#resolveDefaultPrewalk(): Prewalk | undefined {
+		const resolved = this.#resolvePrewalkSelector(DEFAULT_PREWALK_TARGET);
+		if (typeof resolved === "string") {
+			this.emitNotice("warning", `Prewalk not armed: ${resolved}.`, "prewalk");
 			return undefined;
 		}
-		return { target, thinkingLevel: resolved.thinkingLevel };
+		return { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+	}
+
+	/** Resolves auto-prewalk's source then target; each needs a credential that actually yields a key. */
+	async #resolveAutoPrewalk(): Promise<AutoPrewalkSelection | undefined> {
+		const resolveUsable = async (label: string, selector: string) => {
+			let resolved = this.#resolvePrewalkSelector(selector);
+			if (typeof resolved !== "string") {
+				try {
+					if (await this.#modelRegistry.getApiKey(resolved.model, this.sessionId)) return resolved;
+					resolved = `no API key for ${resolved.model.provider}/${resolved.model.id}`;
+				} catch (error) {
+					resolved = error instanceof Error ? error.message : String(error);
+				}
+			}
+			this.emitNotice("warning", `Auto-prewalk skipped: ${label} "${selector}": ${resolved}.`, "prewalk");
+			return undefined;
+		};
+		const source = await resolveUsable("source", cfgPrewalkAutoSource.get(this.settings));
+		if (!source) return undefined;
+		const target = await resolveUsable("target", cfgPrewalkAutoTarget.get(this.settings));
+		if (!target) return undefined;
+		return { source, target: { target: target.model, thinkingLevel: target.thinkingLevel } };
 	}
 
 	/**
@@ -7980,6 +8033,16 @@ export class AgentSession implements SettingsScope {
 		throw new AgentStartPolicyChangedError();
 	}
 
+	/**
+	 * Auto-prewalk applies to top-level, user-authored turns: a typed prompt or a user-invoked skill.
+	 * Synthetic, agent-attributed, and subagent turns never qualify.
+	 */
+	#isAutoPrewalkTurn(message: AgentMessage): boolean {
+		if (this.#agentKind !== "main") return false;
+		if (message.role === "user") return !message.synthetic && message.attribution !== "agent";
+		return message.role === "custom" && isUserInvokedSkillPrompt(message);
+	}
+
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
@@ -8004,6 +8067,7 @@ export class AgentSession implements SettingsScope {
 		try {
 			options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			const autoPrewalkTurn = this.#isAutoPrewalkTurn(message);
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
@@ -8114,6 +8178,33 @@ export class AgentSession implements SettingsScope {
 			if (!preparedMessages) return false;
 			messages.push(...preparedMessages);
 			const baseXdevCatalogDelivered = preparation.baseXdevCatalogDelivered;
+
+			// Auto-prewalk: classify this prepared user turn; a confident prewalk moves to the planning source and
+			// arms the target. Ahead of auto thinking so effort is judged for the model that will answer. Never
+			// blocks the turn: a failed classification or an unusable selector changes nothing.
+			if (autoPrewalkTurn) {
+				const baseBeforeSwitch = this.#tools.baseSystemPrompt;
+				const switched = await this.#prewalk.applyAuto(expandedText, generation, setupAbort.signal);
+				if (this.#promptGeneration !== generation) {
+					return false;
+				}
+				if (switched) {
+					// The earlier usage preflight covered the previous model.
+					if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+					// A model-policy rebuild replaced the base prompt and dropped this turn's memory recall; the
+					// already-run hook outputs (messages, override) stay as prepared.
+					if (this.#tools.baseSystemPrompt !== baseBeforeSwitch) this.#tools.reapplyTurnRecall();
+				}
+				// The eager todo reminder was built before this turn could arm. Like a configured prewalk (#10510),
+				// an actionable one owns todo creation, plan first, so the reminder would contradict its nudge.
+				if (this.#prewalk.willHandoff) {
+					this.#toolChoiceQueue.removeByLabel("eager-todo");
+					const eager = messages.findIndex(
+						candidate => candidate.role === "custom" && candidate.customType === EAGER_TODO_PRELUDE_MESSAGE_TYPE,
+					);
+					if (eager >= 0) messages.splice(eager, 1);
+				}
+			}
 
 			// Auto thinking: classify this real user turn and set the effective level
 			// before the model request. A user-invoked `/skill:<name>` arrives as a

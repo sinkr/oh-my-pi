@@ -82,6 +82,58 @@ export const cfgPrewalkEnabled = register({
 	},
 });
 
+export const cfgPrewalkAuto = register({
+	id: "prewalk.auto",
+	type: "enum",
+	values: ["off", "suggest", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Auto Prewalk",
+		description:
+			"Ask the native System One judge (TypeSafe jev via the 'judge' role) whether each top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.",
+		options: [
+			{ value: "off", label: "Off", description: "Never classify prompts for prewalk" },
+			{
+				value: "suggest",
+				label: "Suggest",
+				description: "Classify each task and report the decision without arming prewalk or switching models",
+			},
+			{
+				value: "on",
+				label: "On",
+				description:
+					"For confidently front-loaded tasks, switch to the auto source and arm a handoff to the auto target; otherwise change nothing",
+			},
+		],
+	},
+});
+
+export const cfgPrewalkAutoSource = register({
+	id: "prewalk.autoSource",
+	type: "string",
+	default: "@slow",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Auto-prewalk source",
+		description: "Model or role (default '@slow') auto-prewalk switches to before arming a qualifying task.",
+	},
+});
+
+export const cfgPrewalkAutoTarget = register({
+	id: "prewalk.autoTarget",
+	type: "string",
+	default: "@smol",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Auto-prewalk target",
+		description: "Model or role (default '@smol') auto-prewalk hands off to at the first edit/write.",
+	},
+});
+
 function isLimitRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
