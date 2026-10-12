@@ -491,13 +491,16 @@ export async function fillViaHandle(
 					write(wanted);
 					// The browser normalises what it accepts (a colour to lower case, a time's seconds), turns
 					// what it rejects into "" (a colour into #000000, a range into its midpoint) and clamps a
-					// range. Only the date and time types can be cleared.
+					// range. A rejected range number can land on the midpoint it coerces to (`0x5`), so its
+					// spelling is checked against the decimal form the browser parses. Only the date and time
+					// types can be cleared.
 					const actual = node.value ?? "";
 					const refused =
 						kind === "color"
 							? actual !== wanted.toLowerCase()
 							: kind === "range"
-								? wanted.trim() === "" || Number(actual) !== Number(wanted)
+								? !/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(wanted) ||
+									Number(actual) !== Number(wanted)
 								: wanted !== "" && actual === "";
 					if (refused) write(before);
 					// A picker reports a pick that changes the value, not one that keeps it.

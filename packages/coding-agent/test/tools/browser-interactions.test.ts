@@ -652,9 +652,11 @@ const read = async () => {
 };
 const values = await read();
 const refused = [];
-for (const [id, value] of [["date", "12/10/2026"], ["color", "red"], ["color", ""], ["range", "11"], ["range", ""]]) {
+for (const [id, value] of [["date", "12/10/2026"], ["color", "red"], ["color", ""], ["range", "11"], ["range", ""], ["range", "0x5"]]) {
   try { await tab.fill("#" + id, value); } catch (error) { refused.push(error.message); }
 }
+// An exponent spelling of the current value is accepted and changes nothing.
+await tab.fill("#range", "7e0");
 return { values, reported: await tab.evaluate(() => window.reported), refused, after: await read() };`,
 					timeout: 25,
 				},
@@ -695,6 +697,7 @@ return { values, reported: await tab.evaluate(() => window.reported), refused, a
 				expect.stringContaining('<input type=color> does not accept ""'),
 				expect.stringContaining('<input type=range> does not accept "11"'),
 				expect.stringContaining('<input type=range> does not accept ""'),
+				expect.stringContaining('<input type=range> does not accept "0x5"'),
 			]);
 			// A refused fill leaves the value it found.
 			expect(value.after).toEqual(value.values);
