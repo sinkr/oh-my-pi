@@ -930,6 +930,86 @@ function dropUploadFiles(el: unknown, files: unknown[]): void {
 	}
 }
 
+/** A watch for a page reading a drop's files; see {@link watchDropRead}. */
+interface DropReadWatch {
+	read: boolean;
+	end(): void;
+}
+
+/**
+ * Watch for the page reading the files of the next drop on an element: getting the drop's `files` or `items`. Runs in
+ * the main world, where the page's listeners get the wrapper whose reads it watches.
+ */
+function watchDropRead(el: unknown): DropReadWatch {
+	interface DropEvent {
+		target: unknown;
+		dataTransfer: object | null;
+	}
+	interface EventRoot {
+		addEventListener(type: string, listener: (event: DropEvent) => void, capture: boolean): void;
+		removeEventListener(type: string, listener: (event: DropEvent) => void, capture: boolean): void;
+	}
+	const element = el as PageElement;
+	// The drop is not composed, so it never leaves the element's document or shadow root.
+	const root = element.getRootNode() as unknown as EventRoot;
+	const instrument = (event: DropEvent): void => {
+		const transfer = event.dataTransfer;
+		if (event.target !== element || !transfer) return;
+		for (const key of ["files", "items"]) {
+			// The wrapper's own prototype, not the `DataTransfer` global a page may replace.
+			const get = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(transfer), key)?.get;
+			Object.defineProperty(transfer, key, {
+				configurable: true,
+				get() {
+					watch.read = true;
+					return get?.call(transfer);
+				},
+			});
+		}
+	};
+	const watch = { read: false, end: () => root.removeEventListener("drop", instrument, true) };
+	root.addEventListener("drop", instrument, true);
+	return watch;
+}
+
+/** Stop a drop watch; whether the page read the files. Runs in the main world. */
+function endDropReadWatch(watch: DropReadWatch): boolean {
+	watch.end();
+	return watch.read;
+}
+
+/**
+ * Run `drop` on `zone` and report whether the page read the dropped files. Canceling proves nothing: pages cancel
+ * dragover and drop document-wide only to stop the browser navigating to a dropped file. A read is the strongest signal
+ * there is, not proof of acceptance: a document guard that checks `files.length` counts too, and counting element-level
+ * reads only would fail delegated drop zones, which read at the document (React 16 and older, jQuery
+ * `.on("drop", selector)`).
+ */
+async function dropRead(
+	zone: ElementHandle,
+	drop: () => Promise<void>,
+	signal: AbortSignal | undefined,
+): Promise<boolean> {
+	const realm = zone.frame.mainRealm();
+	const target = await untilAborted(signal, () => realm.adoptHandle(zone));
+	try {
+		const watch = await untilAborted(signal, () => realm.evaluateHandle(watchDropRead, target));
+		try {
+			try {
+				await drop();
+			} catch (error) {
+				await watch.evaluate(endDropReadWatch).catch(() => undefined);
+				throw error;
+			}
+			return await untilAborted(signal, () => watch.evaluate(endDropReadWatch));
+		} finally {
+			await watch.dispose().catch(() => undefined);
+		}
+	} finally {
+		await target.dispose().catch(() => undefined);
+	}
+}
+
 /**
  * Stream files into `realm` in chunks, several calls in flight, and return a handle to the built `File` array. The
  * isolated world builds them, so the `File` and base64 decoding a page may replace are never the ones used.
@@ -1016,12 +1096,16 @@ async function deliverToInput(
 	}
 }
 
-/** Drop the files on an element, built from staged copies by a detached picker or from streamed contents. */
+/**
+ * Drop the files on an element, built from staged copies by a detached picker or from streamed contents; fails when
+ * nothing on the page read them.
+ */
 async function deliverToDropZone(
 	zone: ElementHandle,
 	sources: UploadSource[],
 	route: UploadRoute,
 	staging: UploadStaging,
+	label: string,
 	signal: AbortSignal | undefined,
 ): Promise<void> {
 	const realm = zone.frame.isolatedRealm();
@@ -1032,7 +1116,16 @@ async function deliverToDropZone(
 				? await pickFiles(realm, await staging.stage(sources, signal), signal)
 				: await streamUploadFiles(realm, sources, signal);
 		try {
-			await untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files));
+			const read = await dropRead(
+				zone,
+				() => untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files)),
+				signal,
+			);
+			if (!read) {
+				throw new ToolError(
+					`${label} opened no file chooser and nothing on the page took the dropped files; target the page's <input type=file>, the control that opens the chooser, or its drop zone`,
+				);
+			}
 		} finally {
 			await files.dispose().catch(() => undefined);
 		}
@@ -1211,7 +1304,7 @@ export async function prepareElementUpload(
 	} finally {
 		pagesAwaitingChooser.delete(page);
 	}
-	return preparedUpload(sources, sig => deliverToDropZone(handle, sources, route, staging, sig));
+	return preparedUpload(sources, sig => deliverToDropZone(handle, sources, route, staging, label, sig));
 }
 
 /** Press a keyboard key without releasing it. */
