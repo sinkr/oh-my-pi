@@ -33,7 +33,7 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 | `computer.display`   | string  | `active` | Capture the display with the largest focused-window overlap (primary fallback); use `all` or a native display ID explicitly. |
 | `computer.maxWidth`  | number  |   `3840` | Maximum screenshot width.                                                                                                    |
 | `computer.maxHeight` | number  |   `2400` | Maximum screenshot height.                                                                                                   |
-| `computer.backgroundFallback` | enum | `takeover` | When a window input call's background route is unavailable: `takeover` reruns that call once in takeover, returns focus to the user's app and reports it in the run output; `refuse` throws `BackgroundUnavailable` without taking over, and also refuses, before anything is sent, `takeover: true`, `raise()` and AX `raise`, `apps.open(…, { activate: true })`, `control.acquire`, input to the desktop or a display and, off macOS, `el.focus()`. |
+| `computer.backgroundFallback` | enum | `takeover` | When a window input call's background route is unavailable: `takeover` reruns that call once in takeover, returns focus to the user's app and reports it in the run output; `refuse` throws `BackgroundUnavailable` without taking over, and also refuses, before anything is sent, `takeover: true`, `raise()` and AX `raise`, `apps.open(…, { activate: true })`, `control.acquire`, input to the desktop or a display, off macOS `el.focus()`, and on macOS every call that opens a context menu (right-click or Control-click, `perform("AXShowMenu")`) or passes `menu`, since an open menu takes the user's keyboard. |
 
 There is no `computer.backend` setting. The native addon selects the platform backend.
 
@@ -177,7 +177,7 @@ On macOS a screenshot taken behind the lock screen sets `screenLocked: true` and
 ## Side effects
 
 - Captures real windows or the selected desktop composite into provider context and writes PNGs to the OS temp directory.
-- Sends real keyboard/pointer input. Window background delivery is intended to preserve focus, pointer, and window order; `takeover: true`, and the `computer.backgroundFallback: takeover` rerun of a refused background call, temporarily activate the target. Desktop-root pointer calls affect the user's real pointer. Under `computer.backgroundFallback: refuse`, every call that would activate an application or drive the user's pointer or keyboard is refused before anything is sent.
+- Sends real keyboard/pointer input. Window background delivery is intended to preserve focus, pointer, and window order; `takeover: true`, and the `computer.backgroundFallback: takeover` rerun of a refused background call, temporarily activate the target. Desktop-root pointer calls affect the user's real pointer. Under `computer.backgroundFallback: refuse`, every call that would activate an application, drive the user's pointer or keyboard, or on macOS open a context menu (which takes the user's keyboard while open) is refused before anything is sent.
 - Reads or writes the system clipboard.
 - Executes full-access JavaScript and may invoke other session tools through `tool.*`.
 - Keeps a native desktop session and Bun worker alive across calls.

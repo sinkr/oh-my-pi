@@ -3221,6 +3221,179 @@ describe("computer background fallback", () => {
 			expect(mac.calls).toEqual(["focus:e1"]);
 		});
 
+		describe("macOS calls that open a menu", () => {
+			class MacSession extends ForegroundSession {
+				override get capabilities(): DesktopCapabilities {
+					return { ...super.capabilities, backend: "quartz" };
+				}
+				override async drag(target: string, _points: DesktopPoint[], opts?: PointerOptions | null): Promise<void> {
+					this.calls.push(`drag:${target}:${opts?.takeover ?? "-"}`);
+				}
+				override async holdMouse(
+					target: string,
+					_x: number,
+					_y: number,
+					options: NativeHoldOptions,
+				): Promise<void> {
+					this.calls.push(`holdMouse:${target}:${options.takeover ?? "-"}`);
+				}
+			}
+
+			const win = 'await (await desktop.window("42"))';
+			const el = 'await (await desktop.ref("e1"))';
+			/** Each call kind that opens a context menu or names an item of the menu it opens, and the call its refusal names. */
+			const menus: Array<{ code: string; call: string; named: string }> = [
+				{
+					code: `${el}.perform("AXShowMenu")`,
+					call: "perform:AXShowMenu",
+					named: 'perform("AXShowMenu") would open a context menu',
+				},
+				{
+					code: `${el}.perform(" showMenu ")`,
+					call: "perform: showMenu ",
+					named: 'perform(" showMenu ") would open a context menu',
+				},
+				{
+					code: `${el}.perform("show_menu")`,
+					call: "perform:show_menu",
+					named: 'perform("show_menu") would open a context menu',
+				},
+				{
+					code: `${el}.perform("AXShowMenu", { menu: ["Copy"] })`,
+					call: "perform:AXShowMenu",
+					named: "would open a context menu",
+				},
+				{
+					code: `${el}.perform("press", { menu: ["New Folder"] })`,
+					call: "perform:press",
+					named: "perform with menu would open a menu",
+				},
+				{
+					code: `${el}.press({ menu: ["New Folder"] })`,
+					call: "perform:press",
+					named: "press with menu would open a menu",
+				},
+				{
+					code: 'await desktop.ref("e1").press({ menu: ["New Folder"] })',
+					call: "perform:press",
+					named: "press with menu would open a menu",
+				},
+				{
+					code: `${win}.click(1, 2, { button: "right" })`,
+					call: "click:42:-",
+					named: 'click with button: "right" would open a context menu',
+				},
+				{
+					code: `${win}.click(1, 2, { button: " Right " })`,
+					call: "click:42:-",
+					named: "would open a context menu",
+				},
+				{
+					code: `${win}.click(1, 2, { modifiers: ["ctrl"] })`,
+					call: "click:42:-",
+					named: "click with Control held would open a context menu",
+				},
+				{
+					code: `${win}.click(1, 2, { modifiers: ["cmd+Control"] })`,
+					call: "click:42:-",
+					named: "click with Control held",
+				},
+				{
+					code: `${win}.click(1, 2, { menu: ["Fonts"] })`,
+					call: "click:42:-",
+					named: "click with menu would open a menu",
+				},
+				{
+					code: `${win}.doubleClick(1, 2, { button: "right" })`,
+					call: "click:42:-",
+					named: 'doubleClick with button: "right"',
+				},
+				{
+					code: `${win}.drag([[1, 2], [3, 4]], { keys: ["control"] })`,
+					call: "drag:42:-",
+					named: "drag with Control held",
+				},
+				{
+					code: `${win}.holdMouse(1, 2, { duration: 0, button: "right" })`,
+					call: "holdMouse:42:-",
+					named: 'holdMouse with button: "right"',
+				},
+				{
+					code: `${el}.click({ button: "right" })`,
+					call: "axClick:-",
+					named: 'click with button: "right" would open a context menu',
+				},
+				{ code: `${el}.click({ modifiers: ["ctrl"] })`, call: "axClick:-", named: "click with Control held" },
+				{
+					code: `${el}.doubleClick({ button: "right" })`,
+					call: "axClick:-",
+					named: 'doubleClick with button: "right"',
+				},
+				{
+					code: 'await desktop.ref("e1").click({ button: "right", menu: ["Copy"] })',
+					call: "axClick:-",
+					named: "would open a context menu",
+				},
+			];
+
+			it("refuses each under refuse before anything is sent, naming the keyboard, the menu bar and the setting", async () => {
+				for (const { code, named } of menus) {
+					const native = new MacSession();
+					const result = await run(native, code, "refuse");
+					expect(result.ok, code).toBe(false);
+					if (result.ok) continue;
+					expect(result.error.message, code).toStartWith("BackgroundUnavailable: ");
+					expect(result.error.message, code).toContain(named);
+					expect(result.error.message, code).toContain("which takes the user's keyboard while it is open");
+					expect(result.error.message, code).toContain('computer.backgroundFallback setting is "refuse"');
+					expect(result.error.message, code).toContain("win.menu.select(...)");
+					expect(result.error.message, code).toContain("an element action such as press()");
+					expect(native.calls, code).toEqual([]);
+				}
+			});
+
+			it("sends each as before under takeover", async () => {
+				for (const { code, call } of menus) {
+					const native = new MacSession();
+					const result = await run(native, code, "takeover");
+					expect(result.ok, code).toBe(true);
+					expect(native.calls, code).toEqual([call]);
+				}
+			});
+
+			it("still sends primary clicks, presses and other AX actions under refuse, and menu calls off macOS", async () => {
+				const mac = new MacSession();
+				const code = [
+					`${win}.click(1, 2);`,
+					`${win}.click(1, 2, { button: "middle", modifiers: ["ctrl"] });`,
+					`${win}.click(1, 2, { modifiers: ["cmd", "shift"] });`,
+					`${win}.drag([[1, 2], [3, 4]], { keys: ["space"] });`,
+					`${el}.press();`,
+					`${el}.perform("AXIncrement");`,
+					`${el}.click();`,
+				].join("\n");
+				expect((await run(mac, code, "refuse")).ok).toBe(true);
+				expect(mac.calls).toEqual([
+					"click:42:-",
+					"click:42:-",
+					"click:42:-",
+					"drag:42:-",
+					"perform:press",
+					"perform:AXIncrement",
+					"axClick:-",
+				]);
+
+				const elsewhere = new ForegroundSession();
+				const menu = [
+					`${win}.click(1, 2, { button: "right" });`,
+					`${el}.perform("AXShowMenu");`,
+					`${el}.press({ menu: ["New Folder"] });`,
+				].join("\n");
+				expect((await run(elsewhere, menu, "refuse")).ok).toBe(true);
+				expect(elsewhere.calls).toEqual(["click:42:-", "perform:AXShowMenu", "perform:press"]);
+			});
+		});
+
 		it("refuses control.acquire without asking the user", async () => {
 			const transport = new MemoryTransport();
 			const native = new ForegroundSession();

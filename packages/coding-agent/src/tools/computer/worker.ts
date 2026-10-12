@@ -335,6 +335,49 @@ function refuseForeground(context: ComputerRunContext, call: string, effect: str
 	);
 }
 
+const MENU_ROUTE =
+	"Use the window's menu bar with win.menu.select(...), or an element action such as press(), instead.";
+
+/**
+ * Under `refuse`, a macOS call that opens a menu is refused before anything is
+ * sent: `WindowServer` sends the user's keys to an open menu, so even one
+ * closed at once costs the user about a keystroke.
+ */
+function refuseMenu(session: NativeDesktopSession, context: ComputerRunContext, call: string, menu: string): void {
+	if (session.capabilities.backend !== "quartz") return;
+	refuseForeground(context, call, `open ${menu}, which takes the user's keyboard while it is open`, MENU_ROUTE);
+}
+
+/**
+ * `refuseMenu` for pointer input: a secondary press (the right button, or the
+ * left with Control held, as native's `may_open_context_menu` reads it) opens
+ * a context menu in most views, and a `menu` option names an item of the menu
+ * the press opens.
+ */
+function refusePointerMenu(
+	session: NativeDesktopSession,
+	context: ComputerRunContext,
+	method: string,
+	{ button, modifiers, keys, menu }: PointerOptions,
+): void {
+	const pressed = typeof button === "string" ? button.trim().toLowerCase() : "left";
+	const control = [modifiers, keys].some(
+		list =>
+			Array.isArray(list) &&
+			list.some(
+				entry =>
+					typeof entry === "string" &&
+					entry.split("+").some(key => ["ctrl", "control"].includes(key.trim().toLowerCase())),
+			),
+	);
+	if (pressed === "right") {
+		refuseMenu(session, context, `${method} with button: "right"`, "a context menu");
+	} else if (pressed === "left" && control) {
+		refuseMenu(session, context, `${method} with Control held`, "a context menu");
+	}
+	if (menu !== undefined) refuseMenu(session, context, `${method} with menu`, "a menu");
+}
+
 /** App names by pid from the window list, empty when the listing fails. */
 async function appNames(session: NativeDesktopSession, signal: AbortSignal): Promise<Map<number, string>> {
 	try {
@@ -562,6 +605,11 @@ class El {
 			);
 		}
 		const menu = menuOption(options);
+		// The names native `axPerform` runs as `AXShowMenu`, which opens the element's context menu.
+		if (["showmenu", "show_menu"].includes(action.trim().toLowerCase()) || action === "AXShowMenu") {
+			refuseMenu(this.#session, context, `perform(${JSON.stringify(action)})`, "a context menu");
+		}
+		if (menu !== undefined) refuseMenu(this.#session, context, "perform with menu", "a menu");
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
 	}
 
@@ -569,6 +617,7 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "press");
 		const menu = menuOption(options);
+		if (menu !== undefined) refuseMenu(this.#session, context, "press with menu", "a menu");
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press", menu));
 	}
 
@@ -576,6 +625,7 @@ class El {
 		const context = this.#getContext();
 		guardRun(context, "click");
 		const native = pointerOptions(options);
+		refusePointerMenu(this.#session, context, "click", native);
 		await sendInput(this.#session, context, "click", native.takeover, fallback =>
 			this.#session.axClick(this.ref, { ...native, ...fallback }),
 		);
@@ -584,7 +634,11 @@ class El {
 	async doubleClick(options?: Omit<ClickOptions, "count">): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "doubleClick");
-		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions({ ...options, count: 2 })));
+		const native = { ...pointerOptions(options), count: 2 };
+		refusePointerMenu(this.#session, context, "doubleClick", native);
+		await sendInput(this.#session, context, "doubleClick", native.takeover, fallback =>
+			this.#session.axClick(this.ref, { ...native, ...fallback }),
+		);
 	}
 
 	async focus(): Promise<void> {
@@ -790,6 +844,7 @@ class Win {
 	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
 		const context = this.#guardInput("click");
 		const native = pointerOptions(options);
+		refusePointerMenu(this.#session, context, "click", native);
 		await sendInput(
 			this.#session,
 			context,
@@ -803,6 +858,7 @@ class Win {
 	async doubleClick(x: number, y: number, options?: Omit<ClickOptions, "count">): Promise<void> {
 		const context = this.#guardInput("doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
+		refusePointerMenu(this.#session, context, "doubleClick", native);
 		await sendInput(
 			this.#session,
 			context,
@@ -829,6 +885,7 @@ class Win {
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
 		const context = this.#guardInput("drag");
 		const native = pointerOptions(options);
+		refusePointerMenu(this.#session, context, "drag", native);
 		await sendInput(
 			this.#session,
 			context,
@@ -913,6 +970,7 @@ class Win {
 		const { duration, button, keys, takeover } = { ...options };
 		validateHold({ duration, takeover });
 		if (keys !== undefined) validateKeys(keys, "keys");
+		refusePointerMenu(this.#session, context, "holdMouse", { button, keys });
 		await sendInput(
 			this.#session,
 			context,
