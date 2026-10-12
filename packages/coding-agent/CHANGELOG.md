@@ -48,6 +48,7 @@
 - Fixed cancelling a bash job hard-killing it before its TERM cleanup handlers could run; it now gets up to one second to clean up before termination is forced ([#15709](https://github.com/can1357/oh-my-pi/pull/15709) by [@mg-mg-mg](https://github.com/mg-mg-mg))
 - Fixed the transcript collapsing to one line per entry after switching between a subagent and the main session mid-turn when an earlier turn left a tool call without a result ([#12247](https://github.com/can1357/oh-my-pi/issues/12247), [#15466](https://github.com/can1357/oh-my-pi/pull/15466) by [@shgew](https://github.com/shgew))
 - Fixed a retried tool losing its transcript card when the view was rebuilt (subagent focus switch, overlay close) while the tool was still running
+- Fixed browser `uploadFile` in Chrome reporting success with no file attached when the element opens no file chooser and nothing on the page reads the dropped files; it now fails and says what to target ([#15491](https://github.com/can1357/oh-my-pi/pull/15491) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.11.1] - 2026-10-15
 
@@ -216,10 +217,6 @@
 - Fixed anonymized session exports losing whether bash timing was shown ([#15468](https://github.com/can1357/oh-my-pi/pull/15468) by [@iliaal](https://github.com/iliaal))
 - Added `omp --restore <session>`: resumes a session like `--resume`, then goes on with what its last process left unfinished when it crashed or was killed, both the interrupted turn and the subagents it was running (their results reach the parent as usual); Tern's session daemon now restarts omp with it after a crash
 - Kept private prompt-cache routing keys out of shared sessions and HTML exports ([#15467](https://github.com/can1357/oh-my-pi/pull/15467) by [@iliaal](https://github.com/iliaal))
-
-### Fixed
-
-- Fixed browser `uploadFile` in Chrome reporting success with no file attached when the element neither opens a file chooser nor takes the dropped files; it now fails and says what to target ([#15491](https://github.com/can1357/oh-my-pi/pull/15491) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.10.2] - 2026-10-12
 

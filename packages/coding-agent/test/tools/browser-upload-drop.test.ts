@@ -11,11 +11,14 @@ import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
-// A drop zone, and a plain element that neither opens a chooser nor takes a drop. Like react-dropzone, the page
-// cancels dragover and drop everywhere so a file dropped outside the zone does not navigate away.
+// Drop zones that read `files`, read only `items`, or are delegated from one document listener (React 16 and older,
+// jQuery `.on("drop", selector)`), and a plain element that neither opens a chooser nor takes a drop. Like
+// react-dropzone, the page cancels dragover and drop everywhere so a file dropped outside a zone does not navigate away.
 const html = `<!doctype html>
 <style>div { display: block; margin: 8px; padding: 8px; }</style>
 <div id="drop">Drop files here</div>
+<div id="items">Drop files here too</div>
+<div id="delegated"><span>Delegated drop zone</span></div>
 <div id="inert">Not a drop zone</div>
 <script>
 window.log = [];
@@ -25,7 +28,15 @@ drop.addEventListener("drop", event => {
   event.preventDefault();
   log.push({ id: "drop", names: [...event.dataTransfer.files].map(file => file.name) });
 });
+document.getElementById("items").addEventListener("drop", event => {
+  event.preventDefault();
+  log.push({ id: "items", names: Array.from(event.dataTransfer.items, item => item.getAsFile().name) });
+});
 document.getElementById("inert").addEventListener("drop", event => log.push({ id: "inert", names: [] }));
+document.addEventListener("drop", event => {
+  if (!event.target.closest("#delegated")) return;
+  log.push({ id: "delegated", names: [...event.dataTransfer.files].map(file => file.name) });
+});
 document.addEventListener("dragover", event => event.preventDefault());
 document.addEventListener("drop", event => event.preventDefault());
 </script>`;
@@ -82,7 +93,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile", () => {
 					name,
 					timeout: 15,
 					code: `const errors = [];
-for (const selector of ["#drop", "#inert"]) {
+for (const selector of ["#drop", "#items", "#delegated", "#inert"]) {
 	try { await tab.uploadFile(selector, "alpha.txt"); errors.push(null); }
 	catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
 }
@@ -94,11 +105,17 @@ return { errors, log: await tab.evaluate(() => window.log) };`,
 			if (!details || typeof details !== "object" || !("value" in details)) throw new Error("run returned no value");
 			// `run` details carry the cell's return value untyped.
 			const { errors, log } = details.value as { errors: (string | null)[]; log: unknown[] };
-			expect(errors[0]).toBeNull();
-			expect(errors[1]).toContain("opened no file chooser and nothing on the page took the dropped files");
+			expect(errors).toEqual([
+				null,
+				null,
+				null,
+				expect.stringContaining("nothing on the page took the dropped files"),
+			]);
 			// The inert element and the document saw the drop event but did not take its files.
 			expect(log).toEqual([
 				{ id: "drop", names: ["alpha.txt"] },
+				{ id: "items", names: ["alpha.txt"] },
+				{ id: "delegated", names: ["alpha.txt"] },
 				{ id: "inert", names: [] },
 			]);
 		} finally {
