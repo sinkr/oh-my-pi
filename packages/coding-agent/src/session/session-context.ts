@@ -175,9 +175,13 @@ export interface BuildSessionContextOptions {
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
 }
 
-export interface TranscriptSessionContextOptions {
-	collapseCompactedHistory?: boolean;
-	/** Keep the live turn's in-flight tool calls; pass while the viewed session streams. */
+/** Options for `AgentSession.buildTranscriptSessionContext` (via `SessionProviderBoundary`). */
+export interface TranscriptSessionContextOptions extends Pick<BuildSessionContextOptions, "collapseCompactedHistory"> {
+	/**
+	 * Keep the unpaired tool calls of the turn the agent loop is still executing,
+	 * so a mid-turn rebuild keeps them routable. Calls left unpaired by earlier
+	 * turns are stripped either way. Pass while the viewed session streams.
+	 */
 	keepInFlightToolCalls?: boolean;
 }
 
