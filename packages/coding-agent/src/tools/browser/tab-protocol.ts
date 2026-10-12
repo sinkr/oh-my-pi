@@ -71,10 +71,11 @@ export type WorkerInitPayload =
 			/** The tab's upload staging folder, which outlives a recycled worker; see `UploadStaging`. */
 			uploadDir: string;
 			/**
-			 * `create`: open a background tab and own it. `owned`: a tab omp created, adopted again after a recycle.
+			 * `create`: open a background tab and own it, in the browser of `nearTargetId` (another tab
+			 * omp drives on the relay) when given. `owned`: a tab omp created, adopted again after a recycle.
 			 * `borrowed`: a page the user has open; never closed, never focus-emulated.
 			 */
-			page: { kind: "create" } | { kind: "owned" | "borrowed"; targetId: string };
+			page: { kind: "create"; nearTargetId?: string } | { kind: "owned" | "borrowed"; targetId: string };
 			dialogs?: "accept" | "dismiss";
 			/** Hostname patterns allowed for every page request. */
 			allowedDomains?: string[];

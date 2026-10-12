@@ -225,24 +225,41 @@ export async function closeCdpTarget(browser: Browser, targetId: string): Promis
 		.catch(() => null);
 	if (!session) return false;
 	try {
-		return await closeTargetVia(session, targetId);
+		try {
+			const result = await session.send("Target.closeTarget", { targetId });
+			if (result.success) return true;
+		} catch {
+			// A concurrent reaper or the page itself may already have closed the
+			// target. Confirm absence before treating the cleanup as complete.
+		}
+		try {
+			const { targetInfos } = await session.send("Target.getTargets");
+			return !targetInfos.some(info => info.targetId === targetId);
+		} catch {
+			return false;
+		}
 	} finally {
 		await session.detach().catch(() => undefined);
 	}
 }
 
-/** {@link closeCdpTarget} over a channel that already answers browser-level `Target.*` commands. */
-export async function closeTargetVia(channel: Pick<CDPSession, "send">, targetId: string): Promise<boolean> {
+/**
+ * {@link closeCdpTarget} for the omp relay, over a channel that answers browser-level `Target.*`
+ * commands. The relay's `Target.getTargets` lists only tabs it can drive right now, not those of a
+ * disconnected browser or with a dismissed debugger, so absence is read from `Target.getTargetInfo`:
+ * it looks the id up among every tab the extensions reported, and answers an unknown id with the
+ * browser target.
+ */
+export async function closeRelayTarget(channel: Pick<CDPSession, "send">, targetId: string): Promise<boolean> {
 	try {
 		const result = await channel.send("Target.closeTarget", { targetId });
 		if (result.success) return true;
 	} catch {
-		// A concurrent reaper or the page itself may already have closed the
-		// target. Confirm absence before treating the cleanup as complete.
+		// Closed already (the worker's own close), or the extension cannot answer.
 	}
 	try {
-		const { targetInfos } = await channel.send("Target.getTargets");
-		return !targetInfos.some(info => info.targetId === targetId);
+		const { targetInfo } = await channel.send("Target.getTargetInfo", { targetId });
+		return targetInfo.targetId !== targetId;
 	} catch {
 		return false;
 	}

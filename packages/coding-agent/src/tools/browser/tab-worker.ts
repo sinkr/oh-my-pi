@@ -1224,13 +1224,16 @@ async function targetIdForPage(page: Page): Promise<string> {
 
 async function createTrackedPage(
 	browser: Browser,
-	options: { background: boolean },
+	options: { background: boolean; nearTargetId?: string },
 	reportTarget: (targetId: string) => void,
 ): Promise<Page> {
-	const { targetId } = await browserConnection(browser).send("Target.createTarget", {
+	// `nearTargetId` is the omp relay's own parameter (the browser to open in); only relay creates carry it.
+	const params: Protocol.Target.CreateTargetRequest & { nearTargetId?: string } = {
 		url: "about:blank",
 		background: options.background || undefined,
-	});
+		nearTargetId: options.nearTargetId,
+	};
+	const { targetId } = await browserConnection(browser).send("Target.createTarget", params);
 	reportTarget(targetId);
 	const existing = browser.targets().find(target => privateTargetId(target) === targetId);
 	const target =
@@ -1682,7 +1685,14 @@ export class WorkerCore {
 				// Puppeteer waits for target/page initialization. If that wait
 				// wedges, the supervisor can still close the created target.
 				// In a browser the user drives, the tab opens without being selected.
-				this.#page = await createTrackedPage(this.#browser, { background: payload.mode === "attach" }, targetId => {
+				const create =
+					payload.mode === "attach"
+						? {
+								background: true,
+								nearTargetId: payload.page.kind === "create" ? payload.page.nearTargetId : undefined,
+							}
+						: { background: false };
+				this.#page = await createTrackedPage(this.#browser, create, targetId => {
 					this.#transport.send({ type: "page-created", targetId });
 				});
 				this.#observeDialogs();

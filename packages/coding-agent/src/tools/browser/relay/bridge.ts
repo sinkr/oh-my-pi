@@ -304,12 +304,15 @@ export class RelayBridge {
 	}
 
 	/**
-	 * The browser a new tab opens in: the one holding a tab this client drives, else the one
-	 * showing the first selected tab (the tab an open without a target used to adopt), else the
-	 * last hello. A reconnecting extension's hello must not move new tabs to another browser.
+	 * The browser a new tab opens in: the one holding `nearTargetId` (a tab the caller drives on
+	 * another connection; omp gives every tab its own), else one holding a tab this connection
+	 * drives, else the one showing the first selected tab (the tab an open without a target used to
+	 * adopt), else the last hello. A reconnecting extension's hello must not move new tabs to another browser.
 	 */
-	#instanceForNewTab(conn: CdpConnection): ExtInstance | undefined {
+	#instanceForNewTab(conn: CdpConnection, nearTargetId: unknown): ExtInstance | undefined {
+		const near = typeof nearTargetId === "string" ? parseTargetId(nearTargetId) : null;
 		const candidates = [
+			near ? this.#tabs.get(near.key) : undefined,
 			...[...conn.claims].map(tabKey => this.#tabs.get(tabKey)),
 			...[...this.#tabs.values()].filter(tab => tab.active && !tab.discarded && this.#eligible(tab)),
 		];
@@ -992,7 +995,10 @@ export class RelayBridge {
 			case "Target.createTarget": {
 				const url =
 					typeof msg.params?.url === "string" && msg.params.url.length > 0 ? msg.params.url : "about:blank";
-				const inst = near ? this.#instances.get(near.instanceId) : this.#instanceForNewTab(conn);
+				// `nearTargetId` is the relay's own parameter: open in the browser of that tab.
+				const inst = near
+					? this.#instances.get(near.instanceId)
+					: this.#instanceForNewTab(conn, msg.params?.nearTargetId);
 				if (!inst || !inst.socket) {
 					this.#replyError(conn, msg, "relay extension is not connected");
 					return;

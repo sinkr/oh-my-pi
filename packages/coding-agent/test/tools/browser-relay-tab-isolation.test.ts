@@ -63,13 +63,18 @@ function startWorker(payload: WorkerInitPayload): TestWorker {
 	};
 }
 
-interface RelayFixture {
+interface RelayBrowser {
 	browser: Browser;
 	/** The relay extension's service worker, for reading Chrome's own tab state. */
 	extension: WebWorker;
+}
+
+interface RelayFixture extends RelayBrowser {
 	server: RelayServer;
 	cdpUrl: string;
 	origin: string;
+	/** Another Chromium with its own profile and the same extension, as a second browser on the relay. */
+	launchBrowser(): Promise<RelayBrowser>;
 	close(): Promise<void>;
 }
 
@@ -97,15 +102,30 @@ async function launchRelayFixture(
 			return new Response(html, { headers: { "Content-Type": "text/html" } });
 		},
 	});
-	let browser: Browser | undefined;
+	const browsers: Browser[] = [];
 	async function close() {
 		try {
-			await browser?.close();
+			await Promise.all(browsers.map(browser => browser.close()));
 		} finally {
 			server.stop();
 			pages.stop(true);
 			await fs.rm(extensionDir, { recursive: true, force: true });
 		}
+	}
+	async function launchBrowser(): Promise<RelayBrowser> {
+		const browser = await puppeteer.launch({
+			executablePath: await ensureChromiumExecutable(),
+			headless: true,
+			pipe: true,
+			enableExtensions: [extensionDir],
+			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
+		});
+		browsers.push(browser);
+		const extension = await (
+			await browser.waitForTarget(target => target.type() === "service_worker", { timeout: 15_000 })
+		).worker();
+		if (!extension) throw new Error("Missing relay extension worker");
+		return { browser, extension };
 	}
 	try {
 		for (const file of ["manifest.json", "options.html", "options.js"]) {
@@ -124,22 +144,20 @@ chrome.storage.local.set({ port: ${port} }).then(() => {
 ${background}
 });`,
 		);
-		browser = await puppeteer.launch({
-			executablePath: await ensureChromiumExecutable(),
-			headless: true,
-			pipe: true,
-			enableExtensions: [extensionDir],
-			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
-		});
-		const extension = await (
-			await browser.waitForTarget(target => target.type() === "service_worker", { timeout: 15_000 })
-		).worker();
-		if (!extension) throw new Error("Missing relay extension worker");
+		const { browser, extension } = await launchBrowser();
 		const cdpUrl = `http://127.0.0.1:${port}`;
 		// Finish the extension hello before the native CDP client attaches to the sentinel.
 		const outcome = await waitForRelayExtension(cdpUrl);
 		if (outcome !== "ready") throw new Error(`Relay fixture handshake failed: ${outcome}`);
-		return { browser, extension, server, cdpUrl, origin: `http://127.0.0.1:${pages.port}`, close };
+		return {
+			browser,
+			extension,
+			server,
+			cdpUrl,
+			origin: `http://127.0.0.1:${pages.port}`,
+			launchBrowser,
+			close,
+		};
 	} catch (error) {
 		await close();
 		throw error;
@@ -208,6 +226,42 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			await releaseTab(names[2]!);
 			expect(human.isClosed()).toBeFalse();
 			expect(await human.title()).toBe("Human sentinel");
+		} finally {
+			for (const name of names) await releaseTab(name).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+		}
+	}, 60_000);
+
+	it("opens a default tab in the browser of the tab omp used last, not the first selected one", async () => {
+		const secondHello = Promise.withResolvers<void>();
+		let hellos = 0;
+		const fixture = await launchRelayFixture(message => {
+			if (message === "extension connected" && ++hellos === 2) secondHello.resolve();
+		});
+		// The first browser shows the first selected tab, which a new tab would otherwise follow.
+		const human = await fixture.browser.newPage();
+		await human.goto(`${fixture.origin}/human`);
+		await human.bringToFront();
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const names = [
+			`relay-near-human-${process.pid}`,
+			`relay-near-other-${process.pid}`,
+			`relay-near-own-${process.pid}`,
+		];
+		/** The browser a relay target id belongs to (`PAGE<browser>.<tab>`). */
+		const browserOf = (targetId: string) => targetId.slice(4, targetId.lastIndexOf("."));
+		try {
+			// Borrowing waits until the relay lists the tab, so the first browser's selected tab is listed first.
+			const inFirst = await acquireTab(names[0]!, relay, { target: "Human sentinel", timeoutMs: 15_000 });
+			const other = await fixture.launchBrowser();
+			// The relay announces a browser's tabs to connected clients only as they change after its hello.
+			await secondHello.promise;
+			await (await other.browser.newPage()).goto(`${fixture.origin}/first`);
+			const inSecond = await acquireTab(names[1]!, relay, { target: "First", timeoutMs: 15_000 });
+			expect(browserOf(inSecond.tab.targetId)).not.toBe(browserOf(inFirst.tab.targetId));
+			const owned = await acquireTab(names[2]!, relay, { url: `${fixture.origin}/second`, timeoutMs: 15_000 });
+			expect(browserOf(owned.tab.targetId)).toBe(browserOf(inSecond.tab.targetId));
 		} finally {
 			for (const name of names) await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
+import { closeRelayTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
 import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
 import type {
 	RelayRpcRequest,
 	RelayToExtMessage,
 	TabSnapshot,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
+import type { CDPSession } from "puppeteer-core";
 
 /** Same derivation as the bridge: target ids embed this per-instance code. */
 function instanceCode(instanceId: string): string {
@@ -1424,6 +1426,58 @@ describe("RelayBridge multiple extension instances", () => {
 		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
 		expect(edge.rpcs("createTab")).toHaveLength(1);
 		expect(chrome.rpcs("createTab")).toHaveLength(0);
+	});
+
+	it("opens a new tab in the browser of nearTargetId on a connection that drives nothing yet", () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		// Chrome shows the first selected tab and said hello last; omp drives Edge's tab on another connection.
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.createTarget",
+				params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
+			}),
+		);
+		expect(edge.rpcs("createTab")).toHaveLength(1);
+		expect(chrome.rpcs("createTab")).toHaveLength(0);
+	});
+});
+
+describe("closeRelayTarget", () => {
+	/** A browser-level channel onto one bridge connection, as the tab supervisor's root connection is. */
+	function channel(bridge: RelayBridge): Pick<CDPSession, "send"> {
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const send = async (method: string, params: object = {}): Promise<unknown> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, method, params }));
+			await flush();
+			const reply = cdp.messages.find(msg => msg.id === id);
+			if (!reply) throw new Error(`no reply to ${method}`);
+			if ("error" in reply) throw new Error(JSON.stringify(reply.error));
+			return reply.result;
+		};
+		return { send } as unknown as Pick<CDPSession, "send">;
+	}
+
+	it("does not report a tab closed while its browser's extension is offline", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 7 })]);
+		bridge.extClosed(chrome);
+		expect(await closeRelayTarget(channel(bridge), `PAGE${instanceCode("chrome")}.7`)).toBeFalse();
+	});
+
+	it("reports a tab the relay no longer knows as closed", async () => {
+		const bridge = new RelayBridge({});
+		connectInstance(bridge, new FakeExtSocket(), "chrome", [tab({ tabId: 7 })]);
+		expect(await closeRelayTarget(channel(bridge), `PAGE${instanceCode("chrome")}.8`)).toBeTrue();
 	});
 });
 
