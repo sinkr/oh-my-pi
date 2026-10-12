@@ -11,7 +11,8 @@ import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
-// A drop zone, and a plain element that neither opens a chooser nor takes a drop.
+// A drop zone, and a plain element that neither opens a chooser nor takes a drop. Like react-dropzone, the page
+// cancels dragover and drop everywhere so a file dropped outside the zone does not navigate away.
 const html = `<!doctype html>
 <style>div { display: block; margin: 8px; padding: 8px; }</style>
 <div id="drop">Drop files here</div>
@@ -25,6 +26,8 @@ drop.addEventListener("drop", event => {
   log.push({ id: "drop", names: [...event.dataTransfer.files].map(file => file.name) });
 });
 document.getElementById("inert").addEventListener("drop", event => log.push({ id: "inert", names: [] }));
+document.addEventListener("dragover", event => event.preventDefault());
+document.addEventListener("drop", event => event.preventDefault());
 </script>`;
 
 let tempDir = "";
@@ -92,8 +95,8 @@ return { errors, log: await tab.evaluate(() => window.log) };`,
 			// `run` details carry the cell's return value untyped.
 			const { errors, log } = details.value as { errors: (string | null)[]; log: unknown[] };
 			expect(errors[0]).toBeNull();
-			expect(errors[1]).toContain("opened no file chooser and did not accept a file drop");
-			// The inert element saw the drop event but did not take it.
+			expect(errors[1]).toContain("opened no file chooser and nothing on the page took the dropped files");
+			// The inert element and the document saw the drop event but did not take its files.
 			expect(log).toEqual([
 				{ id: "drop", names: ["alpha.txt"] },
 				{ id: "inert", names: [] },
