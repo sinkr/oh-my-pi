@@ -3221,6 +3221,34 @@ describe("computer background fallback", () => {
 			expect(mac.calls).toEqual(["focus:e1"]);
 		});
 
+		it("refuses AXOpen on macOS, which brings an Open panel's application forward even when it fails", async () => {
+			class MacSession extends ForegroundSession {
+				override get capabilities(): DesktopCapabilities {
+					return { ...super.capabilities, backend: "quartz" };
+				}
+			}
+			for (const action of ["AXOpen", "open", " Open "]) {
+				const code = `await (await desktop.ref("e1")).perform(${JSON.stringify(action)})`;
+				const mac = new MacSession();
+				const refused = await run(mac, code, "refuse");
+				expect(refused.ok, action).toBe(false);
+				if (refused.ok) continue;
+				expect(refused.error.message, action).toStartWith(
+					`BackgroundUnavailable: perform(${JSON.stringify(action)}) would bring the window's application to the front`,
+				);
+				expect(refused.error.message, action).toContain("keeps the agent in the background; nothing was sent");
+				expect(refused.error.message, action).toContain("Use press() on a button that does the same");
+				expect(mac.calls, action).toEqual([]);
+
+				expect((await run(mac, code, "takeover")).ok, action).toBe(true);
+				expect(mac.calls, action).toEqual([`perform:${action}`]);
+			}
+
+			const elsewhere = new ForegroundSession();
+			expect((await run(elsewhere, 'await (await desktop.ref("e1")).perform("AXOpen")', "refuse")).ok).toBe(true);
+			expect(elsewhere.calls).toEqual(["perform:AXOpen"]);
+		});
+
 		describe("macOS calls that open a menu", () => {
 			class MacSession extends ForegroundSession {
 				override get capabilities(): DesktopCapabilities {

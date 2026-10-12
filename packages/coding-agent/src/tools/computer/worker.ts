@@ -321,6 +321,7 @@ const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
 /** A refusal's closing "nothing was sent", true of the refused background attempt only. */
 const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
 const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
+const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
 
 /**
  * Under `computer.backgroundFallback: "refuse"` the user's setting beats the
@@ -651,6 +652,20 @@ class El {
 				`perform(${JSON.stringify(action)})`,
 				"bring the window's application to the front",
 				RAISE_ROUTE,
+			);
+		}
+		// The names native `axPerform` runs as `AXOpen`. On an item in a macOS Open or
+		// Save panel it brings the panel's application to the front about 35 ms
+		// after the call returns, even when the action fails, and it stays there.
+		if (
+			this.#session.capabilities.backend === "quartz" &&
+			(action.trim().toLowerCase() === "open" || action === "AXOpen")
+		) {
+			refuseForeground(
+				context,
+				`perform(${JSON.stringify(action)})`,
+				"bring the window's application to the front, as it does on an item in an Open or Save panel even when the action fails",
+				OPEN_ROUTE,
 			);
 		}
 		const menu = menuOption(options);
