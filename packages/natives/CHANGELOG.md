@@ -10,15 +10,13 @@
 
 - Reduced allocation overhead for uncached, result-limited file searches in large directory trees ([#16115](https://github.com/can1357/oh-my-pi/pull/16115) by [@kyle-elliott](https://github.com/kyle-elliott)).
 - Desktop window input with `takeover` omitted is now background on every platform even while task control is held; only `takeover: true` selects foreground delivery ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
-- Computer use's physical Escape stop now watches the keyboard only during takeover input (`takeover: true` or held control); an Escape the user presses in their own app no longer cancels background input, which the host interrupt still stops (by [@will-bogusz](https://github.com/will-bogusz))
-- Computer use's physical Escape stop now watches the keyboard only during takeover input (`takeover: true`, held control, desktop-level input, raises); an Escape the user presses in their own app no longer cancels background window input, which the host interrupt still stops (by [@will-bogusz](https://github.com/will-bogusz))
 - Computer use's physical Escape stop now watches the keyboard only during takeover input (`takeover: true`, held control, desktop-level input, raises); an Escape the user presses in their own app no longer cancels background window input, which the host interrupt still stops ([#15176](https://github.com/can1357/oh-my-pi/pull/15176) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
 - Fixed macOS computer use reporting a working physical Escape stop (`globalEscape: true`) when Input Monitoring was turned off and the stop could not see keys; `inputPermission` now reports event-posting access, and permission errors name the terminal or IDE to grant ([#15157](https://github.com/can1357/oh-my-pi/pull/15157) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a macOS element-ref `StaleRef` giving no lead when the app destroyed the element and put an identical one in its place: the error now names the one element of the window with the fields the ref was read with, registered as a new ref, and sends nothing to it ([#15574](https://github.com/can1357/oh-my-pi/pull/15574) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed macOS takeover input sending the user back to their previous app when they clicked or typed in the takeover target as the input ended, or at any time without Input Monitoring; macOS now refuses that hand-back if any key or click came after the takeover's own input ([#15176](https://github.com/can1357/oh-my-pi/pull/15176) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS takeover input sending the user back to their previous app when they clicked in the takeover target as the input ended, and keeping the target in front for good when they merely kept typing while takeover held it: a click, a Command shortcut such as Command-Tab, or a switch to another app now leaves the front app to the user, and macOS refuses the hand-back if one came after the takeover's own input; typing alone no longer does, once Input Monitoring lets omp tell it apart ([#15176](https://github.com/can1357/oh-my-pi/pull/15176) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.1] - 2026-10-17
 

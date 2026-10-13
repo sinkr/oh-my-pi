@@ -276,11 +276,25 @@ pub(crate) fn with_token_for_test<T>(token: &OperationToken, action: impl FnOnce
 }
 
 #[cfg(target_os = "macos")]
-static USER_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+static USER_CHOICES: AtomicU64 = AtomicU64::new(0);
+
+/// Mouse buttons and Command shortcuts (Command-Tab, Spotlight) the user
+/// pressed while the takeover monitor ran: the input that picks an app or
+/// window, so takeover leaves the front application to the user.
+#[cfg(target_os = "macos")]
+pub(crate) fn user_choices() -> u64 {
+	USER_CHOICES.load(Ordering::Acquire)
+}
 
 #[cfg(target_os = "macos")]
-pub(crate) fn user_activity() -> u64 {
-	USER_ACTIVITY.load(Ordering::Acquire)
+static LAST_USER_TYPING: AtomicU64 = AtomicU64::new(0);
+
+/// When (`CLOCK_UPTIME_RAW` nanoseconds) the takeover monitor last saw the
+/// user type a key or modifier that picks nothing; 0 if it never has, as
+/// without Input Monitoring.
+#[cfg(target_os = "macos")]
+pub(crate) fn last_user_typing() -> u64 {
+	LAST_USER_TYPING.load(Ordering::Acquire)
 }
 
 static OWNED: AtomicBool = AtomicBool::new(false);
