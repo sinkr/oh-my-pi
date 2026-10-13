@@ -1564,6 +1564,7 @@ export class AgentSession implements SettingsScope {
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
+		endComputerTurnForOwner(this.#eval.getKernelOwnerId());
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();

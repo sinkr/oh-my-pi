@@ -3,7 +3,7 @@
  * bracket), however long its non-computer steps take, and the turn's end lets the display sleep at once; the next
  * turn holds it again.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -132,5 +132,29 @@ describe("AgentSession computer display hold per turn", () => {
 		await running;
 		expect(releases).toEqual([1]);
 		expect(computerTurnInFlight(owner)).toBeUndefined();
+	});
+
+	it("releases at an interrupt while the prompt's setup is still unwinding", async () => {
+		const entered = Promise.withResolvers<void>();
+		const unblock = Promise.withResolvers<void>();
+		const getApiKey = spyOn(modelRegistry, "getApiKey").mockImplementation(async () => {
+			entered.resolve();
+			await unblock.promise;
+			return "test-key";
+		});
+		try {
+			const target = createSession([{ content: ["done"] }]);
+			const running = target.prompt("go").catch(() => undefined);
+			await entered.promise;
+			expect(computerTurnInFlight(owner)).toBe(1);
+			await target.abort();
+			expect(computerTurnInFlight(owner)).toBeUndefined();
+			expect(releases).toEqual([1]);
+			unblock.resolve();
+			await running;
+			expect(releases).toEqual([1]);
+		} finally {
+			getApiKey.mockRestore();
+		}
 	});
 });
