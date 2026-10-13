@@ -56,6 +56,12 @@ export declare class DesktopSession {
    * outside a turn keeps its grace. An agent calls this when its turn ends.
    */
   releaseDisplayAwake(): void
+  /**
+   * How many times the user's physical Escape has stopped takeover input in
+   * this session. Host cancels, retirement and release never count, so a
+   * rise tells the host the user stopped the work.
+   */
+  get escapeStops(): number
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
   listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>

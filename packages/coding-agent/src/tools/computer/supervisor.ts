@@ -25,6 +25,8 @@ const SMOKE_TIMEOUT_MS = 5_000;
 // the first ensure may load the desktop addon, so it shares the start budget.
 const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
+const ESCAPE_REFUSAL_MESSAGE =
+	"Computer use is stopped for this turn: the user pressed Escape during an earlier computer call. Nothing was sent. Do not retry; tell the user what you did and what remains. Computer use resumes after the user's next message.";
 
 /** Runs desktop scripts and owns their persistent worker session. */
 export interface ComputerController {
@@ -43,6 +45,8 @@ export interface ComputerController {
 	 * again.
 	 */
 	resumeDisplay?(from: number, turn: number): void;
+	/** Lifts the refusal that follows a run the user stopped with Escape. */
+	resumeAfterEscape?(): void;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
 	close(): Promise<void>;
 }
@@ -160,6 +164,8 @@ export class ComputerSupervisor implements ComputerController {
 	readonly #startingRuns = new Set<ComputerSessionSnapshot>();
 	#nextId = 0;
 	#controlEpoch = 0;
+	/** The user stopped a run with Escape; every call is refused until their next message. */
+	#escapeStopped = false;
 	#closed = false;
 	#unsubscribeMessage?: () => void;
 	#unsubscribeError?: () => void;
@@ -183,6 +189,7 @@ export class ComputerSupervisor implements ComputerController {
 		signal?: AbortSignal,
 	): Promise<DesktopCapabilities | undefined> {
 		if (this.#closed) throw new ToolError("Computer session is closed");
+		if (this.#escapeStopped) throw new ToolError(ESCAPE_REFUSAL_MESSAGE);
 		if (signal?.aborted) throw new ToolAbortError();
 		await this.#start();
 		if (signal?.aborted) throw new ToolAbortError();
@@ -210,6 +217,7 @@ export class ComputerSupervisor implements ComputerController {
 		context?: AgentToolContext,
 	): Promise<ComputerRunOk> {
 		if (this.#closed) throw new ToolError("Computer session is closed");
+		if (this.#escapeStopped) throw new ToolError(ESCAPE_REFUSAL_MESSAGE);
 		if (signal?.aborted) throw new ToolAbortError();
 		const epoch = this.#controlEpoch;
 		const session = { ...snapshot };
@@ -281,6 +289,8 @@ export class ComputerSupervisor implements ComputerController {
 			return;
 		}
 		if (message.type === "result") {
+			// Latched even for a run the host already abandoned: the user's stop outlives it.
+			if (!message.ok && message.escapeStopped) this.#escapeStopped = true;
 			const pending = this.#pending.get(message.id);
 			if (!pending) return;
 			for (const controller of pending.toolCalls.values())
@@ -368,6 +378,10 @@ export class ComputerSupervisor implements ComputerController {
 	resumeDisplay(from: number, turn: number): void {
 		for (const starting of this.#startingRuns) if (starting.displayTurn === from) starting.displayTurn = turn;
 		this.#safeSend({ type: "resume-display", from, turn });
+	}
+
+	resumeAfterEscape(): void {
+		this.#escapeStopped = false;
 	}
 
 	async #dispatchToolCall(message: Extract<ComputerWorkerOutbound, { type: "tool-call" }>): Promise<void> {
@@ -547,6 +561,12 @@ export function resumeComputerTurnForOwner(ownerId: string | undefined): void {
 export function computerTurnInFlight(ownerId: string | undefined): number | undefined {
 	const state = ownerId ? ownerTurns.get(ownerId) : undefined;
 	return state?.inFlight ? state.turn : undefined;
+}
+
+/** The user's next message lifts the refusal their Escape set on an agent session's computer use. */
+export function resumeComputerUseForOwner(ownerId: string | undefined): void {
+	if (!ownerId) return;
+	for (const controller of ownedSupervisors.get(ownerId) ?? []) controller.resumeAfterEscape?.();
 }
 
 /** Closes every computer session owned by an agent session. */
