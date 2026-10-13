@@ -1508,6 +1508,26 @@ describe("RelayBridge multiple extension instances", () => {
 			jest.useRealTimers();
 		}
 	});
+
+	it("forgets a timed-out createTab once its late window passes, so a wedged extension cannot grow the relay", async () => {
+		jest.useFakeTimers();
+		try {
+			const bridge = new RelayBridge({});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, []);
+			const connId = bridge.cdpConnected(new FakeCdpSocket());
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
+			await flush();
+			jest.advanceTimersByTime(20_000 + 60_000);
+			await flush();
+			// The relay no longer tracks the request, so an answer this late changes nothing.
+			ack(bridge, ext, "createTab", { tab: tab({ tabId: 9 }) });
+			await flush();
+			expect(ext.rpcs("removeTab")).toHaveLength(0);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
 });
 
 describe("closeRelayTarget", () => {
