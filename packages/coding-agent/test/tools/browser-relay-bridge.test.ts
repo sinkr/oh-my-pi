@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, jest } from "bun:test";
 import { createHash } from "node:crypto";
 import { closeRelayTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
 import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
@@ -1461,6 +1461,52 @@ describe("RelayBridge multiple extension instances", () => {
 		);
 		expect(edge.rpcs("createTab")).toHaveLength(1);
 		expect(chrome.rpcs("createTab")).toHaveLength(0);
+	});
+
+	it("refuses to open a new tab in another browser while the browser of nearTargetId is offline", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
+		bridge.extClosed(edge);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const createId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: createId,
+				method: "Target.createTarget",
+				params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
+			}),
+		);
+		await flush();
+		expect(chrome.rpcs("createTab")).toHaveLength(0);
+		expect(cdp.messages.find(message => message.id === createId)).toHaveProperty("error");
+	});
+
+	it("closes a tab Chrome creates after the createTab RPC timed out", async () => {
+		jest.useFakeTimers();
+		try {
+			const bridge = new RelayBridge({});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, []);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const createId = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id: createId, method: "Target.createTarget", params: {} }));
+			await flush();
+			jest.advanceTimersByTime(20_000);
+			await flush();
+			expect(cdp.messages.find(message => message.id === createId)).toHaveProperty("error");
+			// Chrome answers late: nobody learned the tab's id, so the relay closes it.
+			ack(bridge, ext, "createTab", { tab: tab({ tabId: 9 }) });
+			await flush();
+			expect(ext.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([9]);
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 });
 
