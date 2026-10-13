@@ -795,104 +795,13 @@ pub(super) fn with_background_watch<T>(
 		))
 	};
 	thread::scope(|scope| {
-		let stop = &stopped;
 		let visit = &visited;
 		let sampled = &sampled;
+		let desktop =
+			WindowServerDesktop { spi, sampled, previous, key: previous_key, stopped: &stopped };
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
-			.spawn_scoped(scope, move || -> CoreResult<()> {
-				let mut restored = false;
-				loop {
-					// Once disarmed, nothing is sent back any more, but the lease
-					// keeps watching for the user coming to the target.
-					match front_process(spi.get_front) {
-						None if lease.disarmed => {},
-						None => {
-							return Err(DesktopError::input_failed(
-								"lost the front process during background input",
-							));
-						},
-						Some(front) => {
-							let key = if !lease.disarmed && front.psn == previous.psn {
-								previous.pid.and_then(ax::key_window_id)
-							} else {
-								None
-							};
-							let now = Instant::now();
-							if lease.observe(front.psn, key, SwitchSignals::read(spi, now, sampled), now)
-								== FocusDecision::Restore
-							{
-								// Re-check immediately before changing focus: an AX
-								// probe may have raced a newer application or user
-								// switch. `WindowServer` then refuses the hand-back if
-								// the user pressed a key or clicked after the re-check
-								// began.
-								let brought = front.psn;
-								let handed_back = request_after_check(
-									event_clock_now,
-									|| {
-										front_process(spi.get_front).is_some_and(|front| front.psn == brought)
-											&& {
-												let now = Instant::now();
-												lease.observe(
-													brought,
-													None,
-													SwitchSignals::read(spi, now, sampled),
-													now,
-												) == FocusDecision::Restore
-											}
-									},
-									|since| {
-										set_front_unless_user_acted(
-											spi,
-											previous.psn,
-											previous_key.unwrap_or(0),
-											since,
-										)
-									},
-								)?;
-								match handed_back {
-									// The re-check observed instead; a disarm it recorded
-									// stops the hand-backs from the next poll.
-									None => {},
-									// The user brought the target forward themselves.
-									Some(FrontRequest::UserActed) => lease.user_acted(),
-									Some(FrontRequest::Done) => {
-										restored = true;
-										if let Some(key) = previous_key
-											&& !post_record(spi.post_record, previous.psn, &focus_record(key))
-										{
-											return Err(DesktopError::input_failed(
-												"background key-window restoration was rejected",
-											));
-										}
-									},
-								}
-							}
-						},
-					}
-					visit.store(lease.visited, Ordering::Release);
-					if stop.load(Ordering::Acquire) {
-						let now = Instant::now();
-						if front_process(spi.get_front).is_some_and(|front| {
-							lease.reactivated(
-								restored,
-								front.psn,
-								SwitchSignals::read(spi, now, sampled),
-								now,
-							)
-						}) {
-							return Err(DesktopError::input_failed(
-								"the background target reactivated after focus restoration; input may \
-								 already have landed; inspect the desktop and use takeover:true or ax \
-								 actions",
-							));
-						}
-						return Ok(());
-					}
-					thread::park_timeout(ACTIVATION_POLL);
-				}
-			})
+			.spawn_scoped(scope, move || guard_focus(&mut lease, &desktop, visit))
 			.map_err(start_failed)?;
 		struct StopObserver<'a> {
 			stopped: &'a AtomicBool,
@@ -929,6 +838,158 @@ pub(super) fn with_background_watch<T>(
 		});
 		after_cleanup(result, cleanup)
 	})
+}
+
+/// What the background guard's observer reads from `WindowServer` and asks of
+/// it.
+trait GuardedDesktop {
+	/// The front process; `None` when `WindowServer` cannot tell.
+	fn front(&self) -> Option<ProcessSerialNumber>;
+	/// The user's app's key window, read while that app is in front.
+	fn user_key(&self) -> Option<u32>;
+	fn now(&self) -> Instant;
+	fn signals(&self, now: Instant) -> SwitchSignals;
+	/// [`event_clock_now`].
+	fn event_clock(&self) -> u64;
+	/// Puts the user's app back in front unless they pressed a key or clicked
+	/// after `since` ([`set_front_unless_user_acted`]).
+	fn hand_back(&self, since: u64) -> CoreResult<FrontRequest>;
+	/// Makes `key` the user's key window again; false if `WindowServer` rejected
+	/// it.
+	fn restore_key(&self, key: u32) -> bool;
+	/// Whether the action and its settle are over.
+	fn stopped(&self) -> bool;
+	/// Waits one poll, or until the action ends.
+	fn wait(&self);
+}
+
+struct WindowServerDesktop<'a> {
+	spi:      &'a ForegroundSpi,
+	sampled:  &'a Sampled,
+	/// The user's app.
+	previous: FrontProcess,
+	/// Its key window; `None` when it showed no window.
+	key:      Option<u32>,
+	stopped:  &'a AtomicBool,
+}
+
+impl GuardedDesktop for WindowServerDesktop<'_> {
+	fn front(&self) -> Option<ProcessSerialNumber> {
+		front_process(self.spi.get_front).map(|front| front.psn)
+	}
+
+	fn user_key(&self) -> Option<u32> {
+		self.previous.pid.and_then(ax::key_window_id)
+	}
+
+	fn now(&self) -> Instant {
+		Instant::now()
+	}
+
+	fn signals(&self, now: Instant) -> SwitchSignals {
+		SwitchSignals::read(self.spi, now, self.sampled)
+	}
+
+	fn event_clock(&self) -> u64 {
+		event_clock_now()
+	}
+
+	fn hand_back(&self, since: u64) -> CoreResult<FrontRequest> {
+		set_front_unless_user_acted(self.spi, self.previous.psn, self.key.unwrap_or(0), since)
+	}
+
+	fn restore_key(&self, key: u32) -> bool {
+		post_record(self.spi.post_record, self.previous.psn, &focus_record(key))
+	}
+
+	fn stopped(&self) -> bool {
+		self.stopped.load(Ordering::Acquire)
+	}
+
+	fn wait(&self) {
+		thread::park_timeout(ACTIVATION_POLL);
+	}
+}
+
+/// The guard's observer: polls the front process until the action and its
+/// settle end, sending an app the action brought forward back behind the
+/// user's app while the lease is armed, and publishing in `visit` whether the
+/// user came to the target.
+fn guard_focus(
+	lease: &mut BackgroundFocusLease,
+	desktop: &impl GuardedDesktop,
+	visit: &AtomicBool,
+) -> CoreResult<()> {
+	let mut restored = false;
+	loop {
+		// Once disarmed, nothing is sent back any more, but the lease keeps
+		// watching for the user coming to the target.
+		match desktop.front() {
+			None if lease.disarmed => {},
+			None => {
+				return Err(DesktopError::input_failed(
+					"lost the front process during background input",
+				));
+			},
+			Some(front) => {
+				let key = if !lease.disarmed && front == lease.previous {
+					desktop.user_key()
+				} else {
+					None
+				};
+				let now = desktop.now();
+				if lease.observe(front, key, desktop.signals(now), now) == FocusDecision::Restore {
+					// Re-check immediately before changing focus: an AX probe may
+					// have raced a newer application or user switch.
+					// `WindowServer` then refuses the hand-back if the user
+					// pressed a key or clicked after the re-check began.
+					let handed_back = request_after_check(
+						|| desktop.event_clock(),
+						|| {
+							desktop.front() == Some(front) && {
+								let now = desktop.now();
+								lease.observe(front, None, desktop.signals(now), now)
+									== FocusDecision::Restore
+							}
+						},
+						|since| desktop.hand_back(since),
+					)?;
+					match handed_back {
+						// The re-check observed instead; a disarm it recorded stops
+						// the hand-backs from the next poll.
+						None => {},
+						// The user brought the target forward themselves.
+						Some(FrontRequest::UserActed) => lease.user_acted(),
+						Some(FrontRequest::Done) => {
+							restored = true;
+							if let Some(key) = lease.key
+								&& !desktop.restore_key(key)
+							{
+								return Err(DesktopError::input_failed(
+									"background key-window restoration was rejected",
+								));
+							}
+						},
+					}
+				}
+			},
+		}
+		visit.store(lease.visited, Ordering::Release);
+		if desktop.stopped() {
+			let now = desktop.now();
+			if desktop
+				.front()
+				.is_some_and(|front| lease.reactivated(restored, front, desktop.signals(now), now))
+			{
+				return Err(DesktopError::input_failed(
+					"the background target reactivated after focus restoration; input may already have \
+					 landed; inspect the desktop and use takeover:true or ax actions",
+				));
+			}
+			return Ok(());
+		}
+		desktop.wait();
+	}
 }
 
 /// Runs a guarded action, then the settle during which the guard still sends
