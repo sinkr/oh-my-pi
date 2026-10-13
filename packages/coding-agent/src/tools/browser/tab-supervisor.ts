@@ -400,6 +400,21 @@ async function acquireTabImpl(
 	// below cannot drop it to refCount 0 and dispose the instance we are about
 	// to reuse (e.g. reopening the sole tab with a different dialogs policy).
 	let tempHold = false;
+	// A tab whose worker exited is being reattached: the open reuses the tab the reattach leaves, or opens a fresh
+	// one if the reattach closed it, instead of reporting a tab whose worker is gone.
+	const recovering = tabs.get(name);
+	if (recovering?.backend === "worker" && recovering.workerRecovery) {
+		try {
+			await raceWithTimeout(
+				untilAborted(opts.signal, recovering.workerRecovery),
+				opts.timeoutMs,
+				`Tab ${JSON.stringify(name)}'s worker was still being reattached after ${opts.timeoutMs}ms`,
+			);
+		} catch (error) {
+			if (opts.signal?.aborted) throw new ToolAbortError("Browser tab open aborted");
+			throw error;
+		}
+	}
 	const existing = tabs.get(name);
 	if (existing) {
 		if (existing.browser === browser && existing.state === "alive") {

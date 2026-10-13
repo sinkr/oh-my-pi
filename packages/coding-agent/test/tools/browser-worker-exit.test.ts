@@ -182,6 +182,45 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.queued ?? null);")).toBeNull();
 	}, 30_000);
 
+	it("reuses a tab reopened during its reattach only once the reattach is over", async () => {
+		const name = "worker-exit-reuse";
+		await open(name, "original");
+		await run(name, `await tab.evaluate(() => { document.body.dataset.mark = "kept"; });`);
+		const before = getTab(name);
+		if (before?.backend !== "worker") throw new Error("expected a worker tab");
+		const oldWorker = before.worker;
+		const { release } = await crashAndHoldRecovery(name);
+		let settled = false;
+		const reopened = prelude.invoke({ action: "open", name }, context).finally(() => {
+			settled = true;
+		});
+		await Bun.sleep(300);
+		expect(settled).toBe(false);
+		release();
+		await reopened;
+		const after = getTab(name);
+		expect(after).toBe(before);
+		expect(after?.backend === "worker" && after.worker).not.toBe(oldWorker);
+		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.mark ?? null);")).toBe("kept");
+	}, 30_000);
+
+	it("opens a fresh tab when the tab is closed while an open waits on its reattach", async () => {
+		const name = "worker-exit-reuse-closed";
+		await open(name, "original");
+		const before = getTab(name);
+		const { release } = await crashAndHoldRecovery(name);
+		const reopened = prelude.invoke({ action: "open", name }, context);
+		await Bun.sleep(100);
+		await releaseTab(name);
+		release();
+		await reopened;
+		const after = getTab(name);
+		expect(after).toBeDefined();
+		expect(after).not.toBe(before);
+		expect(after?.state).toBe("alive");
+		expect(await run(name, "return 3;")).toBe(3);
+	}, 30_000);
+
 	it("does not run a call on the new worker when the old one exits while the tab is being resumed", async () => {
 		const name = "worker-exit-during-resume";
 		await open(name, "resume-target");
