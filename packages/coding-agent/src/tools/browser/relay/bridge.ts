@@ -308,7 +308,7 @@ export class RelayBridge {
 	}
 
 	/**
-	 * The browser a new tab opens in: the one holding `nearTargetId` (a tab the caller drives on
+	 * The browser a new tab opens in: the one named by `nearTargetId` (a tab the caller drives on
 	 * another connection; omp gives every tab its own), else one holding a tab this connection
 	 * drives, else the one showing the first selected tab (the tab an open without a target used to
 	 * adopt), else the last hello. A reconnecting extension's hello must not move new tabs to another browser,
@@ -316,8 +316,15 @@ export class RelayBridge {
 	 */
 	#instanceForNewTab(conn: CdpConnection, nearTargetId: unknown): ExtInstance | undefined {
 		const near = typeof nearTargetId === "string" ? parseTargetId(nearTargetId) : null;
-		const driven = [near ? this.#tabs.get(near.key) : undefined, ...[...conn.claims].map(key => this.#tabs.get(key))];
-		const own = driven.find(tab => tab !== undefined);
+		if (near) {
+			// The target id names its browser even after the user closed that tab.
+			const code = near.key.slice(0, near.key.indexOf(":"));
+			for (const inst of this.#instances.values()) {
+				if (inst.code === code) return inst.socket ? inst : undefined;
+			}
+			return undefined;
+		}
+		const own = [...conn.claims].map(key => this.#tabs.get(key)).find(tab => tab !== undefined);
 		if (own) {
 			const inst = this.#instances.get(own.instanceId);
 			return inst?.socket ? inst : undefined;

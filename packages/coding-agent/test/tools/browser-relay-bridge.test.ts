@@ -1463,6 +1463,26 @@ describe("RelayBridge multiple extension instances", () => {
 		expect(chrome.rpcs("createTab")).toHaveLength(0);
 	});
 
+	it("opens a new tab in the browser of nearTargetId after the user closed that tab", () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
+		bridge.extMessage(edge, JSON.stringify({ t: "tabRemoved", tabId: 1 }));
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.createTarget",
+				params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
+			}),
+		);
+		expect(edge.rpcs("createTab")).toHaveLength(1);
+		expect(chrome.rpcs("createTab")).toHaveLength(0);
+	});
+
 	it("refuses to open a new tab in another browser while the browser of nearTargetId is offline", async () => {
 		const bridge = new RelayBridge({});
 		const chrome = new FakeExtSocket();
