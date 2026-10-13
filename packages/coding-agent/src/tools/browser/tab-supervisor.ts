@@ -945,6 +945,7 @@ async function runInTabWithSnapshot(
 	// attach their consumers, and an unobserved `pending.reject` would fire
 	// `unhandledRejection` and tear the whole session down (issue #4499).
 	promise.catch(() => undefined);
+	const dispatchWorker = tab.backend === "worker" ? tab.worker : undefined;
 	// Resume a settle-frozen page before driving it — frozen rAF/timers would
 	// otherwise hang the execution below. A refused resume fails the run
 	// here with an actionable error instead of stalling to timeout.
@@ -968,6 +969,15 @@ async function runInTabWithSnapshot(
 		tab.pending.delete(id);
 		const notAlive = new ToolError(`Tab ${JSON.stringify(name)} is not alive. Open it first with action:"open".`);
 		return await Promise.race([promise, Promise.reject(notAlive)]);
+	}
+	// A worker that exited during the resume already failed this run (its exit handler rejected it) and is being
+	// replaced; dispatching now would run the code on the replacement after the caller was told it failed.
+	if (tab.backend === "worker" && (tab.worker !== dispatchWorker || tab.workerRecovery)) {
+		tab.pending.delete(id);
+		const replaced = new ToolError(
+			`Tab ${JSON.stringify(name)}'s worker was replaced while the tab was being resumed; retry the call.`,
+		);
+		return await Promise.race([promise, Promise.reject(replaced)]);
 	}
 	if (tab.backend === "cmux" || tab.backend === "tern") {
 		const runSignal = opts.signal ? AbortSignal.any([opts.signal, closeAc.signal]) : closeAc.signal;

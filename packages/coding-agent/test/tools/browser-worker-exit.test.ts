@@ -181,4 +181,44 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		expect(await queued).toContain("was closed while its worker was being reattached");
 		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.queued ?? null);")).toBeNull();
 	}, 30_000);
+
+	it("does not run a call on the new worker when the old one exits while the tab is being resumed", async () => {
+		const name = "worker-exit-during-resume";
+		await open(name, "resume-target");
+		const tab = getTab(name);
+		if (tab?.backend !== "worker") throw new Error("expected a worker tab");
+		const oldWorker = tab.worker;
+		let lastRun: Extract<Parameters<typeof oldWorker.send>[0], { type: "run" }> | undefined;
+		const send = oldWorker.send.bind(oldWorker);
+		oldWorker.send = (msg, transferList) => {
+			if (msg.type === "run") lastRun = msg;
+			send(msg, transferList);
+		};
+		await run(name, "return 1;");
+		const target = tab.browser.browser.targets().find(t => t.type() === "page" && t.url().includes("resume-target"));
+		if (!target) throw new Error("expected the tab's target");
+		const createCDPSession = target.createCDPSession.bind(target);
+		// The resume's first CDP roundtrip crashes the old worker and returns once its replacement took over.
+		target.createCDPSession = async () => {
+			target.createCDPSession = createCDPSession;
+			if (!lastRun) throw new Error("expected a recorded run");
+			// The reattach starts by terminating the exited worker, which also mutes that worker's exit listeners.
+			const replacing = Promise.withResolvers<void>();
+			const terminate = oldWorker.terminate.bind(oldWorker);
+			oldWorker.terminate = async () => {
+				replacing.resolve();
+				await terminate();
+			};
+			send({ ...lastRun, id: `${lastRun.id}-crash`, code: UNOWNED_REJECTION });
+			await replacing.promise;
+			await tab.workerRecovery;
+			return await createCDPSession();
+		};
+		tab.frozen = true;
+
+		const failed = await messageOf(run(name, `await tab.evaluate(() => { document.body.dataset.ran = "yes"; });`));
+		expect(failed).toContain("Browser tab worker exited unexpectedly");
+		expect(tab.worker).not.toBe(oldWorker);
+		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.ran ?? null);")).toBeNull();
+	}, 30_000);
 });
