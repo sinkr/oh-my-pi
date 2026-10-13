@@ -19,6 +19,8 @@ use parking_lot::{Condvar, Mutex};
 
 use super::error::{CoreResult, DesktopError};
 
+#[cfg(target_os = "macos")]
+pub(crate) mod intervention;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -36,6 +38,10 @@ struct CancellationState {
 	generation: AtomicU64,
 	state:      Mutex<Option<Arc<ControlLease>>>,
 	wake:       Condvar,
+	/// When the current computer run ends; input waiting for the user to
+	/// pause stops shortly before it.
+	#[cfg(target_os = "macos")]
+	deadline:   Mutex<Option<Instant>>,
 	#[cfg(target_os = "linux")]
 	async_wake: tokio::sync::Notify,
 }
@@ -95,6 +101,13 @@ impl CancellationSource {
 	pub(crate) fn control_active(&self) -> bool {
 		self.0.state.lock().is_some()
 	}
+
+	/// Sets when the current computer run ends, `None` for no deadline. Each
+	/// run sets it before its first call.
+	#[cfg(target_os = "macos")]
+	pub(crate) fn set_deadline(&self, deadline: Option<Instant>) {
+		*self.0.deadline.lock() = deadline;
+	}
 }
 
 /// Weak callback ownership avoids a lease -> monitor -> source -> lease cycle.
@@ -116,6 +129,11 @@ pub(crate) struct OperationToken {
 }
 
 impl OperationToken {
+	#[cfg(target_os = "macos")]
+	pub(crate) fn deadline(&self) -> Option<Instant> {
+		*self.source.0.deadline.lock()
+	}
+
 	pub(crate) fn enter(&self) -> OperationScope {
 		let previous = CURRENT.with_borrow_mut(|current| current.replace(self.clone()));
 		OperationScope { previous, _thread: PhantomData }

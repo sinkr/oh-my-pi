@@ -13,10 +13,12 @@ pub(super) use capture::{application_windows, has_onscreen_window};
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use session::screen_state;
+pub(super) use skylight::front_pid;
 pub(super) use spaces::window_on_another_space;
 
 use self::{ax::MacAx, capture::MacCapture, input::MacInput};
 use super::{
+	ax::AxHandle,
 	backend::{AxBackend, Backend, DeliveryMode, DisplayAwakeHold, PointerEvent},
 	control::OperationToken,
 	error::{CoreResult, DesktopError},
@@ -219,6 +221,15 @@ impl Backend for MacosBackend {
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {
 		Some(&mut self.ax)
 	}
+}
+
+/// The process owning the element `h` names, with its application's name.
+pub(super) fn element_app(h: &AxHandle) -> Option<(libc::pid_t, String)> {
+	let pid = ax::handle_pid(h).ok()?;
+	let name = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+		.and_then(|app| app.localizedName())
+		.map_or_else(|| format!("process {pid}"), |name| name.to_string());
+	Some((pid, name))
 }
 
 fn permission_label(granted: bool) -> String {

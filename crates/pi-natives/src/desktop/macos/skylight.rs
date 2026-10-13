@@ -1116,7 +1116,7 @@ pub(super) fn front_window_context() -> Option<(pid_t, u32)> {
 }
 
 /// The front process's pid as `WindowServer` reports it.
-pub(super) fn front_pid() -> Option<pid_t> {
+pub(in crate::desktop) fn front_pid() -> Option<pid_t> {
 	front_process(FOREGROUND.as_ref()?.get_front)?.pid
 }
 

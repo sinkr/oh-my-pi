@@ -498,6 +498,72 @@ impl Request {
 	const fn is_activity(&self) -> bool {
 		!matches!(self, Self::Capabilities { .. } | Self::Close { .. })
 	}
+
+	/// The window or element whose app this request reads or acts on, for the
+	/// user-input watch. Desktop and display targets name no app, and a launch
+	/// has no process yet.
+	#[cfg(target_os = "macos")]
+	fn app_access(&self) -> Option<AppAccess<'_>> {
+		const fn window(target: &Target) -> Option<&str> {
+			match target {
+				Target::Window(id) => Some(id.as_str()),
+				Target::Desktop | Target::Display(_) => None,
+			}
+		}
+		match self {
+			Self::Capture { target, .. }
+			| Self::CaptureRegion { target, .. }
+			| Self::Observe { target, .. }
+			| Self::AxSnapshot { target, .. }
+			| Self::AxQuery { target, .. } => window(target).map(AppAccess::Read),
+			Self::MenuItems { target, .. } | Self::AxElementAt { target, .. } => {
+				window(target).map(AppAccess::Look)
+			},
+			Self::MenuSelect { target, .. }
+			| Self::HoldKeys { target, .. }
+			| Self::HoldMouse { target, .. }
+			| Self::Click { target, .. }
+			| Self::MoveMouse { target, .. }
+			| Self::Drag { target, .. }
+			| Self::Scroll { target, .. }
+			| Self::TypeText { target, .. }
+			| Self::KeyChord { target, .. } => window(target).map(AppAccess::Input),
+			Self::RaiseWindow { id, .. } | Self::BringToCurrentSpace { id, .. } => {
+				Some(AppAccess::Input(id))
+			},
+			Self::AxPerform { reference, .. }
+			| Self::AxSetValue { reference, .. }
+			| Self::AxSelectText { reference, .. }
+			| Self::AxFocus { reference, .. }
+			| Self::AxClick { reference, .. } => Some(AppAccess::Element(reference)),
+			_ => None,
+		}
+	}
+}
+
+/// How a request involves an app, for the user-input watch.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum AppAccess<'a> {
+	/// A capture, observation, or AX snapshot or query of a window: it shows
+	/// the window as it is now.
+	Read(&'a str),
+	/// Another read of a window.
+	Look(&'a str),
+	/// Input or another mutation aimed at a window.
+	Input(&'a str),
+	/// Input or another mutation aimed at an element ref.
+	Element(&'a str),
+}
+
+/// A request's part in the user-input watch, held while it runs.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct AppWatch {
+	/// The app whose window a read shows, and when the read began.
+	read:   Option<(libc::pid_t, Instant)>,
+	/// An admitted input's key-press watch.
+	_input: Option<control::intervention::InputWatch>,
 }
 
 #[derive(Clone)]
@@ -542,6 +608,9 @@ struct Worker {
 	/// getter can answer while an operation holds the worker.
 	capabilities:  Arc<Mutex<Option<DesktopCapabilities>>>,
 	display_awake: Arc<DisplayAwake>,
+	/// The user's own input into the apps this session reads and acts on.
+	#[cfg(target_os = "macos")]
+	listener:      control::intervention::Listener,
 }
 
 impl Worker {
@@ -557,6 +626,8 @@ impl Worker {
 			frames: HashMap::new(),
 			capabilities,
 			display_awake,
+			#[cfg(target_os = "macos")]
+			listener: control::intervention::Listener::default(),
 		}
 	}
 
@@ -833,6 +904,10 @@ impl Worker {
 		}
 		token.check()?;
 		let _scope = token.enter();
+		// Input the user's recent activity holds back fails here, before it
+		// takes the input lease.
+		#[cfg(target_os = "macos")]
+		let watch = self.watch_app(request, token)?;
 		let lease = request
 			.is_mutation()
 			.then(|| InputLease::acquire(token, request.takes_over()))
@@ -859,6 +934,12 @@ impl Worker {
 					self.frames.remove(target.key());
 				},
 			}
+		}
+		#[cfg(target_os = "macos")]
+		if result.is_ok()
+			&& let Some((pid, started)) = watch.read
+		{
+			self.listener.read(pid, started);
 		}
 		// A `StaleRef` search reads the whole window, which can take long
 		// enough to keep other sessions from input: it runs once the call has
@@ -912,6 +993,40 @@ impl Worker {
 			)),
 			_ => error,
 		}
+	}
+
+	/// Watches the user's own input into the app `request` reads or acts on,
+	/// starting with the first request to name it. Input to an app the user
+	/// has used since the session last read it waits for them to pause, then
+	/// fails ([`control::intervention::Listener::admit`]).
+	#[cfg(target_os = "macos")]
+	fn watch_app(&mut self, request: &Request, token: &OperationToken) -> CoreResult<AppWatch> {
+		let Some(access) = request.app_access() else {
+			return Ok(AppWatch::default());
+		};
+		let started = Instant::now();
+		let app = match access {
+			AppAccess::Read(id) | AppAccess::Look(id) | AppAccess::Input(id) => self
+				.window(&Target::Window(id.to_string()))
+				.ok()
+				.and_then(|window| Some((libc::pid_t::try_from(window.pid?).ok()?, window.app))),
+			AppAccess::Element(reference) => self
+				.registry
+				.resolve(reference)
+				.ok()
+				.and_then(|handle| macos::element_app(&handle)),
+		};
+		let Some((pid, name)) = app else {
+			return Ok(AppWatch::default());
+		};
+		self.listener.touch(pid, || name);
+		Ok(match access {
+			AppAccess::Read(_) => AppWatch { read: Some((pid, started)), _input: None },
+			AppAccess::Look(_) => AppWatch::default(),
+			AppAccess::Input(_) | AppAccess::Element(_) => {
+				AppWatch { read: None, _input: Some(self.listener.admit(pid, token)?) }
+			},
+		})
 	}
 
 	fn ax(&mut self) -> CoreResult<&mut dyn backend::AxBackend> {
@@ -1725,6 +1840,20 @@ impl DesktopSession {
 	#[napi]
 	pub fn retire(&self) {
 		self.core.cancellation.retire();
+	}
+
+	/// Sets when the current run ends, `remaining_ms` from now; each run sets
+	/// it before its first call. On macOS, input waiting for the user to pause
+	/// in its app gives up shortly before it.
+	#[napi]
+	pub fn set_run_deadline(&self, remaining_ms: f64) {
+		let deadline = Duration::try_from_secs_f64(remaining_ms.max(0.0) / 1000.0)
+			.ok()
+			.and_then(|remaining| Instant::now().checked_add(remaining));
+		#[cfg(target_os = "macos")]
+		self.core.cancellation.set_deadline(deadline);
+		#[cfg(not(target_os = "macos"))]
+		let _ = deadline;
 	}
 
 	#[napi]
@@ -2600,11 +2729,13 @@ mod capture_tests {
 	/// so they must not wait for the ownership tests.
 	fn unlocked_worker(backend: impl Backend + 'static) -> Worker {
 		Worker {
-			backend:       Ok(Box::new(backend)),
-			registry:      AxRegistry::default(),
-			frames:        HashMap::new(),
-			capabilities:  Arc::default(),
+			backend: Ok(Box::new(backend)),
+			registry: AxRegistry::default(),
+			frames: HashMap::new(),
+			capabilities: Arc::default(),
 			display_awake: Arc::default(),
+			#[cfg(target_os = "macos")]
+			listener: control::intervention::Listener::without_tap(),
 		}
 	}
 
@@ -3538,6 +3669,54 @@ mod capture_tests {
 			ErrorCode::InvalidCoordinateFrame
 		);
 		assert!(clicks.lock().is_empty());
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn input_into_an_app_the_user_used_since_the_last_read_fails_before_the_backend() {
+		let backend = FakeWaylandBackend::new();
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let source = CancellationSource::default();
+		let target = Target::Window(WAYLAND_ID.to_string());
+		let click = || Request::Click {
+			target:  target.clone(),
+			x:       1.0,
+			y:       1.0,
+			options: ParsedPointerOptions::parse(None).unwrap(),
+			reply:   flume::unbounded().0,
+		};
+		// The capture starts watching the window's app, process 1234.
+		worker
+			.execute(&capture_request(target.clone()), &source.token())
+			.unwrap();
+		worker.listener.record_for_test(1234, Instant::now());
+		// The run ends too soon to wait for the user to pause.
+		source.set_deadline(Some(Instant::now()));
+		let error = worker.execute(&click(), &source.token()).err().unwrap();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("still using obsidian"), "{}", error.message);
+		assert!(clicks.lock().is_empty());
+		// A read before the user has paused for 5 s does not show their input.
+		worker
+			.execute(&capture_request(target.clone()), &source.token())
+			.unwrap();
+		assert_eq!(
+			worker
+				.execute(&click(), &source.token())
+				.err()
+				.unwrap()
+				.code,
+			ErrorCode::UserIntervened
+		);
+		// One after the pause does, and input is admitted again.
+		worker
+			.listener
+			.record_for_test(1234, Instant::now() - Duration::from_secs(6));
+		worker
+			.execute(&capture_request(target.clone()), &source.token())
+			.unwrap();
+		assert!(worker.watch_app(&click(), &source.token()).is_ok());
 	}
 
 	#[test]
