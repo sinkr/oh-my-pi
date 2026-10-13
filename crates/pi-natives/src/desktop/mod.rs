@@ -106,7 +106,11 @@ impl DisplayAwake {
 	fn expire(&self) {
 		let released = {
 			let mut state = self.0.lock();
-			if state.until_released { None } else { state.hold.take() }
+			if state.until_released {
+				None
+			} else {
+				state.hold.take()
+			}
 		};
 		drop(released);
 	}
