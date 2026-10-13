@@ -36,6 +36,8 @@ export interface ComputerController {
 		context?: AgentToolContext,
 	): Promise<ComputerRunOk>;
 	revokeControl?(): Promise<void>;
+	/** The owner's agent turn `turn` ended: let the display sleep now, keeping control, refs and the worker. */
+	releaseDisplay?(turn: number): void;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
 	close(): Promise<void>;
 }
@@ -343,6 +345,10 @@ export class ComputerSupervisor implements ComputerController {
 		}
 	}
 
+	releaseDisplay(turn: number): void {
+		this.#safeSend({ type: "release-display", turn });
+	}
+
 	async #dispatchToolCall(message: Extract<ComputerWorkerOutbound, { type: "tool-call" }>): Promise<void> {
 		const pending = this.#pending.get(message.runId);
 		if (!pending) {
@@ -455,6 +461,8 @@ export class ComputerSupervisor implements ComputerController {
 }
 
 const ownedSupervisors = new Map<string, Set<ComputerController>>();
+/** Per owner with agent turns: the turn in flight, or between turns the one that ended last, counted from 1. */
+const ownerTurns = new Map<string, { turn: number; inFlight: boolean }>();
 
 /** Registers a controller for owner-scoped session cleanup. */
 export function registerComputerController(ownerId: string | undefined, controller: ComputerController): () => void {
@@ -476,9 +484,37 @@ export async function revokeComputerControlForOwner(ownerId: string | undefined)
 	);
 }
 
+/** An agent session's turn began: computer runs keep the display awake until {@link endComputerTurnForOwner}. */
+export function beginComputerTurnForOwner(ownerId: string | undefined): void {
+	if (!ownerId) return;
+	const state = ownerTurns.get(ownerId);
+	ownerTurns.set(ownerId, { turn: (state?.turn ?? 0) + 1, inFlight: true });
+}
+
+/**
+ * The turn ended: let the display sleep now instead of a grace period later. Nothing else ends with the turn; the
+ * next turn's first computer request holds the display again.
+ */
+export function endComputerTurnForOwner(ownerId: string | undefined): void {
+	const state = ownerId ? ownerTurns.get(ownerId) : undefined;
+	if (!ownerId || !state?.inFlight) return;
+	state.inFlight = false;
+	for (const controller of ownedSupervisors.get(ownerId) ?? []) controller.releaseDisplay?.(state.turn);
+}
+
+/**
+ * The owner's agent turn in flight, if any. Without one (between turns, or SDK and eval use with no agent session),
+ * a computer run keeps the native grace period.
+ */
+export function computerTurnInFlight(ownerId: string | undefined): number | undefined {
+	const state = ownerId ? ownerTurns.get(ownerId) : undefined;
+	return state?.inFlight ? state.turn : undefined;
+}
+
 /** Closes every computer session owned by an agent session. */
 export async function releaseComputerSessionsForOwner(ownerId: string | undefined): Promise<void> {
 	if (!ownerId) return;
+	ownerTurns.delete(ownerId);
 	const controllers = ownedSupervisors.get(ownerId);
 	if (!controllers) return;
 	ownedSupervisors.delete(ownerId);

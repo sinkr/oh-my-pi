@@ -63,6 +63,10 @@ export interface NativeDesktopSession {
 	): Promise<DesktopCapture>;
 	cancel(): void;
 	retire(): void;
+	/** Keep the display awake from the next activity until `releaseDisplayAwake()`, not just for the grace period. */
+	holdDisplayUntilReleased(): void;
+	/** Let the display sleep now; later activity is held for the grace period again. */
+	releaseDisplayAwake(): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
 	openApplication(id: string, options?: ApplicationOpenOptions): Promise<Application>;
 	menuItems(target: string, path?: string[]): Promise<MenuItem[]>;
@@ -764,6 +768,8 @@ export class ComputerWorkerCore {
 	 */
 	readonly #runContexts = new AsyncLocalStorage<ComputerRunContext>();
 	#closed = false;
+	/** The latest agent turn whose end was sent here; a run of that turn or earlier, arriving late, holds nothing. */
+	#releasedTurn = 0;
 
 	constructor(transport: ComputerWorkerTransport, createSession?: NativeDesktopSessionFactory) {
 		this.#transport = transport;
@@ -791,6 +797,10 @@ export class ComputerWorkerCore {
 				this.#active?.ac.abort(new ToolAbortError("Computer control revoked"));
 				this.#session?.cancel();
 				this.#transport.send({ type: "control-revoked", id: message.id });
+				return;
+			case "release-display":
+				this.#releasedTurn = Math.max(this.#releasedTurn, message.turn);
+				this.#session?.releaseDisplayAwake();
 				return;
 			case "tool-reply":
 				this.#deliverToolReply(message.id, message.reply);
@@ -884,6 +894,8 @@ export class ComputerWorkerCore {
 			throwIfAborted(signal);
 			const session = await this.#ensureSession(message.session);
 			throwIfAborted(signal);
+			const { displayTurn } = message.session;
+			if (displayTurn !== undefined && displayTurn > this.#releasedTurn) session.holdDisplayUntilReleased();
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);

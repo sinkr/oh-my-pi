@@ -231,7 +231,12 @@ import {
 	releaseTabsForOwner,
 } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
-import { releaseComputerSessionsForOwner, revokeComputerControlForOwner } from "../tools/computer/supervisor";
+import {
+	beginComputerTurnForOwner,
+	endComputerTurnForOwner,
+	releaseComputerSessionsForOwner,
+	revokeComputerControlForOwner,
+} from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import {
 	buildResolveReminderMessage,
@@ -1203,6 +1208,7 @@ export class AgentSession implements SettingsScope {
 		this.#promptInFlightCount++;
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
+			beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
 		}
 	}
 
@@ -1212,6 +1218,7 @@ export class AgentSession implements SettingsScope {
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
+		endComputerTurnForOwner(this.#eval.getKernelOwnerId());
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();
