@@ -865,6 +865,8 @@ async function runInTabWithSnapshot(
 	if (opts.signal?.aborted) throw new ToolAbortError();
 	// A run is use: refresh the idle clock for idle-close.
 	tab.lastActivityAt = Date.now();
+	// A retry after a detach gets only what is left of this call's budget, not a fresh one.
+	const startedAt = performance.now();
 	const id = Snowflake.next();
 	const { promise, resolve, reject } = Promise.withResolvers<RunResultOk>();
 	// `releaseTab` calls `pending.reject(closeError)` when the tab dies
@@ -1024,9 +1026,20 @@ async function runInTabWithSnapshot(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
 					);
 				}
-				// Nothing ran: run the call on the new worker. Its pending entry must go first, or the tab reads as busy.
+				// Nothing ran: run the call on the new worker, within what the re-adoption left of its budget.
+				const remainingMs = Math.floor(opts.timeoutMs - (performance.now() - startedAt));
+				if (remainingMs <= 0) {
+					throw new ToolError(
+						`${detached}. omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
+					);
+				}
+				// Its pending entry must go first, or the tab reads as busy.
 				tab.pending.delete(id);
-				const result = await runInTabWithSnapshot(name, { ...opts, readopted: true }, snapshot);
+				const result = await runInTabWithSnapshot(
+					name,
+					{ ...opts, timeoutMs: remainingMs, readopted: true },
+					snapshot,
+				);
 				result.displays.unshift({
 					type: "text",
 					text: `Chrome had detached omp from this tab since the last call (${DEBUGGER_DETACH_CAUSE}); omp reattached to the same tab on a new worker, without reloading it, and then ran this call. ${WORKER_RESETS}.`,

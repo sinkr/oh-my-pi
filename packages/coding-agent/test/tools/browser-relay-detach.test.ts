@@ -359,6 +359,39 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"does not rerun a call detached before its code started once the re-adoption spent its budget",
+		async () => {
+			const ext = await openRelayTab();
+			await invoke({ action: "run", code: 'await tab.emulate({ userAgent: "omp-detach-test" });', timeout: 10 });
+			const tab = getTab(name);
+			if (tab?.backend !== "worker") throw new Error("expected a worker tab");
+			// Hold the re-adoption for the call's whole budget once the detached worker is gone. Real time: the
+			// re-adoption's own init deadline reads the same clock, so a faked clock would fail it instead.
+			const budgetMs = 1_000;
+			const terminate = tab.worker.terminate.bind(tab.worker);
+			const held = spyOn(tab.worker, "terminate").mockImplementation(async () => {
+				await terminate();
+				await Bun.sleep(budgetMs);
+			});
+			try {
+				const reapplying = ext.nextSend("Network.setUserAgentOverride");
+				const next = runInTab(name, { code: readMark.code, timeoutMs: budgetMs, session: tool }).catch(
+					(error: unknown) => error,
+				);
+				await reapplying;
+				await ext.chromeDetach("target_closed");
+				const failure = String(await next);
+				expect(failure).toContain("before this call, so its code did not run");
+				expect(failure).toContain(`used up this call's ${budgetMs}ms budget, so the call was not run again`);
+			} finally {
+				held.mockRestore();
+			}
+			expect((await invoke(readMark)).value).toBe("kept");
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"counts a detach while the call's code is still compiling as before it ran",
 		async () => {
 			// An inline tab worker runs in this process, so the compile step can be held. Worker threads failing to
