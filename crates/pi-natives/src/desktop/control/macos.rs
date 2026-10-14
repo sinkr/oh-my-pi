@@ -11,6 +11,8 @@ use std::{
 	time::Instant,
 };
 
+use parking_lot::Mutex;
+
 use super::{CoreResult, DesktopError, EmergencyStop, intervention::UserInputs};
 use crate::desktop::macos::front_pid;
 
@@ -80,6 +82,50 @@ unsafe extern "C" {
 struct TapContext<C> {
 	inner: C,
 	tap:   Ref,
+}
+
+/// The ports of this process's live taps, so the process can invalidate them
+/// before it exits ([`close_taps`]).
+struct LiveTaps(Mutex<Vec<usize>>);
+
+static LIVE_TAPS: LiveTaps = LiveTaps(Mutex::new(Vec::new()));
+
+impl LiveTaps {
+	fn add(&self, port: Ref) {
+		self.0.lock().push(port as usize);
+	}
+
+	/// Removes `port` and invalidates it under the same lock as
+	/// [`Self::close`], so neither touches a port the other may release.
+	///
+	/// # Safety
+	/// `port` must be a live `CFMachPort`.
+	unsafe fn invalidate(&self, port: Ref) {
+		let mut live = self.0.lock();
+		live.retain(|&live| live != port as usize);
+		// SAFETY: forwarded caller contract.
+		unsafe { CFMachPortInvalidate(port) };
+	}
+
+	fn close(&self) {
+		for port in self.0.lock().drain(..) {
+			// SAFETY: a port is listed only while its tap thread holds it, and
+			// that thread unlists it under this lock before releasing it.
+			unsafe { CFMachPortInvalidate(port as Ref) };
+		}
+	}
+}
+
+/// Invalidates every listen-only tap this process still holds; for a process
+/// about to exit, after which no tap here sees input again. A tap whose
+/// process exits or is killed with it still valid makes `WindowServer`
+/// deliver the key it was routing at that moment again to the app the user
+/// types in, often many times; a tap invalidated first never did (measured on
+/// macOS 26.5 with helper processes exiting during the user's typing). The
+/// host calls this from its exit handler: Bun's `process.exit` runs no native
+/// exit hook. Nothing helps a process killed outright.
+pub(super) fn close_taps() {
+	LIVE_TAPS.close();
 }
 
 const fn physical_escape(kind: u32, key: i64, pid: i64, tag: i64) -> bool {
@@ -422,12 +468,13 @@ impl TapThread {
 					CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode);
 					CFRunLoopAddSource(run_loop, stop_source, kCFRunLoopDefaultMode);
 					CGEventTapEnable(tap, true);
+					LIVE_TAPS.add(tap);
 					let _ =
 						ready.send(Some((CFRetain(run_loop) as usize, CFRetain(stop_source) as usize)));
 					CFRunLoopRun();
 					CFRunLoopRemoveSource(run_loop, source, kCFRunLoopDefaultMode);
 					CFRunLoopRemoveSource(run_loop, stop_source, kCFRunLoopDefaultMode);
-					CFMachPortInvalidate(tap);
+					LIVE_TAPS.invalidate(tap);
 					CFRelease(source);
 					CFRelease(stop_source);
 					CFRelease(tap);
@@ -511,6 +558,76 @@ impl UserInputMonitor {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// `CFMachPortContext`, version 0.
+	#[repr(C)]
+	struct PortContext {
+		version:     isize,
+		info:        Ref,
+		retain:      Option<unsafe extern "C" fn(ConstRef) -> ConstRef>,
+		release:     Option<unsafe extern "C" fn(ConstRef)>,
+		description: Option<unsafe extern "C" fn(ConstRef) -> ConstRef>,
+	}
+
+	#[link(name = "CoreFoundation", kind = "framework")]
+	unsafe extern "C" {
+		fn CFMachPortCreate(
+			allocator: Ref,
+			callback: unsafe extern "C" fn(Ref, Ref, isize, Ref),
+			context: *mut PortContext,
+			should_free_info: *mut bool,
+		) -> Ref;
+		fn CFMachPortIsValid(port: Ref) -> bool;
+	}
+
+	unsafe extern "C" fn ignore(_: Ref, _: Ref, _: isize, _: Ref) {}
+
+	/// A plain mach port standing in for a tap's, which needs event-listening
+	/// access to create.
+	fn port() -> Ref {
+		let mut context = PortContext {
+			version:     0,
+			info:        ptr::null_mut(),
+			retain:      None,
+			release:     None,
+			description: None,
+		};
+		// SAFETY: a version-zero context copied at creation and a no-op
+		// callback.
+		let port =
+			unsafe { CFMachPortCreate(ptr::null_mut(), ignore, &raw mut context, ptr::null_mut()) };
+		assert!(!port.is_null());
+		port
+	}
+
+	#[test]
+	fn closing_invalidates_every_live_tap_and_none_its_thread_already_ended() {
+		let taps = LiveTaps(Mutex::new(Vec::new()));
+		let (live, ended) = (port(), port());
+		taps.add(live);
+		taps.add(ended);
+		// SAFETY: `ended` is a live port, released below.
+		unsafe { taps.invalidate(ended) };
+		let other = port();
+		taps.close();
+		// SAFETY: live ports created above.
+		unsafe {
+			assert!(!CFMachPortIsValid(live), "a live tap outlived close");
+			assert!(!CFMachPortIsValid(ended));
+			assert!(CFMachPortIsValid(other), "close touched a port it was never given");
+		}
+		assert!(taps.0.lock().is_empty());
+		// A tap thread ending after close finds its port already gone.
+		// SAFETY: still a live (invalid) CFMachPort.
+		unsafe { taps.invalidate(live) };
+		// SAFETY: create-rule objects from `port`.
+		unsafe {
+			for port in [live, ended, other] {
+				CFRelease(port);
+			}
+		}
+	}
+
 	#[test]
 	fn only_physical_escape_cancels() {
 		assert!(physical_escape(KEY_DOWN, 53, 0, 0));

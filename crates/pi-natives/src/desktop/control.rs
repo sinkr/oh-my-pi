@@ -313,6 +313,13 @@ pub(crate) fn with_token_for_test<T>(token: &OperationToken, action: impl FnOnce
 	action()
 }
 
+/// Invalidates this process's listen-only event taps before it exits
+/// (`macos::close_taps`); only macOS taps are known to need it.
+pub(crate) fn close_event_taps() {
+	#[cfg(target_os = "macos")]
+	macos::close_taps();
+}
+
 #[cfg(target_os = "macos")]
 static USER_CHOICES: AtomicU64 = AtomicU64::new(0);
 

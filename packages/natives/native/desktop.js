@@ -11,3 +11,8 @@ export function createDesktopSession(options) {
 	DesktopSession ??= adaptDesktopSession(loadNative().DesktopSession);
 	return new DesktopSession(options);
 }
+
+/** Invalidate this process's listen-only event taps before it exits (see the native doc). */
+export function closeDesktopEventTaps() {
+	loadNative().closeDesktopEventTaps();
+}

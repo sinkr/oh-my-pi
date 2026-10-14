@@ -1287,6 +1287,15 @@ export interface ClipboardImage {
   mimeType: string
 }
 
+/**
+ * Invalidates this process's listen-only event taps; for a host about to
+ * exit, after which no desktop session here sees the user's input again. A
+ * macOS tap that dies with its process while the user types makes
+ * `WindowServer` deliver their key again; Bun's `process.exit` runs no native
+ * exit hook, so the host calls this from its exit handler.
+ */
+export declare function closeDesktopEventTaps(): void
+
 /** A context line (before or after a match). */
 export interface ContextLine {
   /** 1-indexed line number in the source file. */
