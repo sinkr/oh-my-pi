@@ -379,26 +379,29 @@ fn with_background_keyboard<T>(
 		activate_owner(pid, owner, |(owner, window)| {
 			activate_in_background(source, owner, window, skylight::sender_connection()?)
 		})?;
-		deliver(owner.0, &|| {
-			recheck_background(
-				prepared,
-				pid,
-				wid,
-				skylight::front_pid,
-				|| visit.happened(),
-				|| {
-					keys_still_reach(
-						pid,
-						wid,
-						|| keyboard_conflict_now(pid, wid),
-						focus,
-						|| ax::key_focus(pid),
-						skylight::window_parent,
-					)?;
-					owner_still_focused(pid, wid, owner, ax::focused_window_id)
-				},
-			)
-		})
+		deliver(
+			owner.0,
+			&intervention_guard(|| {
+				recheck_background(
+					prepared,
+					pid,
+					wid,
+					skylight::front_pid,
+					|| visit.happened(),
+					|| {
+						keys_still_reach(
+							pid,
+							wid,
+							|| keyboard_conflict_now(pid, wid),
+							focus,
+							|| ax::key_focus(pid),
+							skylight::window_parent,
+						)?;
+						owner_still_focused(pid, wid, owner, ax::focused_window_id)
+					},
+				)
+			}),
+		)
 	})
 }
 
@@ -485,17 +488,26 @@ fn keys_still_reach(
 	)))
 }
 
-/// Posts `event`. Before a key or modifier press it checks that the user has
-/// not used the target's app since the call began
-/// ([`control::intervention::check_press`]) and runs `guard`; releases always
-/// go out so nothing stays held.
+/// `guard` behind the check that the user has not used the target's app since
+/// the call began ([`control::intervention::check_press`]). The background
+/// keyboard route hands this out as its per-press guard, so every way of
+/// sending background keys that runs the guard before a key or modifier press
+/// stops there, before pressing anything more.
+fn intervention_guard(guard: impl Fn() -> CoreResult<()>) -> impl Fn() -> CoreResult<()> {
+	move || {
+		control::intervention::check_press()?;
+		guard()
+	}
+}
+
+/// Posts `event`, running `guard` before a key or modifier press; releases
+/// always go out so nothing stays held.
 fn post_guarded(
 	event: &CGEvent,
 	guard: impl FnOnce() -> CoreResult<()>,
 	post: impl FnOnce(&CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	if is_key_press(event) {
-		control::intervention::check_press()?;
 		guard()?;
 	}
 	post(event)
@@ -2856,19 +2868,15 @@ mod tests {
 				.admit(7, &token)
 				.expect("the user has not used TextEdit");
 			key_chord(&source, &[KeyName::Ctrl, KeyName::Enter], |event| {
-				post_guarded(
-					event,
-					|| Ok(()),
-					|event| {
-						// The user types in TextEdit right after Ctrl goes down.
-						listener.record_for_test(7, Instant::now());
-						events.push((
-							event.get_type() as u32,
-							event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
-						));
-						Ok(())
-					},
-				)
+				post_guarded(event, intervention_guard(|| Ok(())), |event| {
+					// The user types in TextEdit right after Ctrl goes down.
+					listener.record_for_test(7, Instant::now());
+					events.push((
+						event.get_type() as u32,
+						event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+					));
+					Ok(())
+				})
 			})
 		};
 		let error = result.unwrap_err();
@@ -2881,6 +2889,39 @@ mod tests {
 			(CGEventType::KeyUp as u32, 36),
 			(CGEventType::FlagsChanged as u32, 59),
 		]);
+	}
+
+	#[test]
+	fn any_background_key_path_that_runs_the_route_guard_stops_at_the_users_input() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let guard = intervention_guard(|| Ok(()));
+		let mut events = Vec::new();
+		// Typing that runs the route's guard before each press itself, without
+		// `post_guarded`, as a typed-key path does.
+		let result = {
+			let _watch = listener
+				.admit(7, &token)
+				.expect("the user has not used TextEdit");
+			type_text(&source, "abc", |event| {
+				if is_key_press(event) {
+					guard()?;
+				}
+				// The user types in TextEdit right after the first key goes out.
+				listener.record_for_test(7, Instant::now());
+				events.push(event.get_type() as u32);
+				Ok(())
+			})
+		};
+		let error = result.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("in TextEdit during this input"), "{}", error.message);
+		// Only a is typed; b and c are never pressed.
+		assert_eq!(&events[..2], [CGEventType::KeyDown as u32, CGEventType::KeyUp as u32]);
+		assert!(!events[2..].contains(&(CGEventType::KeyDown as u32)), "{events:?}");
 	}
 
 	#[test]
