@@ -3814,7 +3814,7 @@ function buildSubagentSessionOptions(
 		expectedAgentRef,
 		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
-		...(seance ? seanceIsolationOptions() : undefined),
+		...(seance ? seanceIsolationOptions(sessionManager.getCwd()) : undefined),
 		systemPrompt: defaultPrompt => {
 			const ircRoster = inputs.ircEnabled
 				? collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile)
@@ -4181,10 +4181,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
-		artifactsDir:
-			options.sourceSession && subtaskSessionFile
-				? subtaskSessionFile.slice(0, -".jsonl".length)
-				: options.artifactsDir,
+		// Keep follow-up publication beside the parent's other child results. The
+		// persisted fork's adjacent artifact directory remains private tool storage.
+		artifactsDir: options.artifactsDir,
 	};
 
 	const runSubagent = async (): Promise<{
@@ -4359,6 +4358,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						repairInterruptedTail: true,
 						suppressBreadcrumb: true,
 						neutralizeInheritedSessionInit: true,
+						strictCopyArtifacts: true,
+						isolateInheritedDirectories: true,
 					})
 				: sessionFile
 					? SessionManager.open(sessionFile, undefined, undefined, {

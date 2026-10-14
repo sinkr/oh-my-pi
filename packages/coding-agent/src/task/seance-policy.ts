@@ -1,14 +1,16 @@
+import type { WorkspaceTree } from "../workspace-tree";
+
 export const SEANCE_AGENT_NAME = "seance";
 
 /** Options cleared on both fresh seance creation and cold revival. */
 export interface SeanceIsolationOptions {
 	disableExtensionDiscovery: true;
-	additionalDirectories: undefined;
+	additionalDirectories: never[];
 	inheritedSessionAgents: undefined;
 	contextFiles: never[];
 	autoloadSkills: never[];
 	skills: never[];
-	workspaceTree: undefined;
+	workspaceTree: WorkspaceTree;
 	promptTemplates: never[];
 	rules: never[];
 	extensionRoots: undefined;
@@ -22,15 +24,21 @@ export interface SeanceIsolationOptions {
 	parentMnemopiSessionState: undefined;
 }
 
-export function seanceIsolationOptions(): SeanceIsolationOptions {
+export function seanceIsolationOptions(cwd: string): SeanceIsolationOptions {
 	return {
 		disableExtensionDiscovery: true,
-		additionalDirectories: undefined,
+		additionalDirectories: [],
 		inheritedSessionAgents: undefined,
 		autoloadSkills: [],
 		contextFiles: [],
 		skills: [],
-		workspaceTree: undefined,
+		workspaceTree: {
+			rootPath: cwd,
+			rendered: "",
+			truncated: false,
+			totalLines: 0,
+			agentsMdFiles: [],
+		},
 		promptTemplates: [],
 		rules: [],
 		extensionRoots: undefined,

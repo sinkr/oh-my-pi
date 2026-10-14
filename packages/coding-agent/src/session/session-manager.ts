@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import type {
 	ImageContent,
 	Message,
@@ -164,43 +165,117 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 }
 
 /**
- * Copy a session's artifact directory to another session, matching interactive
- * `/fork`. Never overwrites: a destination file written while the copy runs
- * (a session that already moved and kept working) wins over the source's copy.
- * Failures are logged, never thrown.
+ * Copy the session's artifact directory next to the fork journal. Forks made
+ * from the active session can put their journal inside that same directory;
+ * snapshot first in that case so the destination never becomes its own copy
+ * source. Seance forks opt into strict failure handling, while ordinary
+ * session forks retain their historical best-effort behavior.
  */
-export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
-	// Artifacts sit beside the journal's real name: a session reached through a
-	// symlink keeps them next to the link's target, not next to the link.
+async function copySessionArtifactsInternal(
+	sourceSessionFile: string,
+	destinationSessionFile: string,
+	strict: boolean,
+): Promise<void> {
 	let realSource = sourceSessionFile;
 	try {
 		realSource = await fs.promises.realpath(sourceSessionFile);
-	} catch {}
+	} catch (error) {
+		if (strict) throw error;
+	}
 	const sourceArtifactsDir = artifactsDirectoryFor(realSource);
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
 	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
 	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
+
+	let snapshotDir: string | undefined;
+	let failure: unknown;
 	try {
-		if ((await fs.promises.stat(sourceArtifactsDir)).isDirectory()) {
-			// Create the destination first and merge into it: Bun's `cp` fails with
-			// EEXIST when another writer (the moved session's artifact manager,
-			// `local://`) creates the directory while the copy is starting.
-			await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
-			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, {
+		let sourceStat: fs.Stats;
+		try {
+			sourceStat = await fs.promises.stat(sourceArtifactsDir);
+		} catch (error) {
+			if (isEnoent(error)) return;
+			throw error;
+		}
+		if (!sourceStat.isDirectory()) {
+			if (strict) throw new Error(`Session artifacts path is not a directory: ${sourceArtifactsDir}`);
+			return;
+		}
+
+		let realSourceArtifactsDir: string;
+		try {
+			realSourceArtifactsDir = await fs.promises.realpath(sourceArtifactsDir);
+		} catch (error) {
+			if (isEnoent(error)) return;
+			throw error;
+		}
+		await fs.promises.mkdir(path.dirname(destinationArtifactsDir), { recursive: true });
+		const realDestinationParent = await fs.promises.realpath(path.dirname(destinationArtifactsDir));
+		const realDestinationSessionFile = path.join(realDestinationParent, path.basename(destinationSessionFile));
+		let realDestinationArtifactsDir: string;
+		try {
+			realDestinationArtifactsDir = await fs.promises.realpath(destinationArtifactsDir);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			realDestinationArtifactsDir = path.join(realDestinationParent, path.basename(destinationArtifactsDir));
+		}
+		if (realSourceArtifactsDir === realDestinationArtifactsDir) return;
+
+		let copySourceDir = realSourceArtifactsDir;
+		if (pathIsWithin(realSourceArtifactsDir, realDestinationArtifactsDir)) {
+			snapshotDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-session-artifact-snapshot-"));
+			await fs.promises.cp(realSourceArtifactsDir, snapshotDir, {
 				recursive: true,
 				force: false,
 				errorOnExist: false,
+				filter: source => {
+					const candidate = path.resolve(source);
+					return (
+						candidate !== realDestinationSessionFile &&
+						candidate !== realDestinationArtifactsDir &&
+						!pathIsWithin(realDestinationArtifactsDir, candidate)
+					);
+				},
 			});
+			copySourceDir = snapshotDir;
 		}
+		await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
+		await fs.promises.cp(copySourceDir, destinationArtifactsDir, {
+			recursive: true,
+			force: false,
+			errorOnExist: false,
+		});
 	} catch (error) {
-		if (!isEnoent(error)) {
-			logger.warn("Failed to copy session artifacts", {
-				sourceArtifactsDir,
-				destinationArtifactsDir,
-				error: toError(error).message,
-			});
+		failure = error;
+	}
+
+	if (snapshotDir) {
+		try {
+			await fs.promises.rm(snapshotDir, { recursive: true, force: true });
+		} catch (error) {
+			if (failure === undefined) failure = error;
+			else {
+				logger.warn("Failed to remove session artifact snapshot", {
+					snapshotDir,
+					error: toError(error).message,
+				});
+			}
 		}
 	}
+
+	if (failure !== undefined) {
+		if (strict) throw failure;
+		logger.warn("Failed to copy session artifacts", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+			error: toError(failure).message,
+		});
+	}
+}
+
+/** Best-effort copy used by ordinary fork and session-move paths. */
+export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
+	await copySessionArtifactsInternal(sourceSessionFile, destinationSessionFile, false);
 }
 
 /** The numeric id an artifact file name (`<id>.<tool>.log`) carries, if any. */
@@ -4037,11 +4112,18 @@ export class SessionManager {
 			sessionFile?: string;
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
+			/** Convert inherited initialization into historical context. */
 			neutralizeInheritedSessionInit?: boolean;
+			/** Propagate artifact resolution/copy failures and roll back the incomplete fork. */
+			strictCopyArtifacts?: boolean;
+			/** Do not inherit workspace roots from the source session header. */
+			isolateInheritedDirectories?: boolean;
 		},
 	): Promise<SessionManager> {
+		const transactionalFork =
+			options?.neutralizeInheritedSessionInit === true || options?.strictCopyArtifacts === true;
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		if (options?.neutralizeInheritedSessionInit && options.sessionFile && storage.existsSync(options.sessionFile)) {
+		if (transactionalFork && options.sessionFile && storage.existsSync(options.sessionFile)) {
 			throw new Error(`Fork destination already exists: ${options.sessionFile}`);
 		}
 		const manager = new SessionManager(cwd, dir, true, storage);
@@ -4089,7 +4171,9 @@ export class SessionManager {
 		if (options?.neutralizeInheritedSessionInit) manager.#header.seanceFork = true;
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
-		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+		manager.#additionalDirectories = options?.isolateInheritedDirectories
+			? []
+			: (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
 		manager.#sessionName = manager.#header.title;
@@ -4103,7 +4187,7 @@ export class SessionManager {
 			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
 			manager.#index.rebuild(history);
 		}
-		if (options?.neutralizeInheritedSessionInit && options.copyArtifacts !== false) {
+		if (transactionalFork && options.copyArtifacts !== false) {
 			const destinationArtifactsDir = artifactsDirectoryFor(manager.#sessionFile);
 			if (destinationArtifactsDir) {
 				try {
@@ -4115,7 +4199,7 @@ export class SessionManager {
 			}
 		}
 		manager.#forceFileCreation = true;
-		if (!options?.neutralizeInheritedSessionInit) {
+		if (!transactionalFork) {
 			await manager.#rewriteAtomically();
 			if (options?.copyArtifacts !== false) {
 				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
@@ -4130,7 +4214,7 @@ export class SessionManager {
 				throw new Error("Fork destination changed while the session was being created.");
 			}
 			if (options.copyArtifacts !== false) {
-				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+				await copySessionArtifactsInternal(sourcePath, manager.#sessionFile!, options.strictCopyArtifacts === true);
 			}
 			return manager;
 		} catch (error) {

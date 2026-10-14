@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task";
 import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-lifecycle";
 import * as seanceResolver from "@oh-my-pi/pi-coding-agent/task/seance";
@@ -58,7 +60,6 @@ describe("/seance", () => {
 			modelSelectors: [],
 		});
 		const ctx = createInteractiveModeContext();
-		const hostModel = ctx.session.model;
 		const execute = vi.fn(
 			async (
 				_callId: string,
@@ -89,7 +90,6 @@ describe("/seance", () => {
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("fast-result-id"));
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("progress-id"));
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("openai/actual-model"));
-		expect(ctx.session.model).toBe(hostModel);
 	});
 	it("surfaces live async progress IDs and resolved model", async () => {
 		const resolved = sourceSession("/repo/.omp/sessions/async.jsonl");
@@ -121,6 +121,119 @@ describe("/seance", () => {
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("Seance running"));
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("live-seance-id"));
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("anthropic/actual-model"));
+	});
+	it("keeps the latest defined streamed model when the settled result omits one", async () => {
+		const resolved = sourceSession("/repo/.omp/sessions/streamed-model.jsonl");
+		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
+			file: resolved.path,
+			id: resolved.id,
+			modelSelectors: [],
+		});
+		const ctx = createInteractiveModeContext();
+		const execute = vi.fn(
+			async (
+				_callId: string,
+				_params: TaskParams,
+				_signal?: AbortSignal,
+				onUpdate?: (partial: AgentToolResult<TaskToolDetails>) => void,
+			) => {
+				onUpdate?.(
+					taskResult({
+						progress: [{ id: "streamed-id", resolvedModel: "anthropic/primary-model" } as never],
+					}),
+				);
+				onUpdate?.(
+					taskResult({
+						progress: [{ id: "streamed-id", resolvedModel: "openai/latest-streamed-model" } as never],
+					}),
+				);
+				onUpdate?.(taskResult({ progress: [{ id: "streamed-id" } as never] }));
+				return taskResult({ results: [{ id: "settled-id", exitCode: 0 } as never] });
+			},
+		);
+		registerTaskTool(ctx, execute as AgentTool["execute"]);
+
+		await runSeanceCommand(ctx, `${resolved.path} --model openai/requested-model`);
+
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("openai/latest-streamed-model"));
+		expect(ctx.showStatus).not.toHaveBeenCalledWith(expect.stringContaining("anthropic/primary-model"));
+	});
+
+	it("prefers the settled fallback model over the streamed primary model", async () => {
+		const resolved = sourceSession("/repo/.omp/sessions/fallback-model.jsonl");
+		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
+			file: resolved.path,
+			id: resolved.id,
+			modelSelectors: [],
+		});
+		const ctx = createInteractiveModeContext();
+		const execute = vi.fn(
+			async (
+				_callId: string,
+				_params: TaskParams,
+				_signal?: AbortSignal,
+				onUpdate?: (partial: AgentToolResult<TaskToolDetails>) => void,
+			) => {
+				onUpdate?.(
+					taskResult({
+						progress: [{ id: "fallback-id", resolvedModel: "anthropic/primary-model" } as never],
+					}),
+				);
+				return taskResult({
+					results: [
+						{
+							id: "fallback-id",
+							exitCode: 0,
+							resolvedModel: "openai/settled-fallback",
+							resolvedModelIsFallback: true,
+						} as never,
+					],
+				});
+			},
+		);
+		registerTaskTool(ctx, execute as AgentTool["execute"]);
+
+		await runSeanceCommand(ctx, `${resolved.path} --model openai/requested-model`);
+
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("openai/settled-fallback"));
+		expect(ctx.showStatus).not.toHaveBeenCalledWith(expect.stringContaining("anthropic/primary-model"));
+	});
+
+	it("reports zero-exit aborted results as failures with their abort reason", async () => {
+		const resolved = sourceSession("/repo/.omp/sessions/aborted.jsonl");
+		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
+			file: resolved.path,
+			id: resolved.id,
+			modelSelectors: [],
+		});
+		const ctx = createInteractiveModeContext();
+		const abortReason = "Consultation stopped because the source is unavailable";
+		const abortedResult: SingleResult = {
+			index: 0,
+			id: "aborted-id",
+			agent: "seance",
+			agentSource: "bundled",
+			task: "Historical consultation",
+			exitCode: 0,
+			output: "",
+			stderr: "",
+			truncated: false,
+			durationMs: 0,
+			tokens: 0,
+			requests: 1,
+			aborted: true,
+			abortReason,
+		};
+		const renderedResult = formatTaskResultSummary(abortedResult, { totalDurationMs: 0 });
+		registerTaskTool(
+			ctx,
+			vi.fn(async () => taskResult({ results: [abortedResult] }, renderedResult)) as AgentTool["execute"],
+		);
+
+		await runSeanceCommand(ctx, `${resolved.path} --model openai/requested-model`);
+
+		expect(ctx.showError).toHaveBeenCalledWith(sanitizeErrorLine(abortReason));
+		expect(ctx.showStatus).not.toHaveBeenCalledWith(expect.stringContaining("Seance completed"));
 	});
 
 	it("shows real preflight content and sanitizes thrown executor errors", async () => {

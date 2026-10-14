@@ -75,11 +75,21 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * listings are prefetched in parallel; ordinary walks remain sequential
  * depth-first. In `onlyPreferred` mode direct files precede descendants, so a
  * current child wins over copied historical same-id descendants.
+ * `preserveDuplicates` returns every candidate path per id in scan order for
+ * callers that must detect ambiguity.
  */
+export function sessionFilesFromDisk(
+	preferredDir: string | undefined,
+	options: { onlyPreferred?: boolean; preserveDuplicates: true },
+): Promise<Map<string, string[]>>;
+export function sessionFilesFromDisk(
+	preferredDir?: string,
+	options?: { onlyPreferred?: boolean; preserveDuplicates?: false },
+): Promise<Map<string, string>>;
 export async function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean },
-): Promise<Map<string, string>> {
+	options?: { onlyPreferred?: boolean; preserveDuplicates?: boolean },
+): Promise<Map<string, string> | Map<string, string[]>> {
 	const dirs = options?.onlyPreferred ? [] : artifactsDirsFromRegistry();
 	if (preferredDir) dirs.unshift(preferredDir);
 	const listings = new Map<string, Promise<Dirent[] | null>>();
@@ -103,13 +113,18 @@ export async function sessionFilesFromDisk(
 	};
 	for (const dir of dirs) list(dir, 0);
 
-	const found = new Map<string, string>();
+	const found = new Map<string, string[]>();
 	const seenDirs = new Set<string>();
 	const recordFile = (dir: string, entry: Dirent): void => {
 		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) return;
 		if (entry.name.startsWith("__advisor")) return;
 		const id = entry.name.slice(0, -".jsonl".length);
-		if (!found.has(id)) found.set(id, path.join(dir, entry.name));
+		const candidates = found.get(id);
+		if (candidates) {
+			if (options?.preserveDuplicates) candidates.push(path.join(dir, entry.name));
+		} else {
+			found.set(id, [path.join(dir, entry.name)]);
+		}
 	};
 	const scan = async (dir: string, depth: number): Promise<void> => {
 		if (depth > MAX_SCAN_DEPTH || seenDirs.has(dir)) return;
@@ -134,7 +149,8 @@ export async function sessionFilesFromDisk(
 		}
 	};
 	for (const dir of dirs) await scan(dir, 0);
-	return found;
+	if (options?.preserveDuplicates) return found;
+	return new Map([...found].map(([id, candidates]) => [id, candidates[0]!] as const));
 }
 
 /** Directory entries of `dir`, or null when it is missing or not a directory. */

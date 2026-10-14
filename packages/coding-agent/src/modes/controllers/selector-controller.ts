@@ -193,7 +193,7 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 	};
 }
 
-/** Menus that open at most once: a repeat request focuses the open one. */
+/** Single-instance menus; compatible repeat requests can focus an open menu. */
 type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
 
 /** An open menu: registered when the request runs, filled once its component mounts. */
@@ -204,14 +204,19 @@ interface OpenMenu {
 	mount?: () => OverlayHandle;
 }
 
+interface ActiveModelPicker {
+	selectionOnly: boolean;
+	close: () => void;
+}
+
 export class SelectorController {
 	/**
-	 * Each single-instance menu from the moment it is requested until it closes,
-	 * so a repeat request (typed or clicked while the first is still loading,
-	 * or from a composer that stays reachable, as in Tern's native view)
-	 * focuses it instead of stacking another menu on top.
+	 * Single-instance menus stay registered while opening and open, so compatible
+	 * repeats can focus an existing menu instead of stacking another overlay.
 	 */
 	#openMenus = new Map<MenuKind, OpenMenu>();
+	/** The request whose callbacks currently own the model-picker overlay. */
+	#activeModelPicker?: ActiveModelPicker;
 
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -797,9 +802,15 @@ export class SelectorController {
 	 * highlighted and preselected; a leading `@` searches ctrl+p quick roles.
 	 */
 	#showModelPicker(options?: { selectOnly?: SelectOnlyModelSelectorOptions }): void {
-		if (this.#focusOpenMenu("model-picker")) return;
-		const { ModelPickerComponent } = loadModelOverlayComponents();
 		const selectOnly = options?.selectOnly;
+		const activePicker = this.#activeModelPicker;
+		if (!selectOnly && activePicker && !activePicker.selectionOnly) {
+			this.#focusOpenMenu("model-picker");
+			return;
+		}
+		activePicker?.close();
+
+		const { ModelPickerComponent } = loadModelOverlayComponents();
 		const currentContextTokens = selectOnly ? undefined : (this.ctx.session.getContextUsage()?.tokens ?? 0);
 		const current = this.ctx.session.model;
 		const quickRoleOrder = selectOnly ? [] : cfgCycleOrder.get(this.ctx.settings);
@@ -819,11 +830,14 @@ export class SelectorController {
 		const done = () => {
 			if (closed) return;
 			closed = true;
+			if (this.#activeModelPicker === request) this.#activeModelPicker = undefined;
 			menu.handle?.hide();
 			this.#releaseMenu("model-picker", menu);
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
+		const request: ActiveModelPicker = { selectionOnly: selectOnly !== undefined, close: done };
+		const isCurrent = () => this.#activeModelPicker === request && !closed;
 		const picker = new ModelPickerComponent(
 			this.ctx.ui,
 			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
@@ -831,6 +845,7 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext }) => {
+					if (!isCurrent()) return;
 					if (selectOnly) {
 						done();
 						try {
@@ -853,6 +868,7 @@ export class SelectorController {
 				onPickRole: selectOnly
 					? undefined
 					: async entry => {
+							if (!isCurrent()) return;
 							try {
 								await this.ctx.session.applyRoleModel(entry);
 								this.ctx.statusLine.invalidate();
@@ -869,6 +885,7 @@ export class SelectorController {
 				onPickTask: selectOnly
 					? undefined
 					: (_model, selector) => {
+							if (!isCurrent()) return;
 							// Session-only: layer the Task override onto the runtime settings
 							// layer so it is never persisted, mirroring the session-model pick.
 							cfgTaskAgentModelOverrides.override(this.ctx.settings, {
@@ -879,6 +896,7 @@ export class SelectorController {
 							done();
 						},
 				onCancel: () => {
+					if (!isCurrent()) return;
 					done();
 					if (selectOnly?.onCancel) {
 						try {
@@ -900,6 +918,7 @@ export class SelectorController {
 				selectOnly: selectOnly !== undefined,
 			},
 		);
+		this.#activeModelPicker = request;
 		const menu = this.#claimMenu("model-picker");
 		this.#mountMenu(menu, picker, () => {
 			const handle = this.ctx.ui.showOverlay(picker, {

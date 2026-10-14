@@ -182,11 +182,11 @@ async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, 
 		if (!details) return;
 		for (const progress of details.progress ?? []) {
 			taskIds.add(progress.id);
-			selectedModel ??= progress.resolvedModel;
+			if (progress.resolvedModel) selectedModel = progress.resolvedModel;
 		}
 		for (const item of details.results ?? []) {
 			taskIds.add(item.id);
-			selectedModel ??= item.resolvedModel;
+			if (item.resolvedModel) selectedModel = item.resolvedModel;
 		}
 		jobId = details.async?.jobId ?? jobId;
 	};
@@ -201,14 +201,17 @@ async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, 
 			.map(part => part.text)
 			.join("\n")
 			.trim();
-		const failedResult = details?.results?.find(item => item.error || item.exitCode !== 0);
+		const failedResult = details?.results?.find(item => item.error || item.aborted || item.exitCode !== 0);
 		if (
 			result.isError ||
 			details?.async?.state === "failed" ||
 			failedResult ||
 			(!details?.async && (details?.results?.length ?? 0) === 0)
 		) {
-			ctx.showError(sanitizeErrorLine(content || failedResult?.error || "Seance preflight failed."));
+			const failureMessage = failedResult?.aborted
+				? failedResult.abortReason || content || failedResult.error || "Seance preflight failed."
+				: content || failedResult?.error || "Seance preflight failed.";
+			ctx.showError(sanitizeErrorLine(failureMessage));
 			return;
 		}
 		const state = details?.async?.state === "running" ? "running" : "completed";

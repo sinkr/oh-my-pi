@@ -22,13 +22,14 @@ import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, prompt, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
-function sourceHeader(id: string, cwd: string) {
+function sourceHeader(id: string, cwd: string, additionalDirectories: string[] = []) {
 	return {
 		type: "session",
 		version: CURRENT_SESSION_VERSION,
 		id,
 		timestamp: "2026-10-01T00:00:00.000Z",
 		cwd,
+		...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
 	};
 }
 
@@ -56,9 +57,9 @@ function sourceMessage() {
 	};
 }
 
-async function writeSourceSession(file: string, cwd: string): Promise<string> {
+async function writeSourceSession(file: string, cwd: string, additionalDirectories: string[] = []): Promise<string> {
 	await fs.mkdir(path.dirname(file), { recursive: true });
-	const text = [sourceHeader("source-session", cwd), unrestrictedSourceInit(), sourceMessage()]
+	const text = [sourceHeader("source-session", cwd, additionalDirectories), unrestrictedSourceInit(), sourceMessage()]
 		.map(entry => JSON.stringify(entry))
 		.join("\n");
 	await Bun.write(file, `${text}\n`);
@@ -105,12 +106,26 @@ describe("seance startup contracts", () => {
 		using tempDir = TempDir.createSync("@omp-seance-sdk-fresh-");
 		const cwd = path.join(tempDir.path(), "project");
 		await fs.mkdir(cwd, { recursive: true });
+		const sourceRoot = path.join(tempDir.path(), "source-additional");
+		const settingsRoot = path.join(tempDir.path(), "settings-additional");
+		await Promise.all([sourceRoot, settingsRoot].map(directory => fs.mkdir(directory, { recursive: true })));
+		const markerNames = ["cwd-tree-leak.txt", "source-root-tree-leak.txt", "settings-root-tree-leak.txt"];
+		await Promise.all(
+			[
+				path.join(cwd, markerNames[0]),
+				path.join(sourceRoot, markerNames[1]),
+				path.join(settingsRoot, markerNames[2]),
+			].map(file => Bun.write(file, "must not be discovered")),
+		);
 		const sourceFile = path.join(tempDir.path(), "source.jsonl");
-		await writeSourceSession(sourceFile, cwd);
+		const sourceText = await writeSourceSession(sourceFile, cwd, [sourceRoot]);
 		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
 			suppressBreadcrumb: true,
 			neutralizeInheritedSessionInit: true,
+			isolateInheritedDirectories: true,
+			strictCopyArtifacts: true,
 		});
+		expect(forked.getAdditionalDirectories()).toEqual([]);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
@@ -140,7 +155,10 @@ describe("seance startup contracts", () => {
 				authStorage,
 				modelRegistry,
 				model,
-				settings: Settings.isolated(),
+				settings: Settings.isolated({
+					"workspace.additionalDirectories": [settingsRoot],
+					includeWorkspaceTree: true,
+				}),
 				sessionManager: forked,
 				agentName: "seance",
 				toolNames: ["read", "grep", "glob"],
@@ -150,13 +168,14 @@ describe("seance startup contracts", () => {
 				enableMCP: true,
 				enableLsp: false,
 				spawns: "",
-				disableExtensionDiscovery: true,
+				...seanceIsolationOptions(cwd),
 				preloadedExtensionPaths: [extensionPath],
-				contextFiles: [],
-				skills: [],
-				rules: [],
 			});
 			session = created.session;
+			expect(created.session.sessionManager.getAdditionalDirectories()).toEqual([]);
+			const startupPrompt = created.session.systemPrompt.join("\n");
+			for (const markerName of markerNames) expect(startupPrompt).not.toContain(markerName);
+			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
 
 			expect(created.session.getActiveToolNames().toSorted()).toEqual(["glob", "grep", "read", "yield"]);
 			expect(await Bun.file(extensionMarker).exists()).toBe(false);
@@ -253,17 +272,35 @@ describe("seance startup contracts", () => {
 		using tempDir = TempDir.createSync("@omp-seance-cold-");
 		const cwd = path.join(tempDir.path(), "project");
 		await fs.mkdir(cwd, { recursive: true });
+		const sourceRoot = path.join(tempDir.path(), "source-additional");
+		const settingsRoot = path.join(tempDir.path(), "settings-additional");
+		await Promise.all([sourceRoot, settingsRoot].map(directory => fs.mkdir(directory, { recursive: true })));
+		const markerNames = ["cold-cwd-tree-leak.txt", "cold-source-tree-leak.txt", "cold-settings-tree-leak.txt"];
+		await Promise.all(
+			[
+				path.join(cwd, markerNames[0]),
+				path.join(sourceRoot, markerNames[1]),
+				path.join(settingsRoot, markerNames[2]),
+			].map(file => Bun.write(file, "must not be discovered")),
+		);
 		const sourceFile = path.join(tempDir.path(), "source.jsonl");
-		await writeSourceSession(sourceFile, cwd);
+		const sourceText = await writeSourceSession(sourceFile, cwd, [sourceRoot]);
 		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
 			suppressBreadcrumb: true,
 			neutralizeInheritedSessionInit: true,
+			isolateInheritedDirectories: true,
+			strictCopyArtifacts: true,
 		});
+		expect(forked.getAdditionalDirectories()).toEqual([]);
 		const sessionFile = forked.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted fork");
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
+		const seanceSettings = Settings.isolated({
+			"workspace.additionalDirectories": [settingsRoot],
+			includeWorkspaceTree: true,
+		});
 		const previousAgentDir = getAgentDir();
 		setAgentDir(path.join(tempDir.path(), "agent"));
 		let liveSession: AgentSession | undefined;
@@ -300,7 +337,7 @@ describe("seance startup contracts", () => {
 				authStorage,
 				modelRegistry,
 				model,
-				settings: Settings.isolated(),
+				settings: seanceSettings,
 				sessionManager: forked,
 				agentId: "SeanceCold",
 				agentDisplayName: SEANCE_AGENT_NAME,
@@ -313,13 +350,14 @@ describe("seance startup contracts", () => {
 				enableLsp: false,
 				enableIrc: false,
 				enableMCP: false,
-				...seanceIsolationOptions(),
+				...seanceIsolationOptions(cwd),
 				systemPrompt: defaultPrompt => {
 					defaultPromptBlocks = [...defaultPrompt];
 					return [...defaultPrompt, subagentPrompt, assignmentPrompt];
 				},
 			});
 			liveSession = live.session;
+			expect(liveSession.sessionManager.getAdditionalDirectories()).toEqual([]);
 			const persistedTools = liveSession.getEnabledToolNames().filter(name => name !== "write");
 			liveSession.sessionManager.appendSessionInit({
 				systemPrompt: liveSession.agent.state.systemPrompt,
@@ -332,6 +370,8 @@ describe("seance startup contracts", () => {
 			});
 			await liveSession.sessionManager.ensureOnDisk();
 			const warmPrompt = [...liveSession.systemPrompt];
+			for (const markerName of markerNames) expect(warmPrompt.join("\n")).not.toContain(markerName);
+			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
 			const warmToolNames = liveSession.getActiveToolNames().toSorted();
 			const persisted = await SessionManager.peekSessionInit(sessionFile);
 			if (!persisted?.init) throw new Error("Expected the fresh seance runtime contract to be persisted");
@@ -360,14 +400,17 @@ describe("seance startup contracts", () => {
 				session: revivalParent(cwd, [extension]),
 				authStorage,
 				modelRegistry,
-				settings: Settings.isolated(),
+				settings: seanceSettings,
 				enableLsp: true,
 			});
 			const revive = await createReviver(ref);
 			if (!revive) throw new Error("Expected a cold seance reviver");
 			revived = await revive(ref);
+			expect(revived.sessionManager.getAdditionalDirectories()).toEqual([]);
 
 			expect(revived.systemPrompt).toEqual(warmPrompt);
+			for (const markerName of markerNames) expect(revived.systemPrompt.join("\n")).not.toContain(markerName);
+			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
 			expect(warmToolNames).toEqual(["glob", "grep", "read", "yield"]);
 			expect(revived.getActiveToolNames().toSorted()).toEqual(warmToolNames);
 			expect(extensionLoaded).toBe(false);

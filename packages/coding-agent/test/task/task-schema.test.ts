@@ -9,7 +9,9 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 let taskSchemaSessionIndex = 0;
 
-function createSession(options: { parentSpawns?: string; disabledAgents?: string[] } = {}): ToolSession {
+function createSession(
+	options: { parentSpawns?: string; disabledAgents?: string[]; planMode?: boolean } = {},
+): ToolSession {
 	return {
 		cwd: `/tmp/task-schema-${taskSchemaSessionIndex++}`,
 		hasUI: false,
@@ -20,6 +22,7 @@ function createSession(options: { parentSpawns?: string; disabledAgents?: string
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => options.parentSpawns ?? "*",
+		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
 }
 
@@ -164,6 +167,33 @@ describe("task schema seance fields", () => {
 		});
 		const overridden = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
 		expect(JSON.stringify(overridden.parameters.toJsonSchema())).not.toContain('"sourceSession"');
+	});
+
+	it("hides seance fields, listing, and guidance in plan mode", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [bundledSeance],
+			projectAgentsDir: null,
+		});
+		const planMode = await TaskTool.create(createSession({ parentSpawns: "seance", planMode: true }));
+		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
+		expect(
+			planMode.parameters({
+				task: "Plan safely.",
+				solutionSpace: "A bounded task.",
+			}) instanceof type.errors,
+		).toBe(true);
+		expect(planSchema).not.toContain('"sourceSession"');
+		expect(planSchema).not.toContain("seance");
+		expect(planSchema).not.toContain('"model"');
+		expect(planMode.description).not.toContain("seance");
+		expect(planMode.description).not.toContain("Historical consults");
+
+		const ordinary = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
+		const ordinarySchema = JSON.stringify(ordinary.parameters.toJsonSchema());
+		expect(ordinarySchema).toContain('"sourceSession"');
+		expect(ordinarySchema).toContain('"model"');
+		expect(ordinary.description).toContain("`seance`");
+		expect(ordinary.description).toContain("Historical consults");
 	});
 	afterEach(() => vi.restoreAllMocks());
 });

@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { getInternalUrlSuggestions } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
 import {
 	formatCurrentBranchFullHistory,
 	HistoryProtocolHandler,
@@ -684,6 +685,13 @@ describe("history:// protocol", () => {
 			const sourceArtifacts = sourceFile.slice(0, -6);
 			const childId = "Sub1";
 			const grandchildId = `${childId}.Grandchild`;
+			const externalArtifacts = path.join(dir, "external-artifacts");
+			await fs.mkdir(externalArtifacts, { recursive: true });
+			await Bun.write(
+				path.join(externalArtifacts, "ExternalOnly.jsonl"),
+				sessionFixtureJsonl("external disk transcript"),
+			);
+			registerArtifactsDir(externalArtifacts);
 			await fs.mkdir(path.join(sourceArtifacts, childId), { recursive: true });
 			const sourceTimestamp = new Date().toISOString();
 			await Bun.write(
@@ -767,6 +775,26 @@ describe("history:// protocol", () => {
 				expect(index.content).not.toContain("ForeignOnly");
 				const completions = await new HistoryProtocolHandler().complete(undefined, context);
 				expect(completions.map(completion => completion.value).toSorted()).toEqual([childId, grandchildId]);
+				const forkSuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
+					cwd,
+					sessionId: forked.getSessionId(),
+					sessionFile: forkFile,
+					historyScope: "fork",
+				}));
+				const forkValues = forkSuggestions?.items.map(item => item.value) ?? [];
+				expect(forkValues).toContain(`history://${childId}`);
+				expect(forkValues).toContain(`history://${grandchildId}`);
+				expect(forkValues).not.toContain("history://ForeignOnly");
+				expect(forkValues).not.toContain("history://ExternalOnly");
+
+				const ordinarySuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
+					cwd,
+					sessionId: "ordinary-session",
+					sessionFile: sourceFile,
+				}));
+				const ordinaryValues = ordinarySuggestions?.items.map(item => item.value) ?? [];
+				expect(ordinaryValues).toContain("history://ForeignOnly");
+				expect(ordinaryValues).toContain("history://ExternalOnly");
 
 				const current = await InternalUrlRouter.instance().resolve("history://current/full", {
 					...context,

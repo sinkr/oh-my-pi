@@ -2,6 +2,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { sessionFilesFromDisk } from "../internal-urls/registry-helpers";
 import { buildSessionContext, getRestorableSessionModels } from "../session/session-context";
+import { listSessionsReadOnly } from "../session/session-listing";
+import { sessionDirForCwd } from "../session/session-paths";
 import { resolveSessionLeafId, type SessionEntry } from "../session/session-entries";
 import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
 import { SessionManager } from "../session/session-manager";
@@ -98,22 +100,25 @@ export async function resolveSeanceSource(
 
 	const label = safeSourceLabel(source);
 	if (options.artifactsDirHint) {
-		const files = await sessionFilesFromDisk(options.artifactsDirHint, { onlyPreferred: true });
-		const matches = [...files].filter(([id]) => id.toLowerCase().startsWith(source.toLowerCase()));
-		const exact = matches.filter(([id]) => id.toLowerCase() === source.toLowerCase());
-		const candidates = exact.length > 0 ? exact : matches;
-		if (candidates.length > 1) throw new Error(`Session selector "${label}" is ambiguous.`);
-		const match = candidates[0];
-		if (match) return validateSourceFile(match[1], storage);
-	}
-	if (options.sessionDirHint) {
-		const local = await SessionManager.list(options.cwd, options.sessionDirHint, storage);
-		const match = chooseId(local, source);
+		const preferredDir = path.resolve(options.artifactsDirHint);
+		const files = await sessionFilesFromDisk(options.artifactsDirHint, {
+			onlyPreferred: true,
+			preserveDuplicates: true,
+		});
+		const matches = [...files].flatMap(([id, candidates]) => {
+			const direct = candidates.filter(file => path.resolve(path.dirname(file)) === preferredDir);
+			return (direct.length > 0 ? direct : candidates).map(file => ({ id, path: file }));
+		});
+		const match = chooseId(matches, source);
 		if (match) return validateSourceFile(match.path, storage);
 	}
+	const sessionDir = options.sessionDirHint ?? sessionDirForCwd(options.cwd);
+	const local = await listSessionsReadOnly(sessionDir, storage);
+	const localMatch = chooseId(local, source);
+	if (localMatch) return validateSourceFile(localMatch.path, storage);
 	const global = await SessionManager.listAll(storage);
-	const match = chooseId(global, source);
-	if (match) return validateSourceFile(match.path, storage);
+	const matchGlobal = chooseId(global, source);
+	if (matchGlobal) return validateSourceFile(matchGlobal.path, storage);
 	throw new Error(`Session "${label}" was not found.`);
 }
 

@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
@@ -58,6 +59,7 @@ function pickerContext(ui: OverlayUi, models: Model[] = [], current?: Model) {
 			getContextUsage: () => undefined,
 			effectiveServiceTier: () => undefined,
 			getRoleModelCycle: () => undefined,
+			resolveTemporaryModelThinkingLevel: () => undefined,
 			setModelTemporary: vi.fn(async () => {}),
 			applyRoleModel: vi.fn(async () => {}),
 			modelRegistry: {
@@ -130,6 +132,107 @@ describe("single-instance menus", () => {
 		shown[0]?.handleInput?.("\x1b");
 		controller.showModelSelector({ temporaryOnly: true });
 		expect(shown).toHaveLength(2);
+	});
+
+	it("replaces an ordinary picker with selection-only and ignores stale picker input", () => {
+		const { ui, shown } = overlayUi();
+		const model = createMockModel({ provider: "openai", id: "selection-target" }).model;
+		const hostModel = createMockModel({ provider: "anthropic", id: "host-model" }).model;
+		const ctx = pickerContext(ui, [model], hostModel);
+		cfgModelRoles.override(ctx.settings, { default: "kept/default-model" });
+		cfgTaskAgentModelOverrides.override(ctx.settings, { task: "kept/task-model" });
+		const defaultRoles = structuredClone(cfgModelRoles.get(ctx.settings));
+		const taskDefaults = structuredClone(cfgTaskAgentModelOverrides.get(ctx.settings));
+		const selected = vi.fn();
+		const controller = new SelectorController(ctx);
+
+		controller.showModelSelector({ temporaryOnly: true });
+		const ordinaryPicker = shown[0]!;
+		controller.showModelSelector({
+			selectOnly: {
+				currentSelector: `${model.provider}/${model.id}`,
+				onSelect: selected,
+			},
+		});
+		expect(shown).toHaveLength(2);
+		expect(ui.overlayStack).toHaveLength(1);
+
+		ordinaryPicker.handleInput?.("\r");
+		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
+		shown[1]?.handleInput?.("\r");
+
+		expect(selected).toHaveBeenCalledWith(`${model.provider}/${model.id}`);
+		expect(ctx.session.model).toBe(hostModel);
+		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
+		expect(ctx.session.applyRoleModel).not.toHaveBeenCalled();
+		expect(cfgModelRoles.get(ctx.settings)).toEqual(defaultRoles);
+		expect(cfgTaskAgentModelOverrides.get(ctx.settings)).toEqual(taskDefaults);
+	});
+
+	it("replaces selection-only with an ordinary session model picker", () => {
+		const { ui, shown } = overlayUi();
+		const model = createMockModel({ provider: "openai", id: "session-target" }).model;
+		const hostModel = createMockModel({ provider: "anthropic", id: "host-model" }).model;
+		const ctx = pickerContext(ui, [model], hostModel);
+		const selected = vi.fn();
+		const controller = new SelectorController(ctx);
+
+		controller.showModelSelector({
+			selectOnly: {
+				currentSelector: `${model.provider}/${model.id}`,
+				onSelect: selected,
+			},
+		});
+		const selectionPicker = shown[0]!;
+		controller.showModelSelector({ temporaryOnly: true });
+		expect(shown).toHaveLength(2);
+		expect(ui.overlayStack).toHaveLength(1);
+
+		selectionPicker.handleInput?.("\r");
+		expect(selected).not.toHaveBeenCalled();
+		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
+		shown[1]?.handleInput?.("\r");
+
+		expect(selected).not.toHaveBeenCalled();
+		expect(ctx.session.setModelTemporary).toHaveBeenCalledWith(model, undefined);
+		expect(ctx.session.model).toBe(hostModel);
+	});
+
+	it("uses only the newest callbacks for repeated selection-only picker requests", () => {
+		const { ui, shown } = overlayUi();
+		const model = createMockModel({ provider: "openai", id: "selection-target" }).model;
+		const selector = `${model.provider}/${model.id}`;
+		const controller = new SelectorController(pickerContext(ui, [model]));
+		const oldSelect = vi.fn();
+		const latestSelect = vi.fn();
+
+		controller.showModelSelector({ selectOnly: { currentSelector: selector, onSelect: oldSelect } });
+		const oldPicker = shown[0]!;
+		controller.showModelSelector({ selectOnly: { currentSelector: selector, onSelect: latestSelect } });
+		expect(ui.overlayStack).toHaveLength(1);
+
+		oldPicker.handleInput?.("\r");
+		expect(oldSelect).not.toHaveBeenCalled();
+		expect(latestSelect).not.toHaveBeenCalled();
+		shown[1]?.handleInput?.("\r");
+		expect(oldSelect).not.toHaveBeenCalled();
+		expect(latestSelect).toHaveBeenCalledWith(selector);
+
+		const oldCancel = vi.fn();
+		const latestCancel = vi.fn();
+		controller.showModelSelector({
+			selectOnly: { currentSelector: selector, onSelect: vi.fn(), onCancel: oldCancel },
+		});
+		const oldCancelPicker = shown[2]!;
+		controller.showModelSelector({
+			selectOnly: { currentSelector: selector, onSelect: vi.fn(), onCancel: latestCancel },
+		});
+		oldCancelPicker.handleInput?.("\x1b");
+		expect(oldCancel).not.toHaveBeenCalled();
+		expect(latestCancel).not.toHaveBeenCalled();
+		shown[3]?.handleInput?.("\x1b");
+		expect(oldCancel).not.toHaveBeenCalled();
+		expect(latestCancel).toHaveBeenCalledTimes(1);
 	});
 
 	it("raises an open model picker another overlay covers instead of focusing it hidden", () => {

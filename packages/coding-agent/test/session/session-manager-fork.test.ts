@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
@@ -159,6 +160,7 @@ describe("SessionManager.forkFrom", () => {
 			id: "source-session",
 			timestamp,
 			cwd,
+			additionalDirectories: [path.join(tempDir.path(), "parent-workspace")],
 		};
 		const inheritedInit = {
 			type: "session_init",
@@ -229,6 +231,8 @@ describe("SessionManager.forkFrom", () => {
 		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
 			suppressBreadcrumb: true,
 			neutralizeInheritedSessionInit: true,
+			strictCopyArtifacts: true,
+			isolateInheritedDirectories: true,
 		});
 		try {
 			const forkFile = forked.getSessionFile();
@@ -238,6 +242,8 @@ describe("SessionManager.forkFrom", () => {
 			);
 			expect(forkHeader).toMatchObject({ type: "session", seanceFork: true, parentSession: "source-session" });
 			expect(await SessionManager.peekSessionInit(forkFile)).toMatchObject({ seanceFork: true, init: null });
+			expect(forked.getAdditionalDirectories()).toEqual([]);
+			expect(forkHeader?.additionalDirectories).toBeUndefined();
 
 			const contextText = JSON.stringify(buildSessionContext(forked.getBranch()).messages);
 			expect(contextText).toContain("DECISION_WITNESS");
@@ -265,6 +271,87 @@ describe("SessionManager.forkFrom", () => {
 			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
 		} finally {
 			await forked.close();
+		}
+	});
+
+	it("snapshots artifacts before copying a current host into its own artifact tree", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-current-source-");
+		const { cwd, sourceFile, sourceArtifactsDir } = await createSessionWithArtifacts(tempDir.path());
+		const sourceText = await fs.readFile(sourceFile, "utf8");
+		const childFile = path.join(sourceArtifactsDir, "seance.jsonl");
+		const forked = await SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
+			sessionFile: childFile,
+			suppressBreadcrumb: true,
+			neutralizeInheritedSessionInit: true,
+			strictCopyArtifacts: true,
+			isolateInheritedDirectories: true,
+		});
+		try {
+			expect(forked.getSessionFile()).toBe(childFile);
+			const childArtifactsDir = childFile.slice(0, -".jsonl".length);
+			expect(await Bun.file(path.join(childArtifactsDir, "1.read.log")).text()).toBe("tool output");
+			expect(await Bun.file(path.join(childArtifactsDir, "nested", "result.txt")).text()).toBe("nested output");
+			expect(await Bun.file(path.join(childArtifactsDir, "seance.jsonl")).exists()).toBe(false);
+			expect(await Bun.file(path.join(childArtifactsDir, "seance", "nested", "result.txt")).exists()).toBe(false);
+			expect(await Bun.file(path.join(sourceArtifactsDir, "1.read.log")).text()).toBe("tool output");
+			expect(await Bun.file(path.join(sourceArtifactsDir, "nested", "result.txt")).text()).toBe("nested output");
+			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
+		} finally {
+			await forked.close();
+		}
+	});
+
+	it("rolls back seance artifact copy failures but keeps ordinary copies best-effort", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-copy-failure-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sourceFile = path.join(tempDir.path(), "sessions", "source.jsonl");
+		const sourceArtifactsDir = sourceFile.slice(0, -".jsonl".length);
+		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+		await Bun.write(
+			sourceFile,
+			`${JSON.stringify({
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: "source-session",
+				timestamp: new Date().toISOString(),
+				cwd,
+			} satisfies SessionHeader)}\n`,
+		);
+		await fs.mkdir(sourceArtifactsDir, { recursive: true });
+		await Bun.write(path.join(sourceArtifactsDir, "source.txt"), "source artifact");
+
+		const copySpy = vi.spyOn(nodeFs.promises, "cp").mockImplementation(async (_source, destination) => {
+			await fs.mkdir(String(destination), { recursive: true });
+			await fs.writeFile(path.join(String(destination), "partial.txt"), "partial artifact copy");
+			throw Object.assign(new Error("simulated artifact-copy failure"), { code: "EIO" });
+		});
+
+		try {
+			const seanceFile = path.join(tempDir.path(), "seance", "consult.jsonl");
+			await fs.mkdir(path.dirname(seanceFile), { recursive: true });
+			const seanceFailure = await SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
+				sessionFile: seanceFile,
+				suppressBreadcrumb: true,
+				neutralizeInheritedSessionInit: true,
+				strictCopyArtifacts: true,
+			}).catch(error => error);
+			expect(seanceFailure).toMatchObject({ code: "EIO" });
+			expect(await Bun.file(seanceFile).exists()).toBe(false);
+			expect(await Bun.file(path.join(seanceFile.slice(0, -".jsonl".length), "partial.txt")).exists()).toBe(false);
+
+			const ordinaryFile = path.join(tempDir.path(), "ordinary", "worker.jsonl");
+			await fs.mkdir(path.dirname(ordinaryFile), { recursive: true });
+			const ordinary = await SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
+				sessionFile: ordinaryFile,
+				suppressBreadcrumb: true,
+			});
+			try {
+				expect(await Bun.file(ordinaryFile).exists()).toBe(true);
+			} finally {
+				await ordinary.close();
+			}
+		} finally {
+			copySpy.mockRestore();
 		}
 	});
 

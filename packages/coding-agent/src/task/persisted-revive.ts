@@ -143,6 +143,7 @@ export function createPersistedSubagentReviverFactory(
 				suppressBreadcrumb: true,
 				throwIfMissing: true,
 			});
+			const sessionCwd = isSeance ? reopened.getCwd() : ctx.session.sessionManager.getCwd();
 			const entries = reopened.getEntries();
 			const init = extractSessionInit(entries);
 			if (!init) {
@@ -197,11 +198,10 @@ export function createPersistedSubagentReviverFactory(
 				: init.modelRole && init.modelRole !== "default"
 					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 					: init.resolvedModel;
-			// Older session files persisted the synthetic xd:// write transport in the
-			// enabled set. A read-only agent definition could never grant full write,
-			// so remove that transport name before replaying tools as explicit grants.
+			// Keep cold seance revival within its fixed tool allowlist, but preserve
+			// whether the original contract granted the hidden structured-result tool.
 			const revivedToolNames = isSeance
-				? ["read", "grep", "glob", "yield"]
+				? ["read", "grep", "glob", "yield"].filter(name => init.tools.includes(name))
 				: init.readOnly === true && init.tools.includes("write")
 					? init.tools.filter(name => name !== "write")
 					: init.tools;
@@ -220,7 +220,7 @@ export function createPersistedSubagentReviverFactory(
 			let session: AgentSession;
 			try {
 				({ session } = await createAgentSession({
-					cwd: ctx.session.sessionManager.getCwd(),
+					cwd: sessionCwd,
 					authStorage: ctx.authStorage,
 					// Revived agents join the root session tree, so their observability
 					// frames ride the same bus the RPC/collab surfaces subscribed to.
@@ -265,7 +265,7 @@ export function createPersistedSubagentReviverFactory(
 					// Ordinary revived agents inherit the current owner's extension policy.
 					extensionRoots: () => ctx.session.effectiveExtensionRoots,
 					preloadedPreparedExtensions: ctx.session.preparedExtensions,
-					...(isSeance ? seanceIsolationOptions() : undefined),
+					...(isSeance ? seanceIsolationOptions(sessionCwd) : undefined),
 					// Old files predate persisted spawns: deny re-spawning rather than let
 					// createAgentSession default to wildcard ("*").
 					spawns: isSeance ? "" : (init.spawns ?? ""),
@@ -322,9 +322,9 @@ export function createPersistedSubagentReviverFactory(
 				structured,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
-				// Anchor artifacts to the revived ref's own dir (its parent's children
-				// dir), not the live root session's, matching the spawn callers (#11563).
-				artifactsDir: isSeance ? sessionFile.slice(0, -".jsonl".length) : path.dirname(sessionFile),
+				// Follow-up answers are published alongside this agent's siblings;
+				// the session's adjacent artifact directory remains private tool storage.
+				artifactsDir: path.dirname(sessionFile),
 			});
 			return session;
 		};

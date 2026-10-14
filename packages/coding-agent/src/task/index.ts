@@ -152,17 +152,52 @@ function isSeanceSpawnable(
 	agents: readonly AgentDefinition[],
 	disabledAgents: readonly string[],
 	parentSpawns: string | boolean | null | undefined,
+	planMode: boolean,
 ): boolean {
 	const policy = resolveSpawnPolicy(parentSpawns);
 	return (
+		!planMode &&
 		policy.enabled &&
 		(policy.allowedAgents === null || policy.allowedAgents.includes(SEANCE_AGENT_NAME)) &&
 		!disabledAgents.includes(SEANCE_AGENT_NAME) &&
 		agents.some(agent => agent.name === SEANCE_AGENT_NAME && agent.source === "bundled")
 	);
 }
-interface TaskDescriptionOptions {
+
+interface TaskAgentAvailability {
 	agents: AgentDefinition[];
+	defaultAgent: string;
+	spawningDisabled: boolean;
+	seanceEnabled: boolean;
+}
+
+function resolveTaskAgentAvailability(args: {
+	agents: readonly AgentDefinition[];
+	disabledAgents: readonly string[];
+	parentSpawns: string | boolean | null | undefined;
+	planMode: boolean;
+}): TaskAgentAvailability {
+	const policy = resolveSpawnPolicy(args.parentSpawns);
+	const allowedAgents = policy.allowedAgents === null ? undefined : new Set(policy.allowedAgents);
+	let agents = policy.enabled
+		? args.agents.filter(
+				agent => !args.disabledAgents.includes(agent.name) && (!allowedAgents || allowedAgents.has(agent.name)),
+			)
+		: [];
+	if (args.planMode) agents = agents.filter(agent => agent.name !== SEANCE_AGENT_NAME);
+	const defaultAgent = args.planMode
+		? (agents.find(agent => agent.name === policy.defaultAgent)?.name ?? agents[0]?.name ?? "")
+		: policy.defaultAgent;
+	return {
+		agents,
+		defaultAgent,
+		spawningDisabled: !policy.enabled || (args.planMode && agents.length === 0),
+		seanceEnabled: isSeanceSpawnable(args.agents, args.disabledAgents, args.parentSpawns, args.planMode),
+	};
+}
+
+interface TaskDescriptionOptions {
+	availability: TaskAgentAvailability;
 	sessionAgents: readonly AgentDefinition[];
 	isolationEnabled: boolean;
 	applyIsolatedChanges: boolean;
@@ -178,18 +213,7 @@ interface TaskDescriptionOptions {
 
 /** Render the tool description from a cached agent list and current settings. */
 function renderDescription(options: TaskDescriptionOptions): string {
-	const spawnPolicy = resolveSpawnPolicy(options.parentSpawns);
-	const spawningDisabled = !spawnPolicy.enabled;
-	const agents = [...options.agents, ...options.sessionAgents];
-	let filteredAgents =
-		options.disabledAgents.length > 0 ? agents.filter(agent => !options.disabledAgents.includes(agent.name)) : agents;
-	if (spawningDisabled) {
-		filteredAgents = [];
-	} else if (spawnPolicy.allowedAgents !== null) {
-		const allowed = new Set(spawnPolicy.allowedAgents);
-		filteredAgents = filteredAgents.filter(agent => allowed.has(agent.name));
-	}
-	const renderedAgents = filteredAgents.map(agent => ({
+	const renderedAgents = options.availability.agents.map(agent => ({
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
@@ -201,8 +225,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
 		scoutAvailable,
-		spawningDisabled,
-		defaultAgent: spawnPolicy.defaultAgent,
+		spawningDisabled: options.availability.spawningDisabled,
+		defaultAgent: options.availability.defaultAgent,
 		isolationEnabled: options.isolationEnabled,
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
@@ -215,7 +239,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasModelMentions: options.sessionAgents.length > 0,
 		ircEnabled: options.ircEnabled,
 		seanceAgentName: SEANCE_AGENT_NAME,
-		seanceEnabled: isSeanceSpawnable(options.agents, options.disabledAgents, options.parentSpawns),
+		seanceEnabled: options.availability.seanceEnabled,
 	});
 }
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
@@ -706,7 +730,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
-			const plan = planSpawns(args, this.#isBatchEnabled(), this.#defaultAgent());
+			const availability = this.#agentAvailability();
+			if (availability.spawningDisabled) return undefined;
+			const plan = planSpawns(args, this.#isBatchEnabled(), availability.defaultAgent);
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
 		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
@@ -739,19 +765,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = !planMode && cfgTaskIsolationEnabled.get(this.session.settings);
+		const availability = this.#agentAvailability();
 		return getTaskSchema({
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
-			defaultAgent: this.#defaultAgent(),
-			seanceEnabled: isSeanceSpawnable(
-				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
-					this.#discoveredAgents,
-				cfgTaskDisabledAgents.get(this.session.settings),
-				this.session.getSessionSpawns(),
-			),
+			defaultAgent: availability.defaultAgent,
+			seanceEnabled: availability.seanceEnabled,
 		});
 	}
 
@@ -771,13 +793,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
 		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
+		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
+		const availability = this.#agentAvailability(sessionAgents);
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
 		return renderDescription({
-			agents:
-				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
-				this.#discoveredAgents,
-			sessionAgents: this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [],
+			availability,
+			sessionAgents,
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
 			disabledAgents,
@@ -820,8 +842,24 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		};
 	}
 
+	#agentAvailability(
+		sessionAgents: readonly AgentDefinition[] = this.session.advertisedSessionAgents?.() ??
+			this.session.getSessionAgents?.() ??
+			[],
+	): TaskAgentAvailability {
+		const agents =
+			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+			this.#discoveredAgents;
+		return resolveTaskAgentAvailability({
+			agents: [...agents, ...sessionAgents],
+			disabledAgents: cfgTaskDisabledAgents.get(this.session.settings),
+			parentSpawns: this.session.getSessionSpawns(),
+			planMode: this.session.getPlanModeState?.()?.enabled === true,
+		});
+	}
+
 	#defaultAgent(): string {
-		return resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		return this.#agentAvailability().defaultAgent;
 	}
 
 	/** Session-retained id allocator; async ids are claimed before job registration. */
@@ -959,6 +997,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
 		const defaultAgent = this.#defaultAgent();
+		if (!defaultAgent) {
+			return createTaskModeError(
+				"Task execution is unavailable in plan mode because no permitted agents are available.",
+			);
+		}
 		const batchEnabled = this.#isBatchEnabled();
 		const plan = planSpawns(rawParams, batchEnabled, defaultAgent);
 		if (typeof plan === "string") {

@@ -402,13 +402,15 @@ Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explici
 
 ## Seance
 
-`/seance [id|path] [--model selector]` opens a source picker when no session is supplied; an id or path selects directly. Each consult forks the selected session JSONL and recursively copies its artifacts, leaving the original unchanged.
+`/seance [id|path] [--model selector]` opens a source picker when no source is supplied; an id or path selects directly. Each consult forks the source JSONL and recursively copies artifacts, leaving the source unchanged.
 
-The source's saved model is used when restorable; `--model selector` overrides it. If the saved model is absent or unavailable, supply an explicit selection.
+Source resolution reads the transcript without opening a writer. For task-spawned consults, an id first searches the caller's artifact tree: a direct child transcript wins over a same-ID deeper copy, and ambiguous copied matches fail. Other IDs resolve in current-scope then global sessions. If the destination is inside the source artifact tree, copying uses a snapshot; a failed copy aborts the consult and removes the incomplete fork.
 
-Consult the inherited source conversation first; it is already in the fork. Use `history://` only to discover/read copied child and grandchild transcripts; NEVER use the source session UUID as an agent ID. An empty listing means no nested histories, not missing source context. Archive is unnecessary, and Eval remains unavailable. Historical children are not revived as unrestricted agents. Existing IRC consults can ask follow-ups against this read-only history.
+The model comes from the source's active branch when restorable; `--model selector` overrides it. If no saved model can be restored, choose one explicitly.
 
-Parking and process restarts revive the consult's own fork with its full persisted prompt and read-only tool contract. Parent extensions and source startup contracts are not activated.
+The consult excludes configured or inherited additional workspace roots, the source workspace tree, inherited agents, extension discovery, and parent startup contracts. It is limited to `read`, `grep`, and `glob`; `task.structured` (default off) adds hidden `yield`, otherwise the final assistant message completes the report. Cold revival preserves this contract. `history://` lists and opens copied child/grandchild transcripts only; use it for nested history, not the source session UUID. An empty listing means no nested histories, not missing source context. Archive is unnecessary, Eval remains unavailable, and historical children are not revived.
+
+Warm or revived IRC follow-ups preserve this completion contract and fork-scoped `history://` lookup/completion. A yielded follow-up republishes canonical `agent://<id>` output; an unstructured follow-up completes with its final assistant message but leaves the existing `<id>.md` intact.
 
 Inherited aggregate source charges are excluded; new consultation turns use existing task/Agent Hub usage tracking.
 

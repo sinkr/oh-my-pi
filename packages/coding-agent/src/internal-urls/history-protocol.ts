@@ -535,7 +535,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
-		const forkOnly = context?.session?.historyScope === "fork";
+		const forkOnly = context?.historyScope === "fork" || context?.session?.historyScope === "fork";
 		const preferredArtifactDir = context?.sessionFile?.slice(0, -".jsonl".length);
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
