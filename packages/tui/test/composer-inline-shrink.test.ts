@@ -364,6 +364,24 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
+	it("with completeScrollback, keeps every row in scrollback while the chrome is expanded", async () => {
+		const h = makeHarness();
+		h.composer.setPreferences({ completeScrollback: true });
+		await h.scheduler.settle(h.terminal);
+		h.widget.rows = 24;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+
+		const indices = h.terminal
+			.getScrollBuffer()
+			.map(row => Bun.stripANSI(row).trimEnd())
+			.filter(row => row.startsWith(TRANSCRIPT_PREFIX))
+			.map(row => Number(row.slice(TRANSCRIPT_PREFIX.length)));
+		expect(indices).toEqual(Array.from({ length: TRANSCRIPT_ROWS }, (_, i) => i));
+
+		h.composer.stop();
+	});
+
 	it("keeps the below-chrome baseline across a height resize while inline chrome is expanded", async () => {
 		const shorter = ROWS - 10;
 		const h = makeHarness();

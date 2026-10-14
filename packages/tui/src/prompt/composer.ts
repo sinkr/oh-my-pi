@@ -37,6 +37,8 @@ export interface ComposerPreferences {
 	readonly showHardwareCursor: boolean;
 	readonly maxInlineImages: number;
 	readonly resizeScrollback: ResizeScrollbackMode;
+	/** Bill retirement at the chrome's current height, so displaced rows reach scrollback instead of being held live. Applied with session preferences; the prepaint composer has no transcript. */
+	readonly completeScrollback?: boolean;
 	readonly imeSafeCursor: boolean;
 	readonly autocompleteMaxVisible: number;
 	readonly spellingTypoDetection: boolean;
@@ -429,7 +431,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const promotedChromeContracted = this.#chromeFloorPromoted && eligibleChrome < (this.#chromeFloor ?? 0);
 		this.#chromeFloor = Math.min(this.#chromeFloor ?? eligibleChrome, eligibleChrome);
 		this.#rebaselineChromeFloor(this.#runActive || transcript.hasActiveBlock(), eligibleChrome);
-		const belowFloor = this.#chromeFloor;
+		const belowFloor = this.#preferences.completeScrollback === true ? after.length : this.#chromeFloor;
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
