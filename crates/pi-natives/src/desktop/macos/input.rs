@@ -3351,6 +3351,93 @@ mod tests {
 	}
 
 	#[test]
+	fn typed_text_reaches_the_target_whole_as_unicode_payloads() {
+		// Control characters, a ZWJ emoji, and a grapheme longer than one
+		// event's 20 UTF-16 units all ride as payloads; none has a key.
+		let text = format!("a\tb\n\u{1b}👨‍👩‍👧‍👦e{}é", "\u{301}".repeat(24));
+		let no_layout = || -> CoreResult<fn(char) -> Option<Keystroke>> {
+			panic!("local text reads no keyboard layout")
+		};
+		let keys = keys_for(&text, None, no_layout).unwrap();
+		let source = source().expect("event source");
+		let mut events = Vec::new();
+		type_keys(
+			&source,
+			&keys,
+			Duration::ZERO,
+			|| Ok(()),
+			|event| {
+				events.push(typed_event(event));
+				Ok(())
+			},
+		)
+		.unwrap();
+		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		let mut typed = String::new();
+		for pair in events.chunks(2) {
+			let [(press_kind, 0, false, false, press), (release_kind, 0, false, false, release)] =
+				pair
+			else {
+				panic!("expected an unmodified key-0 press and release, got {pair:?}");
+			};
+			assert_eq!((*press_kind, *release_kind), (down, up), "{pair:?}");
+			assert_eq!(press, release);
+			assert!(press.encode_utf16().count() <= MAX_EVENT_UNITS, "{press:?}");
+			typed.push_str(press);
+		}
+		assert_eq!(typed, text);
+	}
+
+	#[test]
+	fn remote_text_with_a_keyless_character_types_nothing() {
+		for character in ["é", "😀", "e\u{301}", "\u{1b}", "\u{7f}"] {
+			let text = format!("ab{character}Ba");
+			let error = typed_keys(&text, us_stroke).unwrap_err();
+			assert_eq!(error.code, ErrorCode::InvalidKey, "{text:?}");
+			assert!(error.message.contains(&format!("types {character};")), "{}", error.message);
+			assert!(error.message.contains("nothing was typed"), "{}", error.message);
+		}
+		// Tab, newline and shifted characters have keys: Shift goes down
+		// around the shifted key only.
+		let with_tab = |character| match character {
+			'\t' => Some(Keystroke { code: 48, shift: false, option: false }),
+			character => us_stroke(character),
+		};
+		assert_eq!(bare_transitions(&typed_keys("a\tB\n", with_tab).unwrap()), [
+			(0, true),
+			(0, false),
+			(48, true),
+			(48, false),
+			(56, true),
+			(11, true),
+			(11, false),
+			(56, false),
+			(36, true),
+			(36, false),
+		]);
+	}
+
+	#[test]
+	fn a_chord_with_a_keyless_character_presses_nothing() {
+		let source = source().expect("event source");
+		let mut events = Vec::new();
+		let result = with_held_keys(
+			&source,
+			&[KeyName::Meta, KeyName::Char('é')],
+			KEY_GAP,
+			|event| {
+				events.push(shift_transition(event));
+				Ok(())
+			},
+			|| panic!("a refused chord must not run the hold"),
+		);
+		let error = result.unwrap_err();
+		assert_eq!(error.code, ErrorCode::InvalidKey);
+		assert!(error.message.contains("'é'"), "{}", error.message);
+		assert!(events.is_empty(), "{events:?}");
+	}
+
+	#[test]
 	fn unicode_runs_fit_one_keyboard_event_without_splitting_characters() {
 		let lengths = |text: &str| -> Vec<usize> {
 			unicode_runs(text)
