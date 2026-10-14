@@ -2416,7 +2416,9 @@ export class ModelRegistry {
 					discoveryConfig;
 				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
 				const modelsDev = managerOptions.modelsDev
-					? { ...managerOptions.modelsDev, additiveOnly: true }
+					? managerOptions.dynamicModelsAuthoritative
+						? managerOptions.modelsDev
+						: { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
 				options.push(modelsDev ? { ...managerOptions, modelsDev } : managerOptions);
 			}
