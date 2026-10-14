@@ -6,15 +6,14 @@
 - Entry: `packages/coding-agent/src/task/index.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/task.md`
 - Key collaborators:
-  - `packages/coding-agent/src/task/types.ts` — task schemas and the typed agent policy contract.
+  - `packages/coding-agent/src/task/types.ts` — dynamic schema, agent definitions, output caps.
   - `packages/tui/src/tools/task.ts` — progress/result and tool-details types.
-  - `packages/coding-agent/src/task/structured-subagent.ts` — shared task/eval policy dispatch and execution.
+  - `packages/coding-agent/src/task/structured-subagent.ts` — shared task/eval preflight, model/schema policy, artifact retention, execution.
   - `packages/coding-agent/src/task/isolation-runner.ts` — isolation capture, merge, recovery, and lifecycle ownership.
   - `packages/coding-agent/src/task/eval-tools.ts` — expose parent-kernel tools to a child.
   - `packages/coding-agent/src/task/discovery.ts` — discover project/user/plugin/bundled agents.
   - `packages/coding-agent/src/task/agents.ts` — bundled agent definitions and frontmatter parsing.
-  - `packages/coding-agent/src/task/seance.ts` and `seance-policy.ts` — seance source/model resolution, fork preparation, session restrictions, and restoration.
-  - `packages/coding-agent/src/task/persisted-revive.ts` — generic session-policy restoration dispatch.
+  - `packages/coding-agent/src/task/seance.ts`, `seance-fork.ts`, and `seance-policy.ts` — seance source/model resolution, source fork, session restrictions, and cold-revival contract.
   - `packages/coding-agent/src/slash-commands/seance.ts` — `/seance` command and session-picker adapter.
   - `packages/coding-agent/src/task/executor.ts` — create child sessions, run subagents, collect output, hand finished sessions to the lifecycle manager.
   - `packages/coding-agent/src/registry/agent-lifecycle.ts` — idle-TTL parking and revival of finished subagents.
@@ -25,8 +24,7 @@
   - `packages/coding-agent/src/task/worktree.ts` — isolation backend mapping (`parseIsolationBackend`) and lifecycle (`ensureIsolation`/`cleanupIsolation`), patch capture, branch merge.
   - `packages/coding-agent/src/task/output-manager.ts` — session-scoped `agent://` id allocation.
   - `packages/coding-agent/src/task/name-generator.ts` — default AdjectiveNoun agent ids.
-  - `packages/coding-agent/src/internal-urls/agent-protocol.ts` — resolve `agent://<id>` to saved subagent output.
-  - `packages/coding-agent/src/internal-urls/history-protocol.ts` — resolve `history://<id>` with generic session-scoped visibility.
+  - `packages/coding-agent/src/internal-urls/history-protocol.ts` — resolve `history://<id>` to a concise transcript.
   - `packages/coding-agent/src/tools/index.ts` — tool registration and recursion-depth gating.
   - `packages/coding-agent/src/sdk.ts` — child-session router/tool wiring and per-subagent `AgentOutputManager`.
   - `docs/task-agent-discovery.md` — deeper discovery and precedence notes.
@@ -82,9 +80,9 @@ Settled response (`async.enabled=false`, no job manager, every item's agent `blo
 
 `SingleResult` includes:
 - identity: `index`, `id`, `agent`, `agentSource`, `task`, `description`, optional `assignment` (internal payload names; the wire fields are `name`/`agent`/`task`)
-- status: `exitCode`, optional `error`, optional `aborted`, optional `abortReason`, optional `retryFailure`; abort fields identify an aborted run and report its reason.
+- status: `exitCode`, optional `error`, optional `aborted`, optional `abortReason`, optional `retryFailure`
 - output: `output`, `stderr`, `truncated`, `durationMs`, `tokens`, `requests`, optional `contextTokens`/`contextWindow`, `usage`
-- model: optional `modelOverride`, `modelRole`, `resolvedModel`, `resolvedModelIdentity`, `resolvedThinkingLevel`, `resolvedModelIsFallback`, `resolvedModelRoute`, `advisor`; resolved model fields follow the latest model serving the run.
+- model: optional `modelOverride`, `modelRole`, `resolvedModel`, `resolvedModelIdentity`, `resolvedThinkingLevel`, `resolvedModelIsFallback`, `resolvedModelRoute`, `advisor`
 - structured result: optional `structuredOutput` with schema source/mode, validation status, parsed `data`, and validation `error`
 - artifact metadata: `outputPath?`, `isolated?`, `patchPath?`, `hasRootChanges?`, `branchName?`, `branchBaseSha?`, `nestedPatches?`, `nestedPatchPaths?`, `outputMeta?`
 - extracted tool data: `extractedToolData?` from registered subprocess tool handlers such as `yield`
@@ -110,7 +108,7 @@ Artifacts and side channels:
 5. Each `SpawnRun` calls `#runSpawn` → `runStructuredSubagent(...)`. Shared policy resolution reloads settings and rediscovers agents from disk, so runtime resolution can differ from the create-time description.
 6. It resolves the requested agent, enforces depth/spawn policy and `PI_BLOCKED_AGENT` self-recursion prevention, validates the effective output schema, and applies `before_subagent_spawn` routing/blocking hooks.
 7. Model priority: `task.agentModelOverrides` → agent frontmatter → configured task role/session fallback. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
-8. Plan mode supplies `read`, `grep`, `glob`, `web_search`, and any configured `ast_grep`, replaces the agent's spawn/prewalk controls, and disables LSP/IRC. It hides `seance` from agent choices, omits its `sourceSession`/`model` fields and historical-consult guidance, and rejects explicit seance calls. Eval-defined tools and isolation/apply/merge controls are rejected.
+8. Plan mode supplies `read`, `grep`, `glob`, `web_search`, and any configured `ast_grep`, replaces the agent's spawn/prewalk controls, and disables LSP/IRC. Eval-defined tools and isolation/apply/merge controls are rejected.
 9. If `isolated`, it requires a git repo (`getRepoRoot(...)` / `captureBaseline(...)`), maps `isolation.backend` to a backend-kind hint (`parseIsolationBackend`), and materializes the workspace via the natives PAL (`ensureIsolation` → `isoResolve`/`isoStart`), walking the candidate list when a backend is unavailable.
 10. Artifacts dir comes from the parent session file when available, otherwise a temp dir. When the session is executing an approved plan, the plan reference is handed to the subagent.
 11. Non-isolated spawns call `runSubprocess(...)` with parent cwd. Isolated spawns run in their workspace and capture root/nested patches or a branch. Successful changes apply only when `task.isolation.apply=true`; failed capture/merge paths preserve recovery artifacts. Kept-alive runs transfer workspace cleanup to the lifecycle owner rather than tearing it down at completion.
@@ -206,7 +204,7 @@ Artifacts and side channels:
 
 Use `agent: "seance"` with required `sourceSession`, `task`, and `solutionSpace`; set `model` to override the source's active-branch model. A source with no restorable saved model requires an explicit selection. Plan mode hides the agent, fields, and consult guidance; explicit seance calls are rejected.
 
-Ownership boundary: `task/seance.ts` owns source/model resolution, consult preparation, and the restore contract; `task/seance-policy.ts` owns the seance session restrictions. The task core invokes the generic `AgentTaskPolicy` seam, while `history://` applies the generic `historyScope: "session"` filter.
+Ownership boundary: seance-specific behavior lives in `task/seance.ts` (validation, source/model resolution, restore contract), `task/seance-fork.ts` (source fork and strict artifact copy), and `task/seance-policy.ts` (session restrictions). Core task, executor, and revival code call these directly at the few points that need them; `history://` only sees the `historyScope: "session"` header marker.
 
 The source is read without opening a writer. Task-spawned ID lookup checks the caller's artifact tree first: a direct child transcript wins over same-ID descendants, while ambiguous copied matches fail. Otherwise IDs resolve in current-scope then global sessions. The consult forks the source transcript and copies artifacts; when its destination is inside the source artifact tree, the copy uses a snapshot. Copy failures fail the consult and remove its incomplete fork.
 

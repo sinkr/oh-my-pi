@@ -14,27 +14,20 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { forkSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance-fork";
 import subagentSystemPromptTemplate from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import seanceAssignmentTemplate from "../../src/prompts/system/seance-assignment.md" with { type: "text" };
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type PreparedAgentTaskSession } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { PreparedSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
+import { seanceIsolationOptions } from "@oh-my-pi/pi-coding-agent/task/seance-policy";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, prompt, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
-function preparedSourceSession(sourceFile: string, sourceSessionId: string): PreparedAgentTaskSession {
+function preparedSourceSession(sourceFile: string, sourceSessionId: string): PreparedSeanceSession {
 	return {
 		fork: {
 			sourceFile,
-			options: {
-				resetInheritedCost: true,
-				repairInterruptedTail: true,
-				suppressBreadcrumb: true,
-				neutralizeInheritedSessionInit: true,
-				strictCopyArtifacts: true,
-				isolateInheritedDirectories: true,
-				historyScope: "session",
-				sessionPolicy: "seance",
-			},
 		},
 		promptSuffix: model =>
 			prompt.render(seanceAssignmentTemplate, {
@@ -42,12 +35,6 @@ function preparedSourceSession(sourceFile: string, sourceSessionId: string): Pre
 				model: model ?? "",
 			}),
 	};
-}
-
-function seanceSessionOptions(cwd: string) {
-	const options = getBundledAgent("seance")?.taskPolicy?.session?.options(cwd);
-	if (!options) throw new Error("Expected the bundled seance session policy");
-	return options;
 }
 
 function sourceHeader(id: string, cwd: string, additionalDirectories: string[] = []) {
@@ -147,13 +134,12 @@ describe("seance startup contracts", () => {
 		);
 		const sourceFile = path.join(tempDir.path(), "source.jsonl");
 		const sourceText = await writeSourceSession(sourceFile, cwd, [sourceRoot]);
-		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
-			suppressBreadcrumb: true,
-			neutralizeInheritedSessionInit: true,
-			isolateInheritedDirectories: true,
-			strictCopyArtifacts: true,
-			historyScope: "session",
-			sessionPolicy: "seance",
+		const forkSessionDir = path.join(tempDir.path(), "forks");
+		const forked = await forkSeanceSession({
+			sourceFile,
+			cwd,
+			sessionDir: forkSessionDir,
+			sessionFile: path.join(forkSessionDir, "seance.jsonl"),
 		});
 		expect(forked.getAdditionalDirectories()).toEqual([]);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -179,6 +165,7 @@ describe("seance startup contracts", () => {
 		await Bun.write(extensionPath, extensionSource);
 		let session: AgentSession | undefined;
 		try {
+			const parentCapabilities = { enableIrc: true, enableMCP: true };
 			const created = await createAgentSession({
 				cwd,
 				agentDir: path.join(tempDir.path(), "agent"),
@@ -193,12 +180,8 @@ describe("seance startup contracts", () => {
 				agentName: "seance",
 				toolNames: ["read", "grep", "glob"],
 				requireYieldTool: true,
-				restrictToolNames: true,
-				enableIrc: true,
-				enableMCP: true,
-				enableLsp: false,
-				spawns: "",
-				...seanceSessionOptions(cwd),
+				...parentCapabilities,
+				...seanceIsolationOptions(cwd),
 				preloadedExtensionPaths: [extensionPath],
 			});
 			session = created.session;
@@ -315,13 +298,12 @@ describe("seance startup contracts", () => {
 		);
 		const sourceFile = path.join(tempDir.path(), "source.jsonl");
 		const sourceText = await writeSourceSession(sourceFile, cwd, [sourceRoot]);
-		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
-			suppressBreadcrumb: true,
-			neutralizeInheritedSessionInit: true,
-			isolateInheritedDirectories: true,
-			strictCopyArtifacts: true,
-			historyScope: "session",
-			sessionPolicy: "seance",
+		const forkSessionDir = path.join(tempDir.path(), "forks");
+		const forked = await forkSeanceSession({
+			sourceFile,
+			cwd,
+			sessionDir: forkSessionDir,
+			sessionFile: path.join(forkSessionDir, "seance.jsonl"),
 		});
 		expect(forked.getAdditionalDirectories()).toEqual([]);
 		const sessionFile = forked.getSessionFile();
@@ -377,12 +359,7 @@ describe("seance startup contracts", () => {
 				taskDepth: 1,
 				toolNames: ["read", "grep", "glob"],
 				requireYieldTool: true,
-				restrictToolNames: true,
-				spawns: "",
-				enableLsp: false,
-				enableIrc: false,
-				enableMCP: false,
-				...seanceSessionOptions(cwd),
+				...seanceIsolationOptions(cwd),
 				systemPrompt: defaultPrompt => {
 					defaultPromptBlocks = [...defaultPrompt];
 					return [...defaultPrompt, subagentPrompt, assignmentPrompt];
@@ -467,11 +444,12 @@ describe("seance startup contracts", () => {
 		await fs.mkdir(cwd, { recursive: true });
 		const sourceFile = path.join(tempDir.path(), "source.jsonl");
 		await writeSourceSession(sourceFile, cwd);
-		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
-			suppressBreadcrumb: true,
-			neutralizeInheritedSessionInit: true,
-			historyScope: "session",
-			sessionPolicy: "seance",
+		const forkSessionDir = path.join(tempDir.path(), "forks");
+		const forked = await forkSeanceSession({
+			sourceFile,
+			cwd,
+			sessionDir: forkSessionDir,
+			sessionFile: path.join(forkSessionDir, "seance.jsonl"),
 		});
 		const sessionFile = forked.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted fork");

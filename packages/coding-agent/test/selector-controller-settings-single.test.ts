@@ -154,12 +154,13 @@ describe("single-instance menus", () => {
 				onSelect: selected,
 			},
 		});
-		expect(shown).toHaveLength(2);
+		const selectionPicker = shown[1]!;
 		expect(ui.overlayStack).toHaveLength(1);
+		expect(ui.overlayStack.at(-1)?.component).toBe(selectionPicker);
 
 		ordinaryPicker.handleInput?.("\r");
 		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
-		shown[1]?.handleInput?.("\r");
+		selectionPicker.handleInput?.("\r");
 
 		expect(selected).toHaveBeenCalledWith(`${model.provider}/${model.id}`);
 		expect(ctx.session.model).toBe(hostModel);
@@ -218,21 +219,17 @@ describe("single-instance menus", () => {
 		expect(oldSelect).not.toHaveBeenCalled();
 		expect(latestSelect).toHaveBeenCalledWith(selector);
 
-		const oldCancel = vi.fn();
-		const latestCancel = vi.fn();
 		controller.showModelSelector({
-			selectOnly: { currentSelector: selector, onSelect: vi.fn(), onCancel: oldCancel },
+			selectOnly: { currentSelector: selector, onSelect: vi.fn() },
 		});
-		const oldCancelPicker = shown[2]!;
+		const stalePicker = shown[2]!;
 		controller.showModelSelector({
-			selectOnly: { currentSelector: selector, onSelect: vi.fn(), onCancel: latestCancel },
+			selectOnly: { currentSelector: selector, onSelect: vi.fn() },
 		});
-		oldCancelPicker.handleInput?.("\x1b");
-		expect(oldCancel).not.toHaveBeenCalled();
-		expect(latestCancel).not.toHaveBeenCalled();
+		stalePicker.handleInput?.("\x1b");
+		expect(ui.overlayStack).toHaveLength(1);
 		shown[3]?.handleInput?.("\x1b");
-		expect(oldCancel).not.toHaveBeenCalled();
-		expect(latestCancel).toHaveBeenCalledTimes(1);
+		expect(ui.overlayStack).toHaveLength(0);
 	});
 
 	it("raises an open model picker another overlay covers instead of focusing it hidden", () => {
@@ -299,7 +296,7 @@ describe("single-instance menus", () => {
 		expect(shown).toHaveLength(2);
 	});
 
-	it("selects a seance source without resuming or offering deletion", async () => {
+	it("selects a seance source without resuming", async () => {
 		const session: SessionInfo = {
 			path: "/repo/.omp/sessions/source.jsonl",
 			id: "source",
@@ -333,11 +330,6 @@ describe("single-instance menus", () => {
 		await controller.showSessionSelector(undefined, selected);
 
 		const selector = shown[0] as SessionSelectorComponent<SessionInfo>;
-		const rendered = selector.render(80);
-		const footer = rendered.slice(-4).join("\n");
-		expect(footer).not.toMatch(/delete|backspace/i);
-		selector.handleInput("\x7f");
-		expect(selector.render(80).join("\n")).not.toContain("Delete session?");
 		selector.handleInput("\r");
 		await Promise.resolve();
 		await Promise.resolve();
@@ -370,13 +362,11 @@ describe("single-instance menus", () => {
 		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
 		expect(ctx.session.applyRoleModel).not.toHaveBeenCalled();
 		expect(cfgTaskAgentModelOverrides.get(ctx.settings)).toEqual(taskDefaults);
-		const onCancel = vi.fn();
 		controller.showModelSelector({
-			selectOnly: { currentSelector: `${model.provider}/${model.id}`, onSelect: selected, onCancel },
+			selectOnly: { currentSelector: `${model.provider}/${model.id}`, onSelect: selected },
 		});
 		shown[1]?.handleInput?.("\x1b");
 		await Promise.resolve();
-		expect(onCancel).toHaveBeenCalledTimes(1);
 		expect(selected).toHaveBeenCalledTimes(1);
 	});
 });

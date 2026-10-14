@@ -27,7 +27,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { forkSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance-fork";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -722,11 +722,11 @@ describe("history:// protocol", () => {
 
 			const forkSessionDir = path.join(dir, "local-sessions");
 			const forkFile = path.join(forkSessionDir, `${childId}.jsonl`);
-			const forked = await SessionManager.forkFrom(sourceFile, cwd, forkSessionDir, undefined, {
+			const forked = await forkSeanceSession({
+				sourceFile,
+				cwd,
+				sessionDir: forkSessionDir,
 				sessionFile: forkFile,
-				suppressBreadcrumb: true,
-				neutralizeInheritedSessionInit: true,
-				historyScope: "session",
 			});
 			try {
 				const forkArtifacts = forkFile.slice(0, -6);

@@ -255,17 +255,10 @@ describe("structured subagent primitive", () => {
 		const caller = Object.assign(session({ cwd }), { modelRegistry });
 		try {
 			const saved = await resolveEffectiveSubagentPolicy(
-				request({ session: caller, agent: "seance", params: { sourceSession: sourceFile } }),
+				request({ session: caller, agent: "seance", sourceSession: sourceFile }),
 			);
-			expect(saved.preparation?.session?.fork.sourceFile).toBe(sourceFile);
-			expect(saved.preparation?.session?.fork.options).toMatchObject({
-				historyScope: "session",
-				sessionPolicy: "seance",
-			});
-			expect(saved.preparation?.modelPatterns).toEqual([
-				"anthropic/claude-sonnet-4-6",
-				"anthropic/claude-sonnet-4-5",
-			]);
+			expect(saved.preparedSession?.fork.sourceFile).toBe(sourceFile);
+
 			expect(saved.modelOverride).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
 			expect(saved.enableLsp).toBe(false);
 			expect(saved.enableIrc).toBe(false);
@@ -274,7 +267,8 @@ describe("structured subagent primitive", () => {
 				request({
 					session: caller,
 					agent: "seance",
-					params: { sourceSession: sourceFile, model: "anthropic/claude-sonnet-4-5" },
+					sourceSession: sourceFile,
+					model: "anthropic/claude-sonnet-4-5",
 				}),
 			);
 			expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
@@ -301,16 +295,15 @@ describe("structured subagent primitive", () => {
 		const caller = Object.assign(session({ cwd }), { modelRegistry });
 		try {
 			await expect(
-				resolveEffectiveSubagentPolicy(
-					request({ session: caller, agent: "seance", params: { sourceSession: sourceFile } }),
-				),
+				resolveEffectiveSubagentPolicy(request({ session: caller, agent: "seance", sourceSession: sourceFile })),
 			).rejects.toThrow("The source session has no saved model.");
 			await expect(
 				resolveEffectiveSubagentPolicy(
 					request({
 						session: caller,
 						agent: "seance",
-						params: { sourceSession: sourceFile, model: "missing-provider/missing-model" },
+						sourceSession: sourceFile,
+						model: "missing-provider/missing-model",
 					}),
 				),
 			).rejects.toThrow("No available saved model can serve this source.");

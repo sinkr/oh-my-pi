@@ -1500,11 +1500,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			onExit();
 		};
 		this.#sessionList.onRequestRender = () => this.#onRequestRender?.();
-		if (this.#onDelete) {
-			this.#sessionList.onDeleteRequest = (session: T) => {
-				this.#showDeleteConfirmation(session);
-			};
-		}
+		this.#sessionList.onDeleteRequest = (session: T) => {
+			this.#showDeleteConfirmation(session);
+		};
 		if (this.#loadAllSessions || this.#globalSessions) {
 			this.#sessionList.onToggleScope = () => {
 				void this.#toggleScope();
@@ -1680,11 +1678,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		const scopeHint = this.#scope === "all" ? "current folder" : "all projects";
 		// Keys mirror SessionList#handleInput; cancel is `app.interrupt` (raw Escape when unbound).
 		const cancel = interruptKey();
-		const deleteHint = this.#onDelete ? `${formatKeyHints(["delete", "backspace"])} delete · ` : "";
-		const primaryHint = this.#actionLabel === "Resume" ? "select" : this.#actionLabel.toLowerCase();
 		const hint = theme.fg(
 			"muted",
-			`[${deleteHint}${formatKeyHint("enter")} ${primaryHint} · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
+			`[${formatKeyHints(["delete", "backspace"])} delete · ${formatKeyHint("enter")} select · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
 		);
 		return [row("", width), row(hint, width), row("", width), bottomBorder(width)];
 	}

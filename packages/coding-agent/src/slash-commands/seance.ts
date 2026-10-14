@@ -3,7 +3,7 @@ import { Snowflake } from "@oh-my-pi/pi-utils";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { discoverAgents } from "../task/discovery";
-import { resolveSeanceSource, SEANCE_TASK_POLICY } from "../task/seance";
+import { isBundledSeance, resolveSeanceSource } from "../task/seance";
 import { SEANCE_AGENT_NAME } from "../task/seance-policy";
 import seanceCommandPrompt from "../prompts/system/seance-command.md" with { type: "text" };
 import { parseCommandArgs } from "../utils/command-args";
@@ -108,9 +108,9 @@ async function chooseSeanceModel(
 			ctx.session.effectiveExtensionRoots,
 		);
 		const seanceAgent = agents.find(agent => agent.name === SEANCE_AGENT_NAME);
-		if (!seanceAgent || seanceAgent.source !== "bundled" || seanceAgent.taskPolicy !== SEANCE_TASK_POLICY) {
+		if (!seanceAgent || !isBundledSeance(seanceAgent)) {
 			throw new Error(
-				"The selected `seance` agent does not use the bundled seance task policy. A project or user `seance` definition may be overriding it; remove or rename that definition to use the bundled agent.",
+				"The selected `seance` agent is not the bundled consult agent. A project or user `seance` definition may be overriding it; remove or rename that definition to use the bundled agent.",
 			);
 		}
 		if (model !== undefined) {

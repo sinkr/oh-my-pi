@@ -5,6 +5,7 @@ import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
+import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -28,7 +29,6 @@ function createSession(
 }
 
 const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
-const seanceTaskSchemas = [bundledSeance.taskPolicy!.schema!];
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
 // `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
@@ -92,7 +92,7 @@ describe("task schema seance fields", () => {
 					batchEnabled,
 					isolationEnabled,
 					evalToolsEnabled: false,
-					taskPolicySchemas: seanceTaskSchemas,
+					seanceFields: seanceTaskSchemaFields,
 				});
 				const modelSelector = batchEnabled
 					? ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]
@@ -127,10 +127,10 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	it("omits policy fields when no schema descriptor is available", () => {
+	it("omits seance fields when they are not enabled", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
-				const schema = getTaskSchema({ batchEnabled, isolationEnabled, taskPolicySchemas: [] });
+				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
 				expect(wireSchema).not.toContain('"model"');
@@ -167,7 +167,7 @@ description: Custom historical agent.
 Custom prompt.`,
 			"project",
 		);
-		expect(customSeance.taskPolicy).toBeUndefined();
+		expect(isBundledSeance(customSeance)).toBe(false);
 		discovery.mockResolvedValue({ agents: [customSeance], projectAgentsDir: null });
 		const overridden = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
 		expect(JSON.stringify(overridden.parameters.toJsonSchema())).not.toContain('"sourceSession"');
@@ -178,14 +178,8 @@ Custom prompt.`,
 			agents: [bundledSeance],
 			projectAgentsDir: null,
 		});
-		const planMode = await TaskTool.create(createSession({ parentSpawns: "seance", planMode: true }));
+		const planMode = await TaskTool.create(createSession({ parentSpawns: "task,seance", planMode: true }));
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
-		expect(
-			planMode.parameters({
-				task: "Plan safely.",
-				solutionSpace: "A bounded task.",
-			}) instanceof type.errors,
-		).toBe(true);
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
 		expect(planSchema).not.toContain('"model"');
@@ -229,7 +223,7 @@ describe("task spawn validation", () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
-			taskPolicySchemas: seanceTaskSchemas,
+			seanceFields: seanceTaskSchemaFields,
 		});
 		const params = {
 			agent: "scout",

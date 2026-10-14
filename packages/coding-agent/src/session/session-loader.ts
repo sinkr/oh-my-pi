@@ -171,9 +171,9 @@ export function parseSessionContent(content: string): SessionLoadResult {
 const SESSION_HEADER_READ_LIMIT = 1024 * 1024;
 
 /**
- * The first valid session header in `filePath`, or `undefined` when there is no
- * usable header. Reads at most one record and {@link SESSION_HEADER_READ_LIMIT}
- * bytes.
+ * The session header in `filePath`, or `undefined` when there is no file
+ * there or it does not start with a valid session header. Reads at most one
+ * record and {@link SESSION_HEADER_READ_LIMIT} bytes.
  */
 export async function readSessionHeader(filePath: string): Promise<SessionHeader | undefined> {
 	let header: SessionHeader | undefined;

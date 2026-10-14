@@ -72,11 +72,10 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * EPERM-rewrite backups (`.bak`) are skipped. When the same id appears in
  * multiple dirs, the first hit wins (registry dirs are scanned first; a
  * `preferredDir` from the caller root is scanned before them). Directory
- * listings are prefetched in parallel; ordinary walks remain sequential
- * depth-first. In `onlyPreferred` mode direct files precede descendants, so a
- * current child wins over copied historical same-id descendants.
- * `preserveDuplicates` returns every candidate path per id in scan order for
- * callers that must detect ambiguity.
+ * listings are prefetched in parallel; the walk itself stays a sequential
+ * depth-first pass so first-hit order is unaffected. In `onlyPreferred` mode,
+ * only the supplied directory is scanned, with direct files before descendants.
+ * `preserveDuplicates` retains every candidate path per id for ambiguity checks.
  */
 export function sessionFilesFromDisk(
 	preferredDir: string | undefined,
@@ -113,17 +112,21 @@ export async function sessionFilesFromDisk(
 	};
 	for (const dir of dirs) list(dir, 0);
 
-	const found = new Map<string, string[]>();
+	const found = options?.preserveDuplicates ? new Map<string, string[]>() : new Map<string, string>();
 	const seenDirs = new Set<string>();
 	const recordFile = (dir: string, entry: Dirent): void => {
 		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) return;
 		if (entry.name.startsWith("__advisor")) return;
 		const id = entry.name.slice(0, -".jsonl".length);
-		const candidates = found.get(id);
-		if (candidates) {
-			if (options?.preserveDuplicates) candidates.push(path.join(dir, entry.name));
+		const file = path.join(dir, entry.name);
+		if (options?.preserveDuplicates) {
+			const files = found as Map<string, string[]>;
+			const candidates = files.get(id);
+			if (candidates) candidates.push(file);
+			else files.set(id, [file]);
 		} else {
-			found.set(id, [path.join(dir, entry.name)]);
+			const files = found as Map<string, string>;
+			if (!files.has(id)) files.set(id, file);
 		}
 	};
 	const scan = async (dir: string, depth: number): Promise<void> => {
@@ -132,8 +135,7 @@ export async function sessionFilesFromDisk(
 		const entries = await list(dir, depth);
 		if (!entries) return;
 		if (options?.onlyPreferred) {
-			// In a copied fork tree, a current direct child can share a basename with
-			// a historical descendant. Prefer the direct transcript, not readdir order.
+			// Prefer a direct transcript over a nested same-id copy.
 			for (const entry of entries) recordFile(dir, entry);
 			for (const entry of entries) {
 				if (entry.isDirectory()) await scan(path.join(dir, entry.name), depth + 1);
@@ -149,8 +151,7 @@ export async function sessionFilesFromDisk(
 		}
 	};
 	for (const dir of dirs) await scan(dir, 0);
-	if (options?.preserveDuplicates) return found;
-	return new Map([...found].map(([id, candidates]) => [id, candidates[0]!] as const));
+	return found;
 }
 
 /** Directory entries of `dir`, or null when it is missing or not a directory. */

@@ -17,8 +17,6 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
-import { SEANCE_TASK_POLICY } from "./seance";
-import { SEANCE_AGENT_NAME } from "./seance-policy";
 
 interface AgentFrontmatter {
 	name: string;
@@ -137,14 +135,9 @@ export function loadBundledAgents(): AgentDefinition[] {
 	if (bundledAgentsCache !== null) {
 		return bundledAgentsCache;
 	}
-	bundledAgentsCache = EMBEDDED_AGENT_DEFS.map(def => {
-		const agent = parseAgent(`embedded:${def.fileName}`, buildAgentContent(def), "bundled");
-		return def.fileName === `${SEANCE_AGENT_NAME}.md` &&
-			agent.name === SEANCE_AGENT_NAME &&
-			agent.source === "bundled"
-			? { ...agent, taskPolicy: SEANCE_TASK_POLICY }
-			: agent;
-	});
+	bundledAgentsCache = EMBEDDED_AGENT_DEFS.map(def =>
+		parseAgent(`embedded:${def.fileName}`, buildAgentContent(def), "bundled"),
+	);
 	return bundledAgentsCache;
 }
 

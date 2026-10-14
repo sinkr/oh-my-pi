@@ -116,7 +116,6 @@ export interface ShowStatusOptions {
 export interface SelectOnlyModelSelectorOptions {
 	/** Use the selected `provider/id` for the caller's operation without mutating session defaults. */
 	onSelect: (selector: string) => void | Promise<void>;
-	onCancel?: () => void;
 	/** `provider/id` initially highlighted in the picker. */
 	currentSelector?: string;
 }

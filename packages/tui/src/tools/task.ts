@@ -73,7 +73,7 @@ interface TaskRenderContext {
 	 */
 	nowMs?: number;
 }
-export type TaskRenderOptions = RenderResultOptions & { renderContext?: TaskRenderContext };
+type TaskRenderOptions = RenderResultOptions & { renderContext?: TaskRenderContext };
 
 const MAX_NESTED_TASK_RENDER_DEPTH = 8;
 

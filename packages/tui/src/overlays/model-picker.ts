@@ -159,24 +159,19 @@ export class ModelPickerComponent implements Component {
 		this.#scopedModels = scopedModels;
 		this.#selectOnly = options.selectOnly ?? false;
 		this.#currentSelector = options.currentSelector;
-		this.#currentQuickRoleSelector = this.#selectOnly
-			? undefined
-			: options.currentQuickRole
-				? `@${options.currentQuickRole}`
-				: undefined;
-		this.#taskSelector = this.#selectOnly ? undefined : options.taskSelector;
+		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
+		this.#taskSelector = options.taskSelector;
 		if (!this.#selectOnly && callbacks.onPickTask) {
 			this.#taskModeKey = options.taskModeKeys?.[0];
 			for (const key of options.taskModeKeys ?? []) addKeyAliases(this.#taskMatchKeys, key);
 		}
-		const quickRoles = this.#selectOnly ? [] : (options.quickRoles ?? []);
 		this.#quickRoleItems = this.#buildQuickRoleItems(
-			quickRoles,
-			this.#selectOnly ? [] : (options.quickRoleOrder ?? quickRoles.map(entry => entry.role)),
+			options.quickRoles ?? [],
+			options.quickRoleOrder ?? options.quickRoles?.map(entry => entry.role) ?? [],
 		);
 
 		this.#browser = new ModelBrowser(settings, {
-			currentContextTokens: this.#selectOnly ? undefined : options.currentContextTokens,
+			currentContextTokens: options.currentContextTokens,
 			markOverContext: !this.#selectOnly,
 			emptyText: () =>
 				this.#roleMode

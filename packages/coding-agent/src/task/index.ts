@@ -41,17 +41,11 @@ import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
-import {
-	type AgentDefinition,
-	type AgentTaskPolicy,
-	type AgentTaskSchema,
-	canSpawnAtDepth,
-	getTaskSchema,
-	type TaskToolSchemaInstance,
-} from "./types";
-import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
-import { type AgentProgress, type SingleResult, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import { isScoutSpawnable, type ResolvedSpawnPolicy, resolveSpawnPolicy } from "./spawn-policy";
+import { isBundledSeance, seanceTaskGuidance, seanceTaskSchemaFields, validateSeanceParams } from "./seance";
+import { SEANCE_AGENT_NAME } from "./seance-policy";
+import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
+import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -138,8 +132,7 @@ export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
 export type { AgentDefinition, SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "./types";
-export type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-export type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+export type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 export * from "./result-summary";
 export {
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -148,46 +141,8 @@ export {
 	taskSchema,
 } from "./types";
 
-interface TaskAgentAvailability {
-	agents: AgentDefinition[];
-	defaultAgent: string;
-	spawningDisabled: boolean;
-	taskPolicies: AgentTaskPolicy[];
-	taskSchemas: AgentTaskSchema[];
-	featureGuidance: string[];
-}
-
-function resolveTaskAgentAvailability(args: {
-	agents: readonly AgentDefinition[];
-	disabledAgents: readonly string[];
-	parentSpawns: string | boolean | null | undefined;
-	planMode: boolean;
-}): TaskAgentAvailability {
-	const spawnPolicy = resolveSpawnPolicy(args.parentSpawns);
-	const allowedAgents = spawnPolicy.allowedAgents === null ? undefined : new Set(spawnPolicy.allowedAgents);
-	const permittedAgents = spawnPolicy.enabled
-		? args.agents.filter(
-				agent => !args.disabledAgents.includes(agent.name) && (!allowedAgents || allowedAgents.has(agent.name)),
-			)
-		: [];
-	const agents = permittedAgents.filter(agent => agent.taskPolicy?.available?.({ planMode: args.planMode }) !== false);
-	const defaultAgent = args.planMode
-		? (agents.find(agent => agent.name === spawnPolicy.defaultAgent)?.name ?? agents[0]?.name ?? "")
-		: spawnPolicy.defaultAgent;
-	const taskPolicies = args.agents.flatMap(agent => (agent.taskPolicy ? [agent.taskPolicy] : []));
-	const advertisedPolicies = agents.flatMap(agent => (agent.taskPolicy ? [agent.taskPolicy] : []));
-	return {
-		agents,
-		defaultAgent,
-		spawningDisabled: !spawnPolicy.enabled || (args.planMode && agents.length === 0),
-		taskPolicies,
-		taskSchemas: advertisedPolicies.flatMap(policy => (policy.schema ? [policy.schema] : [])),
-		featureGuidance: advertisedPolicies.flatMap(policy => (policy.schema?.guidance ? [policy.schema.guidance] : [])),
-	};
-}
-
 interface TaskDescriptionOptions {
-	availability: TaskAgentAvailability;
+	agents: AgentDefinition[];
 	sessionAgents: readonly AgentDefinition[];
 	isolationEnabled: boolean;
 	applyIsolatedChanges: boolean;
@@ -198,12 +153,33 @@ interface TaskDescriptionOptions {
 	structured: boolean;
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
+	planMode: boolean;
 	parentSpawns: string;
+}
+
+/** Plan mode hides seance; a `spawns` list led by it defaults to the next permitted agent. */
+function defaultAgentFor(spawnPolicy: ResolvedSpawnPolicy, planMode: boolean): string {
+	if (!planMode || spawnPolicy.defaultAgent !== SEANCE_AGENT_NAME) return spawnPolicy.defaultAgent;
+	return spawnPolicy.allowedAgents?.find(agent => agent !== SEANCE_AGENT_NAME) ?? spawnPolicy.defaultAgent;
 }
 
 /** Render the tool description from a cached agent list and current settings. */
 function renderDescription(options: TaskDescriptionOptions): string {
-	const renderedAgents = options.availability.agents.map(agent => ({
+	const spawnPolicy = resolveSpawnPolicy(options.parentSpawns);
+	const spawningDisabled = !spawnPolicy.enabled;
+	const agents = [...options.agents, ...options.sessionAgents];
+	let filteredAgents =
+		options.disabledAgents.length > 0 ? agents.filter(agent => !options.disabledAgents.includes(agent.name)) : agents;
+	if (spawningDisabled) {
+		filteredAgents = [];
+	} else if (spawnPolicy.allowedAgents !== null) {
+		const allowed = new Set(spawnPolicy.allowedAgents);
+		filteredAgents = filteredAgents.filter(agent => allowed.has(agent.name));
+	}
+	if (options.planMode) {
+		filteredAgents = filteredAgents.filter(agent => !isBundledSeance(agent));
+	}
+	const renderedAgents = filteredAgents.map(agent => ({
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
@@ -211,12 +187,13 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		// Marked only while `task.structured` is off; with it on, every agent's result is structured.
 		structured: !options.structured && agent.structured === true,
 	}));
+	const seanceAgent = filteredAgents.find(agent => agent.name === SEANCE_AGENT_NAME);
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
 		scoutAvailable,
-		spawningDisabled: options.availability.spawningDisabled,
-		defaultAgent: options.availability.defaultAgent,
+		spawningDisabled,
+		defaultAgent: defaultAgentFor(spawnPolicy, options.planMode),
 		isolationEnabled: options.isolationEnabled,
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
@@ -227,7 +204,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasStructuredAgents: renderedAgents.some(agent => agent.structured),
 		hasModelMentions: options.sessionAgents.length > 0,
-		featureGuidance: options.availability.featureGuidance.join("\n"),
+		seanceGuidance: seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance : "",
 		ircEnabled: options.ircEnabled,
 	});
 }
@@ -289,8 +266,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
 				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
 			}
-			const label = `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
-			const effortError = validateEffort(item.effort, label);
+			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 			if (effortError) return effortError;
 		}
 		const seen = new Map<string, string>();
@@ -327,9 +303,15 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-	const item = { ...params } as TaskItem & { context?: string; tasks?: TaskItem[] };
-	delete item.context;
-	delete item.tasks;
+	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+	if ("solutionSpace" in params) item.solutionSpace = params.solutionSpace;
+	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
+	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
+	if ("tools" in params) item.tools = params.tools;
+	if ("effort" in params) item.effort = params.effort;
+	if ("isolated" in params) item.isolated = params.isolated;
+	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
+	if ("model" in params) item.model = params.model;
 	return [item];
 }
 
@@ -343,13 +325,22 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  * `isolated` (batch form) wins over the top-level flag (flat form).
  */
 function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string): TaskParams {
-	const spawn: TaskParams = { ...item, agent: item.agent?.trim() || defaultAgent };
-	delete spawn.tasks;
-	delete spawn.context;
-	delete spawn.isolated;
-	if (item.isolated !== undefined) spawn.isolated = item.isolated;
-	else if ("isolated" in params) spawn.isolated = params.isolated;
+	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
+	if (item.name !== undefined) spawn.name = item.name;
+	if (item.task !== undefined) spawn.task = item.task;
+	if (item.solutionSpace !== undefined) spawn.solutionSpace = item.solutionSpace;
 	if (params.context !== undefined) spawn.context = params.context;
+	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
+	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
+	if ("tools" in item) spawn.tools = item.tools;
+	if ("effort" in item) spawn.effort = item.effort;
+	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
+	if ("model" in item) spawn.model = item.model;
+	if (item.isolated !== undefined) {
+		spawn.isolated = item.isolated;
+	} else if ("isolated" in params) {
+		spawn.isolated = params.isolated;
+	}
 	return spawn;
 }
 
@@ -365,21 +356,12 @@ interface SpawnPlan {
  * validation error the call reports instead when the shape is rejected. Shared
  * by dispatch and the speculative launcher so both derive identical spawns.
  */
-function planSpawns(
-	rawParams: unknown,
-	batchEnabled: boolean,
-	defaultAgent: string,
-	taskPolicies: readonly AgentTaskPolicy[],
-): SpawnPlan | string {
-	const params = repairTaskParams(rawParams as TaskParams) as TaskParams;
-	let error = validateShapeParams(batchEnabled, params);
-	error ??= validateSpawnParams(params, batchEnabled);
-	if (!error) {
-		for (const policy of taskPolicies) {
-			error = policy.validate?.({ params, batchEnabled, defaultAgent });
-			if (error) break;
-		}
-	}
+function planSpawns(rawParams: unknown, batchEnabled: boolean, defaultAgent: string): SpawnPlan | string {
+	const params = repairTaskParams(rawParams as TaskParams);
+	const error =
+		validateShapeParams(batchEnabled, params) ??
+		validateSpawnParams(params, batchEnabled) ??
+		validateSeanceParams({ params, batchEnabled, defaultAgent });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
 	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
@@ -679,9 +661,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
-			const availability = this.#agentAvailability();
-			if (availability.spawningDisabled) return undefined;
-			const plan = planSpawns(args, this.#isBatchEnabled(), availability.defaultAgent, availability.taskPolicies);
+			const plan = planSpawns(args, this.#isBatchEnabled(), this.#defaultAgent());
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
 		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
@@ -714,15 +694,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = !planMode && cfgTaskIsolationEnabled.get(this.session.settings);
-		const availability = this.#agentAvailability();
 		return getTaskSchema({
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
-			defaultAgent: availability.defaultAgent,
-			taskPolicySchemas: availability.taskSchemas,
+			defaultAgent: this.#defaultAgent(),
+			seanceFields: this.#seanceSchemaFields(),
 		});
 	}
 
@@ -738,16 +717,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			waitTool: hasWaitTool(this.session),
 		});
 	}
-
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
 		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
+		const agents =
+			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+			this.#discoveredAgents;
 		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
-		const availability = this.#agentAvailability(sessionAgents);
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
 		return renderDescription({
-			availability,
+			agents,
 			sessionAgents,
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
@@ -758,6 +738,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			structured: this.#isStructured(),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			planMode,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
 	}
@@ -791,24 +772,31 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		};
 	}
 
-	#agentAvailability(
-		sessionAgents: readonly AgentDefinition[] = this.session.advertisedSessionAgents?.() ??
-			this.session.getSessionAgents?.() ??
-			[],
-	): TaskAgentAvailability {
+	#seanceSchemaFields() {
+		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
+		const planMode = this.session.getPlanModeState?.()?.enabled === true;
+		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
+		if (
+			planMode ||
+			!spawnPolicy.enabled ||
+			disabledAgents.includes(SEANCE_AGENT_NAME) ||
+			(spawnPolicy.allowedAgents !== null && !spawnPolicy.allowedAgents.includes(SEANCE_AGENT_NAME))
+		) {
+			return undefined;
+		}
 		const agents =
 			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 			this.#discoveredAgents;
-		return resolveTaskAgentAvailability({
-			agents: [...agents, ...sessionAgents],
-			disabledAgents: cfgTaskDisabledAgents.get(this.session.settings),
-			parentSpawns: this.session.getSessionSpawns(),
-			planMode: this.session.getPlanModeState?.()?.enabled === true,
-		});
+		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
+		const seanceAgent = [...agents, ...sessionAgents].find(agent => agent.name === SEANCE_AGENT_NAME);
+		return seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskSchemaFields : undefined;
 	}
 
 	#defaultAgent(): string {
-		return this.#agentAvailability().defaultAgent;
+		return defaultAgentFor(
+			resolveSpawnPolicy(this.session.getSessionSpawns()),
+			this.session.getPlanModeState?.()?.enabled === true,
+		);
 	}
 
 	/** Session-retained id allocator; async ids are claimed before job registration. */
@@ -899,7 +887,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			assignment: (params.task ?? "").trim(),
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
-			params,
+			sourceSession: params.sourceSession,
+			model: params.model,
 			...this.#resultParams(params),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
@@ -944,15 +933,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
-		const availability = this.#agentAvailability();
-		const defaultAgent = availability.defaultAgent;
-		if (!defaultAgent) {
-			return createTaskModeError(
-				"Task execution is unavailable in plan mode because no permitted agents are available.",
-			);
-		}
+		const defaultAgent = this.#defaultAgent();
 		const batchEnabled = this.#isBatchEnabled();
-		const plan = planSpawns(rawParams, batchEnabled, defaultAgent, availability.taskPolicies);
+		const plan = planSpawns(rawParams, batchEnabled, defaultAgent);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
 		}
@@ -1717,7 +1700,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context,
 				agent: params.agent,
-				params,
+				sourceSession: params.sourceSession,
+				model: params.model,
 				...this.#resultParams(params),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
 				solutionSpace: params.solutionSpace,
@@ -1735,8 +1719,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index: spawnIndex,
 				parentToolCallId: toolCallId,
 				detached,
-				// Detached jobs outlive this call; prepared sessions derive retention
-				// from their policy contract inside structured execution.
+				// Detached (async) spawns advertise `agent://<id>` handles in the
+				// eventual async-result delivery, which can land well after this
+				// call returns. Without this, a temporary (in-memory session)
+				// artifacts directory is deleted immediately on completion and the
+				// advertised URL 404s by the time delivery happens.
 				retainArtifacts: detached,
 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
 				invokedAt: launchTiming?.invokedAt,

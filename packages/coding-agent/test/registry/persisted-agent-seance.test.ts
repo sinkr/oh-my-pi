@@ -5,6 +5,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { forkSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance-fork";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function persistedChild(id: string, cwd: string, agent = "task", restrictToolNames = false): string {
@@ -65,12 +66,11 @@ describe("persisted seance descendants", () => {
 		await Bun.write(path.join(sourceArtifacts, childId, `${grandchildId}.jsonl`), persistedChild(grandchildId, cwd));
 
 		const forkFile = path.join(tempDir.path(), "local", "Seance.jsonl");
-		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.dirname(forkFile), undefined, {
+		const forked = await forkSeanceSession({
+			sourceFile,
+			cwd,
+			sessionDir: path.dirname(forkFile),
 			sessionFile: forkFile,
-			suppressBreadcrumb: true,
-			neutralizeInheritedSessionInit: true,
-			historyScope: "session",
-			sessionPolicy: "seance",
 		});
 		await forked.close();
 

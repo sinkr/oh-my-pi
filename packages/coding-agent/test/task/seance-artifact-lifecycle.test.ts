@@ -16,27 +16,18 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type PreparedAgentTaskSession } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { PreparedSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const MOCK_API_SOURCE = "seance-artifact-lifecycle-test";
 const AGENT_ID = "SeanceArtifactLifecycle";
 const UNSTRUCTURED_AGENT_ID = "SeanceUnstructuredLifecycle";
-function preparedSession(sourceFile: string, sourceSessionId: string): PreparedAgentTaskSession {
+function preparedSession(sourceFile: string, sourceSessionId: string): PreparedSeanceSession {
 	return {
 		fork: {
 			sourceFile,
-			options: {
-				resetInheritedCost: true,
-				repairInterruptedTail: true,
-				suppressBreadcrumb: true,
-				neutralizeInheritedSessionInit: true,
-				strictCopyArtifacts: true,
-				isolateInheritedDirectories: true,
-				historyScope: "session",
-				sessionPolicy: "seance",
-			},
 		},
 		promptSuffix: model => `Consulting ${sourceSessionId} with ${model ?? "the saved model"}.`,
 	};

@@ -21,6 +21,7 @@ import {
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { forkSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance-fork";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { isTaskToolDetails, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
@@ -228,13 +229,11 @@ describe("SessionManager.forkFrom", () => {
 		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
 		await Bun.write(sourceFile, sourceText);
 
-		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
-			suppressBreadcrumb: true,
-			neutralizeInheritedSessionInit: true,
-			historyScope: "session",
-			sessionPolicy: "seance",
-			strictCopyArtifacts: true,
-			isolateInheritedDirectories: true,
+		const forked = await forkSeanceSession({
+			sourceFile,
+			cwd,
+			sessionDir: path.join(tempDir.path(), "forks"),
+			sessionFile: path.join(tempDir.path(), "forks", "seance.jsonl"),
 		});
 		try {
 			const forkFile = forked.getSessionFile();
@@ -291,20 +290,16 @@ describe("SessionManager.forkFrom", () => {
 		const { cwd, sourceFile, sourceArtifactsDir } = await createSessionWithArtifacts(tempDir.path());
 		const sourceText = await fs.readFile(sourceFile, "utf8");
 		const childFile = path.join(sourceArtifactsDir, "seance.jsonl");
-		const forked = await SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
-			sessionFile: childFile,
-			suppressBreadcrumb: true,
-			neutralizeInheritedSessionInit: true,
-			strictCopyArtifacts: true,
-			isolateInheritedDirectories: true,
-		});
+		const forked = await forkSeanceSession({ sourceFile, cwd, sessionFile: childFile });
 		try {
 			expect(forked.getSessionFile()).toBe(childFile);
 			const copiedHeader = (await loadEntriesFromFile(childFile)).find(
 				(entry): entry is SessionHeader => entry.type === "session",
 			);
-			expect(copiedHeader).not.toHaveProperty("historyScope");
-			expect(copiedHeader).not.toHaveProperty("sessionPolicy");
+			expect(copiedHeader).toMatchObject({
+				historyScope: "session",
+				sessionPolicy: "seance",
+			});
 			const childArtifactsDir = childFile.slice(0, -".jsonl".length);
 			expect(await Bun.file(path.join(childArtifactsDir, "1.read.log")).text()).toBe("tool output");
 			expect(await Bun.file(path.join(childArtifactsDir, "nested", "result.txt")).text()).toBe("nested output");
@@ -346,12 +341,9 @@ describe("SessionManager.forkFrom", () => {
 		try {
 			const seanceFile = path.join(tempDir.path(), "seance", "consult.jsonl");
 			await fs.mkdir(path.dirname(seanceFile), { recursive: true });
-			const seanceFailure = await SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
-				sessionFile: seanceFile,
-				suppressBreadcrumb: true,
-				neutralizeInheritedSessionInit: true,
-				strictCopyArtifacts: true,
-			}).catch(error => error);
+			const seanceFailure = await forkSeanceSession({ sourceFile, cwd, sessionFile: seanceFile }).catch(
+				error => error,
+			);
 			expect(seanceFailure).toMatchObject({ code: "EIO" });
 			expect(await Bun.file(seanceFile).exists()).toBe(false);
 			expect(await Bun.file(path.join(seanceFile.slice(0, -".jsonl".length), "partial.txt")).exists()).toBe(false);
