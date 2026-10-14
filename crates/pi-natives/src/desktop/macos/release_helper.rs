@@ -24,7 +24,10 @@ use std::{
 	io::{Read, Write},
 	os::{fd::FromRawFd, unix::net::UnixStream},
 	process, ptr,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicPtr, Ordering},
+	},
 	thread,
 };
 
@@ -90,6 +93,7 @@ unsafe extern "C" {
 	static kCFRunLoopDefaultMode: Ref;
 	fn CFDataCreate(allocator: Ref, bytes: *const u8, length: isize) -> Ref;
 	fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: isize) -> Ref;
+	fn CFMachPortInvalidate(port: Ref);
 	fn CFRunLoopSourceCreate(allocator: Ref, order: isize, context: *mut SourceContext) -> Ref;
 	fn CFRunLoopSourceSignal(source: Ref);
 	fn CFRunLoopGetCurrent() -> Ref;
@@ -132,6 +136,25 @@ struct SourceContext {
 struct Tap {
 	observation: Arc<Observation>,
 	port:        Ref,
+}
+
+/// The tap's port once `observe` created it, so the helper can invalidate it
+/// before it exits: when a process dies with a listen-only tap still valid
+/// while the user types, `WindowServer` delivers the key the tap was routing
+/// to the user's app again.
+static PORT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+
+/// Invalidates the tap, if any, when `main` returns.
+struct ClosesTap;
+
+impl Drop for ClosesTap {
+	fn drop(&mut self) {
+		let port = PORT.swap(ptr::null_mut(), Ordering::AcqRel);
+		if !port.is_null() {
+			// SAFETY: the port is never released; invalidating is thread-safe.
+			unsafe { CFMachPortInvalidate(port) };
+		}
+	}
 }
 
 /// The observer thread's run loop, applying the tap's transitions.
@@ -188,6 +211,7 @@ fn main() {
 	// SAFETY: the addon passes its end of a socket pair as standard input,
 	// which nothing else in this process owns.
 	let mut stream = unsafe { UnixStream::from_raw_fd(0) };
+	let _tap = ClosesTap;
 	let observation = Arc::new(Observation::default());
 	let ready = stream.try_clone().ok();
 	let open = read_open(&mut stream, || {
@@ -334,6 +358,7 @@ fn observe(observation: &Arc<Observation>, mut ready: UnixStream) {
 	// SAFETY: `context` is live and only this thread writes it before the run
 	// loop starts.
 	unsafe { (*context).port = port };
+	PORT.store(port, Ordering::Release);
 	// SAFETY: `port` is a live tap; the sources and run loop stay alive while
 	// the run loop runs, which is until the process exits. The stop source's
 	// context is copied at creation.
