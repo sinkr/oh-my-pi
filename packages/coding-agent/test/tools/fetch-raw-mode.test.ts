@@ -183,3 +183,34 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 		expect(loadSpy).toHaveBeenCalledWith("https://example.com/file.txt", expect.anything());
 	});
 });
+
+describe("read URL beyond the inline preview (regression: tail past 500,000 chars was discarded)", () => {
+	let testDir: string;
+	beforeEach(() => {
+		testDir = path.join(os.tmpdir(), `fetch-large-body-${Snowflake.next()}`);
+		fs.mkdirSync(testDir, { recursive: true });
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		removeSyncWithRetries(testDir);
+	});
+
+	it("keeps the full response body reachable through tail selectors and the full-output artifact", async () => {
+		const session = makeSession(testDir);
+		const tool = new ReadTool(session);
+		const marker = "COMPLETE_TAIL_MARKER";
+		const lines = Array.from({ length: 12_000 }, (_, i) => `+line-${i + 1} ${"x".repeat(80)}`);
+		stubLoadPage(`${lines.join("\n")}\n${marker}\n`, "text/plain");
+
+		const preview = await tool.execute("preview", { path: "https://example.com/big.diff" });
+		const artifactId = preview.details?.meta?.truncation?.artifactId;
+		expect(artifactId).toBeDefined();
+		const artifact = fs.readdirSync(path.join(testDir, "session")).find(file => file.startsWith(`${artifactId}.`));
+		expect(fs.readFileSync(path.join(testDir, "session", artifact ?? ""), "utf8")).toEndWith(marker);
+
+		const tail = await tool.execute("tail", { path: "https://example.com/big.diff:-2" });
+		const tailText = tail.content.find(c => c.type === "text")?.text ?? "";
+		expect(tailText).toContain("+line-12000");
+		expect(tailText).toContain(marker);
+	});
+});

@@ -23,7 +23,7 @@ import { decodeBody } from "../web/response-body";
 import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
-import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
+import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES } from "../web/scrapers/types";
 import { type BinaryFetchResult, convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
@@ -850,15 +850,14 @@ function buildBinaryPayloadResult(
 	fetchedAt: string,
 	notes: string[],
 ): FetchRenderResult {
-	const output = finalizeOutput(content);
 	return {
 		url,
 		finalUrl,
 		contentType: binaryContentType(mime),
 		method,
-		content: output.content,
+		content: finalizeOutput(content),
 		fetchedAt,
-		truncated: output.truncated,
+		truncated: false,
 		notes,
 	};
 }
@@ -1174,7 +1173,8 @@ async function renderUrl(
 
 	const { finalUrl } = response;
 	let rawContent = response.content;
-	if (response.truncated) {
+	const truncated = Boolean(response.truncated);
+	if (truncated) {
 		notes.push(`Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`);
 	}
 	const mime = normalizeMime(response.contentType);
@@ -1206,9 +1206,9 @@ async function renderUrl(
 						finalUrl,
 						contentType: imageMimeType,
 						method: "image-too-large",
-						content: output.content,
+						content: output,
 						fetchedAt,
-						truncated: output.truncated,
+						truncated,
 						notes,
 					};
 				}
@@ -1229,9 +1229,9 @@ async function renderUrl(
 						finalUrl,
 						contentType: imageMimeType,
 						method: "image-invalid",
-						content: output.content,
+						content: output,
 						fetchedAt,
-						truncated: output.truncated,
+						truncated,
 						notes,
 					};
 				}
@@ -1247,9 +1247,9 @@ async function renderUrl(
 						finalUrl,
 						contentType: imageMimeType,
 						method: "image-too-large",
-						content: output.content,
+						content: output,
 						fetchedAt,
-						truncated: output.truncated,
+						truncated,
 						notes,
 					};
 				}
@@ -1265,9 +1265,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: resized.mimeType,
 					method: "image",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated,
 					notes,
 					image: {
 						data: resized.data,
@@ -1298,9 +1298,9 @@ async function renderUrl(
 						finalUrl,
 						contentType: mime,
 						method: "markit",
-						content: output.content,
+						content: output,
 						fetchedAt,
-						truncated: output.truncated,
+						truncated,
 						notes,
 					};
 				}
@@ -1353,9 +1353,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: "raw",
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1366,9 +1366,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: "json",
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1381,9 +1381,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: "feed",
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1395,9 +1395,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: "text",
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1418,9 +1418,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: "text/markdown",
 					method: "alternate-markdown",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated,
 					notes,
 				};
 			}
@@ -1436,9 +1436,9 @@ async function renderUrl(
 				finalUrl,
 				contentType: "text/markdown",
 				method: "md-suffix",
-				content: output.content,
+				content: output,
 				fetchedAt,
-				truncated: output.truncated,
+				truncated,
 				notes,
 			};
 		}
@@ -1453,9 +1453,9 @@ async function renderUrl(
 				finalUrl,
 				contentType: normalizeMime(negotiated.type),
 				method: "content-negotiation",
-				content: output.content,
+				content: output,
 				fetchedAt,
-				truncated: output.truncated,
+				truncated,
 				notes,
 			};
 		}
@@ -1474,9 +1474,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: "application/feed",
 					method: "alternate-feed",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated,
 					notes,
 				};
 			}
@@ -1509,9 +1509,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: "text/plain",
 					method: "llms.txt",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated,
 					notes,
 				};
 			}
@@ -1522,9 +1522,9 @@ async function renderUrl(
 				finalUrl,
 				contentType: mime,
 				method: "raw-html",
-				content: output.content,
+				content: output,
 				fetchedAt,
-				truncated: output.truncated,
+				truncated,
 				notes,
 			};
 		}
@@ -1546,9 +1546,9 @@ async function renderUrl(
 							finalUrl,
 							contentType: "application/document",
 							method: "extracted-document",
-							content: output.content,
+							content: output,
 							fetchedAt,
-							truncated: output.truncated,
+							truncated,
 							notes,
 						};
 					}
@@ -1569,9 +1569,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: "text/plain",
 					method: "llms.txt",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated,
 					notes,
 				};
 			}
@@ -1585,9 +1585,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: htmlResult.method,
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1599,9 +1599,9 @@ async function renderUrl(
 		finalUrl,
 		contentType: mime,
 		method: "raw",
-		content: output.content,
+		content: output,
 		fetchedAt,
-		truncated: output.truncated,
+		truncated,
 		notes,
 	};
 }
@@ -1777,17 +1777,6 @@ export async function executeReadUrl(
 	const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(details.finalUrl);
 	if (needsArtifact) {
 		resultBuilder.truncation(truncation, { direction: "head", artifactId: entry.artifactId });
-	} else if (entry.details.truncated) {
-		const outputLines = entry.output.split("\n").length;
-		const outputBytes = Buffer.byteLength(entry.output, "utf-8");
-		const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
-		const totalLines = outputLines + 1;
-		resultBuilder.truncationFromText(entry.output, {
-			direction: "tail",
-			totalLines,
-			totalBytes,
-			maxBytes: MAX_OUTPUT_CHARS,
-		});
 	}
 
 	return resultBuilder.done();
