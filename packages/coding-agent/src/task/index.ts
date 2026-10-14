@@ -356,12 +356,18 @@ interface SpawnPlan {
  * validation error the call reports instead when the shape is rejected. Shared
  * by dispatch and the speculative launcher so both derive identical spawns.
  */
-function planSpawns(rawParams: unknown, batchEnabled: boolean, defaultAgent: string): SpawnPlan | string {
+function planSpawns(
+	rawParams: unknown,
+	batchEnabled: boolean,
+	defaultAgent: string,
+	seanceAdvertised: boolean,
+): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
 		validateSpawnParams(params, batchEnabled) ??
-		validateSeanceParams({ params, batchEnabled, defaultAgent });
+		// A custom `seance` shadow is an ordinary agent; runtime rejects hidden bundled seance calls.
+		(seanceAdvertised ? validateSeanceParams({ params, batchEnabled, defaultAgent }) : undefined);
 	if (error) return error;
 	const items = resolveSpawnItems(params);
 	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
@@ -661,7 +667,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
-			const plan = planSpawns(args, this.#isBatchEnabled(), this.#defaultAgent());
+			const plan = planSpawns(
+				args,
+				this.#isBatchEnabled(),
+				this.#defaultAgent(),
+				this.#seanceSchemaFields() !== undefined,
+			);
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
 		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
@@ -935,7 +946,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// item's agent type against the session's actual default agent.
 		const defaultAgent = this.#defaultAgent();
 		const batchEnabled = this.#isBatchEnabled();
-		const plan = planSpawns(rawParams, batchEnabled, defaultAgent);
+		const plan = planSpawns(rawParams, batchEnabled, defaultAgent, this.#seanceSchemaFields() !== undefined);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
 		}

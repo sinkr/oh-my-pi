@@ -24,6 +24,7 @@
   - `packages/coding-agent/src/task/worktree.ts` — isolation backend mapping (`parseIsolationBackend`) and lifecycle (`ensureIsolation`/`cleanupIsolation`), patch capture, branch merge.
   - `packages/coding-agent/src/task/output-manager.ts` — session-scoped `agent://` id allocation.
   - `packages/coding-agent/src/task/name-generator.ts` — default AdjectiveNoun agent ids.
+  - `packages/coding-agent/src/internal-urls/agent-protocol.ts` — resolve `agent://<id>` to saved subagent output.
   - `packages/coding-agent/src/internal-urls/history-protocol.ts` — resolve `history://<id>` to a concise transcript.
   - `packages/coding-agent/src/tools/index.ts` — tool registration and recursion-depth gating.
   - `packages/coding-agent/src/sdk.ts` — child-session router/tool wiring and per-subagent `AgentOutputManager`.
