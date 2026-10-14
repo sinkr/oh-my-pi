@@ -246,7 +246,16 @@ export async function htmlToBasicMarkdown(html: string): Promise<string> {
  */
 export function buildResult(
 	md: string,
-	opts: { url: string; finalUrl?: string; method: string; fetchedAt: string; notes?: string[]; contentType?: string },
+	opts: {
+		url: string;
+		finalUrl?: string;
+		method: string;
+		fetchedAt: string;
+		notes?: string[];
+		contentType?: string;
+		/** Pass the source `LoadPageResult.truncated` when `md` embeds a fetched body verbatim. */
+		truncated?: boolean;
+	},
 ): RenderResult {
 	return {
 		url: opts.url,
@@ -255,7 +264,7 @@ export function buildResult(
 		method: opts.method,
 		content: finalizeOutput(md),
 		fetchedAt: opts.fetchedAt,
-		truncated: false,
+		truncated: opts.truncated ?? false,
 		notes: opts.notes ?? [],
 	};
 }

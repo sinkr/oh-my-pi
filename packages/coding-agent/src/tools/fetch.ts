@@ -251,7 +251,11 @@ function isInlineImageMimeTypeSupported(mimeType: string): boolean {
 /**
  * Try fetching URL with .md appended (llms.txt convention)
  */
-async function tryMdSuffix(url: string, timeout: number, signal?: AbortSignal): Promise<string | null> {
+async function tryMdSuffix(
+	url: string,
+	timeout: number,
+	signal?: AbortSignal,
+): Promise<{ content: string; truncated: boolean } | null> {
 	const candidates: string[] = [];
 
 	try {
@@ -282,7 +286,7 @@ async function tryMdSuffix(url: string, timeout: number, signal?: AbortSignal): 
 		}
 		const result = await loadPage(candidate, { timeout, signal });
 		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return result.content;
+			return { content: result.content, truncated: Boolean(result.truncated) };
 		}
 	}
 
@@ -296,7 +300,7 @@ async function tryLlmEndpoints(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; endpoint: string } | null> {
+): Promise<{ content: string; endpoint: string; truncated: boolean } | null> {
 	const endpoints = buildLlmEndpointCandidates(url);
 
 	if (signal?.aborted || endpoints.length === 0) {
@@ -309,7 +313,7 @@ async function tryLlmEndpoints(
 		}
 		const result = await loadPage(endpoint, { timeout: Math.min(timeout, 5), signal });
 		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return { content: result.content, endpoint };
+			return { content: result.content, endpoint, truncated: Boolean(result.truncated) };
 		}
 	}
 	return null;
@@ -322,7 +326,7 @@ async function tryContentNegotiation(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; type: string } | null> {
+): Promise<{ content: string; type: string; truncated: boolean } | null> {
 	if (signal?.aborted) {
 		return null;
 	}
@@ -337,7 +341,7 @@ async function tryContentNegotiation(
 
 	const mime = normalizeMime(result.contentType);
 	if ((mime.includes("markdown") || mime === "text/plain") && !looksLikeHtml(result.content)) {
-		return { content: result.content, type: result.contentType };
+		return { content: result.content, type: result.contentType, truncated: Boolean(result.truncated) };
 	}
 
 	return null;
@@ -1174,9 +1178,6 @@ async function renderUrl(
 	const { finalUrl } = response;
 	let rawContent = response.content;
 	const truncated = Boolean(response.truncated);
-	if (truncated) {
-		notes.push(`Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`);
-	}
 	const mime = normalizeMime(response.contentType);
 	const extHint = getExtensionHint(finalUrl);
 
@@ -1208,7 +1209,7 @@ async function renderUrl(
 						method: "image-too-large",
 						content: output,
 						fetchedAt,
-						truncated,
+						truncated: false,
 						notes,
 					};
 				}
@@ -1249,7 +1250,7 @@ async function renderUrl(
 						method: "image-too-large",
 						content: output,
 						fetchedAt,
-						truncated,
+						truncated: false,
 						notes,
 					};
 				}
@@ -1267,7 +1268,7 @@ async function renderUrl(
 					method: "image",
 					content: output,
 					fetchedAt,
-					truncated,
+					truncated: false,
 					notes,
 					image: {
 						data: resized.data,
@@ -1300,7 +1301,7 @@ async function renderUrl(
 						method: "markit",
 						content: output,
 						fetchedAt,
-						truncated,
+						truncated: false,
 						notes,
 					};
 				}
@@ -1420,7 +1421,7 @@ async function renderUrl(
 					method: "alternate-markdown",
 					content: output,
 					fetchedAt,
-					truncated,
+					truncated: Boolean(altResult.truncated),
 					notes,
 				};
 			}
@@ -1430,7 +1431,7 @@ async function renderUrl(
 		const mdSuffix = await tryMdSuffix(finalUrl, timeout, signal);
 		if (mdSuffix) {
 			notes.push("Found .md suffix version");
-			const output = finalizeOutput(mdSuffix);
+			const output = finalizeOutput(mdSuffix.content);
 			return {
 				url,
 				finalUrl,
@@ -1438,7 +1439,7 @@ async function renderUrl(
 				method: "md-suffix",
 				content: output,
 				fetchedAt,
-				truncated,
+				truncated: mdSuffix.truncated,
 				notes,
 			};
 		}
@@ -1455,7 +1456,7 @@ async function renderUrl(
 				method: "content-negotiation",
 				content: output,
 				fetchedAt,
-				truncated,
+				truncated: negotiated.truncated,
 				notes,
 			};
 		}
@@ -1476,7 +1477,7 @@ async function renderUrl(
 					method: "alternate-feed",
 					content: output,
 					fetchedAt,
-					truncated,
+					truncated: Boolean(altResult.truncated),
 					notes,
 				};
 			}
@@ -1511,7 +1512,7 @@ async function renderUrl(
 					method: "llms.txt",
 					content: output,
 					fetchedAt,
-					truncated,
+					truncated: llmResult.truncated,
 					notes,
 				};
 			}
@@ -1548,7 +1549,7 @@ async function renderUrl(
 							method: "extracted-document",
 							content: output,
 							fetchedAt,
-							truncated,
+							truncated: false,
 							notes,
 						};
 					}
@@ -1571,7 +1572,7 @@ async function renderUrl(
 					method: "llms.txt",
 					content: output,
 					fetchedAt,
-					truncated,
+					truncated: llmResult.truncated,
 					notes,
 				};
 			}
@@ -1690,7 +1691,7 @@ export async function fetchReadUrl(
 	}
 
 	const storage = session.settings.getStorage();
-	const result = await renderUrl(
+	let result = await renderUrl(
 		url,
 		effectiveTimeout,
 		raw,
@@ -1701,6 +1702,11 @@ export async function fetchReadUrl(
 		session.fetch,
 		webpExclusionForModel(session.getActiveModel?.()),
 	);
+	if (result.truncated) {
+		// Covers special handlers and every renderUrl branch, whichever response supplied the content.
+		const cutNote = `Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`;
+		result = { ...result, notes: [...result.notes, cutNote] };
+	}
 	const output = buildUrlReadOutput(result, result.content);
 	const artifact = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
 

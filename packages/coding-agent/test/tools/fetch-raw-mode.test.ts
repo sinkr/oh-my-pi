@@ -184,6 +184,67 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 	});
 });
 
+interface StubPage {
+	content: string;
+	contentType: string;
+	truncated: boolean;
+}
+
+interface TruncationSourceCase {
+	name: string;
+	url: string;
+	pages: Record<string, StubPage>;
+	method: string;
+	truncated: boolean;
+}
+
+const PAGE_WITH_MD_ALTERNATE = `<html><head><link rel="alternate" type="text/markdown" href="/docs/page.md"></head><body>x</body></html>`;
+const MD_ALTERNATE = `# Page\n\n${"markdown body ".repeat(20)}`;
+
+const truncationSourceCases: TruncationSourceCase[] = [
+	{
+		name: "a cut markdown alternate of a complete HTML page",
+		url: "https://example.com/docs/page",
+		pages: {
+			"https://example.com/docs/page": {
+				content: PAGE_WITH_MD_ALTERNATE,
+				contentType: "text/html",
+				truncated: false,
+			},
+			"https://example.com/docs/page.md": { content: MD_ALTERNATE, contentType: "text/markdown", truncated: true },
+		},
+		method: "alternate-markdown",
+		truncated: true,
+	},
+	{
+		name: "a complete markdown alternate of a cut HTML page",
+		url: "https://example.com/docs/page",
+		pages: {
+			"https://example.com/docs/page": {
+				content: PAGE_WITH_MD_ALTERNATE,
+				contentType: "text/html",
+				truncated: true,
+			},
+			"https://example.com/docs/page.md": { content: MD_ALTERNATE, contentType: "text/markdown", truncated: false },
+		},
+		method: "alternate-markdown",
+		truncated: false,
+	},
+	{
+		name: "a cut GitHub raw blob",
+		url: "https://github.com/owner/repo/blob/main/data.txt",
+		pages: {
+			"https://raw.githubusercontent.com/owner/repo/main/data.txt": {
+				content: "partial blob",
+				contentType: "text/plain",
+				truncated: true,
+			},
+		},
+		method: "github-raw",
+		truncated: true,
+	},
+];
+
 describe("read URL beyond the inline preview (regression: tail past 500,000 chars was discarded)", () => {
 	let testDir: string;
 	beforeEach(() => {
@@ -213,4 +274,22 @@ describe("read URL beyond the inline preview (regression: tail past 500,000 char
 		expect(tailText).toContain("+line-12000");
 		expect(tailText).toContain(marker);
 	});
+
+	it.each(truncationSourceCases)(
+		"reports truncation of the response that supplied the content: $name",
+		async ({ url, pages, method, truncated }) => {
+			vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => {
+				const page = pages[requestedUrl];
+				return page
+					? { ok: true, status: 200, finalUrl: requestedUrl, ...page }
+					: { ok: false, status: 404, finalUrl: requestedUrl, contentType: "", content: "" };
+			});
+
+			const result = await new ReadTool(makeSession(testDir)).execute("call", { path: url });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.details?.method).toBe(method);
+			expect(text.includes("was cut mid-stream; content is incomplete")).toBe(truncated);
+		},
+	);
 });
