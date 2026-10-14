@@ -27,7 +27,9 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	ax, capture, permission,
+	ax, capture,
+	key_reroute::KeyReroute,
+	permission,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -991,6 +993,9 @@ pub(super) fn with_background_watch<T>(
 		SwitchSignals::read(spi, now, previous.pid),
 		now,
 	));
+	// Sends the user's keys back to their app while the target holds the
+	// keyboard uninvited, until the guard below has put their app back.
+	let _reroute = previous.pid.and_then(|user| KeyReroute::arm(user, pid));
 	let stopped = AtomicBool::new(false);
 	let visited = AtomicBool::new(false);
 	let start_failed = |error: std::io::Error| {
