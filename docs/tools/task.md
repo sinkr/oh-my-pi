@@ -211,6 +211,6 @@ The source is read without opening a writer. Task-spawned ID lookup checks the c
 
 The fork carries the source conversation and copied artifacts, but excludes configured/inherited additional roots and workspace tree, inherited agents, extension discovery, and parent startup contracts. The consult is limited to `read`, `grep`, and `glob`; `task.structured` (default off) adds hidden `yield`, otherwise the final assistant message completes the report. Cold revival preserves this contract; historical children are not revived.
 
-Warm or revived IRC follow-ups preserve this completion contract. `history://` lookup and completion expose only copied child/grandchild transcripts. A yielded follow-up republishes canonical `agent://<id>` output; an unstructured follow-up completes with its final assistant message but leaves the existing `<id>.md` intact.
+Warm or revived IRC follow-ups preserve this completion contract. `history://` lookup and completion expose only copied child/grandchild transcripts. A yielded follow-up republishes canonical `agent://<id>` output; successful, nonempty unstructured follow-ups also republish their final report when parent-woken or explicitly requested, removing a stale `<id>.json` sidecar; peer-only unstructured replies and cancelled or empty follow-ups do not publish.
 
 Inherited aggregate source charges are excluded; new consultation turns use existing task/Agent Hub usage tracking.

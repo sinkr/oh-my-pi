@@ -413,7 +413,7 @@ The model comes from the source's active branch when restorable; `--model select
 
 The consult excludes configured or inherited additional workspace roots, the source workspace tree, inherited agents, extension discovery, and parent startup contracts. It is limited to `read`, `grep`, and `glob`; `task.structured` (default off) adds hidden `yield`, otherwise the final assistant message completes the report. Cold revival preserves this contract. `history://` lists and opens copied child/grandchild transcripts only; use it for nested history, not the source session UUID. An empty listing means no nested histories, not missing source context. Archive is unnecessary, Eval remains unavailable, and historical children are not revived.
 
-Warm or revived IRC follow-ups preserve this completion contract and fork-scoped `history://` lookup/completion. A yielded follow-up republishes canonical `agent://<id>` output; an unstructured follow-up completes with its final assistant message but leaves the existing `<id>.md` intact.
+Warm or revived IRC follow-ups preserve this completion contract and fork-scoped `history://` lookup/completion. A yielded follow-up republishes canonical `agent://<id>` output; successful, nonempty unstructured follow-ups also republish their final report when parent-woken or explicitly requested, removing a stale `<id>.json` sidecar; peer-only unstructured replies and cancelled or empty follow-ups do not publish.
 
 Inherited aggregate source charges are excluded; new consultation turns use existing task/Agent Hub usage tracking.
 
