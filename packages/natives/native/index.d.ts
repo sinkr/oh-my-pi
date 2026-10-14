@@ -51,9 +51,9 @@ export declare class DesktopSession {
    */
   holdDisplayUntilReleased(): void
   /**
-   * Lets the display sleep now, without waiting behind queued requests, and
-   * returns later activity to the grace period. An agent calls this when its
-   * turn ends.
+   * Lets the display sleep now if a turn holds it, without waiting behind
+   * queued requests, and returns later activity to the grace period. Activity
+   * outside a turn keeps its grace. An agent calls this when its turn ends.
    */
   releaseDisplayAwake(): void
   listDisplays(): Promise<Array<DesktopDisplay>>

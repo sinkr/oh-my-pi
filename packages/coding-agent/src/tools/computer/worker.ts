@@ -65,7 +65,7 @@ export interface NativeDesktopSession {
 	retire(): void;
 	/** Keep the display awake from the next activity until `releaseDisplayAwake()`, not just for the grace period. */
 	holdDisplayUntilReleased(): void;
-	/** Let the display sleep now; later activity is held for the grace period again. */
+	/** Let a turn's hold go now (activity outside a turn keeps its grace); later activity gets the grace again. */
 	releaseDisplayAwake(): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
 	openApplication(id: string, options?: ApplicationOpenOptions): Promise<Application>;

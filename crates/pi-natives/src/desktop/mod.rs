@@ -91,12 +91,16 @@ impl DisplayAwake {
 		self.0.lock().until_released = true;
 	}
 
-	/// Drops the hold now and returns later activity to the grace period.
+	/// Drops a turn's hold now and returns later activity to the grace period.
+	/// A hold no turn took (activity outside a turn) keeps its grace.
 	fn release_turn(&self) {
 		let released = {
 			let mut state = self.0.lock();
-			state.until_released = false;
-			state.hold.take()
+			if std::mem::take(&mut state.until_released) {
+				state.hold.take()
+			} else {
+				None
+			}
 		};
 		drop(released);
 	}
@@ -1382,9 +1386,9 @@ impl DesktopSession {
 		self.core.display_awake.hold_until_released();
 	}
 
-	/// Lets the display sleep now, without waiting behind queued requests, and
-	/// returns later activity to the grace period. An agent calls this when its
-	/// turn ends.
+	/// Lets the display sleep now if a turn holds it, without waiting behind
+	/// queued requests, and returns later activity to the grace period. Activity
+	/// outside a turn keeps its grace. An agent calls this when its turn ends.
 	#[napi]
 	pub fn release_display_awake(&self) {
 		self.core.display_awake.release_turn();
@@ -2479,6 +2483,22 @@ mod capture_tests {
 		// Work that outlives its turn, such as a background job.
 		send_and_wait(&tx, |reply| Request::ListWindows { reply });
 		wait_for_awake(&awake, &[true, false, true, false]);
+
+		send_and_wait(&tx, |reply| Request::Close { reply });
+		serving.join().unwrap();
+	}
+
+	#[test]
+	fn a_turn_end_leaves_the_grace_of_activity_outside_a_turn() {
+		let backend = FakeWaylandBackend::new();
+		let awake = Arc::clone(&backend.awake);
+		let (turn, tx, serving) = serving_with_turns(backend, Duration::from_millis(300));
+
+		// A background job acts between turns; a later turn ends without acting.
+		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		turn.release_turn();
+		assert_eq!(*awake.lock(), [true], "the turn's end cut the grace short");
+		wait_for_awake(&awake, &[true, false]);
 
 		send_and_wait(&tx, |reply| Request::Close { reply });
 		serving.join().unwrap();
