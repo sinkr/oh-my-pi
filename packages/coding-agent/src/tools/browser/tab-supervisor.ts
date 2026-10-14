@@ -207,11 +207,7 @@ export interface AcquireTabResult {
 	created: boolean;
 	/** What the open recovered from before reusing the tab, for its result. */
 	note?: string;
-	/** This open's place among the name's `acquireTab` calls, for `rollBackAcquiredTab`. */
-	ticket: number;
 }
-
-type OpenedTab = Omit<AcquireTabResult, "ticket">;
 
 export interface RunInTabOptions {
 	code: string;
@@ -236,9 +232,6 @@ const workerPageTargets = new WeakMap<WorkerHandle, string>();
 // same tab name so the existence check and `tabs.set` (separated by several
 // awaits) cannot interleave and leak a worker + browser refCount.
 const acquireChains = new Map<string, Promise<void>>();
-// Per-name count of `acquireTab` calls, taken when each call queues: a rollback
-// whose open is no longer the latest one for the name leaves the tab to the later open.
-const acquireTickets = new Map<string, number>();
 const GRACE_MS = 750;
 // Staging folders of closed tabs are swept at most this often (see `sweepUploadStaging`).
 const UPLOAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
@@ -367,30 +360,24 @@ export function acquireTab(name: string, browser: BrowserHandle, opts: AcquireTa
 	// promise settles; without an acquisition-owned hold, cleanup would then
 	// run through a disconnected handle and leave the worker's page behind.
 	holdBrowser(browser);
-	const ticket = (acquireTickets.get(name) ?? 0) + 1;
-	acquireTickets.set(name, ticket);
-	return serializeOnName(name, () => acquireTabImpl(name, browser, opts)).then(
+	const prior = acquireChains.get(name) ?? Promise.resolve();
+	const acquisition = prior.then(() => acquireTabImpl(name, browser, opts));
+	const result = acquisition.then(
 		async value => {
 			await releaseBrowser(browser, { kill: false });
 			// A worker that exited with no run in flight left the reset unreported; reusing its tab reports it.
 			if (!value.created && value.tab.backend === "worker" && value.tab.workerExitNotice) {
 				const notice = value.tab.workerExitNotice;
 				value.tab.workerExitNotice = undefined;
-				return { ...value, ticket, note: value.note ? `${notice}\n${value.note}` : notice };
+				return { ...value, note: value.note ? `${notice}\n${value.note}` : notice };
 			}
-			return { ...value, ticket };
+			return value;
 		},
 		async error => {
 			await releaseBrowser(browser, { kill: false }).catch(() => undefined);
 			throw error;
 		},
 	);
-}
-
-/** Run `fn` after every earlier acquisition or rollback queued for `name` has settled. */
-function serializeOnName<T>(name: string, fn: () => Promise<T>): Promise<T> {
-	const prior = acquireChains.get(name) ?? Promise.resolve();
-	const result = prior.then(fn);
 	const tail = result.then(
 		() => undefined,
 		() => undefined,
@@ -402,20 +389,11 @@ function serializeOnName<T>(name: string, fn: () => Promise<T>): Promise<T> {
 	return result;
 }
 
-/**
- * Close the tab an open created when the open fails after `acquireTab` returned.
- * Runs in the name's acquisition order and leaves the tab alone once a later
- * `acquireTab` for the name has queued: that open reuses or replaces this tab.
- */
-export function rollBackAcquiredTab(name: string, result: AcquireTabResult): Promise<void> {
-	if (!result.created) return Promise.resolve();
-	return serializeOnName(name, async () => {
-		if (acquireTickets.get(name) !== result.ticket) return;
-		await rollBackCreatedTab(name, result.tab);
-	});
-}
-
-async function acquireTabImpl(name: string, browser: BrowserHandle, opts: AcquireTabOptions): Promise<OpenedTab> {
+async function acquireTabImpl(
+	name: string,
+	browser: BrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<AcquireTabResult> {
 	// Worker-init deadline: the inline-fallback retry passes this same start
 	// so it can't restart the budget (which would let a cold import that
 	// consumed most of it spend the phase floors again for another full
@@ -707,7 +685,7 @@ async function navigateOpenedTab(
 }
 
 /** Close a tab its failed open created, unless something already replaced or closed it. */
-async function rollBackCreatedTab(name: string, tab: TabSession): Promise<void> {
+async function rollBackCreatedTab(name: string, tab: WorkerTabSession): Promise<void> {
 	if (tabs.get(name) !== tab) return;
 	try {
 		await releaseTab(name, { kill: false });
@@ -719,7 +697,11 @@ async function rollBackCreatedTab(name: string, tab: TabSession): Promise<void> 
 	}
 }
 
-async function acquireCmuxTab(name: string, browser: CmuxBrowserHandle, opts: AcquireTabOptions): Promise<OpenedTab> {
+async function acquireCmuxTab(
+	name: string,
+	browser: CmuxBrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<AcquireTabResult> {
 	if (opts.allowedDomains?.length) {
 		throw new ToolError("browser.open allowed_domains is not supported on the cmux backend");
 	}
@@ -822,7 +804,11 @@ async function adoptsSameBlock(existing: TernTabSession, opts: AcquireTabOptions
  * with `opts.target` adopt the user's browser block it names (released again,
  * never closed, on failure and on close).
  */
-async function acquireTernTab(name: string, browser: TernBrowserHandle, opts: AcquireTabOptions): Promise<OpenedTab> {
+async function acquireTernTab(
+	name: string,
+	browser: TernBrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<AcquireTabResult> {
 	const settings = {
 		name,
 		url: opts.url,
