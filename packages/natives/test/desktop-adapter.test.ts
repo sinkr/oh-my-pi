@@ -29,4 +29,36 @@ describe("desktop native ABI requirements", () => {
 		const DesktopSession = adaptDesktopSession(NativeSession);
 		expect(() => new DesktopSession({ display: "active" })).toThrow(/^Unsupported:/);
 	});
+
+	it("rejects an addon built before the turn-scoped display hold", () => {
+		const methods = [
+			"click",
+			"capture",
+			"captureRegion",
+			"cancel",
+			"retire",
+			"observe",
+			"listApplications",
+			"openApplication",
+			"menuItems",
+			"menuSelect",
+			"holdKeys",
+			"holdMouse",
+			"acquireControl",
+			"releaseControl",
+			"controlState",
+			"bringToCurrentSpace",
+		];
+		const sessionWith = (names: string[]) => {
+			class NativeSession {}
+			for (const name of names) Object.defineProperty(NativeSession.prototype, name, { value() {} });
+			return NativeSession;
+		};
+		const Stale = adaptDesktopSession(sessionWith(methods));
+		expect(() => new Stale({ display: "active" })).toThrow(
+			"missing holdDisplayUntilReleased, releaseDisplayAwake). Update the native addon or run bun run build:native",
+		);
+		const Current = sessionWith([...methods, "holdDisplayUntilReleased", "releaseDisplayAwake"]);
+		expect(adaptDesktopSession(Current) === Current).toBe(true);
+	});
 });
