@@ -155,13 +155,20 @@ export const seanceTaskSchemaFields = {
 };
 export const seanceTaskGuidance = seanceTaskGuidanceTemplate;
 
-function validateSeanceFields(item: TaskItem | TaskParams, agent: string, label: string): string | undefined {
+function validateSeanceFields(
+	item: TaskItem | TaskParams,
+	agent: string,
+	label: string,
+	seanceAdvertised: boolean,
+): string | undefined {
 	if (agent !== SEANCE_AGENT_NAME) {
 		if (item.sourceSession !== undefined)
 			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
 		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
 		return undefined;
 	}
+	// Hidden bundled seance (plan mode, policy) is rejected at spawn; a custom shadow is an ordinary agent.
+	if (!seanceAdvertised) return undefined;
 	if (typeof item.sourceSession !== "string" || item.sourceSession.trim().length === 0) {
 		return `${label} selects the \`${SEANCE_AGENT_NAME}\` agent and requires a non-empty \`sourceSession\`.`;
 	}
@@ -186,8 +193,9 @@ export function validateSeanceParams(context: {
 	params: TaskParams;
 	batchEnabled: boolean;
 	defaultAgent: string;
+	seanceAdvertised: boolean;
 }): string | undefined {
-	const { params, batchEnabled, defaultAgent } = context;
+	const { params, batchEnabled, defaultAgent, seanceAdvertised } = context;
 	if (batchEnabled && params.tasks !== undefined) {
 		if (params.sourceSession !== undefined || params.model !== undefined) {
 			return `Put \`sourceSession\` and \`model\` on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
@@ -195,12 +203,12 @@ export function validateSeanceParams(context: {
 		for (let index = 0; index < params.tasks.length; index++) {
 			const item = params.tasks[index]!;
 			const label = `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
-			const error = validateSeanceFields(item, item.agent?.trim() || defaultAgent, label);
+			const error = validateSeanceFields(item, item.agent?.trim() || defaultAgent, label, seanceAdvertised);
 			if (error) return error;
 		}
 		return undefined;
 	}
-	return validateSeanceFields(params, params.agent?.trim() || defaultAgent, "The call");
+	return validateSeanceFields(params, params.agent?.trim() || defaultAgent, "The call", seanceAdvertised);
 }
 
 export async function prepareSeance(context: {

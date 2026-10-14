@@ -366,8 +366,7 @@ function planSpawns(
 	const error =
 		validateShapeParams(batchEnabled, params) ??
 		validateSpawnParams(params, batchEnabled) ??
-		// A custom `seance` shadow is an ordinary agent; runtime rejects hidden bundled seance calls.
-		(seanceAdvertised ? validateSeanceParams({ params, batchEnabled, defaultAgent }) : undefined);
+		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
 	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
