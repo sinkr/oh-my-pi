@@ -989,6 +989,39 @@ describe("OpenCode provider discovery", () => {
 		}
 	});
 
+	test("preserves authoritative discovered Zen models across online, online-if-uncached, and offline strategies when additiveOnly is enabled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-zen-authoritative-cache-"));
+		try {
+			const baseOptions = opencodeZenModelManagerOptions({
+				apiKey: "free-account-key",
+				fetch: async input => {
+					if (String(input).includes("catalog.stencil.so")) return Response.json({});
+					return modelListResponse(LIVE_FREE_MODEL_IDS);
+				},
+			});
+			const managerOptions = {
+				...baseOptions,
+				cacheDbPath: path.join(tempDir, "models.db"),
+				modelsDev: baseOptions.modelsDev ? { ...baseOptions.modelsDev, additiveOnly: true } : undefined,
+			};
+			const expectedIds = [...LIVE_FREE_MODEL_IDS, "jev-1.13", "jev-1.13-free"].sort();
+
+			const online = await resolveProviderModels(managerOptions, "online");
+			expect(online.stale).toBe(false);
+			expect(online.models.map(model => model.id).sort()).toEqual(expectedIds);
+
+			const uncached = await resolveProviderModels(managerOptions, "online-if-uncached");
+			expect(uncached.stale).toBe(false);
+			expect(uncached.models.map(model => model.id).sort()).toEqual(expectedIds);
+
+			const offline = await resolveProviderModels(managerOptions, "offline");
+			expect(offline.stale).toBe(false);
+			expect(offline.models.map(model => model.id).sort()).toEqual(expectedIds);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test("recovers muse-spark thinking levels from live OpenCode Go discovery", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-go-muse-"));
 		try {
