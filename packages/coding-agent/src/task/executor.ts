@@ -56,7 +56,6 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
-import seanceAssignmentTemplate from "../prompts/system/seance-assignment.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -106,7 +105,6 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
-import { seanceIsolationOptions } from "./seance-policy";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
@@ -115,6 +113,7 @@ import {
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
+	type PreparedAgentTaskSession,
 } from "./types";
 import {
 	type AgentProgress,
@@ -411,10 +410,7 @@ export interface ExecutorOptions {
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
-	/** Resolved source JSONL path; present only for restricted seance forks. */
-	sourceSession?: string;
-	/** Source session id rendered in the seance's system prompt. */
-	sourceSessionLabel?: string;
+	preparedSession?: PreparedAgentTaskSession;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
 	context?: string;
 	/**
@@ -3743,7 +3739,6 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 /** Inputs of a subagent's rendered system prompt, fixed at spawn. */
 interface SubagentPromptInputs {
 	id: string;
-	sourceSession?: string;
 	model?: string;
 	agentSystemPrompt: string;
 	context: string;
@@ -3774,8 +3769,7 @@ interface SubagentSessionSpec {
 		| "resolveServiceTierByFamily"
 		| "onFirstChatDispatch"
 	>;
-	/** Explicit source-fork capability; independent of the optional prompt label. */
-	seanceFork: boolean;
+	preparedSession?: Pick<PreparedAgentTaskSession, "promptSuffix">;
 	prompt: SubagentPromptInputs;
 }
 
@@ -3799,14 +3793,14 @@ function buildSubagentSessionOptions(
 	launch?: SubagentLaunchInputs,
 ): CreateAgentSessionOptions {
 	const inputs = spec.prompt;
-	const seance = spec.seanceFork;
 	// MCP proxies are minted per build, not captured in the spec: a kept-alive
 	// subagent revived after `/mcp reload` must see the manager's current tools.
-	const mcpTools = !seance && spec.options.mcpManager ? createMCPProxyTools(spec.options.mcpManager) : [];
-	const customTools = seance ? [] : (spec.options.customTools ?? []);
+	const sessionOptions = { ...spec.options };
+	const mcpTools = sessionOptions.mcpManager ? createMCPProxyTools(sessionOptions.mcpManager) : [];
+	const customTools = sessionOptions.customTools ?? [];
 	return {
-		...spec.options,
-		taskPromptCacheKey: launch ? spec.options.taskPromptCacheKey : undefined,
+		...sessionOptions,
+		taskPromptCacheKey: launch ? sessionOptions.taskPromptCacheKey : undefined,
 		mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
 		customTools: customTools.length > 0 ? customTools : undefined,
 		settings,
@@ -3814,7 +3808,6 @@ function buildSubagentSessionOptions(
 		expectedAgentRef,
 		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
-		...(seance ? seanceIsolationOptions(sessionManager.getCwd()) : undefined),
 		systemPrompt: defaultPrompt => {
 			const ircRoster = inputs.ircEnabled
 				? collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile)
@@ -3843,13 +3836,8 @@ function buildSubagentSessionOptions(
 			// Per-spawn text (context, worktree, IRC roster) goes after the trailing
 			// `<project-context>` block so spawns of the same agent share the static
 			// prompt prefix as a cache hit.
-			const seancePrompt = inputs.sourceSession
-				? prompt.render(seanceAssignmentTemplate, {
-						sourceSession: inputs.sourceSession,
-						model: inputs.model ?? "",
-					})
-				: undefined;
-			return [...defaultPrompt, subagentPrompt, ...(seancePrompt ? [seancePrompt] : [])];
+			const policyPrompt = spec.preparedSession?.promptSuffix?.(inputs.model);
+			return [...defaultPrompt, subagentPrompt, ...(policyPrompt ? [policyPrompt] : [])];
 		},
 	};
 }
@@ -3993,6 +3981,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
+	const preparedSession = options.preparedSession;
+	const effectiveCwd = worktree ?? cwd;
+	const sessionPolicyOptions = agent.taskPolicy?.session?.options(effectiveCwd) ?? {};
+	const restrictedSession = sessionPolicyOptions.restrictToolNames === true || options.restrictToolNames === true;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = options.structured !== false;
 	const startTime = Date.now();
@@ -4040,12 +4032,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// spawn's owner is its parent subagent) and lands on the child's
 	// `modelRoles.advisor`. The expanded pattern is also what the session
 	// contract persists, so cold revival under root settings reuses it.
-	const advisorSelection = options.sourceSession
-		? undefined
-		: resolveAgentAdvisorSelection({
-				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-				agentAdvisor: agent.advisor,
-			});
+	const advisorSelection =
+		sessionPolicyOptions.restrictToolNames === true
+			? undefined
+			: resolveAgentAdvisorSelection({
+					settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
+					agentAdvisor: agent.advisor,
+				});
 	const advisorRolePattern = advisorSelection?.model
 		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
 		: undefined;
@@ -4077,7 +4070,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const softRequestBudgetNotice = cfgTaskSoftRequestBudgetNotice.get(settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
-	const restrictToolNames = options.sourceSession !== undefined || options.restrictToolNames === true;
+	const restrictToolNames = restrictedSession;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 
 	// Add tools if specified. Unstructured runs never get `yield`, even when
@@ -4130,7 +4123,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				? "*"
 				: agent.spawns.join(",");
 
-	const lspEnabled = options.sourceSession ? false : (enableLsp ?? true);
+	const lspEnabled = sessionPolicyOptions.enableLsp ?? enableLsp ?? true;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
 
 	const monitor = createSubagentRunMonitor({
@@ -4347,19 +4340,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const effectiveThinkingLevel =
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
-			const effectiveCwd = worktree ?? cwd;
-			if (options.sourceSession && !subtaskSessionFile) {
-				throw new Error("The seance fork requires a persisted child session file.");
+			const fork = preparedSession?.fork;
+			if (fork && !subtaskSessionFile) {
+				throw new Error("The prepared session fork requires a persisted child session file.");
 			}
-			const sessionManagerPromise = options.sourceSession
-				? SessionManager.forkFrom(options.sourceSession, effectiveCwd, undefined, undefined, {
+			const sessionManagerPromise = fork
+				? SessionManager.forkFrom(fork.sourceFile, effectiveCwd, undefined, undefined, {
+						...fork.options,
 						sessionFile: subtaskSessionFile!,
-						resetInheritedCost: true,
-						repairInterruptedTail: true,
-						suppressBreadcrumb: true,
-						neutralizeInheritedSessionInit: true,
-						strictCopyArtifacts: true,
-						isolateInheritedDirectories: true,
 					})
 				: sessionFile
 					? SessionManager.open(sessionFile, undefined, undefined, {
@@ -4379,12 +4367,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn.
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = options.sourceSession
-				? undefined
-				: resolveAgentPrewalkPattern({
-						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-					});
+			const prewalkPattern =
+				sessionPolicyOptions.restrictToolNames === true
+					? undefined
+					: resolveAgentPrewalkPattern({
+							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+							agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+						});
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
@@ -4408,8 +4397,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
-			const mcpManager = enableMCP ? options.mcpManager : undefined;
+			const enableMCP = sessionPolicyOptions.enableMCP ?? (!restrictToolNames && (options.enableMCP ?? true));
+			const mcpManager = Object.hasOwn(sessionPolicyOptions, "mcpManager")
+				? sessionPolicyOptions.mcpManager
+				: enableMCP
+					? options.mcpManager
+					: undefined;
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -4455,17 +4448,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						options.parentPromptCacheKey === undefined
 							? undefined
 							: `${options.parentPromptCacheKey}:${agent.name}`,
-					cwd: worktree ?? cwd,
+					cwd: effectiveCwd,
 					additionalDirectories:
-						worktree !== undefined || options.sourceSession !== undefined
-							? undefined
-							: options.additionalDirectories,
+						worktree !== undefined || preparedSession !== undefined ? undefined : options.additionalDirectories,
 					authStorage,
 					modelRegistry,
 					getApiKey: options.getApiKey,
 					credentialSourceSessionId: options.credentialSourceSessionId,
 					oauthAccountPools: options.oauthAccountPools,
-					inheritedSessionAgents: options.sourceSession ? undefined : options.inheritedSessionAgents,
+					inheritedSessionAgents: preparedSession ? undefined : options.inheritedSessionAgents,
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
@@ -4483,14 +4474,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					outputSchemaMode: options.outputSchemaMode,
 					restrictToolNames,
 					requireYieldTool: structured,
-					contextFiles: options.sourceSession ? [] : options.contextFiles,
-					skills: options.sourceSession ? [] : options.skills,
-					promptTemplates: options.sourceSession ? [] : options.promptTemplates,
-					workspaceTree: options.sourceSession ? undefined : options.workspaceTree,
-					rules: options.sourceSession ? [] : options.rules,
-					extensionRoots: options.sourceSession ? undefined : options.extensionRoots,
+					contextFiles: preparedSession ? [] : options.contextFiles,
+					skills: preparedSession ? [] : options.skills,
+					promptTemplates: preparedSession ? [] : options.promptTemplates,
+					workspaceTree: preparedSession ? undefined : options.workspaceTree,
+					rules: preparedSession ? [] : options.rules,
+					extensionRoots: preparedSession ? undefined : options.extensionRoots,
 					preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
-					preloadedPreparedExtensions: options.sourceSession ? [] : options.preloadedPreparedExtensions,
+					preloadedPreparedExtensions: preparedSession ? [] : options.preloadedPreparedExtensions,
 					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 					hasUI: false,
 					prewalk,
@@ -4500,8 +4491,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					// so nested lifecycle/progress/event frames reach its surfaces
 					// without leaking into another root session's traffic.
 					subagentEventBus: options.subagentEventBus,
-					parentHindsightSessionState: options.sourceSession ? undefined : options.parentHindsightSessionState,
-					parentMnemopiSessionState: options.sourceSession ? undefined : options.parentMnemopiSessionState,
+					parentHindsightSessionState: preparedSession ? undefined : options.parentHindsightSessionState,
+					parentMnemopiSessionState: preparedSession ? undefined : options.parentMnemopiSessionState,
 					parentTaskPrefix: id,
 					asyncJobManager: options.asyncJobManager,
 					parentAgentId: options.parentAgentId,
@@ -4514,15 +4505,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					enableMCP,
 					mcpManager,
 					// MCP proxies are minted per build as `mcpTools` in buildSubagentSessionOptions.
-					customTools: options.sourceSession ? undefined : options.customTools,
-					localProtocolOptions: options.sourceSession ? undefined : options.localProtocolOptions,
+					customTools: preparedSession ? undefined : options.customTools,
+					localProtocolOptions: preparedSession ? undefined : options.localProtocolOptions,
 					telemetry: subagentTelemetry,
+					...sessionPolicyOptions,
 				},
-				/** Explicit source-fork capability; independent of the optional prompt label. */
-				seanceFork: options.sourceSession !== undefined,
+				preparedSession: preparedSession ? { promptSuffix: preparedSession.promptSuffix } : undefined,
 				prompt: {
 					id,
-					sourceSession: options.sourceSessionLabel,
 					model: progress.resolvedModel,
 					agentSystemPrompt: agent.systemPrompt,
 					context: options.context?.trim() ?? "",
@@ -4539,7 +4529,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
 			openedSessionManager = sessionManager;
-			if (options.parentArtifactManager && !options.sourceSession) {
+			// A prepared fork owns the copied source artifacts; never adopt the parent manager.
+			if (options.parentArtifactManager && !preparedSession) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
@@ -4626,7 +4617,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					sessionFile,
 					spec: sessionSpec,
 					settings: captureSubagentSettings(settings, subagentSettings),
-					parentArtifactManager: options.sourceSession ? undefined : options.parentArtifactManager,
+					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
 					wake: wakeOptions,
 					agentName: agent.name,
@@ -4837,7 +4828,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false && (!options.sourceSession || readyAt !== undefined)) {
+				if (options.keepAlive !== false && (!preparedSession || readyAt !== undefined)) {
 					attachIrcWakeTurnMonitor(session, wakeOptions);
 				}
 				await finalizeSubagentLifecycle({
@@ -4845,7 +4836,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false && (!options.sourceSession || readyAt !== undefined),
+					keepAlive: options.keepAlive !== false && (!preparedSession || readyAt !== undefined),
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
@@ -4896,7 +4887,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					}
 				}
 			}
-			if (options.sourceSession && readyAt === undefined) {
+			if (preparedSession && readyAt === undefined) {
 				const removeFailedFork = (async () => {
 					await pendingSessionDisposal;
 					if (deferredSessionShutdown) await deferredSessionShutdown;
@@ -4904,10 +4895,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					if (!manager && pendingSessionManager) {
 						manager = await pendingSessionManager.catch(() => undefined);
 					}
-					const ownedSessionFile = manager?.getSessionFile();
-					if (manager && ownedSessionFile) await manager.dropSession(ownedSessionFile);
+					if (manager) {
+						const ownedSessionFile = manager.getSessionFile();
+						if (ownedSessionFile) await manager.dropSession(ownedSessionFile);
+					}
 				})().catch(cleanupError => {
-					logger.warn("Failed to remove incomplete seance fork", {
+					logger.warn("Failed to remove incomplete prepared session fork", {
 						id,
 						sessionFile: openedSessionManager?.getSessionFile(),
 						error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
@@ -4922,7 +4915,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					if (Date.now() >= cleanupDeadlineAt) {
 						deferCleanup(removeFailedFork);
 					} else {
-						logger.warn("Incomplete seance fork cleanup failed", {
+						logger.warn("Incomplete prepared session fork cleanup failed", {
 							id,
 							error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
 						});

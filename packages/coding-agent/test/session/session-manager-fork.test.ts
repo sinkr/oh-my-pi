@@ -231,6 +231,8 @@ describe("SessionManager.forkFrom", () => {
 		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
 			suppressBreadcrumb: true,
 			neutralizeInheritedSessionInit: true,
+			historyScope: "session",
+			sessionPolicy: "seance",
 			strictCopyArtifacts: true,
 			isolateInheritedDirectories: true,
 		});
@@ -240,8 +242,17 @@ describe("SessionManager.forkFrom", () => {
 			const forkHeader = (await loadEntriesFromFile(forkFile)).find(
 				(entry): entry is SessionHeader => entry.type === "session",
 			);
-			expect(forkHeader).toMatchObject({ type: "session", seanceFork: true, parentSession: "source-session" });
-			expect(await SessionManager.peekSessionInit(forkFile)).toMatchObject({ seanceFork: true, init: null });
+			expect(forkHeader).toMatchObject({
+				type: "session",
+				historyScope: "session",
+				sessionPolicy: "seance",
+				parentSession: "source-session",
+			});
+			expect(await SessionManager.peekSessionInit(forkFile)).toMatchObject({
+				historyScope: "session",
+				sessionPolicy: "seance",
+				init: null,
+			});
 			expect(forked.getAdditionalDirectories()).toEqual([]);
 			expect(forkHeader?.additionalDirectories).toBeUndefined();
 
@@ -261,7 +272,8 @@ describe("SessionManager.forkFrom", () => {
 				spawns: "",
 			});
 			expect(await SessionManager.peekSessionInit(forkFile)).toMatchObject({
-				seanceFork: true,
+				historyScope: "session",
+				sessionPolicy: "seance",
 				init: {
 					agent: "seance",
 					restrictToolNames: true,
@@ -288,6 +300,11 @@ describe("SessionManager.forkFrom", () => {
 		});
 		try {
 			expect(forked.getSessionFile()).toBe(childFile);
+			const copiedHeader = (await loadEntriesFromFile(childFile)).find(
+				(entry): entry is SessionHeader => entry.type === "session",
+			);
+			expect(copiedHeader).not.toHaveProperty("historyScope");
+			expect(copiedHeader).not.toHaveProperty("sessionPolicy");
 			const childArtifactsDir = childFile.slice(0, -".jsonl".length);
 			expect(await Bun.file(path.join(childArtifactsDir, "1.read.log")).text()).toBe("tool output");
 			expect(await Bun.file(path.join(childArtifactsDir, "nested", "result.txt")).text()).toBe("nested output");

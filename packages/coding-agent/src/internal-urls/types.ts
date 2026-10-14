@@ -277,7 +277,7 @@ export interface ResolveContext {
 	 * constructing a tool session; tool resolution continues to use
 	 * {@link session}.historyScope.
 	 */
-	historyScope?: "fork";
+	historyScope?: "session";
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
 	agentRegistry?: AgentRegistry;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */

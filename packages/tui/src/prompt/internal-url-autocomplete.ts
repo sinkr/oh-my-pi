@@ -76,7 +76,7 @@ export interface InternalUrlCallerContext {
 	cwd?: string;
 	sessionFile?: string;
 	sessionId?: string;
-	historyScope?: "fork";
+	historyScope?: "session";
 }
 
 /**

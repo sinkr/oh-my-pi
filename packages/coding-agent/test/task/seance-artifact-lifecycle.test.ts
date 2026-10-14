@@ -16,13 +16,31 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type PreparedAgentTaskSession } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const MOCK_API_SOURCE = "seance-artifact-lifecycle-test";
 const AGENT_ID = "SeanceArtifactLifecycle";
 const UNSTRUCTURED_AGENT_ID = "SeanceUnstructuredLifecycle";
+function preparedSession(sourceFile: string, sourceSessionId: string): PreparedAgentTaskSession {
+	return {
+		fork: {
+			sourceFile,
+			options: {
+				resetInheritedCost: true,
+				repairInterruptedTail: true,
+				suppressBreadcrumb: true,
+				neutralizeInheritedSessionInit: true,
+				strictCopyArtifacts: true,
+				isolateInheritedDirectories: true,
+				historyScope: "session",
+				sessionPolicy: "seance",
+			},
+		},
+		promptSuffix: model => `Consulting ${sourceSessionId} with ${model ?? "the saved model"}.`,
+	};
+}
 
 function makeModelRegistry(authStorage: AuthStorage, modelsPath: string, model: MockModel): ModelRegistry {
 	const registry = new ModelRegistry(authStorage, modelsPath);
@@ -174,8 +192,7 @@ describe("seance artifact lifecycle", () => {
 				authStorage,
 				getApiKey: async () => "test-key",
 				modelOverride: [`${mock.model.provider}/${mock.model.id}`],
-				sourceSession: sourceFile,
-				sourceSessionLabel: "host-session",
+				preparedSession: preparedSession(sourceFile, "host-session"),
 				artifactsDir,
 				enableIrc: true,
 				enableLsp: false,
@@ -309,8 +326,7 @@ describe("seance artifact lifecycle", () => {
 				authStorage,
 				getApiKey: async () => "test-key",
 				modelOverride: [`${mock.model.provider}/${mock.model.id}`],
-				sourceSession: sourceFile,
-				sourceSessionLabel: "unstructured-host",
+				preparedSession: preparedSession(sourceFile, "unstructured-host"),
 				artifactsDir,
 				enableIrc: true,
 				enableLsp: false,

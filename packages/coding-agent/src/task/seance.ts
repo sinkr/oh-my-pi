@@ -1,13 +1,27 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import { prompt } from "@oh-my-pi/pi-utils";
+import { resolveModelOverrideWithAuthFallback, resolveSessionModelSelector } from "../config/model-resolver";
 import { sessionFilesFromDisk } from "../internal-urls/registry-helpers";
+import seanceAssignmentTemplate from "../prompts/system/seance-assignment.md" with { type: "text" };
+import seanceTaskGuidance from "../prompts/tools/seance-task-guidance.md" with { type: "text" };
 import { buildSessionContext, getRestorableSessionModels } from "../session/session-context";
 import { listSessionsReadOnly } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
 import { resolveSessionLeafId, type SessionEntry } from "../session/session-entries";
 import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
-import { SessionManager } from "../session/session-manager";
-import { loadSessionFile, visitEntriesFromFileStream } from "../session/session-loader";
+import { SessionManager, type PersistedSessionInit } from "../session/session-manager";
+import { loadSessionFile } from "../session/session-loader";
+import type { ModelRegistry } from "../config/model-registry";
+import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import { SEANCE_AGENT_NAME, seanceIsolationOptions } from "./seance-policy";
+import type {
+	AgentTaskPolicy,
+	AgentTaskPreparation,
+	AgentTaskPreparationContext,
+	AgentTaskRestorePolicy,
+} from "./types";
 
 export interface ResolvedSeanceSource {
 	file: string;
@@ -121,26 +135,178 @@ export async function resolveSeanceSource(
 	if (matchGlobal) return validateSourceFile(matchGlobal.path, storage);
 	throw new Error(`Session "${label}" was not found.`);
 }
+const modelSelectorInputSchema = type("string | string[]");
 
-/** Read only the first session record; the shared stream parser skips title-slot preambles. */
-async function hasSeanceForkHeader(file: string): Promise<boolean> {
-	let seanceFork = false;
-	try {
-		await visitEntriesFromFileStream(
-			file,
-			entry => {
-				seanceFork = entry.type === "session" && entry.seanceFork === true;
-				return false;
-			},
-			{ maxRecords: 1 },
-		);
-	} catch {
-		return false;
+function validateSeanceFields(item: TaskItem | TaskParams, agent: string, label: string): string | undefined {
+	if (agent !== SEANCE_AGENT_NAME) {
+		if (item.sourceSession !== undefined)
+			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
+		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
+		return undefined;
 	}
-	return seanceFork;
+	if (typeof item.sourceSession !== "string" || item.sourceSession.trim().length === 0) {
+		return `${label} selects the \`${SEANCE_AGENT_NAME}\` agent and requires a non-empty \`sourceSession\`.`;
+	}
+	if ("tools" in item && item.tools?.length)
+		return `${label} cannot pass custom tools to the read-only \`${SEANCE_AGENT_NAME}\` agent.`;
+	const model: unknown = item.model;
+	if (
+		model !== undefined &&
+		!(
+			(typeof model === "string" && model.trim().length > 0) ||
+			(Array.isArray(model) &&
+				model.length > 0 &&
+				model.every(value => typeof value === "string" && value.trim().length > 0))
+		)
+	) {
+		return `${label} has an invalid \`model\` selector. Provide a non-empty selector or selector array.`;
+	}
+	return undefined;
 }
 
-/** True only for a persisted seance fork, never by agent display or init name. */
-export async function isSeanceSessionFile(file: string): Promise<boolean> {
-	return hasSeanceForkHeader(file);
+function validateSeanceParams(context: {
+	params: TaskParams;
+	batchEnabled: boolean;
+	defaultAgent: string;
+}): string | undefined {
+	const { params, batchEnabled, defaultAgent } = context;
+	if (batchEnabled && params.tasks !== undefined) {
+		if (params.sourceSession !== undefined || params.model !== undefined) {
+			return `Put \`sourceSession\` and \`model\` on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
+		}
+		for (let index = 0; index < params.tasks.length; index++) {
+			const item = params.tasks[index]!;
+			const label = `Task ${index + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
+			const error = validateSeanceFields(item, item.agent?.trim() || defaultAgent, label);
+			if (error) return error;
+		}
+		return undefined;
+	}
+	return validateSeanceFields(params, params.agent?.trim() || defaultAgent, "The call");
 }
+
+async function prepareSeance(context: AgentTaskPreparationContext): Promise<AgentTaskPreparation> {
+	if (context.invocationKind !== "task" || context.agent.source !== "bundled") {
+		throw new Error("Seance requires the bundled task agent.");
+	}
+	const sourceSelector = context.params.sourceSession;
+	if (!sourceSelector?.trim()) throw new Error("The `seance` agent requires a source session.");
+	if (context.planMode || context.isolationRequested || context.hasCustomTools) {
+		throw new Error("Seance does not support plan mode, isolated execution, or custom tools.");
+	}
+	const sessionFile = context.session.getSessionFile();
+	const source = await resolveSeanceSource(sourceSelector, {
+		cwd: context.session.cwd,
+		sessionDirHint: sessionFile ? path.dirname(sessionFile) : undefined,
+		artifactsDirHint: context.session.getArtifactsDir?.() ?? undefined,
+	});
+	const modelRegistry = context.session.modelRegistry;
+	if (!modelRegistry) throw new Error("Seance cannot resolve a model in this session.");
+	await modelRegistry.awaitBackgroundRefresh().catch(() => {});
+	const requestedModel = context.params.model;
+	const requestedModels =
+		requestedModel === undefined
+			? source.modelSelectors
+			: typeof requestedModel === "string"
+				? [requestedModel]
+				: requestedModel;
+	if (requestedModels.length === 0) {
+		throw new Error("The source session has no saved model. Select a model explicitly with `--model`.");
+	}
+	const modelPatterns: string[] = [];
+	for (const selector of requestedModels) {
+		if (requestedModel === undefined) {
+			if (resolveSessionModelSelector(modelRegistry, selector)) modelPatterns.push(selector);
+			continue;
+		}
+		const resolved = await resolveModelOverrideWithAuthFallback(
+			[selector],
+			undefined,
+			modelRegistry,
+			context.session.settings,
+			context.session.getSessionId?.() ?? undefined,
+		);
+		if (resolved.model && modelRegistry.hasConfiguredAuth(resolved.model)) modelPatterns.push(selector);
+	}
+	if (modelPatterns.length === 0) {
+		throw new Error(
+			"No available saved model can serve this source. Select an available model explicitly with `--model`.",
+		);
+	}
+	return {
+		modelPatterns,
+		session: {
+			fork: {
+				sourceFile: source.file,
+				options: {
+					resetInheritedCost: true,
+					repairInterruptedTail: true,
+					suppressBreadcrumb: true,
+					neutralizeInheritedSessionInit: true,
+					strictCopyArtifacts: true,
+					isolateInheritedDirectories: true,
+					historyScope: "session",
+					sessionPolicy: SEANCE_AGENT_NAME,
+				},
+			},
+			promptSuffix: resolvedModel =>
+				prompt.render(seanceAssignmentTemplate, {
+					sourceSession: source.id,
+					model: resolvedModel ?? "",
+				}),
+		},
+	};
+}
+
+async function restoreSeanceSession(context: {
+	init: PersistedSessionInit;
+	cwd: string;
+	modelRegistry: ModelRegistry;
+}): Promise<AgentTaskRestorePolicy | undefined> {
+	const { init, cwd, modelRegistry } = context;
+	if (
+		!init ||
+		typeof init !== "object" ||
+		init.agent !== SEANCE_AGENT_NAME ||
+		init.restrictToolNames !== true ||
+		!Array.isArray(init.systemPrompt) ||
+		init.systemPrompt.length === 0 ||
+		!init.systemPrompt.every(block => typeof block === "string") ||
+		!init.systemPrompt.some(block => typeof block === "string" && block.trim().length > 0) ||
+		typeof init.task !== "string" ||
+		init.task.trim().length === 0 ||
+		typeof init.resolvedModel !== "string" ||
+		init.resolvedModel.trim().length === 0 ||
+		!Array.isArray(init.tools) ||
+		!init.tools.every(tool => typeof tool === "string") ||
+		!["read", "grep", "glob"].every(name => init.tools.includes(name)) ||
+		typeof cwd !== "string" ||
+		cwd.trim().length === 0
+	) {
+		return undefined;
+	}
+	const modelPattern = init.resolvedModel.trim();
+	const tools = init.tools;
+	await modelRegistry.awaitBackgroundRefresh().catch(() => {});
+	if (!resolveSessionModelSelector(modelRegistry, modelPattern)) return undefined;
+	return {
+		cwd,
+		modelPattern,
+		toolNames: ["read", "grep", "glob", "yield"].filter(name => tools.includes(name)),
+	};
+}
+
+export const SEANCE_TASK_POLICY: AgentTaskPolicy = {
+	available: ({ planMode }) => !planMode,
+	schema: {
+		key: "seance",
+		fields: { "sourceSession?": type("string"), "model?": modelSelectorInputSchema },
+		guidance: seanceTaskGuidance,
+	},
+	validate: validateSeanceParams,
+	prepare: prepareSeance,
+	session: {
+		options: seanceIsolationOptions,
+		restore: restoreSeanceSession,
+	},
+};

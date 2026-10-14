@@ -726,6 +726,7 @@ describe("history:// protocol", () => {
 				sessionFile: forkFile,
 				suppressBreadcrumb: true,
 				neutralizeInheritedSessionInit: true,
+				historyScope: "session",
 			});
 			try {
 				const forkArtifacts = forkFile.slice(0, -6);
@@ -753,7 +754,7 @@ describe("history:// protocol", () => {
 				});
 
 				const session = makeToolSession(cwd, forkFile, {
-					historyScope: "fork",
+					historyScope: "session",
 				});
 				const context = { session, sessionFile: forkFile };
 				const child = await InternalUrlRouter.instance().resolve(`history://${childId}`, context);
@@ -779,13 +780,21 @@ describe("history:// protocol", () => {
 					cwd,
 					sessionId: forked.getSessionId(),
 					sessionFile: forkFile,
-					historyScope: "fork",
+					historyScope: "session",
 				}));
 				const forkValues = forkSuggestions?.items.map(item => item.value) ?? [];
 				expect(forkValues).toContain(`history://${childId}`);
 				expect(forkValues).toContain(`history://${grandchildId}`);
 				expect(forkValues).not.toContain("history://ForeignOnly");
 				expect(forkValues).not.toContain("history://ExternalOnly");
+				await expect(
+					InternalUrlRouter.instance().resolve("history://MissingFromThisSession", context),
+				).rejects.toThrow();
+				const emptyCompletions = await new HistoryProtocolHandler().complete(undefined, {
+					session,
+					sessionFile: path.join(dir, "empty-session.jsonl"),
+				});
+				expect(emptyCompletions).toEqual([]);
 
 				const ordinarySuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
 					cwd,

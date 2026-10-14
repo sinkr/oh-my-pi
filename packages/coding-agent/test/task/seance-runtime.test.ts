@@ -14,13 +14,41 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
-import { SEANCE_AGENT_NAME, seanceIsolationOptions } from "@oh-my-pi/pi-coding-agent/task/seance-policy";
 import subagentSystemPromptTemplate from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import seanceAssignmentTemplate from "../../src/prompts/system/seance-assignment.md" with { type: "text" };
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type PreparedAgentTaskSession } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, prompt, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+
+function preparedSourceSession(sourceFile: string, sourceSessionId: string): PreparedAgentTaskSession {
+	return {
+		fork: {
+			sourceFile,
+			options: {
+				resetInheritedCost: true,
+				repairInterruptedTail: true,
+				suppressBreadcrumb: true,
+				neutralizeInheritedSessionInit: true,
+				strictCopyArtifacts: true,
+				isolateInheritedDirectories: true,
+				historyScope: "session",
+				sessionPolicy: "seance",
+			},
+		},
+		promptSuffix: model =>
+			prompt.render(seanceAssignmentTemplate, {
+				sourceSession: sourceSessionId,
+				model: model ?? "",
+			}),
+	};
+}
+
+function seanceSessionOptions(cwd: string) {
+	const options = getBundledAgent("seance")?.taskPolicy?.session?.options(cwd);
+	if (!options) throw new Error("Expected the bundled seance session policy");
+	return options;
+}
 
 function sourceHeader(id: string, cwd: string, additionalDirectories: string[] = []) {
 	return {
@@ -124,6 +152,8 @@ describe("seance startup contracts", () => {
 			neutralizeInheritedSessionInit: true,
 			isolateInheritedDirectories: true,
 			strictCopyArtifacts: true,
+			historyScope: "session",
+			sessionPolicy: "seance",
 		});
 		expect(forked.getAdditionalDirectories()).toEqual([]);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -168,7 +198,7 @@ describe("seance startup contracts", () => {
 				enableMCP: true,
 				enableLsp: false,
 				spawns: "",
-				...seanceIsolationOptions(cwd),
+				...seanceSessionOptions(cwd),
 				preloadedExtensionPaths: [extensionPath],
 			});
 			session = created.session;
@@ -239,7 +269,7 @@ describe("seance startup contracts", () => {
 				settings: Settings.isolated(),
 				modelRegistry,
 				modelOverride: ["anthropic/claude-sonnet-4-5"],
-				sourceSession: sourceFile,
+				preparedSession: preparedSourceSession(sourceFile, "source-session"),
 				artifactsDir,
 				preloadedPreparedExtensions: [extension],
 				extensionRoots: () => {
@@ -290,6 +320,8 @@ describe("seance startup contracts", () => {
 			neutralizeInheritedSessionInit: true,
 			isolateInheritedDirectories: true,
 			strictCopyArtifacts: true,
+			historyScope: "session",
+			sessionPolicy: "seance",
 		});
 		expect(forked.getAdditionalDirectories()).toEqual([]);
 		const sessionFile = forked.getSessionFile();
@@ -307,7 +339,7 @@ describe("seance startup contracts", () => {
 		let revived: AgentSession | undefined;
 		let forkManagerClosed = false;
 		try {
-			const seanceAgent = getBundledAgent(SEANCE_AGENT_NAME);
+			const seanceAgent = getBundledAgent("seance");
 			if (!seanceAgent) throw new Error("Expected the bundled seance agent");
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5");
@@ -340,8 +372,8 @@ describe("seance startup contracts", () => {
 				settings: seanceSettings,
 				sessionManager: forked,
 				agentId: "SeanceCold",
-				agentDisplayName: SEANCE_AGENT_NAME,
-				agentName: SEANCE_AGENT_NAME,
+				agentDisplayName: "seance",
+				agentName: "seance",
 				taskDepth: 1,
 				toolNames: ["read", "grep", "glob"],
 				requireYieldTool: true,
@@ -350,7 +382,7 @@ describe("seance startup contracts", () => {
 				enableLsp: false,
 				enableIrc: false,
 				enableMCP: false,
-				...seanceIsolationOptions(cwd),
+				...seanceSessionOptions(cwd),
 				systemPrompt: defaultPrompt => {
 					defaultPromptBlocks = [...defaultPrompt];
 					return [...defaultPrompt, subagentPrompt, assignmentPrompt];
@@ -363,7 +395,7 @@ describe("seance startup contracts", () => {
 				systemPrompt: liveSession.agent.state.systemPrompt,
 				task: "Read the source transcript.",
 				tools: persistedTools,
-				agent: SEANCE_AGENT_NAME,
+				agent: "seance",
 				resolvedModel,
 				restrictToolNames: true,
 				spawns: "",
@@ -389,7 +421,7 @@ describe("seance startup contracts", () => {
 			});
 			const ref = AgentRegistry.global().register({
 				id: "SeanceCold",
-				displayName: SEANCE_AGENT_NAME,
+				displayName: "seance",
 				kind: "sub",
 				parentId: "Main",
 				status: "parked",
@@ -438,12 +470,14 @@ describe("seance startup contracts", () => {
 		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
 			suppressBreadcrumb: true,
 			neutralizeInheritedSessionInit: true,
+			historyScope: "session",
+			sessionPolicy: "seance",
 		});
 		const sessionFile = forked.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted fork");
 		await forked.close();
 		const peek = await SessionManager.peekSessionInit(sessionFile);
-		expect(peek).toMatchObject({ seanceFork: true, init: null });
+		expect(peek).toMatchObject({ sessionPolicy: "seance", historyScope: "session", init: null });
 
 		const createReviver = createPersistedSubagentReviverFactory({
 			session: revivalParent(cwd, []),

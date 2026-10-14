@@ -6,6 +6,7 @@ This document describes operator-visible behavior for session export, sharing, c
 
 - [`src/slash-commands/builtin-collaboration.ts`](../packages/coding-agent/src/slash-commands/builtin-collaboration.ts) — export/dump/share command specs
 - [`src/slash-commands/builtin-lifecycle.ts`](../packages/coding-agent/src/slash-commands/builtin-lifecycle.ts) — lifecycle command specs
+- [`src/slash-commands/seance.ts`](../packages/coding-agent/src/slash-commands/seance.ts) — `/seance` command and session-picker adapter
 - [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts) — TUI execution
 - [`src/modes/controllers/selector-controller.ts`](../packages/coding-agent/src/modes/controllers/selector-controller.ts) — resume/import picker and cwd transition
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
@@ -405,6 +406,8 @@ Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explici
 `/seance [id|path] [--model selector]` opens a source picker when no source is supplied; an id or path selects directly. Each consult forks the source JSONL and recursively copies artifacts, leaving the source unchanged.
 
 Source resolution reads the transcript without opening a writer. For task-spawned consults, an id first searches the caller's artifact tree: a direct child transcript wins over a same-ID deeper copy, and ambiguous copied matches fail. Other IDs resolve in current-scope then global sessions. If the destination is inside the source artifact tree, copying uses a snapshot; a failed copy aborts the consult and removes the incomplete fork.
+
+The `/seance` adapter routes into the task tool; [`src/task/seance.ts`](../packages/coding-agent/src/task/seance.ts) owns source/model selection, consult preparation, and restoration, with [`src/task/seance-policy.ts`](../packages/coding-agent/src/task/seance-policy.ts) defining the restricted child-session options. Shared task code supplies the policy seam; `history://` uses generic session-scoped visibility.
 
 The model comes from the source's active branch when restorable; `--model selector` overrides it. If no saved model can be restored, choose one explicitly.
 

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
+import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -26,12 +27,8 @@ function createSession(
 	} as unknown as ToolSession;
 }
 
-const bundledSeance: AgentDefinition = {
-	name: "seance",
-	description: "Read-only historical consult.",
-	systemPrompt: "",
-	source: "bundled",
-};
+const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
+const seanceTaskSchemas = [bundledSeance.taskPolicy!.schema!];
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
 // `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
@@ -95,7 +92,7 @@ describe("task schema seance fields", () => {
 					batchEnabled,
 					isolationEnabled,
 					evalToolsEnabled: false,
-					seanceEnabled: true,
+					taskPolicySchemas: seanceTaskSchemas,
 				});
 				const modelSelector = batchEnabled
 					? ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]
@@ -130,10 +127,10 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	it("omits historical-consult fields from every disabled schema variant", () => {
+	it("omits policy fields when no schema descriptor is available", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
-				const schema = getTaskSchema({ batchEnabled, isolationEnabled, seanceEnabled: false });
+				const schema = getTaskSchema({ batchEnabled, isolationEnabled, taskPolicySchemas: [] });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
 				expect(wireSchema).not.toContain('"model"');
@@ -161,10 +158,17 @@ describe("task schema seance fields", () => {
 		const absentFromCatalogue = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
 		expect(JSON.stringify(absentFromCatalogue.parameters.toJsonSchema())).not.toContain('"sourceSession"');
 
-		discovery.mockResolvedValue({
-			agents: [{ ...bundledSeance, source: "project" }],
-			projectAgentsDir: null,
-		});
+		const customSeance = parseAgent(
+			"project-seance.md",
+			`---
+name: seance
+description: Custom historical agent.
+---
+Custom prompt.`,
+			"project",
+		);
+		expect(customSeance.taskPolicy).toBeUndefined();
+		discovery.mockResolvedValue({ agents: [customSeance], projectAgentsDir: null });
 		const overridden = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
 		expect(JSON.stringify(overridden.parameters.toJsonSchema())).not.toContain('"sourceSession"');
 	});
@@ -203,8 +207,8 @@ describe("task spawn validation", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function executeText(params: unknown): Promise<string> {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+	async function executeText(params: unknown, agents: AgentDefinition[] = []): Promise<string> {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
 		const tool = await TaskTool.create(createSession());
 		const result = await tool.execute("tool-call", params);
 		return result.content.find(part => part.type === "text")?.text ?? "";
@@ -225,7 +229,7 @@ describe("task spawn validation", () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
-			seanceEnabled: true,
+			taskPolicySchemas: seanceTaskSchemas,
 		});
 		const params = {
 			agent: "scout",
@@ -234,6 +238,6 @@ describe("task spawn validation", () => {
 			model: "anthropic/claude-sonnet-4-5",
 		};
 		expect(schema(params) instanceof type.errors).toBe(false);
-		expect(await executeText(params)).toContain("`model` is only accepted for the `seance` agent.");
+		expect(await executeText(params, [bundledSeance])).toContain("`model` is only accepted for the `seance` agent.");
 	});
 });

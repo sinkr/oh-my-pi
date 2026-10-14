@@ -12,6 +12,11 @@ import { $env } from "@oh-my-pi/pi-utils";
 
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ModelRegistry } from "../config/model-registry";
+import type { CreateAgentSessionOptions } from "../sdk";
+import type { PersistedSessionInit, SessionForkOptions } from "../session/session-manager";
+import type { ToolSession } from "../tools";
+import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
@@ -42,8 +47,6 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
-const modelSelectorInputSchema = type("string | string[]");
-const seanceTaskFields = { "sourceSession?": "string", "model?": modelSelectorInputSchema };
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -125,7 +128,7 @@ function createTaskSchema(options: {
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
 	structured: boolean;
-	seanceEnabled: boolean;
+	taskPolicyFields: Record<string, BaseType>;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
@@ -133,7 +136,7 @@ function createTaskSchema(options: {
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	const seanceFields = options.seanceEnabled ? seanceTaskFields : {};
+	const taskPolicyFields = options.taskPolicyFields;
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -144,7 +147,7 @@ function createTaskSchema(options: {
 				...effortField,
 				...schemaFields,
 				...toolsField,
-				...seanceFields,
+				...taskPolicyFields,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -162,7 +165,7 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
-			...seanceFields,
+			...taskPolicyFields,
 			"+": "delete",
 		});
 		return type.raw({
@@ -180,7 +183,7 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
-			...seanceFields,
+			...taskPolicyFields,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -193,7 +196,7 @@ function createTaskSchema(options: {
 		...effortField,
 		...schemaFields,
 		...toolsField,
-		...seanceFields,
+		...taskPolicyFields,
 		"+": "delete",
 	});
 }
@@ -208,28 +211,43 @@ export function getTaskSchema(options: {
 	/** Advertise `outputSchema`/`schemaMode` (`task.structured`); default on. */
 	structured?: boolean;
 	defaultAgent?: string;
-	/** Advertise historical-consult fields only when the bundled agent is spawnable. */
-	seanceEnabled?: boolean;
+	taskPolicySchemas?: readonly AgentTaskSchema[];
 }): TaskToolSchemaInstance {
-	const defaultAgent = options.defaultAgent ?? "task";
-	const effortEnabled = options.effortEnabled ?? false;
-	const evalToolsEnabled = options.evalToolsEnabled ?? true;
-	const structured = options.structured ?? true;
-	const seanceEnabled = options.seanceEnabled ?? false;
-	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && structured && !seanceEnabled) {
+	const {
+		taskPolicySchemas = [],
+		defaultAgent: requestedDefaultAgent,
+		effortEnabled: requestedEffortEnabled,
+		evalToolsEnabled: requestedEvalToolsEnabled,
+		structured: requestedStructured,
+		...schemaOptions
+	} = options;
+	const defaultAgent = requestedDefaultAgent ?? "task";
+	const effortEnabled = requestedEffortEnabled ?? false;
+	const evalToolsEnabled = requestedEvalToolsEnabled ?? true;
+	const structured = requestedStructured ?? true;
+	const orderedTaskPolicySchemas = [...taskPolicySchemas].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+	const taskPolicyFields = Object.assign({}, ...orderedTaskPolicySchemas.map(schema => schema.fields));
+	if (
+		defaultAgent === "task" &&
+		!effortEnabled &&
+		evalToolsEnabled &&
+		structured &&
+		orderedTaskPolicySchemas.length === 0
+	) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${seanceEnabled ? "seance" : "no-seance"}:${defaultAgent}`;
+	const policyKey = JSON.stringify(orderedTaskPolicySchemas.map(schema => schema.key));
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${policyKey}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({
-		...options,
+		...schemaOptions,
 		effortEnabled,
 		evalToolsEnabled,
 		structured,
 		defaultAgent,
-		seanceEnabled,
+		taskPolicyFields,
 	});
 	taskSchemaCache.set(key, schema);
 	return schema;
@@ -242,6 +260,58 @@ export function getTaskSchema(options: {
  */
 export function canSpawnAtDepth(maxRecursionDepth: number, taskDepth: number): boolean {
 	return maxRecursionDepth < 0 || taskDepth < maxRecursionDepth;
+}
+
+export interface AgentTaskSchema {
+	/** Stable identity; change when fields or guidance change. */
+	key: string;
+	fields: Record<string, BaseType>;
+	guidance?: string;
+}
+
+export interface AgentTaskPreparationContext {
+	session: ToolSession;
+	invocationKind: "task" | "eval";
+	agent: AgentDefinition;
+	params: TaskParams;
+	planMode: boolean;
+	isolationRequested: boolean;
+	hasCustomTools: boolean;
+}
+
+/** Owned self-contained source fork: excludes parent workspace/extensions; core owns rollback and private artifacts. */
+export interface PreparedAgentTaskSession {
+	fork: {
+		sourceFile: string;
+		options: SessionForkOptions;
+	};
+	promptSuffix?: (resolvedModel?: string) => string;
+}
+
+export interface AgentTaskPreparation {
+	modelPatterns?: string[];
+	session?: PreparedAgentTaskSession;
+}
+
+export interface AgentTaskRestorePolicy {
+	cwd: string;
+	modelPattern: string;
+	toolNames: string[];
+}
+
+export interface AgentTaskPolicy {
+	available?: (context: { planMode: boolean }) => boolean;
+	schema?: AgentTaskSchema;
+	validate?: (context: { params: TaskParams; batchEnabled: boolean; defaultAgent: string }) => string | undefined;
+	prepare?: (context: AgentTaskPreparationContext) => Promise<AgentTaskPreparation>;
+	session?: {
+		options: (cwd: string) => Partial<CreateAgentSessionOptions>;
+		restore?: (context: {
+			init: PersistedSessionInit;
+			cwd: string;
+			modelRegistry: ModelRegistry;
+		}) => Promise<AgentTaskRestorePolicy | undefined>;
+	};
 }
 
 /** Agent definition (bundled or discovered) */
@@ -264,6 +334,8 @@ export interface AgentDefinition {
 	prewalk?: boolean | string;
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
 	advisor?: boolean | string;
+	/** Trusted built-in code only; never parsed from user or session agent frontmatter. */
+	taskPolicy?: AgentTaskPolicy;
 	source: AgentSource;
 	filePath?: string;
 }

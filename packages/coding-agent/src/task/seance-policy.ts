@@ -1,35 +1,20 @@
-import type { WorkspaceTree } from "../workspace-tree";
+import type { CreateAgentSessionOptions } from "../sdk";
 
 export const SEANCE_AGENT_NAME = "seance";
 
-/** Options cleared on both fresh seance creation and cold revival. */
-export interface SeanceIsolationOptions {
-	disableExtensionDiscovery: true;
-	additionalDirectories: never[];
-	inheritedSessionAgents: undefined;
-	contextFiles: never[];
-	autoloadSkills: never[];
-	skills: never[];
-	workspaceTree: WorkspaceTree;
-	promptTemplates: never[];
-	rules: never[];
-	extensionRoots: undefined;
-	preloadedExtensionPaths: never[];
-	preloadedPreparedExtensions: never[];
-	preloadedCustomToolPaths: never[];
-	customTools: undefined;
-	localProtocolOptions: undefined;
-	parentArtifactManager: undefined;
-	parentHindsightSessionState: undefined;
-	parentMnemopiSessionState: undefined;
-}
-
-export function seanceIsolationOptions(cwd: string): SeanceIsolationOptions {
+/** Session capabilities shared by fresh startup and cold restoration. */
+export function seanceIsolationOptions(cwd: string) {
 	return {
 		disableExtensionDiscovery: true,
+		restrictToolNames: true,
+		enableMCP: false,
+		mcpManager: undefined,
+		mcpTools: [],
+		enableIrc: false,
+		enableLsp: false,
+		spawns: "",
 		additionalDirectories: [],
 		inheritedSessionAgents: undefined,
-		autoloadSkills: [],
 		contextFiles: [],
 		skills: [],
 		workspaceTree: {
@@ -47,8 +32,7 @@ export function seanceIsolationOptions(cwd: string): SeanceIsolationOptions {
 		preloadedCustomToolPaths: [],
 		customTools: undefined,
 		localProtocolOptions: undefined,
-		parentArtifactManager: undefined,
 		parentHindsightSessionState: undefined,
 		parentMnemopiSessionState: undefined,
-	};
+	} satisfies Partial<CreateAgentSessionOptions>;
 }

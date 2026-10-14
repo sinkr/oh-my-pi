@@ -69,13 +69,15 @@ describe("persisted seance descendants", () => {
 			sessionFile: forkFile,
 			suppressBreadcrumb: true,
 			neutralizeInheritedSessionInit: true,
+			historyScope: "session",
+			sessionPolicy: "seance",
 		});
 		await forked.close();
 
 		const registry = new AgentRegistry();
 		await registerPersistedSubagents(registry, forkFile);
 		const peek = await SessionManager.peekSessionInit(forkFile);
-		expect(peek).toMatchObject({ seanceFork: true, init: null });
+		expect(peek).toMatchObject({ historyScope: "session", sessionPolicy: "seance", init: null });
 		expect(registry.list()).toEqual([]);
 	});
 

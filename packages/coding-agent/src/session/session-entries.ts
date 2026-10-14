@@ -56,8 +56,10 @@ export interface SessionHeader {
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
-	/** Marks a restricted seance fork before its runtime session contract is appended. */
-	seanceFork?: true;
+	/** Limits history:// to transcripts in this session's local artifact tree. */
+	historyScope?: "session";
+	/** Built-in AgentDefinition name whose policy restores this session at runtime. */
+	sessionPolicy?: string;
 }
 
 export interface NewSessionOptions {

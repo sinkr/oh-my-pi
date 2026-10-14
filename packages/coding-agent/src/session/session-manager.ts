@@ -135,6 +135,23 @@ const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
  */
 const MAX_WRITE_CONFLICT_RECOVERIES = 3;
 
+export interface SessionForkOptions {
+	copyArtifacts?: boolean;
+	suppressBreadcrumb?: boolean;
+	sessionFile?: string;
+	resetInheritedCost?: boolean;
+	repairInterruptedTail?: boolean;
+	/** Convert inherited initialization into historical context. */
+	neutralizeInheritedSessionInit?: boolean;
+	/** Propagate artifact resolution/copy failures and roll back the incomplete fork. */
+	strictCopyArtifacts?: boolean;
+	/** Do not inherit workspace roots from the source session header. */
+	isolateInheritedDirectories?: boolean;
+	/** Explicit caller-selected scope for history:// visibility. */
+	historyScope?: SessionHeader["historyScope"];
+	/** Explicit built-in agent policy used when restoring this session. */
+	sessionPolicy?: string;
+}
 /** A fresh session id. */
 export function mintSessionId(): string {
 	return Bun.randomUUIDv7();
@@ -168,8 +185,9 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
  * Copy the session's artifact directory next to the fork journal. Forks made
  * from the active session can put their journal inside that same directory;
  * snapshot first in that case so the destination never becomes its own copy
- * source. Seance forks opt into strict failure handling, while ordinary
- * session forks retain their historical best-effort behavior.
+ * source. Callers requiring source-preserving semantics opt into strict
+ * failure handling; ordinary session forks retain their historical best effort
+ * behavior.
  */
 async function copySessionArtifactsInternal(
 	sourceSessionFile: string,
@@ -4106,19 +4124,7 @@ export class SessionManager {
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: {
-			copyArtifacts?: boolean;
-			suppressBreadcrumb?: boolean;
-			sessionFile?: string;
-			resetInheritedCost?: boolean;
-			repairInterruptedTail?: boolean;
-			/** Convert inherited initialization into historical context. */
-			neutralizeInheritedSessionInit?: boolean;
-			/** Propagate artifact resolution/copy failures and roll back the incomplete fork. */
-			strictCopyArtifacts?: boolean;
-			/** Do not inherit workspace roots from the source session header. */
-			isolateInheritedDirectories?: boolean;
-		},
+		options?: SessionForkOptions,
 	): Promise<SessionManager> {
 		const transactionalFork =
 			options?.neutralizeInheritedSessionInit === true || options?.strictCopyArtifacts === true;
@@ -4168,7 +4174,8 @@ export class SessionManager {
 			},
 			options?.sessionFile,
 		);
-		if (options?.neutralizeInheritedSessionInit) manager.#header.seanceFork = true;
+		if (options?.historyScope !== undefined) manager.#header.historyScope = options.historyScope;
+		if (options?.sessionPolicy !== undefined) manager.#header.sessionPolicy = options.sessionPolicy;
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
 		manager.#additionalDirectories = options?.isolateInheritedDirectories
@@ -4392,7 +4399,8 @@ export class SessionManager {
 	): Promise<{
 		cwd: string;
 		init: PersistedSessionInit | null;
-		seanceFork: boolean;
+		historyScope?: SessionHeader["historyScope"];
+		sessionPolicy?: string;
 	} | null> {
 		let header: SessionHeader | undefined;
 		const initEntries: FileEntry[] = [];
@@ -4414,7 +4422,8 @@ export class SessionManager {
 		return {
 			cwd: header.cwd ?? getProjectDir(),
 			init: extractSessionInit(initEntries),
-			seanceFork: header.seanceFork === true,
+			historyScope: header.historyScope,
+			sessionPolicy: header.sessionPolicy,
 		};
 	}
 	/** Continue the most recent session, or create a new one if none exists. */

@@ -42,15 +42,15 @@ import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
-import { SEANCE_AGENT_NAME } from "./seance-policy";
 import {
 	type AgentDefinition,
+	type AgentTaskPolicy,
+	type AgentTaskSchema,
 	canSpawnAtDepth,
 	getTaskSchema,
-	type TaskItem,
-	type TaskParams,
 	type TaskToolSchemaInstance,
 } from "./types";
+import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import { type AgentProgress, type SingleResult, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
@@ -148,27 +148,13 @@ export {
 	taskSchema,
 } from "./types";
 
-function isSeanceSpawnable(
-	agents: readonly AgentDefinition[],
-	disabledAgents: readonly string[],
-	parentSpawns: string | boolean | null | undefined,
-	planMode: boolean,
-): boolean {
-	const policy = resolveSpawnPolicy(parentSpawns);
-	return (
-		!planMode &&
-		policy.enabled &&
-		(policy.allowedAgents === null || policy.allowedAgents.includes(SEANCE_AGENT_NAME)) &&
-		!disabledAgents.includes(SEANCE_AGENT_NAME) &&
-		agents.some(agent => agent.name === SEANCE_AGENT_NAME && agent.source === "bundled")
-	);
-}
-
 interface TaskAgentAvailability {
 	agents: AgentDefinition[];
 	defaultAgent: string;
 	spawningDisabled: boolean;
-	seanceEnabled: boolean;
+	taskPolicies: AgentTaskPolicy[];
+	taskSchemas: AgentTaskSchema[];
+	featureGuidance: string[];
 }
 
 function resolveTaskAgentAvailability(args: {
@@ -177,22 +163,26 @@ function resolveTaskAgentAvailability(args: {
 	parentSpawns: string | boolean | null | undefined;
 	planMode: boolean;
 }): TaskAgentAvailability {
-	const policy = resolveSpawnPolicy(args.parentSpawns);
-	const allowedAgents = policy.allowedAgents === null ? undefined : new Set(policy.allowedAgents);
-	let agents = policy.enabled
+	const spawnPolicy = resolveSpawnPolicy(args.parentSpawns);
+	const allowedAgents = spawnPolicy.allowedAgents === null ? undefined : new Set(spawnPolicy.allowedAgents);
+	const permittedAgents = spawnPolicy.enabled
 		? args.agents.filter(
 				agent => !args.disabledAgents.includes(agent.name) && (!allowedAgents || allowedAgents.has(agent.name)),
 			)
 		: [];
-	if (args.planMode) agents = agents.filter(agent => agent.name !== SEANCE_AGENT_NAME);
+	const agents = permittedAgents.filter(agent => agent.taskPolicy?.available?.({ planMode: args.planMode }) !== false);
 	const defaultAgent = args.planMode
-		? (agents.find(agent => agent.name === policy.defaultAgent)?.name ?? agents[0]?.name ?? "")
-		: policy.defaultAgent;
+		? (agents.find(agent => agent.name === spawnPolicy.defaultAgent)?.name ?? agents[0]?.name ?? "")
+		: spawnPolicy.defaultAgent;
+	const taskPolicies = args.agents.flatMap(agent => (agent.taskPolicy ? [agent.taskPolicy] : []));
+	const advertisedPolicies = agents.flatMap(agent => (agent.taskPolicy ? [agent.taskPolicy] : []));
 	return {
 		agents,
 		defaultAgent,
-		spawningDisabled: !policy.enabled || (args.planMode && agents.length === 0),
-		seanceEnabled: isSeanceSpawnable(args.agents, args.disabledAgents, args.parentSpawns, args.planMode),
+		spawningDisabled: !spawnPolicy.enabled || (args.planMode && agents.length === 0),
+		taskPolicies,
+		taskSchemas: advertisedPolicies.flatMap(policy => (policy.schema ? [policy.schema] : [])),
+		featureGuidance: advertisedPolicies.flatMap(policy => (policy.schema?.guidance ? [policy.schema.guidance] : [])),
 	};
 }
 
@@ -237,9 +227,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasStructuredAgents: renderedAgents.some(agent => agent.structured),
 		hasModelMentions: options.sessionAgents.length > 0,
+		featureGuidance: options.availability.featureGuidance.join("\n"),
 		ircEnabled: options.ircEnabled,
-		seanceAgentName: SEANCE_AGENT_NAME,
-		seanceEnabled: options.availability.seanceEnabled,
 	});
 }
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
@@ -265,13 +254,6 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 			return `task.batch is disabled, so the task tool does not accept ${disallowed.map(f => `\`${f}\``).join(" or ")}. Spawn one agent per call with \`task\`, or enable the task.batch setting.`;
 		}
 	}
-	if (
-		batchEnabled &&
-		params.tasks !== undefined &&
-		(params.sourceSession !== undefined || params.model !== undefined)
-	) {
-		return `Put \`sourceSession\` and \`model\` on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
-	}
 	return undefined;
 }
 
@@ -291,33 +273,8 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	if (effort === undefined || TASK_EFFORTS.includes(effort)) return undefined;
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
-function validateSeanceFields(item: TaskItem, agent: string, label: string): string | undefined {
-	if (agent !== SEANCE_AGENT_NAME) {
-		if (item.sourceSession !== undefined)
-			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
-		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
-		return undefined;
-	}
-	if (typeof item.sourceSession !== "string" || item.sourceSession.trim().length === 0) {
-		return `${label} selects the \`${SEANCE_AGENT_NAME}\` agent and requires a non-empty \`sourceSession\`.`;
-	}
-	if (item.tools?.length) return `${label} cannot pass custom tools to the read-only \`${SEANCE_AGENT_NAME}\` agent.`;
-	const model: unknown = item.model;
-	if (
-		model !== undefined &&
-		!(
-			(typeof model === "string" && model.trim().length > 0) ||
-			(Array.isArray(model) &&
-				model.length > 0 &&
-				model.every(value => typeof value === "string" && value.trim().length > 0))
-		)
-	) {
-		return `${label} has an invalid \`model\` selector. Provide a non-empty selector or selector array.`;
-	}
-	return undefined;
-}
 
-function validateSpawnParams(params: TaskParams, batchEnabled: boolean, defaultAgent: string): string | undefined {
+function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
 	const hasTask = typeof params.task === "string" && params.task.trim() !== "";
 	const tasks = params.tasks;
 	if (batchEnabled && tasks !== undefined) {
@@ -335,8 +292,6 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, defaultA
 			const label = `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
 			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
-			const seanceError = validateSeanceFields(item, item.agent?.trim() || defaultAgent, label);
-			if (seanceError) return seanceError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -359,10 +314,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean, defaultA
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return (
-		validateSeanceFields(params, params.agent?.trim() || defaultAgent, "The call") ??
-		validateEffort(params.effort, "The call")
-	);
+	return validateEffort(params.effort, "The call");
 }
 
 /**
@@ -375,15 +327,9 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
-	if ("solutionSpace" in params) item.solutionSpace = params.solutionSpace;
-	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
-	if ("model" in params) item.model = params.model;
-	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
-	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
-	if ("tools" in params) item.tools = params.tools;
-	if ("effort" in params) item.effort = params.effort;
-	if ("isolated" in params) item.isolated = params.isolated;
+	const item = { ...params } as TaskItem & { context?: string; tasks?: TaskItem[] };
+	delete item.context;
+	delete item.tasks;
 	return [item];
 }
 
@@ -397,22 +343,13 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  * `isolated` (batch form) wins over the top-level flag (flat form).
  */
 function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string): TaskParams {
-	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
-	if (item.name !== undefined) spawn.name = item.name;
-	if (item.task !== undefined) spawn.task = item.task;
-	if (item.solutionSpace !== undefined) spawn.solutionSpace = item.solutionSpace;
-	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
-	if ("model" in item) spawn.model = item.model;
+	const spawn: TaskParams = { ...item, agent: item.agent?.trim() || defaultAgent };
+	delete spawn.tasks;
+	delete spawn.context;
+	delete spawn.isolated;
+	if (item.isolated !== undefined) spawn.isolated = item.isolated;
+	else if ("isolated" in params) spawn.isolated = params.isolated;
 	if (params.context !== undefined) spawn.context = params.context;
-	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
-	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
-	if ("tools" in item) spawn.tools = item.tools;
-	if ("effort" in item) spawn.effort = item.effort;
-	if (item.isolated !== undefined) {
-		spawn.isolated = item.isolated;
-	} else if ("isolated" in params) {
-		spawn.isolated = params.isolated;
-	}
 	return spawn;
 }
 
@@ -428,9 +365,21 @@ interface SpawnPlan {
  * validation error the call reports instead when the shape is rejected. Shared
  * by dispatch and the speculative launcher so both derive identical spawns.
  */
-function planSpawns(rawParams: unknown, batchEnabled: boolean, defaultAgent: string): SpawnPlan | string {
+function planSpawns(
+	rawParams: unknown,
+	batchEnabled: boolean,
+	defaultAgent: string,
+	taskPolicies: readonly AgentTaskPolicy[],
+): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams) as TaskParams;
-	const error = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled, defaultAgent);
+	let error = validateShapeParams(batchEnabled, params);
+	error ??= validateSpawnParams(params, batchEnabled);
+	if (!error) {
+		for (const policy of taskPolicies) {
+			error = policy.validate?.({ params, batchEnabled, defaultAgent });
+			if (error) break;
+		}
+	}
 	if (error) return error;
 	const items = resolveSpawnItems(params);
 	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
@@ -732,7 +681,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawns: args => {
 			const availability = this.#agentAvailability();
 			if (availability.spawningDisabled) return undefined;
-			const plan = planSpawns(args, this.#isBatchEnabled(), availability.defaultAgent);
+			const plan = planSpawns(args, this.#isBatchEnabled(), availability.defaultAgent, availability.taskPolicies);
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
 		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
@@ -773,7 +722,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			defaultAgent: availability.defaultAgent,
-			seanceEnabled: availability.seanceEnabled,
+			taskPolicySchemas: availability.taskSchemas,
 		});
 	}
 
@@ -950,8 +899,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			assignment: (params.task ?? "").trim(),
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
-			model: params.model,
-			sourceSession: params.sourceSession,
+			params,
 			...this.#resultParams(params),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
@@ -996,14 +944,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
-		const defaultAgent = this.#defaultAgent();
+		const availability = this.#agentAvailability();
+		const defaultAgent = availability.defaultAgent;
 		if (!defaultAgent) {
 			return createTaskModeError(
 				"Task execution is unavailable in plan mode because no permitted agents are available.",
 			);
 		}
 		const batchEnabled = this.#isBatchEnabled();
-		const plan = planSpawns(rawParams, batchEnabled, defaultAgent);
+		const plan = planSpawns(rawParams, batchEnabled, defaultAgent, availability.taskPolicies);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
 		}
@@ -1768,8 +1717,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context,
 				agent: params.agent,
-				model: params.model,
-				sourceSession: params.sourceSession,
+				params,
 				...this.#resultParams(params),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
 				solutionSpace: params.solutionSpace,
@@ -1787,12 +1735,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index: spawnIndex,
 				parentToolCallId: toolCallId,
 				detached,
-				// Detached (async) spawns advertise `agent://<id>` handles in the
-				// eventual async-result delivery, which can land well after this
-				// call returns. Without this, a temporary (in-memory session)
-				// artifacts directory is deleted immediately on completion and the
-				// advertised URL 404s by the time delivery happens.
-				retainArtifacts: detached || params.agent === SEANCE_AGENT_NAME,
+				// Detached jobs outlive this call; prepared sessions derive retention
+				// from their policy contract inside structured execution.
+				retainArtifacts: detached,
 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,

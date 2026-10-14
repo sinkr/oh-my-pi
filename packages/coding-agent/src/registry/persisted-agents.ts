@@ -6,10 +6,9 @@ import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
-import { visitEntriesFromFileStream } from "../session/session-loader";
+import { readSessionHeader, visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
-import { isSeanceSessionFile } from "../task/seance";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
 import {
 	type AgentHistorySummary,
@@ -591,7 +590,17 @@ export async function ensurePersistedRoster(
 			return root;
 		}
 	}
-	if (await isSeanceSessionFile(root)) return root;
+	let historyScope: "session" | undefined;
+	try {
+		historyScope = (await readSessionHeader(root))?.historyScope;
+	} catch (error) {
+		logger.warn("Persisted agent roster scope probe failed; using in-memory peers", {
+			rootSessionFile: root,
+			error: rosterScanError(error),
+		});
+		return root;
+	}
+	if (historyScope === "session") return root;
 	// Forget settled latches oldest-first once the bound is reached, so a
 	// process that visits many roots doesn't accumulate one entry per root.
 	// In-flight scans are never evicted: their latch is the single-flight guard.
@@ -656,7 +665,7 @@ export async function registerPersistedSubagents(
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
-	if (await isSeanceSessionFile(sessionFile)) return;
+	if ((await readSessionHeader(sessionFile))?.historyScope === "session") return;
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	const hydrateHistory = options.hydrateHistory ?? true;
 	if (!shouldContinue()) return;
@@ -849,7 +858,7 @@ async function registerPersistedSubagentsFromDir(
 		}
 		// A transcript stem is not proof of a child directory: "." and ".."
 		// revisit ancestors, and symlinks can point back into the same tree.
-		if (childDirectories.has(id) && !(await isSeanceSessionFile(sessionFile))) {
+		if (childDirectories.has(id) && (await readSessionHeader(sessionFile))?.historyScope !== "session") {
 			await registerPersistedSubagentsFromDir(
 				registry,
 				path.join(dir, id),
