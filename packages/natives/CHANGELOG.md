@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `trimNativeMemory()` to return unused allocator pages on GNU/Linux without evicting caches, at most once per minute.
+
 ### Changed
 
 - Reduced memory held by cached code-structure parses: the cache now caps estimated syntax-tree memory instead of source size, keeps only a file's current and previous parse, and reparses edited files incrementally ([#15886](https://github.com/can1357/oh-my-pi/pull/15886) by [@H4vC](https://github.com/H4vC))
