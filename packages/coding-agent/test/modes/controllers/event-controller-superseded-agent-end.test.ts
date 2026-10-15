@@ -4,6 +4,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { Loader, TERMINAL } from "@oh-my-pi/pi-tui";
+import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 /**
@@ -338,5 +339,54 @@ describe("EventController superseded agent_end", () => {
 
 		expect(ctx.flushPendingModelSwitch).toHaveBeenCalled();
 		expect(ctx.flushPendingCommandOutput).toHaveBeenCalled();
+	});
+
+	it("does not flush the main model switch when a focused worker ends while the main session streams", async () => {
+		const { ctx, streamState, loader } = createContext();
+		const controller = new EventController(ctx);
+
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		streamState.isStreaming = true;
+		streamState.viewIsStreaming = false;
+		await controller.handleEvent(AGENT_END);
+
+		// The worker's own teardown still runs; only the main-owned switch waits
+		// for the main run's settle.
+		expect(loader.stop).toHaveBeenCalledTimes(1);
+		expect(ctx.flushPendingModelSwitch).not.toHaveBeenCalled();
+
+		streamState.isStreaming = false;
+		await controller.handleEvent(AGENT_END);
+		expect(ctx.flushPendingModelSwitch).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not let a recovery watch overwrite the status of a real terminal agent_end", async () => {
+		const { ctx, streamState } = createContext();
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const idle = Promise.withResolvers<void>();
+		vi.spyOn(ctx.viewSession, "waitForIdle").mockImplementation(() => idle.promise);
+		const controller = new EventController(ctx);
+
+		// Attachment lands during terminal agent_end maintenance: post-prompt work
+		// is still pending, so restoring activity arms the recovery watch.
+		streamState.hasPostPromptWork = true;
+		controller.restoreRunActivity();
+
+		// The real terminal event is then handled after the subscription is live.
+		streamState.hasPostPromptWork = false;
+		const failed = {
+			type: "agent_end",
+			messages: [{ role: "assistant", stopReason: "error", errorMessage: "boom", content: [] }],
+		} as unknown as AgentSessionEvent;
+		await controller.handleEvent(failed);
+		expect(report).toHaveBeenLastCalledWith({ state: "error", msg: "boom" });
+
+		// The armed watch wakes afterwards; it must stand down instead of running a
+		// second, message-less teardown that reports `idle`.
+		idle.resolve();
+		await controller.dispatchSessionEvent({ type: "turn_start" });
+		expect(report).toHaveBeenCalledTimes(1);
+		expect(report).toHaveBeenLastCalledWith({ state: "error", msg: "boom" });
 	});
 });

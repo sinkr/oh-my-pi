@@ -303,6 +303,12 @@ export class EventController {
 	#runEpoch = 0;
 	/** Epoch of the in-flight {@link #finishWhenRunSettles} watch, if any. */
 	#settleWatchEpoch: number | undefined = undefined;
+	/**
+	 * Bumped when a terminal `agent_end` is handled. A settle watch armed before
+	 * it stands down, so a real terminal status is never overwritten by the
+	 * watch's synthetic (message-less) teardown.
+	 */
+	#terminalSettleCount = 0;
 	/** Changes whenever transcript ownership is detached, including same-session reattachment. */
 	#transcriptGeneration = 0;
 	// Coalescing window for `message_update` events at the subscription boundary.
@@ -2306,7 +2312,7 @@ export class EventController {
 			// the run is not over, it resumes or settles without the user.
 			if (event.awaitingAsyncWork === true) setTerminalTitleState("idle");
 			void this.#finishWhenRunSettles(event);
-			await this.ctx.flushPendingModelSwitch();
+			await this.#flushMainModelSwitch();
 			// Reaching here means the first guard passed, so `isStreaming` is already
 			// false: a command issued from now on mounts immediately. Leaving earlier
 			// panels queued would render them out of order, minutes later, after the
@@ -2315,6 +2321,7 @@ export class EventController {
 			this.ctx.flushPendingCommandOutput();
 			return;
 		}
+		this.#terminalSettleCount += 1;
 		setRunStatus(this.#settledRunStatus(event));
 
 		await this.#finishAgentEnd(event);
@@ -2343,7 +2350,9 @@ export class EventController {
 		// No `hasAdmittedSubmission` gate: this very settle is emitted while the
 		// prompt that produced it is still admitted, and a new submission starts a
 		// run whose `agent_start` bumps the epoch anyway.
+		const terminalSettles = this.#terminalSettleCount;
 		const superseded = () =>
+			this.#terminalSettleCount !== terminalSettles ||
 			this.#runEpoch !== epoch ||
 			this.#transcriptGeneration !== generation ||
 			this.ctx.viewSession !== session ||
@@ -2391,6 +2400,16 @@ export class EventController {
 		return { state: "done" };
 	}
 
+	/**
+	 * Apply a deferred model switch only when the main session is quiet. The
+	 * switch targets `ctx.session`, so a focused worker settling while the main
+	 * run still streams must not flush it mid-turn; the main run's own settle does.
+	 */
+	async #flushMainModelSwitch(): Promise<void> {
+		if (this.ctx.session.isStreaming) return;
+		await this.ctx.flushPendingModelSwitch();
+	}
+
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
 		this.#setTerminalProgress(false);
 		this.ctx.statusLine.markActivityEnd();
@@ -2403,7 +2422,7 @@ export class EventController {
 			this.ctx.statusContainer.disposeChildren();
 		}
 		this.ctx.composer.setRunActive(false);
-		await this.ctx.flushPendingModelSwitch();
+		await this.#flushMainModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#blockingPrompts.clear();
 		this.#readToolCallArgs.clear();
