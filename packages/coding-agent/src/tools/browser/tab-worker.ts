@@ -219,7 +219,7 @@ import {
 import { navigateMainFrame, pushState, reloadPage, traverseHistory, type NavigationWaitUntil } from "./navigation";
 
 import { cloneSafe, RunOutput } from "./run-output";
-import { UploadStaging } from "./upload-files";
+import { type UploadRoute, UploadStaging } from "./upload-files";
 import type {
 	Observation,
 	ObservationEntry,
@@ -2502,10 +2502,15 @@ export class WorkerCore {
 				const label = `tab.uploadFile(${JSON.stringify(selector)})`;
 				return markHandled(
 					(async () => {
+						if (!filePaths.length) throw new ToolError("tab.uploadFile() requires at least one file path");
+						// Its own deadline: the first upload's check must not eat into the wait for the selector.
+						const route = await op(`${label} checking how the browser takes files`, actionOpMs, sig =>
+							this.#requireUploads().route(page, sig),
+						);
 						const prepared = await op(
 							label,
 							actionOpMs,
-							sig => this.#prepareTabUpload(selector, filePaths, label, actionOpMs, sig, session),
+							sig => this.#prepareTabUpload(selector, filePaths, label, route, actionOpMs, sig, session),
 							{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 						);
 						try {
@@ -3202,18 +3207,24 @@ export class WorkerCore {
 		selector: string,
 		filePaths: string[],
 		label: string,
+		route: UploadRoute,
 		timeoutMs: number,
 		signal: AbortSignal,
 		session: SessionSnapshot,
 	): Promise<PreparedUpload> {
-		if (!filePaths.length) throw new ToolError("tab.uploadFile() requires at least one file path");
 		const page = this.#requirePage();
 		const handle = await this.#resolveActionHandle(selector, timeoutMs, signal);
 		try {
 			const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd));
-			const uploads = this.#requireUploads();
-			const route = await uploads.route(page, signal);
-			const prepared = await prepareElementUpload(page, handle, absolute, label, route, uploads, signal);
+			const prepared = await prepareElementUpload(
+				page,
+				handle,
+				absolute,
+				label,
+				route,
+				this.#requireUploads(),
+				signal,
+			);
 			return {
 				...prepared,
 				dispose: async () => {

@@ -424,6 +424,20 @@ return {
 		}
 	}, 60_000);
 
+	test("refuses a folder by name where the browser takes only contents", async () => {
+		const { run, close } = await openConnectedTab("browser-upload-folder-contents", {
+			proxy: routeProxy("contents"),
+		});
+		try {
+			await fs.mkdir(path.join(tempDir, "refused-album"), { recursive: true });
+			await Bun.write(path.join(tempDir, "refused-album", "one.txt"), "one");
+			const errors = await run(collectErrors(`() => tab.uploadFile("#folder", "refused-album"),`));
+			expect(errors).toEqual([expect.stringContaining("refused-album is a folder")]);
+		} finally {
+			await close();
+		}
+	}, 60_000);
+
 	test("streams contents in messages under the link's cap", async () => {
 		const maxMessageBytes = 16 * 1024 * 1024;
 		const { run, close } = await openConnectedTab("browser-upload-capped", {
@@ -563,4 +577,64 @@ test("detaches a chooser session that attaches after the upload was cancelled", 
 	});
 	for (let turn = 0; turn < 5; turn++) await Promise.resolve();
 	expect(detached).toBe(true);
+});
+
+/** A page whose route check reads its token through `read`, counting the checks. */
+function routeCheckPage(read: (tokenPath: string) => Promise<string>): { page: Page; checks: () => number } {
+	let checks = 0;
+	let tokenPath = "";
+	const input = {
+		frame: {
+			client: {
+				send: async (_method: string, params: { files: string[] }) => {
+					tokenPath = params.files[0] ?? "";
+				},
+			},
+		},
+		remoteObject: () => ({ objectId: "picker" }),
+	};
+	const picker = { asElement: () => input, evaluate: () => read(tokenPath), dispose: async () => {} };
+	const realm = {
+		evaluateHandle: async () => {
+			checks++;
+			return picker;
+		},
+	};
+	const page = { mainFrame: () => ({ isolatedRealm: () => realm }) } as unknown as Page;
+	return { page, checks: () => checks };
+}
+
+test("checks the upload route again after a check that decided nothing, and keeps a decided one", async () => {
+	let attempt = 0;
+	const { page, checks } = routeCheckPage(async tokenPath => {
+		attempt++;
+		// The first check's page navigates away mid-read; the next reads the token.
+		if (attempt === 1) throw new Error("Execution context was destroyed");
+		return await Bun.file(tokenPath).text();
+	});
+	const staging = new UploadStaging(path.join(tempDir, "route-staging"));
+	expect(await staging.route(page)).toBe("contents");
+	expect(await staging.route(page)).toBe("paths");
+	expect(await staging.route(page)).toBe("paths");
+	expect(checks()).toBe(2);
+});
+
+test("stages a symlinked file's contents, once while the file is unchanged", async () => {
+	const target = path.join(tempDir, "link-target.txt");
+	await Bun.write(target, "linked");
+	const link = path.join(tempDir, "link.txt");
+	await fs.symlink(target, link, "file");
+	const staging = new UploadStaging(path.join(tempDir, "symlink-staging"));
+	const [first] = await staging.stage([await openUploadSource(link)]);
+	const [again] = await staging.stage([await openUploadSource(link)]);
+	expect(again).toBe(first);
+	// A copy that still pointed at the original would send the browser to it, and break once it is gone.
+	expect((await fs.lstat(first!)).isSymbolicLink()).toBe(false);
+	await fs.rm(target);
+	expect(await Bun.file(first!).text()).toBe("linked");
+	await Bun.write(target, "changed");
+	await fs.utimes(target, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+	const [changed] = await staging.stage([await openUploadSource(link)]);
+	expect(changed).not.toBe(first);
+	expect(await Bun.file(changed!).text()).toBe("changed");
 });

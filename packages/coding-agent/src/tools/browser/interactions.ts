@@ -18,6 +18,7 @@ import {
 	createFilePicker,
 	openUploadSources,
 	pickedFiles,
+	refuseFolders,
 	setFileInputPaths,
 	type UploadFileInfo,
 	type UploadRoute,
@@ -1069,6 +1070,7 @@ export async function prepareInputUpload(
 	signal?: AbortSignal,
 ): Promise<PreparedUpload> {
 	const sources = await openUploadSources(absolutePaths, signal);
+	if (route === "contents") refuseFolders(sources);
 	const refusal = await untilAborted(signal, () => input.evaluate(fileInputRefusal, sources.length));
 	if (refusal) throw new ToolError(refusal);
 	return preparedUpload(sources, sig => deliverToInput(input, sources, route, staging, sig));
@@ -1163,6 +1165,7 @@ export async function prepareElementUpload(
 		return await prepareInputUpload(handle, absolutePaths, route, staging, signal);
 	}
 	const sources = await openUploadSources(absolutePaths, signal);
+	if (route === "contents") refuseFolders(sources);
 
 	if (pagesAwaitingChooser.has(page)) {
 		throw new ToolError(`${label} cannot run while another uploadFile on this tab waits for its file chooser`);
@@ -1177,8 +1180,11 @@ export async function prepareElementUpload(
 					sources,
 					async sig => {
 						const staged = await staging.stage(sources, sig);
-						handled = true;
-						await untilAborted(sig, () => chooser.accept(staged));
+						// Handled only once accept starts: a cancel during staging leaves the chooser to `dispose`.
+						await untilAborted(sig, () => {
+							handled = true;
+							return chooser.accept(staged);
+						});
 					},
 					async () => {
 						if (!handled) await chooser.cancel().catch(() => undefined);

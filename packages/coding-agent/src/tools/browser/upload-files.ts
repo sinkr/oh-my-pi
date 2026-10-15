@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { BunFile } from "bun";
 import type { ElementHandle, Page, Realm } from "puppeteer-core";
 import { throwIfAborted } from "../tool-errors";
@@ -31,6 +32,8 @@ export interface UploadSource {
 	path: string;
 	file: BunFile;
 	size: number;
+	/** A folder, which only a browser reading its path can expand (for a `webkitdirectory` input). */
+	directory: boolean;
 	info: UploadFileInfo;
 }
 
@@ -53,13 +56,14 @@ const ROUTE_CHECK_READ_MS = 2_000;
 export async function openUploadSource(absolute: string): Promise<UploadSource> {
 	const file = Bun.file(absolute);
 	// A missing file reports size 0; stat rejects instead of uploading it empty.
-	const { size } = await file.stat();
+	const stats = await file.stat();
 	const bunType = file.type.split(";")[0];
 	const unknown = bunType === UNKNOWN_TYPE && !OCTET_STREAM_EXTENSIONS[path.extname(absolute).toLowerCase()];
 	return {
 		path: absolute,
 		file,
-		size,
+		size: stats.size,
+		directory: stats.isDirectory(),
 		info: { name: path.basename(absolute), type: unknown ? "" : bunType, lastModified: file.lastModified },
 	};
 }
@@ -74,10 +78,21 @@ export async function openUploadSources(absolutePaths: string[], signal?: AbortS
 	return sources;
 }
 
+/** Reject folders for a browser that only takes file contents: only a browser reading a path expands a folder. */
+export function refuseFolders(sources: UploadSource[]): void {
+	const folder = sources.find(source => source.directory);
+	if (!folder) return;
+	throw new ToolError(
+		`${folder.path} is a folder, and this browser cannot read omp's files (a relay without file-URL access, or a browser on another machine), so it takes files only; upload the files inside it instead`,
+	);
+}
+
 /** Read whole files into payloads for one call into the page. */
 export async function readFilePayloads(absolutePaths: string[], signal?: AbortSignal): Promise<FilePayload[]> {
+	const sources = await openUploadSources(absolutePaths, signal);
+	refuseFolders(sources);
 	const payloads: FilePayload[] = [];
-	for (const { file, info } of await openUploadSources(absolutePaths, signal)) {
+	for (const { file, info } of sources) {
 		throwIfAborted(signal);
 		payloads.push({ ...info, data: Buffer.from(await file.arrayBuffer()).toString("base64") });
 	}
@@ -117,13 +132,19 @@ export function pickedFiles(picker: PagePicker): unknown[] {
 	return Array.from(picker.files ?? []);
 }
 
-/** The text of a picker's first file. Runs in the page. */
+/**
+ * The text of a picker's first file, or "" when the browser could not read it (a path on another machine's file
+ * system). Runs in the page.
+ */
 function readFirstPickedFile(picker: PagePicker): Promise<string> | string {
 	const file = picker.files?.[0];
-	return file ? file.text() : "";
+	return file ? file.text().catch(() => "") : "";
 }
 
-/** Staging folders are `omp-uploads-<pid>-<id>` in the temp directory; the pid names the omp process that owns one. */
+/**
+ * Staging folders are `omp-uploads-<pid>-<id>` in the temp directory; the pid names the omp process that owns one. The
+ * route check's own folder shares the prefix, so one a crash left behind is swept the same way.
+ */
 const STAGING_FOLDER = /^omp-uploads-(\d+)-/;
 
 /**
@@ -176,42 +197,66 @@ export async function sweepUploadStaging(live: ReadonlySet<string>, now = Date.n
 export class UploadStaging {
 	readonly #directory: string;
 	#created: Promise<unknown> | undefined;
-	#route: Promise<UploadRoute> | undefined;
+	/** The route a check decided; unset until one does. */
+	#route: UploadRoute | undefined;
+	#checking: Promise<UploadRoute> | undefined;
+	/** Staged copies of unchanged files, by source path, size and mtime, so a repeated upload copies nothing. */
+	readonly #copies = new Map<string, string>();
 
 	constructor(directory: string) {
 		this.#directory = directory;
 	}
 
 	/**
-	 * The route for this connection, checked on the first upload: the browser gets a token file's path through
-	 * `DOM.setFileInputFiles` on a detached input and must read it back. `Not allowed`, a failed or late read, or other
-	 * contents mean it cannot open omp's files.
+	 * The route for this connection: the browser gets a token file's path through `DOM.setFileInputFiles` on a detached
+	 * input and must read it back. A read of the token means paths and `Not allowed` means contents, both kept for the
+	 * connection. Anything else (a late or failed read, a navigation, a busy page) decides nothing: this upload gets
+	 * contents, which any browser takes, and the next one checks again.
 	 */
 	route(page: Page, signal?: AbortSignal): Promise<UploadRoute> {
-		this.#route ??= this.#checkRoute(page).catch(error => {
-			// A check cut short (navigation, a closed target) decided nothing; the next upload checks again.
-			this.#route = undefined;
-			throw error;
-		});
-		const route = this.#route;
-		return untilAborted(signal, () => route);
+		if (this.#route) return Promise.resolve(this.#route);
+		this.#checking ??= this.#checkRoute(page)
+			.then(
+				({ route, decided }) => {
+					if (decided) this.#route = route;
+					return route;
+				},
+				(): UploadRoute => "contents",
+			)
+			.finally(() => {
+				this.#checking = undefined;
+			});
+		const checking = this.#checking;
+		return untilAborted(signal, () => checking);
 	}
 
-	/** Copy files or folders into the staging directory, keeping names and mtimes, and return the copies' paths. */
+	/**
+	 * Copy files or folders into the staging directory, keeping names and mtimes, and return the copies' paths. Links
+	 * are followed: a copy that pointed back at the original would send the browser to it again.
+	 */
 	async stage(sources: UploadSource[], signal?: AbortSignal): Promise<string[]> {
 		const directory = await this.#ensureDirectory();
 		const staged: string[] = [];
 		for (const source of sources) {
 			throwIfAborted(signal);
+			// A folder's own size and mtime miss changes deeper in it, so only files are reused.
+			const key = source.directory ? undefined : `${source.path}\0${source.size}\0${source.info.lastModified}`;
+			const reused = key === undefined ? undefined : this.#copies.get(key);
+			if (reused) {
+				staged.push(reused);
+				continue;
+			}
 			const folder = await fs.mkdtemp(path.join(directory, "f-"));
 			const copy = path.join(folder, source.info.name);
 			// A clone where the filesystem supports one (APFS, btrfs, XFS), a plain copy elsewhere. A folder, which
 			// Chrome expands for a `webkitdirectory` input, is copied whole.
 			await fs.cp(source.path, copy, {
 				recursive: true,
+				dereference: true,
 				preserveTimestamps: true,
 				mode: fs.constants.COPYFILE_FICLONE,
 			});
+			if (key !== undefined) this.#copies.set(key, copy);
 			staged.push(copy);
 		}
 		return staged;
@@ -223,10 +268,10 @@ export class UploadStaging {
 		return this.#directory;
 	}
 
-	async #checkRoute(page: Page): Promise<UploadRoute> {
+	async #checkRoute(page: Page): Promise<{ route: UploadRoute; decided: boolean }> {
 		const token = crypto.randomUUID();
 		// Its own folder, so a tab that never stages a file leaves no staging folder behind.
-		const checkDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-upload-check-"));
+		const checkDirectory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-uploads-${process.pid}-check-`));
 		try {
 			const tokenPath = path.join(checkDirectory, "route-check");
 			await Bun.write(tokenPath, token);
@@ -238,15 +283,17 @@ export class UploadStaging {
 					await setFileInputPaths(input, [tokenPath]);
 				} catch (error) {
 					// Chrome refuses every path to a client without file access (a relay extension by default).
-					if (error instanceof Error && error.message.includes("Not allowed")) return "contents";
+					if (error instanceof Error && error.message.includes("Not allowed"))
+						return { route: "contents", decided: true };
 					throw error;
 				}
 				const text = await withTimeout(
 					picker.evaluate(readFirstPickedFile),
 					ROUTE_CHECK_READ_MS,
 					"upload route check read timed out",
-				).catch(() => null);
-				return text === token ? "paths" : "contents";
+				);
+				// Chrome took the path but read nothing or something else: it sees another machine's file system.
+				return { route: text === token ? "paths" : "contents", decided: true };
 			} finally {
 				await picker.dispose().catch(() => undefined);
 			}
