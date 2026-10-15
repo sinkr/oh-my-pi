@@ -305,6 +305,12 @@ describe("parseAuthGatewayClients", () => {
 		["a misspelled field", { ci: { tokenSha256: digest, model: ["mock/granted"] } }, 'unknown field "model"'],
 		["a truncated digest", { ci: { tokenSha256: digest.slice(1) } }, "64 hex digits"],
 		["a glob inside a model id", { ci: { tokenSha256: digest, models: ["mock/gran*"] } }, '"provider/*"'],
+		["whitespace inside a grant", { ci: { tokenSha256: digest, models: ["mock /granted"] } }, '"provider/*"'],
+		[
+			"an account provider id with surrounding whitespace, which would leave mock unbound",
+			{ ci: { tokenSha256: digest, accounts: { "mock ": ["account:acc-b"] } } },
+			"provider id",
+		],
 		[
 			"identity keys that are not a list",
 			{ ci: { tokenSha256: digest, accounts: { mock: "account:acc-b" } } },

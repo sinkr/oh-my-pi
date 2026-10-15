@@ -156,14 +156,24 @@ class ClientScope implements AuthGatewayClientScope {
 			const slash = grant.indexOf("/");
 			const provider = grant.slice(0, slash);
 			const id = grant.slice(slash + 1);
-			if (slash <= 0 || id.length === 0 || grant.trim() !== grant || (id.includes("*") && id !== "*")) {
+			if (
+				slash <= 0 ||
+				id.length === 0 ||
+				provider.trim() !== provider ||
+				id.trim() !== id ||
+				(id.includes("*") && id !== "*")
+			) {
 				throw invalid(`${name}.models`, 'each grant must be "provider/id" or "provider/*"');
 			}
 			if (id === "*") this.#providers.add(provider);
 			else this.#models.add(grant);
 		}
 		for (const [provider, keys] of Object.entries(client.accounts ?? {})) {
-			if (provider.length === 0 || !keys.every(key => key.length > 0 && key.trim() === key)) {
+			// A provider id that matches no request would leave that provider unbound, so it must be exact.
+			if (provider.length === 0 || provider.trim() !== provider) {
+				throw invalid(`${name}.accounts`, "a provider id must be non-empty with no surrounding whitespace");
+			}
+			if (!keys.every(key => key.length > 0 && key.trim() === key)) {
 				throw invalid(`${name}.accounts`, 'expected identity keys such as "email:you@example.com|org:<org-id>"');
 			}
 			this.#accounts.set(provider, keys);
