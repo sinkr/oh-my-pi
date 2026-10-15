@@ -404,6 +404,13 @@ Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explici
 
 ## Interactive `/resume [value]`
 
+`/clir [value]` is a separately listed command sharing `/resume`'s handler,
+so it appears in command catalogues as well as accepting direct input.
+It provides a distinct name for hosts that intercept `/resume` and uses the same picker, resolver, and
+session-switching behavior in the current OMP process; it does not launch a new
+process. Like `/resume`, it uses the active profile's session history. Existing
+OMP processes must restart once after installing this command.
+
 Without an argument:
 
 1. Opens the session selector populated via `SessionManager.listForPicker(currentCwd, currentSessionDir)`. Pinned sessions come first; untitled, prompt-less zero-turn stubs are hidden unless pinned. The picker always opens in current-folder scope; the empty state invites Tab into all-projects instead of auto-switching.

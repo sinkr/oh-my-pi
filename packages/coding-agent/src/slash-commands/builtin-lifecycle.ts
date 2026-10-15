@@ -31,6 +31,43 @@ import type {
 	TuiSlashCommandRuntime,
 } from "./types";
 
+const resumeCommand: SlashCommandSpec = {
+	name: "resume",
+	icon: "history",
+	description: "Resume a different session",
+	inlineHint: "[session id|name|@claude|@codex]",
+	allowArgs: true,
+	handleTui: async (command, runtime) => {
+		const sessionArg = command.args.trim();
+		clearSubmittedText(runtime);
+		const foreignSource = sessionArg === "@claude" ? "claude" : sessionArg === "@codex" ? "codex" : undefined;
+		if (foreignSource) {
+			runtime.ctx.showSessionSelector(foreignSource);
+			return;
+		}
+		if (!sessionArg) {
+			runtime.ctx.showSessionSelector();
+			return;
+		}
+		const match = await resolveResumableSession(
+			sessionArg,
+			runtime.ctx.sessionManager.getCwd(),
+			runtime.ctx.sessionManager.getSessionDir(),
+			{ allowGlobalFallback: true },
+		);
+		if (!match) {
+			runtime.ctx.showError(`Session "${sessionArg}" not found`);
+			return;
+		}
+		try {
+			await runtime.ctx.handleResumeSession(match.session.path);
+		} catch (error) {
+			// The picker reports a failed switch itself; `/resume <id>` has no picker.
+			runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
+	},
+};
+
 function formatFreshSessionResult(result: FreshSessionResult): string {
 	const stateLabel = result.closedProviderSessions === 1 ? "provider state" : "provider states";
 	return `Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`;
@@ -368,42 +405,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			await runtime.ctx.handleHandoffCommand(customInstructions);
 		},
 	},
-	{
-		name: "resume",
-		icon: "history",
-		description: "Resume a different session",
-		inlineHint: "[session id|name|@claude|@codex]",
-		allowArgs: true,
-		handleTui: async (command, runtime) => {
-			const sessionArg = command.args.trim();
-			clearSubmittedText(runtime);
-			const foreignSource = sessionArg === "@claude" ? "claude" : sessionArg === "@codex" ? "codex" : undefined;
-			if (foreignSource) {
-				runtime.ctx.showSessionSelector(foreignSource);
-				return;
-			}
-			if (!sessionArg) {
-				runtime.ctx.showSessionSelector();
-				return;
-			}
-			const match = await resolveResumableSession(
-				sessionArg,
-				runtime.ctx.sessionManager.getCwd(),
-				runtime.ctx.sessionManager.getSessionDir(),
-				{ allowGlobalFallback: true },
-			);
-			if (!match) {
-				runtime.ctx.showError(`Session "${sessionArg}" not found`);
-				return;
-			}
-			try {
-				await runtime.ctx.handleResumeSession(match.session.path);
-			} catch (error) {
-				// The picker reports a failed switch itself; `/resume <id>` has no picker.
-				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
-			}
-		},
-	},
+	resumeCommand,
+	{ ...resumeCommand, name: "clir" },
 	{
 		name: "pin",
 		icon: "pin",
