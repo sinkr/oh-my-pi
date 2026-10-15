@@ -416,7 +416,10 @@ export class TranscriptContainer extends Container {
 	hasActiveBlock(): boolean {
 		this.#syncEntries();
 		this.#settleFinalized();
-		return this.#entries.some(entry => entry.state === "active");
+		for (let index = this.#frontier; index < this.#entries.length; index++) {
+			if (this.#entries[index]!.state === "active") return true;
+		}
+		return false;
 	}
 
 	/** Whether visible active capacity and live-block memory permit another admission. */

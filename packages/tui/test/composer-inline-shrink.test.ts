@@ -437,6 +437,50 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
+	it("refills the screen when a tall HUD closes a frame after the answer finalizes", async () => {
+		const rows = 30;
+		const h = makeHarness(COLUMNS, rows, 0);
+		await h.scheduler.settle(h.terminal);
+		const message = new AssistantMessageComponent();
+		h.transcript.addChild(message);
+		h.hud.rows = 23;
+		const reply = (text: string): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "gpt-5.6-sol",
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 1,
+		});
+		const lines = Array.from({ length: 110 }, (_, i) => `line${i}`);
+		for (let n = 1; n <= lines.length; n++) {
+			message.updateContent(reply(lines.slice(0, n).join("\n\n")), { transient: true });
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+		}
+		message.updateContent(reply(lines.join("\n\n")));
+		message.markTranscriptBlockFinalized();
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+		// The HUD outlives the finalizing paint by a frame, as a loader does when
+		// the turn-end event trails the message-end event.
+		h.hud.rows = 0;
+		h.composer.ui.requestRender();
+		await h.scheduler.advance(h.terminal, 300);
+		expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+		expect(blankBand(h.terminal)).toBeLessThanOrEqual(1);
+		h.composer.stop();
+	});
+
 	it("keeps the editor on the bottom row when a live block collapses under retired history", async () => {
 		const h = makeHarness();
 		const transcript = new TranscriptContainer();

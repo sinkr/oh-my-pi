@@ -8,6 +8,7 @@ import { ProcessTerminal, type Terminal } from "../terminal";
 import {
 	type Component,
 	Container,
+	type RenderTimer,
 	type ResizeScrollbackMode,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
@@ -26,6 +27,8 @@ import { WelcomeComponent } from "./welcome";
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
+// How long idle chrome must hold its height after a turn before it is treated as permanent.
+const IDLE_CHROME_SETTLE_MS = 250;
 
 /** Live settings that affect the composer before and after session adoption. */
 export interface ComposerPreferences {
@@ -259,10 +262,16 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// from whatever chrome is expanded when the height changes.
 	#chromeFloor: number | undefined;
 	// Chrome height of the last frame with a streaming block. Chrome still that
-	// tall once the turn ends is permanent, so it becomes the floor: otherwise
-	// the rows it clips off the live tail stay hidden until later output
-	// commits them out of order.
+	// tall once the turn ends and its height settles is permanent, so it becomes
+	// the floor: otherwise the rows it clips off the live tail stay hidden until
+	// later output commits them out of order.
 	#lastBusyChrome: number | undefined;
+	// Idle chrome height awaiting the settle window, and whether it has elapsed.
+	// Turn-scoped HUDs can close a few frames after the last block finalizes;
+	// billing them first would commit rows they cover and strand a band.
+	#idleChrome: number | undefined;
+	#idleChromeSettled = false;
+	#idleChromeTimer: RenderTimer | undefined;
 	/** Rows the chrome below each below-transcript root took in the last frame (see {@link rowsBelow}). */
 	#rowsBelow = new Map<Component, number>();
 	#lastInterruptAt = 0;
@@ -376,12 +385,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
 		this.#chromeFloor = Math.min(this.#chromeFloor ?? after.length, after.length);
-		if (transcript.hasActiveBlock()) {
-			this.#lastBusyChrome = after.length;
-		} else if (this.#lastBusyChrome !== undefined) {
-			this.#chromeFloor = Math.max(this.#chromeFloor, Math.min(this.#lastBusyChrome, after.length));
-			this.#lastBusyChrome = undefined;
-		}
+		this.#rebaselineChromeFloor(transcript.hasActiveBlock(), after.length);
 		const belowFloor = this.#chromeFloor;
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
@@ -658,6 +662,37 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 	}
 
+	/** Raise the chrome floor to post-turn chrome that survives the settle window; see {@link #lastBusyChrome}. */
+	#rebaselineChromeFloor(busy: boolean, chrome: number): void {
+		if (busy) {
+			this.#lastBusyChrome = chrome;
+			this.#resetIdleChrome();
+			return;
+		}
+		if (this.#lastBusyChrome === undefined) return;
+		if (this.#idleChromeSettled && this.#idleChrome === chrome) {
+			this.#chromeFloor = Math.max(this.#chromeFloor ?? chrome, Math.min(this.#lastBusyChrome, chrome));
+			this.#lastBusyChrome = undefined;
+			this.#resetIdleChrome();
+			return;
+		}
+		if (this.#idleChrome === chrome && this.#idleChromeTimer !== undefined) return;
+		this.#resetIdleChrome();
+		this.#idleChrome = chrome;
+		this.#idleChromeTimer = this.ui.scheduleAfter(IDLE_CHROME_SETTLE_MS, () => {
+			this.#idleChromeTimer = undefined;
+			this.#idleChromeSettled = true;
+			this.ui.requestRender();
+		});
+	}
+
+	#resetIdleChrome(): void {
+		this.#idleChromeTimer?.cancel();
+		this.#idleChromeTimer = undefined;
+		this.#idleChrome = undefined;
+		this.#idleChromeSettled = false;
+	}
+
 	/** Header retires first; replay coalesces it with the complete transcript ledger. */
 	#offerHistory(
 		transcript: TranscriptContainer,
@@ -912,6 +947,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (this.#stopped) return;
 		this.#chromeFloor = undefined;
 		this.#lastBusyChrome = undefined;
+		this.#resetIdleChrome();
 		this.#nativeDock = options.nativeDock;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {

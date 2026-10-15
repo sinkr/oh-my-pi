@@ -79,7 +79,8 @@ describe("transcript rows under chrome that outlives the turn", () => {
 			message.updateContent(reply(lines.join("\n\n")));
 			message.markTranscriptBlockFinalized();
 			composer.ui.requestRender();
-			await scheduler.settle(terminal);
+			// Past the idle-chrome settle window, the chrome that outlived the turn is permanent.
+			await scheduler.advance(terminal, 300);
 
 			const counts = new Map<number, number>();
 			for (const row of terminal.getScrollBuffer()) {
