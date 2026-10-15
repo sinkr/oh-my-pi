@@ -28,7 +28,7 @@ import {
 } from "../render/render-utils";
 import { renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
-import { wrapPrefixedLine } from "../render/hanging-wrap";
+import { wrapPrefixedLine, wrapTreeLine } from "../render/hanging-wrap";
 import { ansi, code, col, compact, keyed, md, node, row, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
@@ -264,12 +264,16 @@ export function renderResult(
 			: formatStatusIcon(isPartial ? "running" : "error", theme, spinnerFrame);
 		const header = `${icon} LSP ${actionLabel}`;
 
+		// Hover code hangs under its rail; expanded tree rows hang under their
+		// connector so Ctrl+O reveals the full text instead of a clipped row.
 		const rail = ` ${theme.fg("mdCodeBlockBorder", theme.boxRound.vertical)} `;
 		const contentLines = codeBlockMatch
 			? bodyLines.flatMap(line =>
 					line.startsWith(rail) ? wrapPrefixedLine(rail, rail, line.slice(rail.length), contentWidth) : [line],
 				)
-			: bodyLines;
+			: expanded
+				? bodyLines.flatMap(line => wrapTreeLine(line, contentWidth, theme) ?? [line])
+				: bodyLines;
 		return {
 			header,
 			phase: isPartial ? "partial" : state,
@@ -665,7 +669,7 @@ function renderGeneric(text: string, lines: string[], expanded: boolean, theme: 
 		for (let i = 0; i < lines.length; i++) {
 			const isLast = i === lines.length - 1;
 			const branch = isLast ? theme.tree.last : theme.tree.branch;
-			output += `\n ${theme.fg("dim", branch)} ${truncateToWidth(replaceTabs(lines[i]), TRUNCATE_LENGTHS.CONTENT)}`;
+			output += `\n ${theme.fg("dim", branch)} ${replaceTabs(lines[i])}`;
 		}
 		return output.split("\n");
 	}
