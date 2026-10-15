@@ -1801,6 +1801,22 @@ describe("computer worker round trips", () => {
 		expect(native.selections).toEqual([]);
 	});
 
+	it("names selectText's text argument on a resolved element before the native call", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"select-text-resolved-argument",
+			'const el = await (await desktop.window("42")).ref("e1"); await el.selectText(7)',
+		);
+		expect(result.ok ? undefined : result.error).toMatchObject({
+			isToolError: true,
+			message: "selectText(text) requires a string, got number",
+		});
+		expect(native.selections).toEqual([]);
+	});
+
 	describe("numeric window ids", () => {
 		class TwoWindowSession extends FakeNativeSession {
 			override async listWindows(): Promise<DesktopWindow[]> {
@@ -2430,6 +2446,14 @@ describe("expanded computer APIs", () => {
 			override async axSetValue(ref: string, _value: string): Promise<void> {
 				this.calls.push(`axSetValue:${ref}`);
 			}
+			override async axSelectText(
+				ref: string,
+				text: string,
+				opts?: AxSelectTextOptions | null,
+			): Promise<AxTextSelection> {
+				this.calls.push(`axSelectText:${ref}`);
+				return super.axSelectText(ref, text, opts);
+			}
 			override async axPerform(ref: string, _action: string): Promise<void> {
 				this.calls.push(`axPerform:${ref}`);
 			}
@@ -2450,6 +2474,8 @@ describe("expanded computer APIs", () => {
 		for (const [code, message] of [
 			['await desktop.ref("e1").setValue()', "setValue(value) requires a string, got undefined"],
 			['await desktop.ref("e1").setValue(42)', "setValue(value) requires a string, got number"],
+			['await desktop.ref("e1").selectText()', "selectText(text) requires a string, got undefined"],
+			['await desktop.ref("e1").selectText(["cat"])', "selectText(text) requires a string, got an array"],
 			['await desktop.ref("e1").perform("")', 'perform(action) requires a non-empty string, got ""'],
 			["desktop.ref()", "ref(ref) requires a non-empty string, got undefined"],
 			["(await desktop.window(42)).ref(null)", "ref(ref) requires a non-empty string, got null"],
@@ -2493,6 +2519,9 @@ describe("expanded computer APIs", () => {
 			);
 			await expect(runInContext('computer.ref("e1").perform()', realm)).rejects.toThrow(
 				"perform(action) requires a non-empty string, got undefined",
+			);
+			await expect(runInContext('computer.ref("e1").selectText()', realm)).rejects.toThrow(
+				"selectText(text) requires a string, got undefined",
 			);
 		} finally {
 			await prelude.invoke({ action: "close" }, context);

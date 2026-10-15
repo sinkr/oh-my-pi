@@ -398,6 +398,7 @@ class El {
 	async selectText(text: string, options?: AxSelectTextOptions): Promise<AxTextSelection> {
 		const context = this.#getContext();
 		guardRun(context, "selectText");
+		validateString(text, "selectText(text)");
 		return await nativeCall(context.signal, () => this.#session.axSelectText(this.ref, text, options));
 	}
 
@@ -537,6 +538,7 @@ class ElRef implements PromiseLike<El> {
 
 	async selectText(text: string, options?: AxSelectTextOptions): Promise<AxTextSelection> {
 		guardRun(this.#getContext(), "selectText");
+		validateString(text, "selectText(text)");
 		return (await this.#resolve()).selectText(text, options);
 	}
 
