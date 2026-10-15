@@ -22,7 +22,7 @@
 - Fixed an OpenAI-compatible server's `finish_reason: "repetition"` or `stop_reason: "repetition_detected"` not being treated as a thinking loop, so the degenerate partial reasoning was kept and replayed into the next turn ([#12525](https://github.com/can1357/oh-my-pi/issues/12525), [#14535](https://github.com/can1357/oh-my-pi/pull/14535) by [@F0Rextasy](https://github.com/F0Rextasy))
 ### Added
 
-- Added experimental native image judgments for TypeSafe Jev's `jev-latest`, `jev-preview`, `jev-1.13.0`, and `jev-1.14.0`, plus OpenRouter's `typesafe/jev-1.13`, `typesafe/jev-1.14`, and `~typesafe/jev-latest` models.
+- Added experimental native image judgments for TypeSafe Jev's `jev-latest`, `jev-preview`, `jev-1.13.0`, and `jev-1.14.0`, plus OpenRouter's `typesafe/jev-1.13`, `typesafe/jev-1.14`, and `~typesafe/jev-latest` models ([#15887](https://github.com/can1357/oh-my-pi/pull/15887) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.11.1] - 2026-10-15
 

@@ -11,6 +11,7 @@
 
 - GPT Image models (`gpt-image-*`, `chatgpt-image-*`) now classify as their own `gpt-image` family instead of `gpt` or `chatgpt`, so GPT chat-model rules no longer apply to them ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
 - Marked TypeSafe Jev's `jev-latest`, `jev-preview`, `jev-1.13.0`, and `jev-1.14.0`, and OpenRouter's `typesafe/jev-1.13`, `typesafe/jev-1.14`, and `~typesafe/jev-latest` models as image-capable for native judgments (experimental).
+- Marked TypeSafe Jev's `jev-latest`, `jev-preview`, `jev-1.13.0`, and `jev-1.14.0`, and OpenRouter's `typesafe/jev-1.13`, `typesafe/jev-1.14`, and `~typesafe/jev-latest` models as image-capable for native judgments (experimental) ([#15887](https://github.com/can1357/oh-my-pi/pull/15887) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.11.1] - 2026-10-15
 
