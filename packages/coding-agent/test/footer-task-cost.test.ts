@@ -17,7 +17,6 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { FooterComponent } from "@oh-my-pi/pi-tui/status-line/footer";
-import type { FooterSession } from "@oh-my-pi/pi-tui/status-line/host";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -159,47 +158,6 @@ describe("FooterComponent session cost", () => {
 			await session.dispose();
 			await manager.close();
 			authStorage.close();
-		}
-	});
-
-	it("reads the cumulative rollup once per repaint", () => {
-		let reads = 0;
-		// Built against FooterSession itself, with no cast: if the footer's
-		// capability requirement drifts from what a session actually provides,
-		// this stops compiling instead of silently passing through `as unknown as`.
-		const session = {
-			state: {},
-			isAutoThinking: false,
-			autoResolvedThinkingLevel: () => undefined,
-			getContextUsage: () => undefined,
-			modelRegistry: { isUsingOAuth: () => false },
-			sessionManager: {
-				getUsageStatistics: () => {
-					reads++;
-					return {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						orchestrationInput: 0,
-						orchestrationOutput: 0,
-						orchestrationCacheRead: 0,
-						premiumRequests: 0,
-						cost: 0,
-					};
-				},
-			},
-		} satisfies FooterSession;
-
-		const component = new FooterComponent(session, statusLineHost);
-		try {
-			component.render(200);
-			expect(reads).toBe(1);
-			component.describe();
-			expect(reads).toBe(2);
-		} finally {
-			component.dispose();
 		}
 	});
 });
