@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { listAllSessions, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
@@ -131,20 +133,34 @@ describe("/resume slash command", () => {
 		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath, { continuation: undefined });
 	});
 
-	it("resumes a title with spaces from another cwd through global fallback", async () => {
+	it.each(["resume", "clir"])("resumes a title with spaces from another cwd through /%s", async command => {
 		const currentCwd = path.join(tempDir, "current");
 		const otherCwd = path.join(tempDir, "other");
 		const currentSessionDir = computeDefaultSessionDir(currentCwd, storage);
 		const otherSessionDir = computeDefaultSessionDir(otherCwd, storage);
-		const sessionPath = await writeSession("title-target", otherCwd, otherSessionDir, "AWS Infrastructure");
+		await writeSession("title-target", otherCwd, otherSessionDir, "AWS Infrastructure");
 		const harness = createRuntime(currentCwd, currentSessionDir);
+		const resumedHeaders: Array<SessionHeader | null> = [];
+		harness.runtime.ctx.handleResumeSession = async sessionPath => {
+			const session = await SessionManager.open(sessionPath, undefined, storage, {
+				initialCwd: currentCwd,
+				suppressBreadcrumb: true,
+				throwIfMissing: true,
+			});
+			try {
+				resumedHeaders.push(session.getHeader());
+			} finally {
+				await session.close();
+			}
+		};
 
-		const handled = await executeBuiltinSlashCommand("/resume aws infrastructure", harness.runtime);
+		const handled = await executeBuiltinSlashCommand(`/${command} aws infrastructure`, harness.runtime);
 
 		expect(handled).toBe(true);
+		expect(harness.setText).toHaveBeenCalledWith("");
 		expect(harness.showError).not.toHaveBeenCalled();
 		expect(harness.showSessionSelector).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+		expect(resumedHeaders).toEqual([expect.objectContaining({ id: "title-target", title: "AWS Infrastructure" })]);
 	});
 
 	it("checks the active session directory before global cwd buckets", async () => {
