@@ -784,8 +784,8 @@ export class EventController {
 		this.ctx.unsubscribe?.();
 		const session = this.ctx.session;
 		let active = true;
-		// Startup can finish after agent_start has already fired.
-		this.ctx.composer.setRunActive(session.runStartedAt !== undefined);
+		// Startup can finish after agent_start or a nonterminal settle has fired.
+		this.restoreRunActivity();
 		const unsubscribe = session.subscribe(event => {
 			if (!active || this.ctx.viewSession !== session) return;
 			return this.dispatchSessionEvent(event);
@@ -794,6 +794,24 @@ export class EventController {
 			active = false;
 			unsubscribe();
 		};
+	}
+
+	/** Restore the viewed logical run, including pauses whose stream timestamp was cleared. */
+	restoreRunActivity(): void {
+		const session = this.ctx.viewSession;
+		const active =
+			session.runStartedAt !== undefined ||
+			session.isStreaming ||
+			session.isRetrying ||
+			session.hasPostPromptWork ||
+			session.hasPendingAsyncWork() ||
+			session.queuedMessageCount > 0;
+		this.ctx.composer.setRunActive(active);
+		if (active && !session.isStreaming) {
+			// Attachment can miss the nonterminal event. Reuse its cancellation/
+			// async-drain watcher rather than interpreting stream-idle as run-idle.
+			void this.#finishWhenRunSettles({ type: "agent_end", messages: [], isTerminal: false });
+		}
 	}
 
 	/**

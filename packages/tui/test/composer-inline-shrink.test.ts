@@ -83,7 +83,7 @@ function makeHarness(
 	const widget = new InlineWidget();
 	editor.addChild(widget);
 	editor.addChild(new Text("EDITOR", 0, 0));
-	composer.setRuntimeChildren([transcript, hud, editor]);
+	composer.setRuntimeChildren([transcript, hud, editor], { transientChrome: [editor] });
 	composer.start({ playWelcomeIntro: false });
 	return { terminal, scheduler, composer, transcript, widget, hud, editor };
 }
@@ -588,6 +588,70 @@ describe("composer inline shrink (#11007)", () => {
 			expect(history()).toEqual([...expected, ...next]);
 			h.composer.stop();
 		});
+
+		for (const timing of ["before settlement", "after settlement"] as const) {
+			it(`preserves every transcript and shell row when an extension widget ${placement} the editor appears ${timing}`, async () => {
+				const rows = 30;
+				const shell = Array.from({ length: 12 }, (_, i) => `shell${i}`);
+				const h = makeHarness(COLUMNS, rows, 0, shell);
+				const persistent = new InlineWidget();
+				const above = new Container();
+				above.addChild(new EditorTopGap(() => false));
+				const below = new Container();
+				const root = placement === "above" ? above : below;
+				h.composer.setRuntimeChildren([h.transcript, persistent, above, h.editor, below], {
+					transientChrome: [h.editor],
+				});
+				try {
+					await h.scheduler.settle(h.terminal);
+					h.composer.setRunActive(true);
+					persistent.rows = 3;
+					await streamFinalizedAnswer(h);
+					h.composer.setRunActive(false);
+					await h.scheduler.settle(h.terminal);
+					if (timing === "after settlement") await h.scheduler.advance(h.terminal, 300);
+
+					// Extension agent_end work can install chrome after the final busy
+					// paint, including after the first idle height has already settled.
+					const widget = new InlineWidget();
+					widget.rows = 7;
+					root.addChild(widget);
+					h.composer.ui.requestRender();
+					await h.scheduler.advance(h.terminal, 300);
+					const history = (): string[] =>
+						h.terminal
+							.getScrollBuffer()
+							.map(row => Bun.stripANSI(row).trim())
+							.filter(row => /^(shell|line)\d+$/.test(row));
+					const expected = [...shell, ...Array.from({ length: 110 }, (_, i) => `line${i}`)];
+					expect(history()).toEqual(expected);
+					expect(
+						h.terminal
+							.getViewport()
+							.map(row => Bun.stripANSI(row).trim())
+							.filter(row => row.startsWith("Live widget row ")),
+					).toEqual([
+						...Array.from({ length: 3 }, (_, i) => `Live widget row ${i}`),
+						...Array.from({ length: 7 }, (_, i) => `Live widget row ${i}`),
+					]);
+
+					root.removeChild(widget);
+					h.composer.ui.requestRender();
+					await h.scheduler.advance(h.terminal, 300);
+					const editorRow = h.terminal.getViewport().findIndex(row => row.includes("EDITOR"));
+					expect(editorRow).toBeGreaterThanOrEqual(0);
+					expect(editorRow).toBeLessThan(rows - 1);
+					expect(blankBand(h.terminal)).toBeLessThanOrEqual(2);
+					expect(history()).toEqual(expected);
+					h.composer.ui.requestRender();
+					await h.scheduler.advance(h.terminal, 300);
+					expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(editorRow);
+					expect(history()).toEqual(expected);
+				} finally {
+					h.composer.stop();
+				}
+			});
+		}
 	}
 
 	it("keeps the editor on the bottom row when a live block collapses under retired history", async () => {

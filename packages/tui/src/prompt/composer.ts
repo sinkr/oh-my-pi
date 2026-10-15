@@ -256,21 +256,19 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#retiredHeaderStart = 0;
 	#resizeRetiredHeaderStart: number | undefined;
 	#lastNormalRows = 0;
-	// The smallest height the chrome below the transcript has rendered at since
-	// mount. Retirement bills that chrome at this floor, never its current
-	// height: a dialog, report, HUD or tall draft that grows clips the live tail
-	// instead of committing rows it displaces, so when it shrinks those rows
-	// refill the screen rather than leaving a band no frame can fill (#11007).
-	// Displaced rows reach scrollback once newer output pushes them past the
-	// floor, or when the chrome shrinks back and they scroll off normally.
+	// Retirement bills below-transcript chrome at this floor, not its current
+	// height. It follows contractions immediately and promotes stable eligible
+	// growth only while idle. Transient roots count at their minimum painted
+	// height: a growing dialog or draft clips the live tail without committing
+	// displaced rows, so those rows refill the screen when it shrinks (#11007).
+	// Displaced rows reach history when newer output pushes them past the floor
+	// or persistent idle chrome settles and raises it.
 	// The floor is terminal-height independent — chrome heights do not scale
 	// with rows — so it is retained across resizes rather than rediscovered
 	// from whatever chrome is expanded when the height changes.
 	#chromeFloor: number | undefined;
+	// Settled idle chrome has retired rows; contraction must preserve native history.
 	#chromeFloorPromoted = false;
-	// Promote settled post-run chrome so displaced transcript rows reach history.
-	// A later contraction leaves space below the editor instead of erasing native history.
-	#lastBusyChrome: number | undefined;
 	#runActive = false;
 	#transientChrome: ReadonlySet<Component> = new Set();
 	// Fewest rows the transient roots have painted since mount; only rows above it are excluded from the floor.
@@ -683,19 +681,15 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 	}
 
-	/** Raise the chrome floor to post-turn chrome that survives the settle window; see {@link #lastBusyChrome}. */
+	/** Raise the floor to eligible idle chrome that survives the settle window, even if it appeared after the run. */
 	#rebaselineChromeFloor(busy: boolean, chrome: number): void {
-		if (busy) {
-			this.#lastBusyChrome = chrome;
+		if (busy || chrome <= (this.#chromeFloor ?? chrome)) {
 			this.#resetIdleChrome();
 			return;
 		}
-		if (this.#lastBusyChrome === undefined) return;
 		if (this.#idleChromeSettled && this.#idleChrome === chrome) {
-			const floor = Math.max(this.#chromeFloor ?? chrome, Math.min(this.#lastBusyChrome, chrome));
-			this.#chromeFloorPromoted ||= floor > (this.#chromeFloor ?? floor);
-			this.#chromeFloor = floor;
-			this.#lastBusyChrome = undefined;
+			this.#chromeFloorPromoted = true;
+			this.#chromeFloor = chrome;
 			this.#resetIdleChrome();
 			return;
 		}
@@ -981,7 +975,6 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (this.#stopped) return;
 		this.#chromeFloor = undefined;
 		this.#chromeFloorPromoted = false;
-		this.#lastBusyChrome = undefined;
 		this.#resetIdleChrome();
 		this.#nativeDock = options.nativeDock;
 		this.#transientChrome = new Set(options.transientChrome);

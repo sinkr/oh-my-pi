@@ -211,7 +211,6 @@ function makeSession(
 	let messages = initialMessages;
 	let streaming = initialStreaming;
 	let runStartedAt: number | undefined = initialStreaming || runningJobIds.length > 0 ? 1 : undefined;
-	const runStateListeners = new Set<(state: "running" | "idle") => void>();
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
 	let persistence = Promise.resolve();
 	const activeToolUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
@@ -225,11 +224,14 @@ function makeSession(
 		get runStartedAt() {
 			return runStartedAt;
 		},
-		subscribeRunState(listener: (state: "running" | "idle") => void) {
-			runStateListeners.add(listener);
-			return () => runStateListeners.delete(listener);
-		},
 		retryAttempt: 0,
+		hasPostPromptWork: false,
+		queuedMessageCount: 0,
+		hasPendingAsyncWork: () => runningJobIds.length > 0,
+		waitForIdle: async () => {
+			await persistence;
+		},
+		settleAsyncWork: () => Promise.withResolvers<void>().promise,
 		agent: {
 			get state() {
 				return { streamMessage: liveMessage };
@@ -280,7 +282,6 @@ function makeSession(
 			return () => {
 				messages = [danglingWait, completedWait];
 				runStartedAt = undefined;
-				for (const listener of runStateListeners) listener("idle");
 				pending.resolve();
 			};
 		},

@@ -192,10 +192,6 @@ export class SessionFocusController {
 				});
 				if (generation === this.#attachGeneration) this.ctx.eventController.restorePendingToolResults();
 			};
-			const unsubscribeRunState = target.subscribeRunState(state => {
-				if (generation !== this.#attachGeneration) return;
-				this.ctx.composer.setRunActive(state === "running");
-			});
 			const unsubscribeEvents = target.subscribe(async event => {
 				if (generation !== this.#attachGeneration) return;
 				if (event.type === "message_start" && event.message.role === "assistant") {
@@ -215,18 +211,14 @@ export class SessionFocusController {
 				if (event.type === "message_end" && event.message.role === "assistant") assistantStreamSynced = false;
 				await this.ctx.eventController.handleEvent(event);
 			});
-			this.ctx.unsubscribe = () => {
-				unsubscribeEvents();
-				unsubscribeRunState();
-			};
+			this.ctx.unsubscribe = unsubscribeEvents;
 
 			await target.settleInFlightMessagePersistence();
 			if (generation !== this.#attachGeneration) return false;
 			this.ctx.statusLine.setSession(target, this.#focusedAgentId);
-			// Reset run bookkeeping before replay populates pending tool handles.
-			// A paused run remains active between streams; run-state transitions also cover
-			// cancellation without a public agent_end after attaching to that pause.
-			this.ctx.composer.setRunActive(target.runStartedAt !== undefined);
+			// A stream-idle pulse clears runStartedAt even when this logical run
+			// still owns a continuation. Restore its activity and settlement watch.
+			this.ctx.eventController.restoreRunActivity();
 			if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
 			else setRunStatus({ state: "idle" });
 			if (generation !== this.#attachGeneration) return false;

@@ -93,4 +93,68 @@ describe("transcript rows under chrome that outlives the turn", () => {
 			composer.stop();
 		});
 	}
+
+	for (const mounting of ["initial mount", "runtime remount"] as const) {
+		it(`keeps restored transcript and shell history reachable when idle chrome grows after ${mounting} without a new run`, async () => {
+			const rows = 30;
+			const shell = Array.from({ length: 12 }, (_, i) => `shell${i}`);
+			const terminal = new VirtualTerminal(COLUMNS, rows);
+			terminal.write(`${shell.join("\r\n")}${"\r\n".repeat(rows + 1)}`);
+			const scheduler = new VirtualRenderScheduler();
+			const composer = new Composer({
+				terminal,
+				tuiOptions: { renderScheduler: scheduler },
+				preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			});
+			const transcript = new TranscriptContainer();
+			const lines = Array.from(
+				{ length: REPLY_LINES },
+				(_, i) => `QZI${String(i + 1).padStart(3, "0")} alpha bravo`,
+			);
+			const message = new AssistantMessageComponent();
+			message.updateContent(reply(lines.join("\n\n")));
+			message.markTranscriptBlockFinalized();
+			transcript.addChild(message);
+			const chrome = new TurnChrome();
+			const editor = new Container();
+			editor.addChild(new Text("EDITOR", 0, 0));
+			composer.setRuntimeChildren([transcript, chrome, editor]);
+			composer.start({ playWelcomeIntro: false });
+			try {
+				await scheduler.advance(terminal, 300);
+				if (mounting === "runtime remount") {
+					// Replacing session-aware roots resets floor bookkeeping, but
+					// does not imply another agent run or erase existing history.
+					composer.setRuntimeChildren([transcript, chrome, editor]);
+					await scheduler.advance(terminal, 300);
+				}
+				const history = (): string[] =>
+					terminal
+						.getScrollBuffer()
+						.map(row => Bun.stripANSI(row).trim())
+						.filter(row => /^(shell\d+|QZI\d{3} alpha bravo)$/.test(row));
+				expect(history()).toEqual([...shell, ...lines]);
+				chrome.rows = 7;
+				composer.ui.requestRender();
+				await scheduler.advance(terminal, 300);
+				expect(history()).toEqual([...shell, ...lines]);
+				expect(
+					terminal
+						.getViewport()
+						.map(row => Bun.stripANSI(row).trim())
+						.filter(row => row.startsWith("Turn chrome row ")),
+				).toEqual(Array.from({ length: 7 }, (_, i) => `Turn chrome row ${i}`));
+
+				chrome.rows = 0;
+				composer.ui.requestRender();
+				await scheduler.advance(terminal, 300);
+				const editorRow = terminal.getViewport().findIndex(row => row.includes("EDITOR"));
+				expect(editorRow).toBeGreaterThanOrEqual(0);
+				expect(editorRow).toBeLessThan(rows - 1);
+				expect(history()).toEqual([...shell, ...lines]);
+			} finally {
+				composer.stop();
+			}
+		});
+	}
 });

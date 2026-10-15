@@ -17,24 +17,17 @@ interface SessionStub {
 	emit: (event: unknown) => Promise<void>;
 	unsubscribeCalls: () => number;
 	setStreaming: (streaming: boolean) => void;
-	emitRunState: (state: "running" | "idle") => void;
-	runStateListenerCount: () => number;
 	/** Seed the steering/follow-up queue that getQueuedMessages() returns. */
 	setQueue: (queue: { steering?: string[]; followUp?: string[] }) => void;
 }
 
 function makeSessionStub(opts: { isStreaming?: boolean; runStartedAt?: number } = {}): SessionStub {
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
-	const runStateListeners = new Set<(state: "running" | "idle") => void>();
 	let unsubscribeCalls = 0;
 	let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 	const stub = {
 		isStreaming: opts.isStreaming ?? false,
 		runStartedAt: opts.runStartedAt ?? (opts.isStreaming ? 1 : undefined),
-		subscribeRunState(fn: (state: "running" | "idle") => void) {
-			runStateListeners.add(fn);
-			return () => runStateListeners.delete(fn);
-		},
 		agent: { state: { streamMessage: null } },
 		subscribe(fn: (event: AgentSessionEvent) => Promise<void> | void) {
 			listener = fn;
@@ -57,11 +50,6 @@ function makeSessionStub(opts: { isStreaming?: boolean; runStartedAt?: number } 
 		setStreaming: streaming => {
 			stub.isStreaming = streaming;
 		},
-		emitRunState: state => {
-			stub.runStartedAt = state === "running" ? 1 : undefined;
-			for (const listener of runStateListeners) listener(state);
-		},
-		runStateListenerCount: () => runStateListeners.size,
 		setQueue: next => {
 			queue = { steering: next.steering ?? [], followUp: next.followUp ?? [] };
 		},
@@ -118,6 +106,9 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 				resetTranscriptAnchors++;
 			},
 			restorePendingToolResults() {},
+			restoreRunActivity() {
+				runActive = ctx.viewSession.runStartedAt !== undefined;
+			},
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {
@@ -315,40 +306,6 @@ describe("SessionFocusController", () => {
 		await h.controller.focusParent();
 		expect(h.controller.target).toBeUndefined();
 		expect(h.runActive()).toBe(false);
-	});
-
-	it("keeps an attached paused run active until its authoritative idle transition without an agent_end", async () => {
-		const h = makeHarness();
-		const worker = makeSessionStub({ isStreaming: false, runStartedAt: 1 });
-		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
-
-		await h.controller.focusAgent("Worker");
-		expect(h.runActive()).toBe(true);
-		expect(h.handledEvents).toEqual([]);
-		worker.emitRunState("idle");
-		expect(h.runActive()).toBe(false);
-		worker.emitRunState("running");
-		expect(h.runActive()).toBe(true);
-	});
-
-	it("unsubscribes a paused worker's run state when returning to idle main so stale transitions cannot change the flag", async () => {
-		const h = makeHarness();
-		const worker = makeSessionStub({ isStreaming: false, runStartedAt: 1 });
-		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
-
-		await h.controller.focusAgent("Worker");
-		expect(h.runActive()).toBe(true);
-		expect(worker.runStateListenerCount()).toBe(1);
-		await h.controller.unfocus();
-		expect(h.runActive()).toBe(false);
-		expect(worker.runStateListenerCount()).toBe(0);
-
-		worker.emitRunState("running");
-		expect(h.runActive()).toBe(false);
-		h.main.emitRunState("running");
-		expect(h.runActive()).toBe(true);
-		worker.emitRunState("idle");
-		expect(h.runActive()).toBe(true);
 	});
 
 	it("does not restart the next assistant when an older message end finishes rendering", async () => {
