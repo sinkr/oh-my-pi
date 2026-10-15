@@ -54,14 +54,22 @@ function dereferenceKeyword(key: string, value: unknown, root: JsonObject, visit
  */
 function resolveLocalRef(ref: string, root: JsonObject): JsonObject | undefined {
 	// Only handle local refs: #/$defs/Name or #/definitions/Name
-	const match = /^#\/(\$defs|definitions)\/(.+)$/.exec(ref);
+	if (!ref.startsWith("#")) return undefined;
+	let pointer: string;
+	try {
+		pointer = decodeURIComponent(ref.slice(1));
+	} catch {
+		return undefined;
+	}
+	const match = /^\/(\$defs|definitions)\/([^/]*)$/.exec(pointer);
 	if (!match) return undefined;
 
 	const [, defsKey, name] = match;
 	const defs = root[defsKey!];
 	if (!isJsonObject(defs)) return undefined;
 
-	const resolved = defs[name!];
+	const decodedName = name!.replace(/~1/g, "/").replace(/~0/g, "~");
+	const resolved = defs[decodedName];
 	return isJsonObject(resolved) ? resolved : undefined;
 }
 

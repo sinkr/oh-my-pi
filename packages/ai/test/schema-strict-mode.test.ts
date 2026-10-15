@@ -4,6 +4,7 @@ import type { Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import {
 	adaptSchemaForStrict,
 	arkToWireSchema,
+	dereferenceJsonSchema,
 	enforceStrictSchema,
 	isJsonSchemaValueValid,
 	isValidJsonSchema,
@@ -13,6 +14,73 @@ import {
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+
+describe("URI-fragment definition references", () => {
+	it("resolves percent-encoded and pointer-escaped names once across schema consumers", () => {
+		for (const defsKey of ["$defs", "definitions"]) {
+			const schema = {
+				type: "object",
+				[defsKey]: {
+					"a%2Fb /~1 空\n": { type: "string" },
+					"a/b /~1 空\n": { type: "boolean" },
+					"": { type: "integer" },
+				},
+				properties: {
+					encoded: { $ref: `#/${defsKey}/a%252Fb%20~1~01%20%E7%A9%BA%0A`, description: "encoded" },
+					raw: { $ref: `#/${defsKey}/a~1b%20~1~01%20%E7%A9%BA%0A`, description: "raw" },
+					empty: { $ref: `#/${defsKey}/`, description: "empty" },
+				},
+				required: ["encoded", "raw", "empty"],
+			};
+			const properties = {
+				encoded: { type: "string", description: "encoded" },
+				raw: { type: "boolean", description: "raw" },
+				empty: { type: "integer", description: "empty" },
+			};
+			expect(dereferenceJsonSchema(schema)).toEqual({
+				type: "object",
+				properties,
+				required: schema.required,
+			});
+			const strict = tryEnforceStrictSchema(schema);
+			expect(strict.strict).toBe(true);
+			expect(strict.schema.properties).toEqual(properties);
+			expect(strict.schema.additionalProperties).toBe(false);
+			const valid = { encoded: "valid", raw: false, empty: 2 };
+			expect(isJsonSchemaValueValid(schema, valid)).toBe(true);
+			expect(isJsonSchemaValueValid(schema, { ...valid, encoded: false })).toBe(false);
+			expect(isJsonSchemaValueValid(schema, { ...valid, raw: "invalid" })).toBe(false);
+			expect(isJsonSchemaValueValid(schema, { ...valid, empty: 2.5 })).toBe(false);
+		}
+	});
+
+	it("preserves malformed and external refs for sanitizers but rejects unresolved values", () => {
+		for (const ref of [
+			"#/$defs/%",
+			"#/$defs/%E0%A4%A",
+			"https://example.com/schema#/$defs/value",
+			"other.json#/$defs/value",
+		]) {
+			const schema = {
+				type: "object",
+				$defs: {
+					"%": { type: "string" },
+					"%E0%A4%A": { type: "string" },
+					value: { type: "string" },
+				},
+				properties: { value: { $ref: ref, description: "unresolved" } },
+				required: ["value"],
+			};
+			expect(dereferenceJsonSchema(schema)).toEqual({
+				type: "object",
+				properties: schema.properties,
+				required: schema.required,
+			});
+			expect(sanitizeSchemaForStrictMode(schema).properties).toEqual(schema.properties);
+			expect(isJsonSchemaValueValid(schema, { value: "valid" })).toBe(false);
+		}
+	});
+});
 
 describe("sanitizeSchemaForStrictMode", () => {
 	it("infers object type, strips non-structural keywords, and converts const to enum", () => {
