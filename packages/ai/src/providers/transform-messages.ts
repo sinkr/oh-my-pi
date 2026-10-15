@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
@@ -345,36 +346,33 @@ function deduplicateToolCallIds(
 	return { messages: transformed, realToolResultsById, validToolUseIds };
 }
 
+/** Default for providers without an authored tool-name policy and native OpenAI Responses history. */
 const MAX_TOOL_CALL_NAME_LENGTH = 128;
-/** Tool-call name characters accepted by Bedrock, Anthropic and OpenAI. */
 const STRICT_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_-]+$/;
-/** Google function names additionally permit dots and colons. */
-const GOOGLE_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_.:-]+$/;
+const GOOGLE_TOOL_CALL_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.:-]*$/;
 
 /**
  * Whether a tool-call name cannot be replayed to the target: missing, empty,
- * longer than OpenAI's 128-character replay limit, or containing a character
- * outside the target's declaration charset. Models emit such names when the
- * name slot carries invocation text (whitespace, NULs) or an invented name
- * such as an internal URL (`proc://*`, #15839).
+ * longer than its declaration limit, or containing a character outside its
+ * declaration charset. Models emit such names when the name slot carries
+ * invocation text (whitespace, NULs) or an invented internal URL (`proc://*`).
  *
- * Without a target, use the strict charset for OpenAI Responses native history.
+ * Without a target, use the OpenAI Responses native-history constraints.
  */
-export function isMalformedToolCallName(name: unknown, allowedName = STRICT_TOOL_CALL_NAME_RE): boolean {
-	return (
-		typeof name !== "string" ||
-		name.length === 0 ||
-		name.length > MAX_TOOL_CALL_NAME_LENGTH ||
-		!allowedName.test(name)
-	);
+export function isMalformedToolCallName(
+	name: unknown,
+	allowedName = STRICT_TOOL_CALL_NAME_RE,
+	maxLength = MAX_TOOL_CALL_NAME_LENGTH,
+): boolean {
+	return typeof name !== "string" || name.length > maxLength || !allowedName.test(name);
 }
 
 function isMalformedToolCallId(id: string | undefined): boolean {
 	return !id || id.trim().length === 0;
 }
 
-function isMalformedToolCall(block: { id: string; name: string }, allowedName: RegExp): boolean {
-	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name, allowedName);
+function isMalformedToolCall(block: { id: string; name: string }, allowedName: RegExp, maxLength: number): boolean {
+	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name, allowedName, maxLength);
 }
 
 /**
@@ -401,17 +399,17 @@ function isMalformedToolCall(block: { id: string; name: string }, allowedName: R
  * malformed call. Idempotent for the same target: a re-run on an already-sanitized
  * list returns the input untouched.
  */
-function sanitizeMalformedToolCalls(messages: Message[], targetApi: Api): Message[] {
-	const allowedName =
-		targetApi === "google-generative-ai" || targetApi === "google-gemini-cli" || targetApi === "google-vertex"
-			? GOOGLE_TOOL_CALL_NAME_RE
-			: STRICT_TOOL_CALL_NAME_RE;
+function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[] {
+	const policy = resolveCatalogPolicy(model);
+	const allowedName = policy.toolCallNameCharset === "google" ? GOOGLE_TOOL_CALL_NAME_RE : STRICT_TOOL_CALL_NAME_RE;
+	const maxLength =
+		typeof policy.toolCallNameMaxLength === "number" ? policy.toolCallNameMaxLength : MAX_TOOL_CALL_NAME_LENGTH;
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
 	outer: for (const msg of messages) {
 		if (msg.role !== "assistant") continue;
 		for (const block of msg.content) {
-			if (block.type === "toolCall" && isMalformedToolCall(block, allowedName)) {
+			if (block.type === "toolCall" && isMalformedToolCall(block, allowedName, maxLength)) {
 				hasMalformed = true;
 				break outer;
 			}
@@ -437,7 +435,7 @@ function sanitizeMalformedToolCalls(messages: Message[], targetApi: Api): Messag
 			const filtered: AssistantMessage["content"] = [];
 			for (const block of msg.content) {
 				if (block.type === "toolCall") {
-					const malformed = isMalformedToolCall(block, allowedName);
+					const malformed = isMalformedToolCall(block, allowedName, maxLength);
 					const queue = dropQueues.get(block.id);
 					if (queue) queue.push(malformed);
 					else dropQueues.set(block.id, [malformed]);
@@ -804,7 +802,7 @@ export function transformMessages<TApi extends Api>(
 	// Drop assistant `toolCall` blocks whose id or name the target cannot replay
 	// (and their matched `toolResult` messages) before anything else looks at
 	// the history. Replaying them would 400 the target provider.
-	messages = sanitizeMalformedToolCalls(messages, model.api);
+	messages = sanitizeMalformedToolCalls(messages, model);
 
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();

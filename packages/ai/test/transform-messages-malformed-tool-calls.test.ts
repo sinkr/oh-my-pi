@@ -37,6 +37,19 @@ const googleModel: Model<"google-generative-ai"> = buildModel({
 	reasoning: false,
 });
 
+const googleCliModel: Model<"google-gemini-cli"> = buildModel({
+	api: "google-gemini-cli",
+	provider: "google-gemini-cli",
+	id: "gemini-2.5-pro",
+	name: "Gemini 2.5 Pro",
+	baseUrl: "https://cloudcode-pa.googleapis.com",
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 8192,
+	contextWindow: 200000,
+	reasoning: false,
+});
+
 function assistant(content: AssistantMessage["content"], timestamp: number): AssistantMessage {
 	return {
 		role: "assistant",
@@ -249,6 +262,7 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 					{ type: "toolCall", id: "call_history", name: "history://0-Sub", arguments: {} },
 					{ type: "toolCall", id: "call_unicode", name: "lées", arguments: {} },
 					{ type: "toolCall", id: "call_google", name: "ns.tool:v1", arguments: {} },
+					{ type: "toolCall", id: "call_digit", name: "2invalid", arguments: {} },
 				],
 				2,
 			),
@@ -256,6 +270,7 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 			toolResult("call_history", "Tool history://0-Sub not found", 4),
 			toolResult("call_unicode", "Tool lées not found", 5),
 			toolResult("call_google", "google result", 6),
+			toolResult("call_digit", "Tool 2invalid not found", 7),
 			{ role: "user", content: "continue", timestamp: 7 },
 		];
 
@@ -266,8 +281,37 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 		]);
 
 		const strictHistory = transformMessages(messages, model);
-		expect(getToolCalls(strictHistory)).toEqual([]);
-		expect(strictHistory.some(message => message.role === "toolResult")).toBe(false);
+		expect(getToolCalls(strictHistory).map(call => call.id)).toEqual(["call_digit"]);
+		expect(strictHistory.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
+			"call_digit",
+		]);
+	});
+
+	it("keeps function names only within the selected Google endpoint's length limit", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "inspect the file", timestamp: 1 },
+			assistant(
+				[
+					{ type: "toolCall", id: "call_64", name: "t".repeat(64), arguments: {} },
+					{ type: "toolCall", id: "call_65", name: "t".repeat(65), arguments: {} },
+					{ type: "toolCall", id: "call_129", name: "t".repeat(129), arguments: {} },
+				],
+				2,
+			),
+			toolResult("call_64", "ok", 3),
+			toolResult("call_65", "ok", 4),
+			toolResult("call_129", "Tool not found", 5),
+		];
+
+		expect(getToolCalls(transformMessages(messages, googleModel)).map(call => call.id)).toEqual([
+			"call_64",
+			"call_65",
+		]);
+		const cliHistory = transformMessages(messages, googleCliModel);
+		expect(getToolCalls(cliHistory).map(call => call.id)).toEqual(["call_64"]);
+		expect(cliHistory.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
+			"call_64",
+		]);
 	});
 
 	// Regression for PR #3459 review feedback: a tool-call id can legitimately

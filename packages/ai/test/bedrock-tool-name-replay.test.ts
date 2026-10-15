@@ -27,7 +27,7 @@ function toolResult(id: string, name: string): ToolResultMessage {
 	};
 }
 
-it("does not replay Google-legal but Bedrock-invalid tool names or their results", async () => {
+it("replays only Bedrock-valid tool names and their paired results", async () => {
 	const assistant: AssistantMessage = {
 		role: "assistant",
 		api: "google-generative-ai",
@@ -36,6 +36,8 @@ it("does not replay Google-legal but Bedrock-invalid tool names or their results
 		content: [
 			{ type: "toolCall", id: "call_colon", name: "ns.tool:v1", arguments: {} },
 			{ type: "toolCall", id: "call_url", name: "proc://*", arguments: {} },
+			{ type: "toolCall", id: "call_long", name: "t".repeat(65), arguments: {} },
+			{ type: "toolCall", id: "call_limit", name: "t".repeat(64), arguments: {} },
 			{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "a.txt" } },
 		],
 		stopReason: "toolUse",
@@ -55,6 +57,8 @@ it("does not replay Google-legal but Bedrock-invalid tool names or their results
 			assistant,
 			toolResult("call_colon", "ns.tool:v1"),
 			toolResult("call_url", "proc://*"),
+			toolResult("call_long", "t".repeat(65)),
+			{ ...toolResult("call_limit", "t".repeat(64)), isError: false },
 			{ ...toolResult("call_read", "read"), isError: false, content: [{ type: "text", text: "file contents" }] },
 			{ role: "user", content: "Continue", timestamp: 4 },
 		],
@@ -79,7 +83,19 @@ it("does not replay Google-legal but Bedrock-invalid tool names or their results
 	}
 	expect(payload.messages.slice(0, 3)).toMatchObject([
 		{ role: "user", content: [{ text: "Read a.txt" }] },
-		{ role: "assistant", content: [{ toolUse: { name: "read", toolUseId: "call_read" } }] },
-		{ role: "user", content: [{ toolResult: { toolUseId: "call_read", status: "success" } }] },
+		{
+			role: "assistant",
+			content: [
+				{ toolUse: { name: "t".repeat(64), toolUseId: "call_limit" } },
+				{ toolUse: { name: "read", toolUseId: "call_read" } },
+			],
+		},
+		{
+			role: "user",
+			content: [
+				{ toolResult: { toolUseId: "call_limit", status: "success" } },
+				{ toolResult: { toolUseId: "call_read", status: "success" } },
+			],
+		},
 	]);
 });

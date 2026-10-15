@@ -355,6 +355,14 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: [true, false],
 	},
+	/** Replayed tool calls must satisfy the target wire's declaration charset and length. */
+	"tool-call-name-charset": {
+		key: "toolCallNameCharset",
+		set: "catalog",
+		shape: "scalar",
+		values: ["ascii", "google"],
+	},
+	"tool-call-name-max-length": { key: "toolCallNameMaxLength", set: "catalog", shape: "scalar" },
 	"preserves-max-output-tokens": {
 		key: "preservesMaxOutputTokens",
 		set: "catalog",
