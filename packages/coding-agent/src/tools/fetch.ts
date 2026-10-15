@@ -618,13 +618,14 @@ export async function renderHtmlToText(
 		// even after remote/subprocess attempts are aborted by the budget.
 		native: () => htmlToMarkdown(html, { cleanContent: true }),
 		trafilatura: async () => {
+			if (overallSignal?.aborted) return null;
 			const trafilatura = await ensureTool("trafilatura", { signal: overallSignal, silent: true });
-			if (!trafilatura) return null;
+			if (!trafilatura || overallSignal?.aborted) return null;
 			const result = await ptree.exec([trafilatura, "-u", url, "--output-format", "markdown"], execOptions);
 			return result.ok ? result.stdout : null;
 		},
 		lynx: async () => {
-			if (!hasCommand("lynx")) return null;
+			if (!hasCommand("lynx") || overallSignal?.aborted) return null;
 			const result = await ptree.exec(["lynx", "-dump", "-nolist", "-width", "250", url], execOptions);
 			return result.ok ? result.stdout : null;
 		},
@@ -1140,6 +1141,19 @@ async function renderUrl(
 				response.status ? `Failed to fetch URL (HTTP ${response.status})` : "Failed to fetch URL",
 				...(response.error ? [`Cause: ${response.error}`] : []),
 			],
+		};
+	}
+
+	if (response.status === 204) {
+		return {
+			url,
+			finalUrl: response.finalUrl,
+			contentType: response.contentType || "unknown",
+			method: "no-content",
+			content: "",
+			fetchedAt,
+			truncated: false,
+			notes: ["HTTP 204 No Content"],
 		};
 	}
 
