@@ -929,7 +929,7 @@ class RendererCrashedError extends ToolError {}
 /** Chrome ended the debugger attachment the page is driven through (omp browser relay); the page itself lives on. */
 class DebuggerDetachedError extends ToolError {
 	constructor(
-		reason: string,
+		readonly reason: string,
 		/** `during`: the run's code had started, so its input may already have landed. */
 		readonly when: "during" | "before",
 	) {
@@ -1146,7 +1146,8 @@ function errorPayload(error: unknown): RunErrorPayload {
 	const recoverTab = error instanceof RequestInterceptionCleanupError || undefined;
 	const navigationTimeout = error instanceof NavigationTimeoutError || undefined;
 	const rendererCrashed = error instanceof RendererCrashedError || undefined;
-	const debuggerDetached = error instanceof DebuggerDetachedError ? error.when : undefined;
+	const debuggerDetached =
+		error instanceof DebuggerDetachedError ? { when: error.when, reason: error.reason } : undefined;
 	if (error instanceof ToolAbortError) {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: true };
 	}
@@ -2093,8 +2094,10 @@ export class WorkerCore {
 				throwIfAborted(active.signal);
 				return this.#callTool(active, name, args);
 			},
-			// Compiling the cell can wait (the first run loads Babel); a detach then still ran nothing.
+			// Compiling the cell can wait (the first run loads Babel); a detach (or any abort) then still ran nothing,
+			// and the cell must not run late either.
 			onEvaluate: () => {
+				throwIfAborted(active.signal);
 				active.codeStarted = true;
 			},
 		};

@@ -252,7 +252,9 @@ const WORKER_RESETS =
 const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any page still loading was stopped.`;
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
 const DEBUGGER_DETACH_CAUSE =
-	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu, or when the user cancels Chrome's debugging bar";
+	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu";
+/** Chrome's `chrome.debugger.onDetach` reason when the user pressed Cancel on its debugging bar. */
+const USER_CANCELLED_DEBUGGER = "canceled_by_user";
 class RecoverableWorkerError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
@@ -264,6 +266,8 @@ class DebuggerDetachedError extends ToolError {
 		message: string,
 		/** `during`: the run's code had started, so its input may already have landed. */
 		readonly when: "during" | "before",
+		/** Chrome's reason for the detach (`target_closed`, `canceled_by_user`). */
+		readonly reason: string,
 	) {
 		super(message);
 	}
@@ -1008,12 +1012,21 @@ async function runInTabWithSnapshot(
 				);
 			}
 			if (error instanceof DebuggerDetachedError) {
-				// Re-adopt the same Chrome tab on a new worker. No `recover` pass: the page is healthy, and stopping
-				// its loading would cancel a navigation the call itself started.
-				const detached = `${error.message}. ${DEBUGGER_DETACH_CAUSE}${error.when === "during" ? "; input this call sent before the detach may already have landed" : ""}`;
-				const lost = `${detached}. omp could not reattach to the tab, so it was closed; open it again once the other extension's frame is gone`;
+				const landed =
+					error.when === "during" ? "; input this call sent before the detach may already have landed" : "";
 				// Host tool calls the detached run started would otherwise keep running, and reply to the new worker.
 				for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);
+				if (error.reason === USER_CANCELLED_DEBUGGER) {
+					// The relay hides a tab whose debugging bar the user cancelled, so a re-adoption cannot succeed.
+					const cancelled = `${error.message}. The user cancelled Chrome's debugging bar${landed}. omp released the tab; the relay hides it until its URL changes, so navigate it in Chrome, then open it again`;
+					if (tabs.get(name) === tab && tab.state === "alive") await forceKillTab(name, cancelled);
+					if (opts.signal?.aborted) throw new ToolAbortError();
+					throw new ToolError(cancelled);
+				}
+				// Re-adopt the same Chrome tab on a new worker. No `recover` pass: the page is healthy, and stopping
+				// its loading would cancel a navigation the call itself started.
+				const detached = `${error.message}. ${DEBUGGER_DETACH_CAUSE}${landed}`;
+				const lost = `${detached}. omp could not reattach to the tab, so it was closed; once the other extension's frame is gone, open it again. If Chrome refused the attach, the relay hides the tab until its URL changes, so navigate it in Chrome first`;
 				const reattached = await recoverWorkerTab(tab, name, opts.timeoutMs, lost, {
 					recover: false,
 					failedReason: lost,
@@ -2055,7 +2068,11 @@ async function targetIdForTarget(target: Target): Promise<string> {
 
 function errorFromPayload(payload: RunErrorPayload): Error {
 	if (payload.debuggerDetached) {
-		const error = new DebuggerDetachedError(payload.message, payload.debuggerDetached);
+		const error = new DebuggerDetachedError(
+			payload.message,
+			payload.debuggerDetached.when,
+			payload.debuggerDetached.reason,
+		);
 		if (payload.stack) error.stack = payload.stack;
 		return error;
 	}

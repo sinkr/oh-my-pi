@@ -34,7 +34,10 @@ export interface RuntimeHooks {
 	onText(chunk: string): void;
 	onDisplay(output: JsDisplayOutput): void;
 	callTool(name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown>;
-	/** Called by `run` right before the cell's code is evaluated, once compiling it (which may load Babel) finished. */
+	/**
+	 * Called by `run` right before the cell's code is evaluated, once compiling it (which may load Babel) finished;
+	 * a throw fails the run without evaluating the cell.
+	 */
 	onEvaluate?(): void;
 }
 

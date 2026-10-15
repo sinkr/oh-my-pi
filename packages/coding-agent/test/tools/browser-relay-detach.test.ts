@@ -11,7 +11,7 @@ import { getTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/br
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import puppeteer, { type Browser } from "puppeteer-core";
+import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -198,6 +198,25 @@ class ChromeBackedExtension {
 		);
 	}
 
+	/** The tab's URL changed in Chrome (`chrome.tabs.onUpdated`). */
+	urlChanged(url: string): void {
+		this.#relay.send(
+			JSON.stringify({
+				t: "tabUpdated",
+				tab: {
+					tabId: TAB_ID,
+					url,
+					title: "Sign in",
+					active: true,
+					discarded: false,
+					windowId: 1,
+					pinned: false,
+					groupId: -1,
+				},
+			}),
+		);
+	}
+
 	/** Chrome ends the attachment by itself: the command in flight fails, then `onDetach` fires. */
 	async chromeDetach(reason: string): Promise<void> {
 		const root = this.#root;
@@ -219,6 +238,8 @@ describe("relay tabs Chrome detaches omp from", () => {
 	let site: Bun.Server<undefined> | undefined;
 	let relay: RelayServer | undefined;
 	let extension: ChromeBackedExtension | undefined;
+	let page: Page | undefined;
+	let pageUrl = "";
 	let tool: ToolSession;
 	const name = `relay-detach-${process.pid}`;
 
@@ -260,14 +281,14 @@ describe("relay tabs Chrome detaches omp from", () => {
 	/** Adopt a page through the relay and leave state on it that only survives a re-adoption without reload. */
 	async function openRelayTab(): Promise<ChromeBackedExtension> {
 		if (!chromium || !site) throw new Error("Chromium not launched");
-		const page = await chromium.newPage();
-		const url = `${site.url}login?case=${crypto.randomUUID()}`;
-		await page.goto(url);
+		page = await chromium.newPage();
+		pageUrl = `${site.url}login?case=${crypto.randomUUID()}`;
+		await page.goto(pageUrl);
 		// Puppeteer exposes a target's CDP id only on the private field.
 		const target = page.target() as unknown as { _targetId: string };
 		const port = await findFreeCdpPort();
 		relay = startRelayServer({ port, group: false });
-		extension = await ChromeBackedExtension.connect(port, chromium.wsEndpoint(), target._targetId, url);
+		extension = await ChromeBackedExtension.connect(port, chromium.wsEndpoint(), target._targetId, pageUrl);
 		tool = {
 			cwd: "/tmp",
 			hasUI: false,
@@ -288,6 +309,21 @@ describe("relay tabs Chrome detaches omp from", () => {
 	}
 
 	const readMark = { action: "run", code: "return await page.evaluate(() => window.mark);", timeout: 10 };
+
+	/** Resolves once the bridge has handled the extension's next detach report, which sends the tab's worker `OMP.debuggerDetached`. */
+	function bridgeHandlesDetach(): Promise<void> {
+		if (!relay) throw new Error("relay not started");
+		const bridge = relay.bridge;
+		const extMessage = bridge.extMessage.bind(bridge);
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const spy = spyOn(bridge, "extMessage").mockImplementation((socket, raw) => {
+			extMessage(socket, raw);
+			if (JSON.parse(raw).t !== "detached") return;
+			spy.mockRestore();
+			resolve();
+		});
+		return promise;
+	}
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"fails the call in flight at once, names the cause, and re-adopts the same page for the next call",
@@ -342,10 +378,12 @@ describe("relay tabs Chrome detaches omp from", () => {
 		"re-adopts a tab Chrome detached between calls and runs the next call there",
 		async () => {
 			const ext = await openRelayTab();
+			// The call's first page command (reapplying this user agent) goes out behind the bridge's
+			// `OMP.debuggerDetached` on the worker's socket, so the worker sees the detach before the call's code starts.
+			await invoke({ action: "run", code: 'await tab.emulate({ userAgent: "omp-detach-test" });', timeout: 10 });
+			const handled = bridgeHandlesDetach();
 			await ext.chromeDetach("target_closed");
-			// The detach crosses the relay to the tab's worker on its own sockets; nothing the test can await
-			// marks its arrival, and the call must start after it to be a call made on an already-detached tab.
-			await Bun.sleep(500);
+			await handled;
 			const next = await invoke(readMark);
 			expect(next.value).toBe("kept");
 			expect(next.text).toContain("Chrome had detached omp from this tab since the last call");
@@ -410,19 +448,15 @@ describe("relay tabs Chrome detaches omp from", () => {
 		async () => {
 			// An inline tab worker runs in this process, so the compile step can be held. Worker threads failing to
 			// start is what puts a tab on one. It cannot be re-adopted, so the call reports the tab closed.
-			const RealWorker = globalThis.Worker;
-			Object.defineProperty(globalThis, "Worker", {
-				configurable: true,
-				writable: true,
-				value: function UnavailableWorker(): never {
-					throw new Error("Worker threads unavailable");
-				},
-			});
+			// `Worker` is typed as a constructor, which a throwing mock implementation does not satisfy.
+			const unavailable = spyOn(globalThis, "Worker").mockImplementation((() => {
+				throw new Error("Worker threads unavailable");
+			}) as never);
 			let ext: ChromeBackedExtension;
 			try {
 				ext = await openRelayTab();
 			} finally {
-				globalThis.Worker = RealWorker;
+				unavailable.mockRestore();
 			}
 			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
 			const wrapCode = rewriteImports.wrapCode;
@@ -433,16 +467,24 @@ describe("relay tabs Chrome detaches omp from", () => {
 				await compiled.promise;
 				return await wrapCode(code);
 			});
+			const probe = `OMP_DETACH_PROBE_${process.pid}`;
 			try {
-				const next = invoke(readMark).catch((error: unknown) => error);
+				const code = `process.env.${probe} = "ran"; return await page.evaluate(() => window.mark);`;
+				const next = invoke({ action: "run", code, timeout: 10 }).catch((error: unknown) => error);
 				await compiling.promise;
 				await ext.chromeDetach("target_closed");
 				expect(String(await next)).toContain(
 					"Chrome detached omp from this tab (target_closed) before this call, so its code did not run",
 				);
+				// The compile finishing after the detach must not evaluate the cell late. The runtime awaits the
+				// compile before this test does, so its evaluation, if any, has run once this await returns.
+				compiled.resolve();
+				await held.mock.results[0]?.value;
+				expect(process.env[probe]).toBeUndefined();
 			} finally {
 				compiled.resolve();
 				held.mockRestore();
+				delete process.env[probe];
 			}
 		},
 		60_000,
@@ -462,6 +504,39 @@ describe("relay tabs Chrome detaches omp from", () => {
 			expect(failure).toContain("could not reattach");
 			const later = String(await invoke(readMark).catch((error: unknown) => error));
 			expect(later).toContain("could not reattach");
+			expect(later).toContain("navigate it in Chrome first");
+			// The guidance holds: once the frame is gone and the tab's URL changed, it opens again, page state intact.
+			ext.refuseAttach = false;
+			await page?.evaluate("location.hash = 'moved'");
+			ext.urlChanged(`${pageUrl}#moved`);
+			await invoke({ action: "open", app: { relay: true, target: "case=" }, timeout: 20 });
+			expect((await invoke(readMark)).value).toBe("kept");
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"releases the tab without re-adopting it when the user cancels Chrome's debugging bar",
+		async () => {
+			const ext = await openRelayTab();
+			const respawn = spyOn(globalThis, "Worker");
+			try {
+				const evaluating = ext.hanging();
+				const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+				await evaluating;
+				await ext.chromeDetach("canceled_by_user");
+				const failure = String(await stalled);
+				expect(failure).toContain("Chrome detached omp from this tab (canceled_by_user) during this call");
+				expect(failure).toContain("The user cancelled Chrome's debugging bar");
+				expect(failure).toContain("navigate it in Chrome, then open it again");
+				expect(failure).not.toContain("password manager");
+				// No new worker was started for a re-adoption the relay cannot grant.
+				expect(respawn).not.toHaveBeenCalled();
+			} finally {
+				respawn.mockRestore();
+			}
+			const later = String(await invoke(readMark).catch((error: unknown) => error));
+			expect(later).toContain("The user cancelled Chrome's debugging bar");
 		},
 		60_000,
 	);
