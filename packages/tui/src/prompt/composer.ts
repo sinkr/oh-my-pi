@@ -258,6 +258,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// with rows — so it is retained across resizes rather than rediscovered
 	// from whatever chrome is expanded when the height changes.
 	#chromeFloor: number | undefined;
+	// Chrome height of the last frame with a streaming block. Chrome still that
+	// tall once the turn ends is permanent, so it becomes the floor: otherwise
+	// the rows it clips off the live tail stay hidden until later output
+	// commits them out of order.
+	#lastBusyChrome: number | undefined;
 	/** Rows the chrome below each below-transcript root took in the last frame (see {@link rowsBelow}). */
 	#rowsBelow = new Map<Component, number>();
 	#lastInterruptAt = 0;
@@ -371,6 +376,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
 		this.#chromeFloor = Math.min(this.#chromeFloor ?? after.length, after.length);
+		if (transcript.hasActiveBlock()) {
+			this.#lastBusyChrome = after.length;
+		} else if (this.#lastBusyChrome !== undefined) {
+			this.#chromeFloor = Math.max(this.#chromeFloor, Math.min(this.#lastBusyChrome, after.length));
+			this.#lastBusyChrome = undefined;
+		}
 		const belowFloor = this.#chromeFloor;
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
@@ -900,6 +911,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	setRuntimeChildren(children: readonly Component[], options: RuntimeChildrenOptions = {}): void {
 		if (this.#stopped) return;
 		this.#chromeFloor = undefined;
+		this.#lastBusyChrome = undefined;
 		this.#nativeDock = options.nativeDock;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {

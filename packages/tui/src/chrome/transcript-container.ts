@@ -412,6 +412,13 @@ export class TranscriptContainer extends Container {
 		return this.#entries.map(entry => entry.emitted);
 	}
 
+	/** Whether any block is still streaming or otherwise unfinalized. */
+	hasActiveBlock(): boolean {
+		this.#syncEntries();
+		this.#settleFinalized();
+		return this.#entries.some(entry => entry.state === "active");
+	}
+
 	/** Whether visible active capacity and live-block memory permit another admission. */
 	canAdmit(rows: number): boolean {
 		const active = this.#entries.filter(entry => entry.state === "active").length;
