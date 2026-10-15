@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager, SessionResolutionError } from "@oh-my-pi/pi-coding-agent/main";
-import { resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { resolveResumeTarget, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import {
 	FileSessionStorage,
@@ -62,8 +62,10 @@ for (const backend of ["file", "sql"] as const) {
 			title: string | undefined,
 			modified: number,
 			dir = path.join(sessionsRoot, "other-project"),
+			options: { headerId?: string; continuationOf?: string; timestamp?: string } = {},
 		): Promise<string> {
-			const sessionPath = path.join(dir, `2026-01-01T00-00-00-000Z_${id}.jsonl`);
+			const timestamp = options.timestamp ?? "2026-01-01T00:00:00.000Z";
+			const sessionPath = path.join(dir, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
 			const titleSlot =
 				backend === "sql"
 					? serializeTitleSlot({
@@ -74,9 +76,10 @@ for (const backend of ["file", "sql"] as const) {
 					: "";
 			const content = `${titleSlot}${JSON.stringify({
 				type: "session",
-				id,
+				id: options.headerId ?? id,
 				title: backend === "sql" ? "stale header title" : title,
-				timestamp: "2026-01-01T00:00:00.000Z",
+				timestamp,
+				continuationOf: options.continuationOf,
 				cwd,
 			})}\n`;
 			if (client) {
@@ -192,6 +195,77 @@ for (const backend of ["file", "sql"] as const) {
 			await expect(createSessionManager({ ...args, resume: "unknown" }, cwd, stubSettings)).rejects.toBeInstanceOf(
 				SessionResolutionError,
 			);
+		});
+
+		it("follows title, ID and path selections to the continuation through the active backend", async () => {
+			const dir = path.join(sessionsRoot, "other-project");
+			const original = await writeSession("original-id", "AWS", 1000, dir);
+			const continued = await writeSession("continued-id", "Continued work", 2000, dir, {
+				continuationOf: "original-id",
+				timestamp: "2026-01-02T00:00:00.000Z",
+			});
+			const backing = await storage();
+			setDefaultSessionStorage(backing);
+			const before = await backing.readText(original);
+			for (const selector of ["aWs", "original-id", original]) {
+				const notices: string[] = [];
+				const manager = await createSessionManager(parseArgs(["-r", selector]), cwd, stubSettings, undefined, {
+					onSessionContinuation: continuation => notices.push(continuation.from),
+				});
+				try {
+					expect(manager?.getSessionId()).toBe("continued-id");
+					expect(manager?.getSessionFile()).toBe(continued);
+					expect(manager?.getSessionName()).toBe("Continued work");
+					expect(manager?.getEntries()).toEqual([]);
+					expect(notices).toEqual([original]);
+				} finally {
+					await manager?.close();
+				}
+			}
+			expect(await backing.readText(original)).toBe(before);
+		});
+
+		it("distinguishes a replacement's title and path from the original filename selector", async () => {
+			const dir = path.join(sessionsRoot, "other-project");
+			const replaced = await writeSession("original-id", "Replacement title", 1000, dir, {
+				headerId: "replacement-id",
+			});
+			const continued = await writeSession("continued-id", "Continued work", 2000, dir, {
+				continuationOf: "original-id",
+				timestamp: "2026-01-02T00:00:00.000Z",
+			});
+			setDefaultSessionStorage(await storage());
+			for (const [selector, expectedId, expectedPath] of [
+				["replacement title", "replacement-id", replaced],
+				[replaced, "replacement-id", replaced],
+				["original-id", "continued-id", continued],
+				["2026-01-01T00-00", "continued-id", continued],
+			]) {
+				const manager = await createSessionManager(parseArgs(["-r", selector]), cwd, stubSettings);
+				try {
+					expect(manager?.getSessionId()).toBe(expectedId);
+					expect(manager?.getSessionFile()).toBe(expectedPath);
+				} finally {
+					await manager?.close();
+				}
+			}
+		});
+
+		it("finds an unlisted replaced session's continuation across active backend buckets", async () => {
+			const dir = path.join(sessionsRoot, "other-project");
+			const original = await writeSession("original-id", "AWS", 1000, dir);
+			const continued = await writeSession("continued-id", "Continued work", 2000, dir, {
+				continuationOf: "original-id",
+				timestamp: "2026-01-02T00:00:00.000Z",
+			});
+			const backing = await storage();
+			setDefaultSessionStorage(backing);
+			await backing.writeText(original, "not a session\n");
+			const target = await resolveResumeTarget("original-id", cwd);
+			expect(target?.session.path).toBe(continued);
+			expect(target?.continuation?.from).toBe(original);
+			expect(await backing.readText(original)).toBe("not a session\n");
+			expect(await resolveResumeTarget("original-id", cwd, path.join(root, "custom"))).toBeUndefined();
 		});
 	});
 }
