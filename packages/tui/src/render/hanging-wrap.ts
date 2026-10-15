@@ -17,7 +17,7 @@ export function wrapTreeLine(line: string, width: number, theme: Theme): string[
 		const index = line.indexOf(marker);
 		if (index < 0) continue;
 		const before = line.slice(0, index);
-		if (!/^[ │]*$/.test(Bun.stripANSI(before))) continue;
+		if (!/^ *$/.test(Bun.stripANSI(before).replaceAll(theme.tree.vertical, ""))) continue;
 		const end = index + marker.length + 1;
 		if (line[end - 1] !== " ") continue;
 		const connectorWidth = visibleWidth(connector);
@@ -30,13 +30,29 @@ export function wrapTreeLine(line: string, width: number, theme: Theme): string[
 	return undefined;
 }
 
-/** Leading run of spaces, `│` guides and SGR escapes that a tree detail row hangs beneath. */
-const GUIDE_RUN = /^(?:[ │]|\x1b\[[0-9;]*m)*/;
+const SGR = /\x1b\[[0-9;]*m/y;
+
+/** End of the leading run of spaces, `vertical` guides and SGR escapes that a tree detail row hangs beneath. */
+function guideRunEnd(line: string, vertical: string): number {
+	let index = 0;
+	while (index < line.length) {
+		if (line[index] === " ") {
+			index++;
+		} else if (vertical && line.startsWith(vertical, index)) {
+			index += vertical.length;
+		} else {
+			SGR.lastIndex = index;
+			if (!SGR.test(line)) break;
+			index = SGR.lastIndex;
+		}
+	}
+	return index;
+}
 
 /** Hang a tree row beneath its connector, or a connector-less detail row beneath its guide rails. */
 export function wrapGuidedLine(line: string, width: number, theme: Theme): string[] {
 	const tree = wrapTreeLine(line, width, theme);
 	if (tree) return tree;
-	const prefix = line.match(GUIDE_RUN)?.[0] ?? "";
+	const prefix = line.slice(0, guideRunEnd(line, theme.tree.vertical));
 	return wrapPrefixedLine(prefix, prefix, line.slice(prefix.length), width);
 }
