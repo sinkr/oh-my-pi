@@ -397,7 +397,7 @@ export const cfgTuiCompleteScrollback = register({
 		group: "Display",
 		label: "Complete Scrollback",
 		description:
-			"Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback, so tmux copy mode shows them; when it shrinks, blank rows sit above the transcript until new output fills them",
+			"Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback, so tmux copy mode shows them; when it shrinks, blank rows sit between the transcript and the input until new output fills them",
 	},
 });
 
