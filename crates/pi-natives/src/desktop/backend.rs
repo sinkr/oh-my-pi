@@ -10,7 +10,8 @@ use super::{
 	keys::KeyName,
 	menus::DesktopMenuItem,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
+		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
+		ScreenState, Target,
 	},
 };
 
@@ -100,10 +101,24 @@ pub enum PointerEvent {
 	},
 }
 
+/// A held prevent-idle-display-sleep assertion; dropping it releases it.
+pub type DisplayAwakeHold = Box<dyn Send>;
+
 pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>>;
+	/// Live lock and display-sleep state; `display` narrows the sleep check to
+	/// the display a request targets, else the session's. Backends that cannot
+	/// tell report both as false.
+	fn screen_state(&mut self, _display: Option<&DisplaySelector>) -> ScreenState {
+		ScreenState::default()
+	}
+	/// Start the platform's prevent-idle-display-sleep assertion, held until the
+	/// returned guard drops. Backends without one return `None`.
+	fn hold_display_awake(&mut self) -> Option<DisplayAwakeHold> {
+		None
+	}
 	/// Explicit display keyboard input must establish the focused surface's
 	/// real global monitor, not infer it from window-relative coordinates.
 	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {
