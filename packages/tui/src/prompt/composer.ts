@@ -282,6 +282,10 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#selfClearingChrome: ReadonlySet<Component> = new Set();
 	// Fewest rows the user-driven transient roots have painted since mount; only rows above it are excluded from the floor.
 	#transientFloor: number | undefined;
+	// Fewest rows the bare editor painted before the runtime mounted. A draft replayed from the
+	// startup keystroke buffer can already be present on the first runtime frame, so that frame is
+	// not the editor's resting height; this is, because the bootstrap frame paints before replay.
+	#bootstrapEditorRows: number | undefined;
 	// Idle chrome height awaiting the settle window, and whether it has elapsed.
 	// Turn-scoped HUDs can close a few frames after the last block finalizes;
 	// billing them first would commit rows they cover and strand a band.
@@ -383,7 +387,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
-			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+			const bootstrap = this.#renderRoots(roots, width);
+			if (!this.#runtimeMounted) {
+				const editorRows = this.editor.render(width).length;
+				this.#bootstrapEditorRows = Math.min(this.#bootstrapEditorRows ?? editorRows, editorRows);
+			}
+			return { viewport: bootstrap.slice(-rows) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
@@ -405,7 +414,14 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
-		this.#transientFloor = Math.min(this.#transientFloor ?? transientRows, transientRows);
+		// The first runtime frame may already carry a replayed startup draft; seed from the empty
+		// editor's pre-mount height so clearing that draft is reclaimable like any other.
+		const seededFloor =
+			this.#transientFloor === undefined && this.#bootstrapEditorRows !== undefined
+				? Math.min(transientRows, this.#bootstrapEditorRows)
+				: transientRows;
+		this.#bootstrapEditorRows = undefined;
+		this.#transientFloor = Math.min(this.#transientFloor ?? seededFloor, transientRows);
 		// Eligible chrome excludes user-driven transient rows above their painted minimum and every
 		// self-clearing row; contraction, floor and rebaseline all use it.
 		const eligibleChrome = after.length - (transientRows - this.#transientFloor) - selfClearingRows;

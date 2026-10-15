@@ -772,6 +772,55 @@ describe("composer inline shrink (#11007)", () => {
 		}
 	});
 
+	it("does not bill a startup draft replayed before runtime mount into the floor", async () => {
+		const rows = 30;
+		const shell = Array.from({ length: 12 }, (_, i) => `shell${i}`);
+		const terminal = new VirtualTerminal(COLUMNS, rows);
+		terminal.write(`${shell.join("\r\n")}${"\r\n".repeat(rows + 1)}`);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		const editorRoot = new Container();
+		composer.start({ playWelcomeIntro: false });
+		try {
+			// The bootstrap frame paints the empty editor before any keystroke replay.
+			await scheduler.settle(terminal);
+			// Buffered keystrokes replay into the editor before the runtime mounts.
+			composer.editor.setText("draft1\ndraft2\ndraft3\ndraft4\ndraft5");
+			editorRoot.addChild(composer.editor);
+			composer.setRuntimeChildren([transcript, editorRoot], { transientChrome: [editorRoot] });
+			await scheduler.settle(terminal);
+
+			composer.setRunActive(true);
+			const answer = Array.from({ length: 110 }, (_, i) => `line${i}`);
+			for (const row of answer) transcript.addChild({ render: () => [row] });
+			composer.ui.requestRender();
+			await scheduler.settle(terminal);
+			composer.setRunActive(false);
+			await scheduler.advance(terminal, 300);
+
+			// Clearing (not submitting) the draft must hand its rows back, not leave a band.
+			composer.editor.setText("EDITOR");
+			composer.ui.requestRender();
+			await scheduler.advance(terminal, 300);
+			const view = terminal.getViewport().map(row => Bun.stripANSI(row));
+			expect(view.some(row => row.includes("draft1"))).toBe(false);
+			expect(view.findIndex(row => row.includes("EDITOR"))).toBeGreaterThanOrEqual(rows - 3);
+			expect(blankBand(terminal)).toBeLessThanOrEqual(2);
+			const history = terminal
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trim())
+				.filter(row => /^(shell|line)\d+$/.test(row));
+			expect(history).toEqual([...shell, ...answer]);
+		} finally {
+			composer.stop();
+		}
+	});
+
 	it("keeps the editor on the bottom row when a live block collapses under retired history", async () => {
 		const h = makeHarness();
 		const transcript = new TranscriptContainer();
