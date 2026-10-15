@@ -541,12 +541,18 @@ mod tests {
 	}
 
 	/// Whether the request closed its end of the stream, with nothing unread.
+	/// A process another test is spawning holds a copy of that end until it
+	/// execs, so the end of the stream may arrive a moment after the close.
 	fn closed() -> bool {
 		PEER.with_borrow(|peer| {
 			peer.as_ref().is_none_or(|peer| {
+				let mut readable =
+					libc::pollfd { fd: peer.as_raw_fd(), events: libc::POLLIN, revents: 0 };
 				let mut byte = 0u8;
-				// SAFETY: `byte` is writable for one byte; MSG_PEEK leaves it.
+				// SAFETY: `readable` and `byte` are writable for the calls;
+				// MSG_PEEK leaves the byte unread.
 				unsafe {
+					libc::poll(&raw mut readable, 1, 100);
 					libc::recv(
 						peer.as_raw_fd(),
 						ptr::from_mut(&mut byte).cast(),
