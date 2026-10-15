@@ -476,6 +476,7 @@ const noOpUIContext: ExtensionUIContext = {
 	editor: async () => undefined,
 	addAutocompleteProvider: () => {},
 	setEditorComponent: () => {},
+	getEditorComponent: () => undefined,
 	get theme() {
 		return theme;
 	},
@@ -682,6 +683,11 @@ export class ExtensionRunner {
 	/** Whether a native built-in of `name` is available to delegate to. */
 	hasNativeTool(name: string): boolean {
 		return this.#nativeToolResolver?.(name) !== undefined;
+	}
+
+	/** Guidance a same-name replacement inherits from the native `name` tool it can delegate to. */
+	getNativeDelegationGuidance(name: string): string {
+		return this.#nativeToolResolver?.(name)?.tool.delegationGuidance ?? "";
 	}
 
 	/**

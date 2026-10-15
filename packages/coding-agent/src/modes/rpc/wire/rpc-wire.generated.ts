@@ -547,6 +547,7 @@ export interface CompactionResult {
 	shortSummary?: string;
 	details?: unknown;
 	preserveData?: Record<string, unknown>;
+	providerReplayThroughEntryId?: string;
 }
 
 export interface ModelCycleResult {
@@ -770,6 +771,8 @@ export type NotifyType = "info" | "warning" | "error";
 
 export interface AgentStartEvent {
 	type: "agent_start";
+	/** Calls of an unpaired assistant tail a continued run executes before its first model request. */
+	resumedToolCallIds?: string[];
 }
 
 export interface AgentEndEvent {
