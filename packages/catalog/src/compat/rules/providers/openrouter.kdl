@@ -145,10 +145,17 @@ provider "openrouter" {
 		// isOpenRouterAnthropicModel checks in the OpenAI request builders.
 		retry-without-strict-on-grammar-error #true
 	}
+	// OpenRouter forwards Muse to Meta's backend, which accepts only
+	// tool_choice "auto" and 400s on "none" (see providers/meta.kdl);
+	// OpenRouter reports that as an opaque "Provider returned error".
 	class "meta" {
 		family "muse-spark" {
 			filter-reasoning-history #true
 			allows-synthetic-reasoning-content-for-tool-calls #false
+			supports-tool-choice #false
+		}
+		family "muse-wonder" {
+			supports-tool-choice #false
 		}
 	}
 	class "minimax" {
