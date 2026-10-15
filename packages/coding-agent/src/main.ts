@@ -127,6 +127,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import { getDefaultSessionStorage } from "./session/session-storage";
 import { initSessionStorage } from "./session/session-storage-init";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -1309,7 +1310,7 @@ export async function createSessionManager(
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
 			// The conversation may have gone on in a sibling file while another process held this one.
-			const continuation = await findSessionContinuation(sessionArg);
+			const continuation = await findSessionContinuation(sessionArg, getDefaultSessionStorage());
 			if (continuation) options.onSessionContinuation?.(continuation);
 			let manager: SessionManager;
 			try {
