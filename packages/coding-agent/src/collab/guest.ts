@@ -134,6 +134,8 @@ export interface GuestSnapshotActivityReconcilerCtx extends GuestIdleReconcilerC
 	ensureLoadingAnimation: InteractiveModeContext["ensureLoadingAnimation"];
 	autoCompactionLoader: InteractiveModeContext["autoCompactionLoader"];
 	retryLoader: InteractiveModeContext["retryLoader"];
+	/** Composer run flag, repaired alongside the loader when the wire start/end events were missed. */
+	composer: InteractiveModeContext["composer"];
 }
 
 /** Status-area state which cannot outlive removal of its child components. */
@@ -157,6 +159,7 @@ export function clearGuestTransientStatus(ctx: GuestTransientStatusCtx): void {
 }
 
 export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconcilerCtx, isStreaming: boolean): void {
+	ctx.composer.setRunActive(isStreaming);
 	if (isStreaming) {
 		ctx.statusLine.markActivityStart();
 		if (!ctx.autoCompactionLoader && !ctx.retryLoader) ctx.ensureLoadingAnimation();

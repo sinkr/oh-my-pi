@@ -420,5 +420,31 @@ describe("EventController superseded agent_end", () => {
 		expect(waitForIdle).not.toHaveBeenCalled();
 		expect(report).toHaveBeenCalledTimes(1);
 		expect(report).toHaveBeenLastCalledWith({ state: "error", msg: "boom" });
+		// The raced attach flipped the composer busy again; the teardown must settle it.
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+	});
+
+	it("does not settle the composer when a new run started during terminal teardown", async () => {
+		const { ctx, streamState } = createContext();
+		vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const switching = Promise.withResolvers<void>();
+		ctx.flushPendingModelSwitch = vi.fn(() => switching.promise);
+		const controller = new EventController(ctx);
+
+		const ended = controller.handleEvent({
+			type: "agent_end",
+			messages: [{ role: "assistant", stopReason: "stop", content: [] }],
+		} as unknown as AgentSessionEvent);
+		await Promise.resolve();
+
+		// The next prompt starts while the previous teardown still awaits the model switch.
+		streamState.isStreaming = true;
+		streamState.viewIsStreaming = true;
+		await controller.dispatchSessionEvent(AGENT_START);
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+
+		switching.resolve();
+		await ended;
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
 	});
 });

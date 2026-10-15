@@ -2330,11 +2330,17 @@ export class EventController {
 		}
 		this.#terminalSettleCount += 1;
 		this.#terminalTeardownActive = true;
+		const epoch = this.#runEpoch;
 		try {
 			setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		} finally {
 			this.#terminalTeardownActive = false;
+			// A focus attach can land `restoreRunActivity()` while the teardown awaits the model
+			// switch; it reads the still-live post-prompt work and flips the composer back to busy,
+			// and its watcher refused to arm under the teardown token. The teardown is authoritative,
+			// so settle the composer unless a new run started meanwhile (which bumps the epoch).
+			if (epoch === this.#runEpoch && !this.ctx.viewSession.isStreaming) this.ctx.composer.setRunActive(false);
 		}
 		// This settle may belong to an extension-started turn while the main
 		// input loop remains asleep. Do not await session-idle from its own event.
