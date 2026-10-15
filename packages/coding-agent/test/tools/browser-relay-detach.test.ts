@@ -325,6 +325,23 @@ describe("relay tabs Chrome detaches omp from", () => {
 		return promise;
 	}
 
+	/**
+	 * {@link openRelayTab} on an inline tab worker, which runs in this process. Worker threads failing to start is what
+	 * puts a tab on one; it cannot be re-adopted, so a detach releases the tab.
+	 */
+	async function openInlineRelayTab(): Promise<ChromeBackedExtension> {
+		// `Worker` is typed as a constructor, which a throwing mock implementation does not satisfy.
+		const unavailable = spyOn(globalThis, "Worker").mockImplementation((() => {
+			throw new Error("Worker threads unavailable");
+		}) as never);
+		try {
+			return await openRelayTab();
+		} finally {
+			unavailable.mockRestore();
+			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
+		}
+	}
+
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"fails the call in flight at once, names the cause, and re-adopts the same page for the next call",
 		async () => {
@@ -446,19 +463,8 @@ describe("relay tabs Chrome detaches omp from", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"counts a detach while the call's code is still compiling as before it ran",
 		async () => {
-			// An inline tab worker runs in this process, so the compile step can be held. Worker threads failing to
-			// start is what puts a tab on one. It cannot be re-adopted, so the call reports the tab closed.
-			// `Worker` is typed as a constructor, which a throwing mock implementation does not satisfy.
-			const unavailable = spyOn(globalThis, "Worker").mockImplementation((() => {
-				throw new Error("Worker threads unavailable");
-			}) as never);
-			let ext: ChromeBackedExtension;
-			try {
-				ext = await openRelayTab();
-			} finally {
-				unavailable.mockRestore();
-			}
-			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
+			// An inline tab worker runs in this process, so the compile step can be held.
+			const ext = await openInlineRelayTab();
 			const wrapCode = rewriteImports.wrapCode;
 			const compiling = Promise.withResolvers<void>();
 			const compiled = Promise.withResolvers<void>();
@@ -485,6 +491,32 @@ describe("relay tabs Chrome detaches omp from", () => {
 				compiled.resolve();
 				held.mockRestore();
 				delete process.env[probe];
+			}
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"closes an inline worker before releasing the tab it cannot re-adopt",
+		async () => {
+			const ext = await openInlineRelayTab();
+			const tab = getTab(name);
+			if (tab?.backend !== "worker") throw new Error("expected a worker tab");
+			// The inline core reports `closed` once it has disconnected from the relay; a core left running keeps its
+			// connection and claim, and could take the tab again when the relay re-announces it.
+			let closed = false;
+			const unsubscribe = tab.worker.onMessage(msg => {
+				if (msg.type === "closed") closed = true;
+			});
+			try {
+				const evaluating = ext.hanging();
+				const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+				await evaluating;
+				await ext.chromeDetach("target_closed");
+				expect(String(await stalled)).toContain("could not reattach");
+				expect(closed).toBe(true);
+			} finally {
+				unsubscribe();
 			}
 		},
 		60_000,
