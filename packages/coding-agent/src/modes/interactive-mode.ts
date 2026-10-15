@@ -2207,7 +2207,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				// Roots that collapse without new transcript output must not raise the
 				// post-run chrome floor: user-driven ones (editor drafts, dialogs and
 				// selectors, staged attachments, reports, queued messages, dismissible
-				// panels and the error banner).
+				// panels and the error banner). Any root listed in neither set counts
+				// as persistent: once it holds its height after a run the floor rises
+				// to it, and its later collapse floats the editor until output fills
+				// in. Classify every new root that can collapse on its own.
 				transientChrome: [
 					this.editorContainer,
 					this.attachmentChipsContainer,

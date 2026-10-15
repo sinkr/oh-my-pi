@@ -157,4 +157,81 @@ describe("transcript rows under chrome that outlives the turn", () => {
 			}
 		});
 	}
+
+	/** Stream {@link REPLY_LINES} lines under 7 rows of persistent chrome, then let the idle chrome settle. */
+	async function streamUnderChrome(composer: Composer, scheduler: VirtualRenderScheduler, terminal: VirtualTerminal) {
+		const transcript = new TranscriptContainer();
+		const chrome = new TurnChrome();
+		const editorRoot = new Container();
+		editorRoot.addChild(composer.editor);
+		composer.setRuntimeChildren([transcript, chrome, editorRoot], { transientChrome: [editorRoot] });
+		await scheduler.settle(terminal);
+		return async (beforeStream?: () => Promise<void>): Promise<string[]> => {
+			await beforeStream?.();
+			composer.setRunActive(true);
+			const message = new AssistantMessageComponent();
+			transcript.addChild(message);
+			chrome.rows = 7;
+			const lines = Array.from({ length: REPLY_LINES }, (_, i) => `QZS${String(i + 1).padStart(3, "0")}`);
+			for (let n = 1; n <= lines.length; n++) {
+				message.updateContent(reply(lines.slice(0, n).join("\n\n")), { transient: true });
+				composer.ui.requestRender();
+				await scheduler.settle(terminal);
+			}
+			message.updateContent(reply(lines.join("\n\n")));
+			message.markTranscriptBlockFinalized();
+			composer.setRunActive(false);
+			composer.ui.requestRender();
+			await scheduler.advance(terminal, 300);
+			const seen = new Set<string>();
+			for (const row of terminal.getScrollBuffer()) {
+				const token = /QZS\d{3}/.exec(Bun.stripANSI(row))?.[0];
+				if (token !== undefined) seen.add(token);
+			}
+			return lines.filter(line => !seen.has(line));
+		};
+	}
+
+	it("keeps every line when the runtime composer shape is taller than the prepaint shape", async () => {
+		const terminal = new VirtualTerminal(COLUMNS, 24);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true, composerShape: "band" },
+		});
+		composer.start({ playWelcomeIntro: false });
+		try {
+			// The bootstrap frame paints the cached 2-row band; settings then resolve to the 3-row pi shape.
+			await scheduler.settle(terminal);
+			composer.editor.setBorderStyle("pi");
+			const run = await streamUnderChrome(composer, scheduler, terminal);
+			expect(await run()).toEqual([]);
+		} finally {
+			composer.stop();
+		}
+	});
+
+	it("keeps every line after the composer shape grows mid-session", async () => {
+		const terminal = new VirtualTerminal(COLUMNS, 24);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true, composerShape: "band" },
+		});
+		composer.start({ playWelcomeIntro: false });
+		try {
+			await scheduler.settle(terminal);
+			const run = await streamUnderChrome(composer, scheduler, terminal);
+			const missing = await run(async () => {
+				composer.setPreferences({ composerShape: "pi" });
+				composer.ui.requestRender();
+				await scheduler.settle(terminal);
+			});
+			expect(missing).toEqual([]);
+		} finally {
+			composer.stop();
+		}
+	});
 });

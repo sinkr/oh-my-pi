@@ -282,10 +282,18 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#selfClearingChrome: ReadonlySet<Component> = new Set();
 	// Fewest rows the user-driven transient roots have painted since mount; only rows above it are excluded from the floor.
 	#transientFloor: number | undefined;
-	// Fewest rows the bare editor painted before the runtime mounted. A draft replayed from the
-	// startup keystroke buffer can already be present on the first runtime frame, so that frame is
-	// not the editor's resting height; this is, because the bootstrap frame paints before replay.
+	// Editor and shape the transient floor was measured under, plus the last frame's transient rows.
+	// A shape swap (band → pi) changes the editor's resting height; a minimum carried over from the
+	// shorter shape would exclude the taller shape's fixed rows forever and clip that many transcript rows.
+	#transientEditor: Component | undefined;
+	#transientEditorStyle: string | undefined;
+	#lastTransientRows = 0;
+	// Fewest rows the bare editor painted before the runtime mounted, and the shape it was painted in.
+	// A draft replayed from the startup keystroke buffer can already be present on the first runtime
+	// frame, so that frame is not the editor's resting height; this is, because the bootstrap frame
+	// paints before replay. Only valid while the shape is unchanged.
 	#bootstrapEditorRows: number | undefined;
+	#bootstrapEditorStyle: string | undefined;
 	// Idle chrome height awaiting the settle window, and whether it has elapsed.
 	// Turn-scoped HUDs can close a few frames after the last block finalizes;
 	// billing them first would commit rows they cover and strand a band.
@@ -361,6 +369,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.ui.addChild(this.editor);
 		this.ui.addChild(this.#statusHost);
 		this.ui.setFocus(this.editor);
+		// A settle timer that fires while the TUI is stopped (external editor, suspend) is dropped;
+		// forget it on restart so the next frame re-arms instead of waiting on it forever.
+		this.ui.addStartListener(() => this.#resetIdleChrome());
 	}
 	/**
 	 * Rows the below-transcript chrome under `root` (editor, status line, …)
@@ -387,18 +398,13 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
-			if (!this.#runtimeMounted) {
-				const editorRows = this.editor.render(width);
-				this.#bootstrapEditorRows = Math.min(this.#bootstrapEditorRows ?? editorRows.length, editorRows.length);
-				const bootstrap = [
-					...this.#header.render(width),
-					...this.#bootstrapInputGap.render(width),
-					...editorRows,
-					...this.#statusHost.render(width),
-				];
-				return { viewport: bootstrap.slice(-rows) };
+			const viewport: string[] = [];
+			for (const root of roots) {
+				const rendered = root.render(width);
+				if (!this.#runtimeMounted && root === this.editor) this.#recordBootstrapEditorRows(rendered.length);
+				viewport.push(...rendered);
 			}
-			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+			return { viewport: viewport.slice(-rows) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
@@ -416,25 +422,18 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			ends.push({ root, end: after.length });
 		}
 		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
-		// Offer history under capacity pressure only: blocks stay live (and keep
-		// reflowing to the current width) while the screen has room. A batch
-		// leaves the mutable viewport in the same frame it is appended, so its
-		// rows are never painted twice.
-		// The first runtime frame may already carry a replayed startup draft; seed from the empty
-		// editor's pre-mount height so clearing that draft is reclaimable like any other.
-		const seededFloor =
-			this.#transientFloor === undefined && this.#bootstrapEditorRows !== undefined
-				? Math.min(transientRows, this.#bootstrapEditorRows)
-				: transientRows;
-		this.#bootstrapEditorRows = undefined;
-		this.#transientFloor = Math.min(this.#transientFloor ?? seededFloor, transientRows);
-		// Eligible chrome excludes user-driven transient rows above their painted minimum and every
+		const transientFloor = this.#syncTransientFloor(transientRows);
+		// Eligible chrome excludes user-driven transient rows above their resting height and every
 		// self-clearing row; contraction, floor and rebaseline all use it.
-		const eligibleChrome = after.length - (transientRows - this.#transientFloor) - selfClearingRows;
+		const eligibleChrome = after.length - (transientRows - transientFloor) - selfClearingRows;
 		const promotedChromeContracted = this.#chromeFloorPromoted && eligibleChrome < (this.#chromeFloor ?? 0);
 		this.#chromeFloor = Math.min(this.#chromeFloor ?? eligibleChrome, eligibleChrome);
 		this.#rebaselineChromeFloor(this.#runActive || transcript.hasActiveBlock(), eligibleChrome);
 		const belowFloor = this.#chromeFloor;
+		// Offer history under capacity pressure only: blocks stay live (and keep
+		// reflowing to the current width) while the screen has room. A batch
+		// leaves the mutable viewport in the same frame it is appended, so its
+		// rows are never painted twice.
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
 		// Retirement measures the same live blocks the viewport lays out below;
@@ -741,6 +740,42 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#idleChromeTimer = undefined;
 		this.#idleChrome = undefined;
 		this.#idleChromeSettled = false;
+	}
+
+	/** Track the empty editor's pre-mount height per shape; a shape change restarts the measurement. */
+	#recordBootstrapEditorRows(rows: number): void {
+		const style = this.editor.getBorderStyle();
+		this.#bootstrapEditorRows =
+			style === this.#bootstrapEditorStyle ? Math.min(this.#bootstrapEditorRows ?? rows, rows) : rows;
+		this.#bootstrapEditorStyle = style;
+	}
+
+	/**
+	 * Follow the transient roots' resting height. Normally a running minimum; when the editor or its
+	 * shape changes, the floor shifts by that frame's height change instead, so draft growth stays
+	 * excluded while the new shape's fixed rows are billed.
+	 */
+	#syncTransientFloor(transientRows: number): number {
+		const editor = this.editor;
+		const style = editor.getBorderStyle();
+		let floor: number;
+		if (this.#transientFloor === undefined) {
+			// The first runtime frame may already carry a replayed startup draft; seed from the empty
+			// editor's pre-mount height when it was painted in the same shape.
+			const bootstrap = this.#bootstrapEditorStyle === style ? this.#bootstrapEditorRows : undefined;
+			floor = bootstrap === undefined ? transientRows : Math.min(transientRows, bootstrap);
+		} else if (editor !== this.#transientEditor || style !== this.#transientEditorStyle) {
+			floor = Math.max(0, Math.min(transientRows, this.#transientFloor + transientRows - this.#lastTransientRows));
+		} else {
+			floor = Math.min(this.#transientFloor, transientRows);
+		}
+		this.#transientFloor = floor;
+		this.#bootstrapEditorRows = undefined;
+		this.#bootstrapEditorStyle = undefined;
+		this.#transientEditor = editor;
+		this.#transientEditorStyle = style;
+		this.#lastTransientRows = transientRows;
+		return floor;
 	}
 
 	/** Header retires first; replay coalesces it with the complete transcript ledger. */
