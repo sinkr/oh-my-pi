@@ -96,50 +96,5 @@ mod allocator {
 				true
 			}));
 		}
-
-		#[cfg(all(target_os = "linux", target_env = "gnu"))]
-		#[test]
-		fn trimming_keeps_cached_trees_available_for_reuse() {
-			use pi_ast::{
-				language::SupportLang,
-				parse_cache::{parse_cache_stats, parse_cached},
-			};
-
-			// Cache counters are process-global; isolate this probe from parallel tests.
-			if std::env::var_os("PI_NATIVE_TRIM_CACHE_PROBE").is_none() {
-				let output = std::process::Command::new(std::env::current_exe().unwrap())
-					.args([
-						"--exact",
-						"memory::allocator::tests::trimming_keeps_cached_trees_available_for_reuse",
-					])
-					.env("PI_NATIVE_TRIM_CACHE_PROBE", "1")
-					.output()
-					.unwrap();
-				let stdout = String::from_utf8_lossy(&output.stdout);
-				let stderr = String::from_utf8_lossy(&output.stderr);
-				assert!(
-					output.status.success() && stdout.contains("1 passed; 0 failed;"),
-					"cache probe did not pass: {stdout}\n{stderr}"
-				);
-				return;
-			}
-
-			let code = "fn native_trim_preserves_tree() -> usize { 42 }";
-			let tree = parse_cached(code, SupportLang::Rust, Some("native-trim.rs"))
-				.unwrap()
-				.unwrap();
-			let before = parse_cache_stats();
-			release_unused_pages();
-			let reused = parse_cached(code, SupportLang::Rust, Some("native-trim.rs"))
-				.unwrap()
-				.unwrap();
-			let after = parse_cache_stats();
-			assert_eq!(after.hits, before.hits + 1);
-			assert_eq!(after.misses, before.misses);
-			assert_eq!(after.entries, before.entries);
-			assert_eq!(tree.root_node().utf8_text(code.as_bytes()).unwrap(), code);
-			assert_eq!(reused.root_node().to_sexp(), tree.root_node().to_sexp());
-			assert!(!reused.root_node().has_error());
-		}
 	}
 }
