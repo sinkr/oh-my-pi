@@ -344,7 +344,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? normalizedModelsDevModels.filter(model => !modelsDevAdditiveStaticModelIds.has(model.id))
 		: normalizedModelsDevModels;
 	const shouldUseFreshCacheAsAuthoritative =
-		(strategy === "online-if-uncached" || strategy === "offline") && hasUsableFreshCache && hasAuthoritativeCache;
+		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
 	const anyRemoteFetchSucceeded = modelsDevFetchSucceeded || dynamicFetchSucceeded;
 	const allConfiguredRemoteFetchesSucceeded =
