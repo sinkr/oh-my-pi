@@ -16,10 +16,19 @@
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import {
+	HL_FILE_HASH_LENGTH,
+	HL_FILE_HASH_SEP,
+	HL_FILE_PREFIX,
+	HL_FILE_SUFFIX,
+	HL_LINE_BODY_SEP,
+} from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { prompt } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
 import contextStub from "../prompts/system/snapcompact-context-stub.md" with { type: "text" };
+import readNoteTemplate from "../prompts/system/snapcompact-read-note.md" with { type: "text" };
 import systemFramesNote from "../prompts/system/snapcompact-system-frames-note.md" with { type: "text" };
 import systemStub from "../prompts/system/snapcompact-system-stub.md" with { type: "text" };
 import toolResultNote from "../prompts/system/snapcompact-toolresult-note.md" with { type: "text" };
@@ -58,6 +67,61 @@ const SAVINGS_MARGIN = 0.9;
 
 /** Loose block-array view shared by live contexts and session-history estimates. */
 type BlockViews = ReadonlyArray<{ type?: unknown; text?: unknown }>;
+
+/**
+ * A `read` result's snapshot header (`[path#TAG]`), optionally after the one-line
+ * notice `prependSuffixResolutionNotice` writes. Edits copy the tag, so it stays text.
+ */
+const READ_HEADER = new RegExp(
+	`^(?:\\[[^\\n]*\\]\\n)?\\${HL_FILE_PREFIX}[^\\n]+${HL_FILE_HASH_SEP}[0-9A-F]{${HL_FILE_HASH_LENGTH}}\\${HL_FILE_SUFFIX}\\n`,
+);
+const READ_ROW_PREFIX = `\\d+(?:-\\d+)?[${HL_LINE_BODY_SEP}|]`;
+/** A numbered read (hashline `N:`, line-number `N|`) opens with a numbered row. */
+const READ_NUMBERED = new RegExp(`^${READ_ROW_PREFIX}`);
+/**
+ * A row's leading indentation, after an optional line-number prefix. Anchored on
+ * `\n` only: a `m`-flag `^` would also match after `\r` and U+2028 inside a row.
+ */
+const rowIndent = (prefix: string) => new RegExp(`(^|\\n)(${prefix})?([ \\t]+)`, "g");
+/** Numbered rows: `N:`, `N|`, or a collapsed block's `N-M:`. */
+const READ_ROW_INDENT = rowIndent(READ_ROW_PREFIX);
+/** Unnumbered reads (`:raw`, line numbers off): a leading `12:` is file content, not a prefix. */
+const READ_LINE_INDENT = rowIndent("");
+const READ_INDENT_RUN = /\t+| +/g;
+const TOOL_RESULT_NOTE = toolResultNote.trim();
+
+interface ReadFramePayload {
+	/** Body rendered into frames, indentation drawn as count brackets. */
+	body: string;
+	/** Lifted snapshot header; empty when the result has none. */
+	header: string;
+	/** Whether any bracket was drawn, so the note explains them. */
+	indented: boolean;
+}
+
+/**
+ * Frames collapse whitespace, so draw each row's leading indentation as a count
+ * bracket and lift the snapshot header out to text (see snapcompact-read-note.md).
+ */
+function encodeReadForFrames(text: string): ReadFramePayload {
+	const header = READ_HEADER.exec(text)?.[0] ?? "";
+	const rest = text.slice(header.length);
+	const body = rest.replace(
+		READ_NUMBERED.test(rest) ? READ_ROW_INDENT : READ_LINE_INDENT,
+		(_, lineStart: string, prefix = "", indent: string) => `${lineStart}${prefix}${indentBracket(indent)}`,
+	);
+	return { body, header: header.trimEnd(), indented: body !== rest };
+}
+
+/** `\t\t  ` → `[»2·2]`: one count per tab or space run. */
+function indentBracket(indent: string): string {
+	return `[${indent.replace(READ_INDENT_RUN, run => `${run[0] === "\t" ? "»" : "·"}${run.length}`)}]`;
+}
+
+/** The note for an imaged `read`: the bracket legend when used, then the lifted header. */
+function readFramesNote(read: ReadFramePayload): string {
+	return prompt.render(readNoteTemplate, { note: TOOL_RESULT_NOTE, header: read.header, indented: read.indented });
+}
 
 /** Count image blocks in one message's content. */
 function messageImageCount(message: { content?: unknown }): number {
@@ -351,12 +415,16 @@ export interface InlineMessageView {
 
 interface BuiltInlineToolResultCandidate {
 	candidate: InlineToolResultCandidate;
-	text: string;
+	/** What the frames render: the result's text, or an eligible `read`'s encoded body. */
+	frameText: string;
+	read?: ReadFramePayload;
 }
 
 /**
- * Build the exact same text payload and planning candidate for estimation and
- * live transformation. Image blocks do not suppress co-resident text.
+ * Build the exact same frame payload and planning candidate for estimation and
+ * live transformation. Image blocks do not suppress co-resident text. Frames
+ * are counted on the payload the swap renders; `textTokens` stays the bill of
+ * the text it replaces.
  */
 function buildInlineToolResultCandidate(
 	toolCallId: string,
@@ -366,6 +434,7 @@ function buildInlineToolResultCandidate(
 	imagesThrough: number,
 	tokenizer: Tokenizer,
 	shape: snapcompact.Shape,
+	imageReadResults: boolean,
 ): BuiltInlineToolResultCandidate {
 	const blocks: BlockViews = Array.isArray(content) ? (content as BlockViews) : [];
 	const textBlocks: string[] = [];
@@ -381,16 +450,21 @@ function buildInlineToolResultCandidate(
 	const text = textBlocks.join("\n");
 	const textTokens = text.length > 0 ? tokenizer.countTokens(text) : 0;
 	const isError = messageIsError === true;
+	const eligible = !isError && textTokens >= MIN_TOOL_RESULT_TOKENS;
+	// The planner keeps `read` as text for a reader that has not opted in; skip encoding it.
+	const read = eligible && toolName === "read" && imageReadResults ? encodeReadForFrames(text) : undefined;
+	const frameText = read?.body ?? text;
 	return {
 		candidate: {
 			id: toolCallId,
 			textTokens,
-			frames: !isError && textTokens >= MIN_TOOL_RESULT_TOKENS ? snapcompact.frames(text, { shape }) : 0,
+			frames: eligible ? snapcompact.frames(frameText, { shape }) : 0,
 			isError,
 			...(toolName !== undefined && { toolName }),
 			imagesThrough,
 		},
-		text,
+		frameText,
+		...(read && { read }),
 	};
 }
 
@@ -412,6 +486,7 @@ function scanInlineContext(
 	renderToolResults: boolean,
 	tokenizer: Tokenizer,
 	shape: snapcompact.Shape,
+	imageReadResults: boolean,
 ): InlineContextScan {
 	const toolResults: InlineContextScan["toolResults"] = [];
 	let images = 0;
@@ -433,6 +508,7 @@ function scanInlineContext(
 			images,
 			tokenizer,
 			shape,
+			imageReadResults,
 		);
 		toolResults.push({ ...built, index });
 	}
@@ -497,7 +573,8 @@ export function estimateInlineSavings(input: {
 	const shape = snapcompact.resolveShape(model, options.shape);
 	const tokenizer = new Tokenizer(model);
 	const imageLimit = snapcompact.providerImageBudget(model);
-	const scan = scanInlineContext(input.messages, options.renderToolResults, tokenizer, shape);
+	const imageReadResults = snapcompact.readerImagesReadResults(model);
+	const scan = scanInlineContext(input.messages, options.renderToolResults, tokenizer, shape, imageReadResults);
 	const candidates = scan.toolResults.map(built => built.candidate);
 
 	let systemPromptTarget: SystemPromptImageTarget | undefined;
@@ -521,7 +598,7 @@ export function estimateInlineSavings(input: {
 		toolResults: candidates,
 		systemPrompt: systemPromptCandidate,
 		hasUserMessage: true,
-		imageReadResults: snapcompact.readerImagesReadResults(model),
+		imageReadResults,
 	});
 
 	let savedTokens = 0;
@@ -635,7 +712,8 @@ export class SnapcompactInlineTransformer {
 
 		// Tool-result candidates (in order) for the planner, plus the text/index
 		// needed to apply swaps and the live ids for cache eviction.
-		const scan = scanInlineContext(messages, options.renderToolResults, tokenizer, shape);
+		const imageReadResults = snapcompact.readerImagesReadResults(model);
+		const scan = scanInlineContext(messages, options.renderToolResults, tokenizer, shape, imageReadResults);
 		const targets = new Map(scan.toolResults.map(built => [built.candidate.id, built]));
 
 		let systemPromptTarget: SystemPromptImageTarget | undefined;
@@ -660,7 +738,7 @@ export class SnapcompactInlineTransformer {
 			toolResults: scan.toolResults.map(built => built.candidate),
 			systemPrompt: systemPromptCandidate,
 			hasUserMessage: userIndex >= 0,
-			imageReadResults: snapcompact.readerImagesReadResults(model),
+			imageReadResults,
 		});
 
 		let changed = false;
@@ -670,8 +748,9 @@ export class SnapcompactInlineTransformer {
 			if (!target) continue;
 			const message = messages[target.index];
 			if (message.role !== "toolResult") continue;
-			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape, shapeKey);
-			const content: (TextContent | ImageContent)[] = [{ type: "text", text: toolResultNote }, ...frames];
+			const frames = await this.#framesFor(this.#toolCache, swap.id, target.frameText, shape, shapeKey);
+			const note = target.read ? readFramesNote(target.read) : toolResultNote;
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text: note }, ...frames];
 			let sourceImageIndex = 0;
 			for (const block of message.content) {
 				if (block.type !== "image") continue;

@@ -192,6 +192,84 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(haiku.messages.map(imaged)).toEqual([false, false, true]);
 	});
 
+	it("renders a `read` result with indentation as count brackets and its snapshot header as text", async () => {
+		// Tab, space, mixed, and unindented rows, as a hashline read prints them.
+		// Short rows make the brackets cost an extra frame the raw text would not need.
+		const indents = ["\t\t", "    ", "\t  ", ""];
+		const rows: string[] = [];
+		for (let line = 1; rows.join("\n").length < DEFAULT_CAPACITY * 2; line++) {
+			rows.push(`${line}:${indents[line % indents.length]}${denseText(2)}`);
+		}
+		// A summary's collapsed block keeps its head's indentation after an `N-M:`
+		// prefix; whitespace after an in-row U+2028 is not a line start.
+		const last = rows.length;
+		rows.push(`${last + 1}-${last + 30}:\tcollapsed() { … }`, `${last + 31}:x\u2028  y`);
+		const header = "[src/indented.ts#1F2E]";
+		const raw = `${header}\n${rows.join("\n")}`;
+		const context: Context = {
+			systemPrompt: ["system"],
+			messages: [userMessage("go"), toolResult("read-1", raw, "read")],
+		};
+		const options = withTestShape({ renderSystemPrompt: "none", renderToolResults: true });
+		const model = makeModel({ id: "claude-opus-5-5" });
+		const spy = spyOn(snapcompact, "renderMany");
+		try {
+			const result = await new SnapcompactInlineTransformer(options).transform(context, model);
+			const swapped = result.messages[1] as ToolResultMessage;
+			const frames = swapped.content.filter(block => block.type === "image");
+
+			// The header stays copyable text; the frames start at the first row.
+			const note = (swapped.content[0] as TextContent).text;
+			expect(note.split("\n")).toContain(header);
+			const rendered = spy.mock.calls[0][0];
+			expect(rendered).not.toContain(header);
+			expect(rendered.startsWith("1:[·4]w")).toBe(true);
+			expect(rendered).toContain("\n2:[»1·2]w");
+			expect(rendered).toContain("\n3:w");
+			expect(rendered).toContain("\n4:[»2]w");
+			expect(rendered).toContain(`\n${last + 1}-${last + 30}:[»1]collapsed() { … }`);
+			expect(rendered).toContain(`\n${last + 31}:x\u2028  y`);
+			expect(rendered).not.toMatch(/^[\d-]+:[ \t]/m);
+
+			// The brackets cost cells: planning counts frames on the encoded body,
+			// so /context and the image cap see what the request carries.
+			const shape = snapcompact.resolveShape(model, TEST_SHAPE);
+			expect(snapcompact.frames(raw, { shape })).toBeLessThan(frames.length);
+			const estimate = estimateInlineSavings({
+				options,
+				model,
+				systemPrompt: ["system"],
+				messages: context.messages,
+			});
+			expect(estimate.toolResults?.frames).toBe(frames.length);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("treats a leading `N:` as content, not a line number, in a read without line numbers", async () => {
+		// A `:raw` YAML read: `200:` is a key, so the spaces after it are content,
+		// not indentation; indented rows still get a bracket at line start.
+		const rows = ["responses:"];
+		while (rows.join("\n").length < DEFAULT_CAPACITY * 2) rows.push(`  ${denseText(2)}`);
+		rows.push("200:  OK");
+		const context: Context = {
+			systemPrompt: ["system"],
+			messages: [userMessage("go"), toolResult("read-raw", rows.join("\n"), "read")],
+		};
+		const spy = spyOn(snapcompact, "renderMany");
+		try {
+			await new SnapcompactInlineTransformer(
+				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+			).transform(context, makeModel({ id: "claude-opus-5-5" }));
+			const rendered = spy.mock.calls[0][0];
+			expect(rendered.startsWith("responses:\n[·2]w")).toBe(true);
+			expect(rendered.endsWith("\n200:  OK")).toBe(true);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
 	it("applies option changes on the next request, re-rendering cached frames when the shape changes", async () => {
 		const options = withTestShape({ renderSystemPrompt: "none", renderToolResults: false });
 		const renderedFonts: string[] = [];
