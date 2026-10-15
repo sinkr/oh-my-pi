@@ -1007,6 +1007,9 @@ export class FileSessionStorage implements SessionStorage {
 
 	listFilesSync(dir: string, pattern: string): string[] {
 		try {
+			// Bun.Glob walks no symlink unless asked, and a transcript placed in
+			// a session directory as one — a launcher's, a supervisor's — is a
+			// transcript like any other (#15878)
 			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true })).map(name =>
 				path.join(dir, name),
 			);

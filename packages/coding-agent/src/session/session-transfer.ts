@@ -463,7 +463,7 @@ function isTranscriptPrefix(local: readonly SessionEntry[], incoming: readonly S
 async function findLocalCopies(id: string, sessionDir: string): Promise<string[]> {
 	const candidates = new Set((await findSessionFiles(id)).map(file => path.resolve(file)));
 	try {
-		for await (const name of new Bun.Glob(`*_${id}.jsonl`).scan(sessionDir)) {
+		for await (const name of new Bun.Glob(`*_${id}.jsonl`).scan({ cwd: sessionDir, followSymlinks: true })) {
 			candidates.add(path.resolve(sessionDir, name));
 		}
 	} catch (error) {
