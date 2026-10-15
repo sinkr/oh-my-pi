@@ -970,9 +970,10 @@ export interface ResumeTarget {
 }
 
 /**
- * The session file a resume key (an id or filename prefix) opens:
- * {@link resolveResumableSession}, then the copy of that conversation to
- * resume ({@link findSessionContinuation}). `undefined` when nothing matches.
+ * The session a resume key (an id, filename prefix, or title) opens, using the
+ * active storage backend: {@link resolveResumableSession}, then the copy of
+ * that conversation to resume ({@link findSessionContinuation}).
+ * `undefined` when nothing matches.
  *
  * A key that matched only a file's name asks for the session that name
  * records, so a file that now holds another session is followed to the copies
@@ -986,12 +987,15 @@ export async function resolveResumeTarget(
 	sessionDir?: string,
 	options: ResolveResumableSessionOptions = {},
 ): Promise<ResumeTarget | undefined> {
-	const match = await resolveResumableSession(sessionArg, cwd, sessionDir, new FileSessionStorage(), options);
+	const storage = getDefaultSessionStorage();
+	const match = await resolveResumableSession(sessionArg, cwd, sessionDir, storage, options);
 	const continuation = match
-		? await findSessionContinuation(match.session.path, undefined, {
-				matchedByFileName: !match.session.id.toLowerCase().startsWith(sessionArg.toLowerCase()),
+		? await findSessionContinuation(match.session.path, storage, {
+				matchedByFileName:
+					sessionMatchesResumeArg(match.session, sessionArg) &&
+					!match.session.id.toLowerCase().startsWith(sessionArg.toLowerCase()),
 			})
-		: await findUnlistedSessionContinuation(sessionArg, cwd, sessionDir, options);
+		: await findUnlistedSessionContinuation(sessionArg, cwd, sessionDir, options, storage);
 	const session = continuation?.session ?? match?.session;
 	return session ? { session, continuation } : undefined;
 }
@@ -1010,7 +1014,7 @@ async function findUnlistedSessionContinuation(
 	cwd: string,
 	sessionDir: string | undefined,
 	options: ResolveResumableSessionOptions,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage,
 ): Promise<SessionContinuation | undefined> {
 	const prefix = idPrefix.toLowerCase();
 	if (!/^[\w-]+$/.test(prefix)) return undefined;
@@ -1018,7 +1022,11 @@ async function findUnlistedSessionContinuation(
 	const globalToo = !sessionDir || options.allowGlobalFallback === true;
 	for (const scope of globalToo ? ["local", "global"] : ["local"]) {
 		const files =
-			scope === "local" ? storage.listFilesSync(localDir, `*_${prefix}*.jsonl`) : await findSessionFiles(prefix);
+			scope === "local"
+				? storage.listFilesSync(localDir, `*_${prefix}*.jsonl`)
+				: storage instanceof FileSessionStorage
+					? await findSessionFiles(prefix)
+					: storage.listFilesSync(getSessionsDir(), `*/*_${prefix}*.jsonl`);
 		for (const file of files) {
 			if (!parseSessionFileName(file)?.id.startsWith(prefix)) continue;
 			const continuation = await findSessionContinuation(file, storage, { matchedByFileName: true });
