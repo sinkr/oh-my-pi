@@ -346,26 +346,26 @@ function deduplicateToolCallIds(
 }
 
 const MAX_TOOL_CALL_NAME_LENGTH = 128;
-/**
- * Union of the tool-name charsets providers accept in declarations: Anthropic,
- * Bedrock and OpenAI allow `[a-zA-Z0-9_-]`; Google additionally allows `.` and `:`.
- */
-const DECLARABLE_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_.:-]+$/;
+/** Tool-call name characters accepted by Bedrock, Anthropic and OpenAI. */
+const STRICT_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+/** Google function names additionally permit dots and colons. */
+const GOOGLE_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_.:-]+$/;
 
 /**
- * Whether a tool-call name cannot belong to any declared tool: missing, empty,
+ * Whether a tool-call name cannot be replayed to the target: missing, empty,
  * longer than OpenAI's 128-character replay limit, or containing a character
- * outside every provider's declaration charset. Models emit such names when the
- * name slot carries invocation text (whitespace, NULs) or an invented name such
- * as an internal URL (`proc://*`, #15839); Bedrock validates replayed
- * `toolUse.name` against `[a-zA-Z0-9_-]+` and rejects the whole request.
+ * outside the target's declaration charset. Models emit such names when the
+ * name slot carries invocation text (whitespace, NULs) or an invented name
+ * such as an internal URL (`proc://*`, #15839).
+ *
+ * Without a target, use the strict charset for OpenAI Responses native history.
  */
-export function isMalformedToolCallName(name: unknown): boolean {
+export function isMalformedToolCallName(name: unknown, allowedName = STRICT_TOOL_CALL_NAME_RE): boolean {
 	return (
 		typeof name !== "string" ||
 		name.length === 0 ||
 		name.length > MAX_TOOL_CALL_NAME_LENGTH ||
-		!DECLARABLE_TOOL_CALL_NAME_RE.test(name)
+		!allowedName.test(name)
 	);
 }
 
@@ -373,13 +373,13 @@ function isMalformedToolCallId(id: string | undefined): boolean {
 	return !id || id.trim().length === 0;
 }
 
-function isMalformedToolCall(block: { id: string; name: string }): boolean {
-	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
+function isMalformedToolCall(block: { id: string; name: string }, allowedName: RegExp): boolean {
+	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name, allowedName);
 }
 
 /**
  * Drop assistant `toolCall` blocks with an empty / whitespace-only `id` or a `name`
- * no provider could have declared (see {@link isMalformedToolCallName}),
+ * the target provider cannot declare (see {@link isMalformedToolCallName}),
  * the `toolResult` messages they point at, and any assistant turn that has no
  * replayable content left.
  *
@@ -398,16 +398,20 @@ function isMalformedToolCall(block: { id: string; name: string }): boolean {
  * 128 characters with `string_above_max_length`.
  *
  * Run before any other transform so the rest of the pipeline never sees a
- * malformed call. Idempotent: a re-run on an already-sanitized list returns
- * the input untouched. Provider-agnostic — any wire model could surface this.
+ * malformed call. Idempotent for the same target: a re-run on an already-sanitized
+ * list returns the input untouched.
  */
-function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
+function sanitizeMalformedToolCalls(messages: Message[], targetApi: Api): Message[] {
+	const allowedName =
+		targetApi === "google-generative-ai" || targetApi === "google-gemini-cli" || targetApi === "google-vertex"
+			? GOOGLE_TOOL_CALL_NAME_RE
+			: STRICT_TOOL_CALL_NAME_RE;
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
 	outer: for (const msg of messages) {
 		if (msg.role !== "assistant") continue;
 		for (const block of msg.content) {
-			if (block.type === "toolCall" && isMalformedToolCall(block)) {
+			if (block.type === "toolCall" && isMalformedToolCall(block, allowedName)) {
 				hasMalformed = true;
 				break outer;
 			}
@@ -433,7 +437,7 @@ function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
 			const filtered: AssistantMessage["content"] = [];
 			for (const block of msg.content) {
 				if (block.type === "toolCall") {
-					const malformed = isMalformedToolCall(block);
+					const malformed = isMalformedToolCall(block, allowedName);
 					const queue = dropQueues.get(block.id);
 					if (queue) queue.push(malformed);
 					else dropQueues.set(block.id, [malformed]);
@@ -797,11 +801,10 @@ export function transformMessages<TApi extends Api>(
 	// block errors from LLM providers (e.g. invalid_prompt).
 	messages = redactSensitiveCredentialsInMessages(messages);
 
-	// Drop assistant `toolCall` blocks with empty/whitespace `id` or `name`
+	// Drop assistant `toolCall` blocks whose id or name the target cannot replay
 	// (and their matched `toolResult` messages) before anything else looks at
-	// the history. Replays of these would 400 every provider — see
-	// `sanitizeMalformedToolCalls`.
-	messages = sanitizeMalformedToolCalls(messages);
+	// the history. Replaying them would 400 the target provider.
+	messages = sanitizeMalformedToolCalls(messages, model.api);
 
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();

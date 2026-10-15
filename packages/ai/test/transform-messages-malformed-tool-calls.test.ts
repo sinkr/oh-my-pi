@@ -24,6 +24,19 @@ const model: Model<"anthropic-messages"> = buildModel({
 	reasoning: true,
 });
 
+const googleModel: Model<"google-generative-ai"> = buildModel({
+	api: "google-generative-ai",
+	provider: "google",
+	id: "gemini-2.5-pro",
+	name: "Gemini 2.5 Pro",
+	baseUrl: "https://generativelanguage.googleapis.com",
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 8192,
+	contextWindow: 200000,
+	reasoning: false,
+});
+
 function assistant(content: AssistantMessage["content"], timestamp: number): AssistantMessage {
 	return {
 		role: "assistant",
@@ -225,10 +238,9 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 	});
 
 	// Regression for #15839: models invent tool names from internal URL schemes
-	// (`proc://*`) while polling background work. Bedrock validates replayed
-	// `toolUse.name` against `[a-zA-Z0-9_-]+`, so the surviving block 400'd every
-	// later request. Google declarations allow `.` and `:`, so those must survive.
-	it("drops calls whose name has characters no provider declares, keeping Google-legal names", () => {
+	// (`proc://*`) while polling background work. Strict targets reject replayed
+	// names with `.` or `:`, while Google accepts them.
+	it("drops invalid tool names and results for the target's charset", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "wait for the background job", timestamp: 1 },
 			assistant(
@@ -247,12 +259,15 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 			{ role: "user", content: "continue", timestamp: 7 },
 		];
 
-		const transformed = transformMessages(messages, model);
-
-		expect(getToolCalls(transformed).map(call => call.id)).toEqual(["call_google"]);
-		expect(transformed.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
+		const googleHistory = transformMessages(messages, googleModel);
+		expect(getToolCalls(googleHistory).map(call => call.id)).toEqual(["call_google"]);
+		expect(googleHistory.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
 			"call_google",
 		]);
+
+		const strictHistory = transformMessages(messages, model);
+		expect(getToolCalls(strictHistory)).toEqual([]);
+		expect(strictHistory.some(message => message.role === "toolResult")).toBe(false);
 	});
 
 	// Regression for PR #3459 review feedback: a tool-call id can legitimately
