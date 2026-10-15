@@ -11,17 +11,17 @@
  *   account pools) its requests may use. A listed provider never falls back to
  *   a sibling account or an API key; an empty list allows no account.
  *
- * Account binding reuses `AuthStorage.sessions.restrict`: a client's credential
- * lookups for a bound provider all resolve under one session id of its own,
- * restricted before the client's token is admitted. Replacing the table
- * restricts that session again in place and never lifts it, so a retry still
- * in flight never resolves unrestricted, and the client's conversations share
- * that session's account pin.
+ * Account binding reuses `AuthStorage.sessions.restrict`. Each admitted
+ * version of a client (its token, models and accounts) resolves a bound
+ * provider's credentials under a session id of its own, restricted before the
+ * token is admitted. A reload that changes any of them admits a new version
+ * under a new session; requests the old version admitted keep resolving under
+ * the old restriction until they finish, and only then is it lifted. A
+ * version's requests share that session's account pin.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { SessionsApi } from "../auth/types";
+import type { SessionRestrictionLease, SessionsApi } from "../auth/types";
 import type { Api, Model } from "../types";
-import { deterministicUuid } from "../utils/deterministic-id";
 
 /** One scoped client. */
 export interface AuthGatewayClient {
@@ -48,6 +48,14 @@ export interface AuthGatewayClientScope {
 	 * the request's `sessionId`.
 	 */
 	credentialSessionId(provider: string, sessionId: string): string;
+	/**
+	 * Hold the client's account restriction while a request uses it; call the
+	 * returned release once the request can no longer resolve a credential. A
+	 * reload that retires the client lifts the restriction only after every
+	 * hold is released. Take the first hold in the same tick as
+	 * `authenticate`, before a reload can retire the client.
+	 */
+	retain(): () => void;
 }
 
 const CLIENT_FIELDS: Record<string, true> = { tokenSha256: true, models: true, accounts: true };
@@ -106,7 +114,7 @@ export function parseAuthGatewayClients(text: string): AuthGatewayClient[] {
 		clients.push(client);
 	}
 	// Validate every entry here too, so a bad file fails where it is read.
-	compileClients(clients, "");
+	compileClients(clients);
 	return clients;
 }
 
@@ -115,19 +123,27 @@ export function hashAuthGatewayToken(token: string): string {
 	return new Bun.CryptoHasher("sha256").update(token).digest("hex");
 }
 
-/** A validated client: its model grants compiled, its accounts ready to restrict. */
+type RestrictionSessions = Pick<SessionsApi, "restrict" | "unrestrict">;
+
+/** A validated client: its model grants compiled, its accounts restricted while it is admitted or still serving. */
 class ClientScope implements AuthGatewayClientScope {
 	readonly name: string;
 	readonly tokenSha256: string;
 	readonly limitsModels: boolean;
+	/** Equal for the same entry read again, so a reload that leaves it unchanged keeps the scope and its pin. */
+	readonly policy: string;
 	/** Exact `provider/id` grants. */
 	readonly #models = new Set<string>();
 	/** Providers granted with `provider/*`. */
 	readonly #providers = new Set<string>();
 	readonly #accounts = new Map<string, readonly string[]>();
-	readonly #sessionId: string;
+	readonly #sessionId = crypto.randomUUID();
+	#leases: Array<[provider: string, lease: SessionRestrictionLease]> = [];
+	#sessions: RestrictionSessions | undefined;
+	#holds = 0;
+	#retired = false;
 
-	constructor(client: AuthGatewayClient, salt: string) {
+	constructor(client: AuthGatewayClient) {
 		const { name } = client;
 		if (typeof name !== "string" || name.length === 0 || CONTROL_CHARACTER.test(name)) {
 			throw new Error("Invalid auth-gateway clients: a client name must be non-empty text");
@@ -152,7 +168,7 @@ class ClientScope implements AuthGatewayClientScope {
 			}
 			this.#accounts.set(provider, keys);
 		}
-		this.#sessionId = deterministicUuid(`auth-gateway client\u0000${salt}\u0000${name}`);
+		this.policy = JSON.stringify([name, this.tokenSha256, client.models ?? null, client.accounts ?? null]);
 	}
 
 	allows(model: Model<Api>): boolean {
@@ -165,18 +181,44 @@ class ClientScope implements AuthGatewayClientScope {
 		return this.#accounts.has(provider) ? this.#sessionId : sessionId;
 	}
 
-	/** Restrict this client's session to its accounts, replacing any earlier restriction of the same name. */
-	restrict(sessions: Pick<SessionsApi, "restrict">): void {
-		for (const [provider, keys] of this.#accounts) sessions.restrict(provider, this.#sessionId, keys);
+	retain(): () => void {
+		this.#holds++;
+		let held = true;
+		return () => {
+			if (!held) return;
+			held = false;
+			this.#holds--;
+			this.#releaseIfDone();
+		};
+	}
+
+	/** Restrict this scope's session to its accounts. */
+	restrict(sessions: RestrictionSessions): void {
+		this.#sessions = sessions;
+		for (const [provider, keys] of this.#accounts) {
+			this.#leases.push([provider, sessions.restrict(provider, this.#sessionId, keys)]);
+		}
+	}
+
+	/** No longer admitted: lift the restriction once the last request holding it is done. */
+	retire(): void {
+		this.#retired = true;
+		this.#releaseIfDone();
+	}
+
+	#releaseIfDone(): void {
+		if (!this.#retired || this.#holds > 0) return;
+		for (const [provider, lease] of this.#leases) this.#sessions?.unrestrict(provider, this.#sessionId, lease);
+		this.#leases = [];
 	}
 }
 
 /** Validate `clients` as one table and compile it, keyed by token digest. */
-function compileClients(clients: readonly AuthGatewayClient[], salt: string): Map<string, ClientScope> {
+function compileClients(clients: readonly AuthGatewayClient[]): Map<string, ClientScope> {
 	const compiled = new Map<string, ClientScope>();
 	const names = new Set<string>();
 	for (const client of clients) {
-		const scope = new ClientScope(client, salt);
+		const scope = new ClientScope(client);
 		if (names.has(scope.name)) throw invalid(scope.name, "duplicate client name");
 		if (compiled.has(scope.tokenSha256)) throw invalid(scope.name, "another client has the same tokenSha256");
 		names.add(scope.name);
@@ -190,36 +232,52 @@ function compileClients(clients: readonly AuthGatewayClient[], salt: string): Ma
  * presented bearer.
  */
 export class AuthGatewayClientTable {
-	readonly #sessions: Pick<SessionsApi, "restrict">;
+	readonly #sessions: RestrictionSessions;
 	/** Digests of the gateway's own tokens, which no client may claim. */
 	readonly #reserved: ReadonlySet<string>;
-	/** Keeps two gateways over one `AuthStorage` from sharing a client's session. */
-	readonly #salt = crypto.randomUUID();
 	#byDigest = new Map<string, ClientScope>();
+	#closed = false;
 
-	constructor(sessions: Pick<SessionsApi, "restrict">, gatewayTokens: Iterable<string>) {
+	constructor(sessions: RestrictionSessions, gatewayTokens: Iterable<string>) {
 		this.#sessions = sessions;
 		this.#reserved = new Set(Array.from(gatewayTokens, hashAuthGatewayToken));
 	}
 
 	/**
 	 * Replace the admitted clients. An invalid table throws and changes
-	 * nothing. Each client's accounts are restricted before its token is
-	 * admitted; a removed client's session keeps its last restriction.
+	 * nothing. An unchanged client keeps its scope; a new or changed one is
+	 * restricted before its token is admitted; the scopes left out are retired.
+	 * Ignored once the table is closed.
 	 */
 	set(clients: readonly AuthGatewayClient[]): void {
-		const next = compileClients(clients, this.#salt);
+		if (this.#closed) return;
+		const next = compileClients(clients);
 		for (const scope of next.values()) {
 			if (this.#reserved.has(scope.tokenSha256)) {
 				throw invalid(scope.name, "tokenSha256 is the gateway token's digest; give the client its own token");
 			}
 		}
-		for (const scope of next.values()) scope.restrict(this.#sessions);
+		for (const [digest, scope] of next) {
+			const current = this.#byDigest.get(digest);
+			if (current?.policy === scope.policy) next.set(digest, current);
+			else scope.restrict(this.#sessions);
+		}
+		const previous = this.#byDigest;
 		this.#byDigest = next;
+		for (const [digest, scope] of previous) {
+			if (next.get(digest) !== scope) scope.retire();
+		}
 	}
 
 	/** The client `token` authenticates, if any. */
 	authenticate(token: string): AuthGatewayClientScope | undefined {
 		return this.#byDigest.get(hashAuthGatewayToken(token));
+	}
+
+	/** Admit no more clients and retire every scope. */
+	close(): void {
+		this.#closed = true;
+		for (const scope of this.#byDigest.values()) scope.retire();
+		this.#byDigest = new Map();
 	}
 }

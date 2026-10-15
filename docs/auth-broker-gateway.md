@@ -182,7 +182,7 @@ omp auth-gateway check   [--strict] [--json]
 - A client's conversations share one account pin per listed provider, and never share retained provider state (learned fallbacks, Codex transport sessions) with another client's or with gateway-token traffic.
 - `/v1/usage` and `/v1/credentials/check` cover every account the gateway holds, so client tokens get `403` there.
 - The gateway token stays valid and unscoped. `--clients` cannot be combined with `--no-auth`.
-- An unknown field or malformed entry rejects the whole file; `serve` fails to start on it. While serving, the file is re-read every 10 s: a removed or changed token is refused from its next request, and a request already in flight keeps its model and retries within the client's current accounts (a removed client's last ones). A file that cannot be read or parsed refuses every client token until it is fixed.
+- An unknown field or malformed entry rejects the whole file; `serve` fails to start on it. While serving, the file is re-read every 10 s: a removed or changed token is refused from its next request, while a request already in flight finishes, retries included, on the model and accounts it was admitted with. A changed entry starts a new account pin. A file that cannot be read or parsed refuses every client token until it is fixed.
 
 ### stdio
 

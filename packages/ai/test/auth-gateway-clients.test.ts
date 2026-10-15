@@ -88,7 +88,7 @@ describe("auth-gateway scoped clients", () => {
 		return gateway;
 	}
 
-	function chat(token: string, model: string, promptCacheKey?: string): Promise<Response> {
+	function chat(token: string, model: string, promptCacheKey?: string, stream = false): Promise<Response> {
 		if (!gateway) throw new Error("gateway not started");
 		return fetch(`${gateway.url}/v1/chat/completions`, {
 			method: "POST",
@@ -96,7 +96,7 @@ describe("auth-gateway scoped clients", () => {
 			body: JSON.stringify({
 				model,
 				messages: [{ role: "user", content: "hi" }],
-				stream: false,
+				stream,
 				prompt_cache_key: promptCacheKey,
 			}),
 		});
@@ -203,6 +203,78 @@ describe("auth-gateway scoped clients", () => {
 		expect(() =>
 			boot([], [{ name: "impostor", tokenSha256: hashAuthGatewayToken(GATEWAY_TOKEN) }], [GATEWAY_TOKEN]),
 		).toThrow("gateway token's digest");
+	});
+
+	it.each([false, true])(
+		"keeps a request admitted before a token rotation on its own account for a late retry (stream: %p)",
+		async stream => {
+			const entered = Promise.withResolvers<void>();
+			const proceed = Promise.withResolvers<void>();
+			const granted = createMockModel({
+				provider: "mock",
+				id: "granted",
+				handler: async (_context, options) => {
+					if (options?.apiKey === "access-a") {
+						entered.resolve();
+						await proceed.promise;
+						throw new ProviderHttpError("Usage limit reached", 429, { code: "insufficient_quota" });
+					}
+					return { content: [`served:${options?.apiKey}`] };
+				},
+			});
+			const handle = boot([granted], [{ ...CI_CLIENT, accounts: { mock: ["account:acc-a"] } }]);
+
+			const inFlight = chat(CI_TOKEN, "mock/granted", undefined, stream);
+			await entered.promise;
+			// The name moves to a new token bound to account b while the old token's request waits to retry.
+			handle.setClients([{ ...CI_CLIENT, tokenSha256: hashAuthGatewayToken("ci-token-2") }]);
+			proceed.resolve();
+
+			const old = await inFlight;
+			if (stream) expect(await old.text()).toContain("Usage limit reached");
+			else expect(old.status).toBe(429);
+			expect(granted.calls.map(call => call.options?.apiKey)).toEqual(["access-a"]);
+			expect((await chat(CI_TOKEN, "mock/granted")).status).toBe(401);
+			expect(await answer(await chat("ci-token-2", "mock/granted"))).toBe("served:access-b");
+		},
+	);
+
+	it("lifts a retired client's restriction after its last request, and every restriction on close", async () => {
+		const restrict = vi.spyOn(storage.sessions, "restrict");
+		const entered = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		const granted = createMockModel({
+			provider: "mock",
+			id: "granted",
+			handler: async () => {
+				entered.resolve();
+				await proceed.promise;
+				return { content: ["ok"] };
+			},
+		});
+		const handle = boot([granted], [CI_CLIENT]);
+		const accountA = storage.credentials
+			.list("mock")
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "acc-a");
+		if (!accountA) throw new Error("account a is not stored");
+		// CI_CLIENT is bound to account b, so account a is refused while its restriction holds.
+		const restricted = (call: number): boolean =>
+			!storage.sessions.permits("mock", restrict.mock.calls[call]?.[1] ?? "", accountA.id);
+		expect(restricted(0)).toBe(true);
+
+		const inFlight = chat(CI_TOKEN, "mock/granted");
+		await entered.promise;
+		handle.setClients([]);
+		expect(restricted(0)).toBe(true);
+		proceed.resolve();
+		expect((await inFlight).status).toBe(200);
+		expect(restricted(0)).toBe(false);
+
+		handle.setClients([CI_CLIENT]);
+		expect(restricted(1)).toBe(true);
+		await handle.close();
+		gateway = undefined;
+		expect(restricted(1)).toBe(false);
 	});
 
 	it("never shares retained provider state between clients", async () => {
