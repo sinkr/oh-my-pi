@@ -5,6 +5,7 @@
 ### Changed
 
 - GPT Image models (`gpt-image-*`, `chatgpt-image-*`) now classify as their own `gpt-image` family instead of `gpt` or `chatgpt`, so GPT chat-model rules no longer apply to them ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
+
 ### Fixed
 
 - Fixed Command Code's `z-ai/glm-5.3-flash` failing every request with "not available on this endpoint": the catalog routes it to chat completions, the only endpoint Command Code lists for it
