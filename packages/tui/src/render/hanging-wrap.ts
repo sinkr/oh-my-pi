@@ -29,3 +29,14 @@ export function wrapTreeLine(line: string, width: number, theme: Theme): string[
 	}
 	return undefined;
 }
+
+/** Leading run of spaces, `│` guides and SGR escapes that a tree detail row hangs beneath. */
+const GUIDE_RUN = /^(?:[ │]|\x1b\[[0-9;]*m)*/;
+
+/** Hang a tree row beneath its connector, or a connector-less detail row beneath its guide rails. */
+export function wrapGuidedLine(line: string, width: number, theme: Theme): string[] {
+	const tree = wrapTreeLine(line, width, theme);
+	if (tree) return tree;
+	const prefix = line.match(GUIDE_RUN)?.[0] ?? "";
+	return wrapPrefixedLine(prefix, prefix, line.slice(prefix.length), width);
+}
