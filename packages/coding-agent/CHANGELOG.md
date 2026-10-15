@@ -101,6 +101,7 @@
 - Fixed gaps inside the transcript after persistent widgets close, preserving native scrollback by letting the editor move upward until new output fills the screen ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 - Fixed busy indicators and scrollback becoming inconsistent when an extension starts a turn during startup or focus changes while events are queued ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 - Fixed scrollback gaps when focusing paused continuations or when extensions add widgets after a turn ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
+- Fixed various scrollback issues when extensions or widgets change height, idle view during background waits / busy after completion, and inconsistencies when extensions start turns or focus changes while events are queued ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 
 ## [18.11.0] - 2026-10-14
 
