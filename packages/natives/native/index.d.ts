@@ -2758,12 +2758,17 @@ export declare function parseKittySequence(data: string): ParsedKittyResult | nu
 export interface ParseStatus {
   /** Canonical language name only when parsing succeeded. */
   language?: string
+  /** True when non-empty source parses without syntax errors. */
   parsed: boolean
 }
 
+/** Options for checking source syntax without generating a summary. */
 export interface ParseStatusOptions {
+  /** Source code to parse; empty input is not parsed. */
   code: string
+  /** Language alias; a non-blank value overrides path-based detection. */
   lang?: string
+  /** File path used to infer language when `lang` is omitted or blank. */
   path?: string
 }
 

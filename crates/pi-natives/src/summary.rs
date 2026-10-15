@@ -5,10 +5,14 @@ use napi_derive::napi;
 
 use crate::task;
 
+/// Options for checking source syntax without generating a summary.
 #[napi(object)]
 pub struct ParseStatusOptions {
+	/// Source code to parse; empty input is not parsed.
 	pub code: String,
+	/// Language alias; a non-blank value overrides path-based detection.
 	pub lang: Option<String>,
+	/// File path used to infer language when `lang` is omitted or blank.
 	pub path: Option<String>,
 }
 
@@ -16,6 +20,7 @@ pub struct ParseStatusOptions {
 pub struct ParseStatus {
 	/// Canonical language name only when parsing succeeded.
 	pub language: Option<String>,
+	/// True when non-empty source parses without syntax errors.
 	pub parsed:   bool,
 }
 
