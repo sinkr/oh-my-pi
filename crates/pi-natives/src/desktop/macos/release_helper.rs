@@ -22,12 +22,10 @@ mod route;
 use std::{
 	ffi::c_void,
 	io::{Read, Write},
+	mem,
 	os::{fd::FromRawFd, unix::net::UnixStream},
 	process, ptr,
-	sync::{
-		Arc,
-		atomic::{AtomicPtr, Ordering},
-	},
+	sync::{Arc, Mutex, PoisonError},
 	thread,
 };
 
@@ -58,6 +56,14 @@ const SIGINT: i32 = 2;
 const SIGHUP: i32 = 1;
 const SIGPIPE: i32 = 13;
 const SIG_IGN: usize = 1;
+const SIGALRM: i32 = 14;
+const SIGTERM: i32 = 15;
+/// `pthread_sigmask` operations.
+const SIG_BLOCK: i32 = 1;
+const SIG_UNBLOCK: i32 = 2;
+/// `sigset_t` values, one bit per signal on macOS.
+const ALARM_SET: u32 = 1 << (SIGALRM - 1);
+const ENDING_SET: u32 = ALARM_SET | (1 << (SIGTERM - 1));
 /// How long releasing may take once the stream ends before `SIGALRM` ends
 /// the helper, and with it the ownership it holds.
 const RELEASE_DEADLINE_SECONDS: u32 = 2;
@@ -109,6 +115,9 @@ unsafe extern "C" {
 	fn signal(signal: i32, handler: usize) -> usize;
 	fn alarm(seconds: u32) -> u32;
 	fn clock_gettime_nsec_np(clock: u32) -> u64;
+	fn pthread_sigmask(how: i32, set: *const u32, old: *mut u32) -> i32;
+	fn sigwait(set: *const u32, signal: *mut i32) -> i32;
+	fn _exit(status: i32) -> !;
 }
 
 #[repr(C)]
@@ -138,23 +147,57 @@ struct Tap {
 	port:        Ref,
 }
 
-/// The tap's port once `observe` created it, so the helper can invalidate it
-/// before it exits: when a process dies with a listen-only tap still valid
-/// while the user types, `WindowServer` delivers the key the tap was routing
-/// to the user's app again.
-static PORT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+/// The helper's event tap. When a process dies with a listen-only tap still
+/// valid while the user types, `WindowServer` delivers the key the tap was
+/// routing to the user's app again, so the helper closes it before it exits.
+static TAP: Mutex<TapState> = Mutex::new(TapState::Unstarted);
 
-/// Invalidates the tap, if any, when `main` returns.
+enum TapState {
+	Unstarted,
+	Running(TapPort),
+	/// No tap starts once the helper has closed it.
+	Closed,
+}
+
+struct TapPort(Ref);
+
+// SAFETY: a `CFMachPort` may be invalidated from any thread.
+unsafe impl Send for TapPort {}
+
+/// Invalidates the tap if it runs, and keeps one from starting.
+fn close_tap() {
+	let mut tap = TAP.lock().unwrap_or_else(PoisonError::into_inner);
+	if let TapState::Running(TapPort(port)) = mem::replace(&mut *tap, TapState::Closed) {
+		// SAFETY: the port is never released.
+		unsafe { CFMachPortInvalidate(port) };
+	}
+}
+
+/// Closes the tap when dropped, also while a panic unwinds `main`.
 struct ClosesTap;
 
 impl Drop for ClosesTap {
 	fn drop(&mut self) {
-		let port = PORT.swap(ptr::null_mut(), Ordering::AcqRel);
-		if !port.is_null() {
-			// SAFETY: the port is never released; invalidating is thread-safe.
-			unsafe { CFMachPortInvalidate(port) };
-		}
+		close_tap();
 	}
+}
+
+/// Waits for `SIGALRM` or `SIGTERM`, then closes the tap and exits, posting
+/// nothing more. `SIGALRM`, unblocked here, still ends the helper a second
+/// later if closing the tap hangs.
+fn end_on_signal() {
+	let mut received = 0;
+	// SAFETY: both pointers are live for the call.
+	unsafe { sigwait(&ENDING_SET, &mut received) };
+	// SAFETY: scheduling SIGALRM and changing this thread's mask have no
+	// preconditions.
+	unsafe {
+		alarm(1);
+		pthread_sigmask(SIG_UNBLOCK, &ALARM_SET, ptr::null_mut());
+	}
+	close_tap();
+	// SAFETY: ends the process at once, as the signal would have.
+	unsafe { _exit(0) }
 }
 
 /// The observer thread's run loop, applying the tap's transitions.
@@ -207,6 +250,22 @@ fn main() {
 		signal(SIGINT, SIG_IGN);
 		signal(SIGHUP, SIG_IGN);
 		signal(SIGPIPE, SIG_IGN);
+	}
+	// `SIGALRM` (the release deadline) and `SIGTERM` (the addon stopping a
+	// helper that missed part of its stream) are taken by `end_on_signal`,
+	// which closes the tap before the helper exits. They are blocked before
+	// any other thread starts, so no other thread takes them. Without that
+	// thread the helper exits before it starts a tap, and the request goes on
+	// without it.
+	// SAFETY: changes this thread's signal mask, which threads it starts
+	// inherit.
+	unsafe { pthread_sigmask(SIG_BLOCK, &ENDING_SET, ptr::null_mut()) };
+	if thread::Builder::new()
+		.name("end-on-signal".into())
+		.spawn(end_on_signal)
+		.is_err()
+	{
+		process::exit(0);
 	}
 	// SAFETY: the addon passes its end of a socket pair as standard input,
 	// which nothing else in this process owns.
@@ -347,6 +406,11 @@ fn observe(observation: &Arc<Observation>, mut ready: UnixStream) {
 		observation: Arc::clone(observation),
 		port:        ptr::null_mut(),
 	}));
+	let mut tap = TAP.lock().unwrap_or_else(PoisonError::into_inner);
+	// The helper is past observing.
+	if !matches!(*tap, TapState::Unstarted) {
+		return;
+	}
 	// SAFETY: a listen-only session tap whose context lives for the rest of
 	// the process.
 	let port = unsafe {
@@ -358,7 +422,8 @@ fn observe(observation: &Arc<Observation>, mut ready: UnixStream) {
 	// SAFETY: `context` is live and only this thread writes it before the run
 	// loop starts.
 	unsafe { (*context).port = port };
-	PORT.store(port, Ordering::Release);
+	*tap = TapState::Running(TapPort(port));
+	drop(tap);
 	// SAFETY: `port` is a live tap; the sources and run loop stay alive while
 	// the run loop runs, which is until the process exits. The stop source's
 	// context is copied at creation.
@@ -379,6 +444,7 @@ fn observe(observation: &Arc<Observation>, mut ready: UnixStream) {
 		};
 		let stop = CFRunLoopSourceCreate(ptr::null_mut(), 0, &raw mut stop_context);
 		if source.is_null() || stop.is_null() {
+			close_tap();
 			process::exit(0);
 		}
 		CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);

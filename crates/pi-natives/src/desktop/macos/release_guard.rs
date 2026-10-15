@@ -43,6 +43,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(100);
 /// How long a request that ends with presses open (a panic unwound it) waits
 /// for the helper to release them, keeping input ownership meanwhile.
 const RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long an abandoned helper may take to close its event tap and exit
+/// once asked, before it is killed.
+const STOP_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -289,9 +292,18 @@ impl Ledger {
 	}
 
 	/// Stops a helper that missed part of the stream before it sees the
-	/// stream end, so it never releases a key this request still holds.
+	/// stream end, so it never releases a key this request still holds. It is
+	/// asked with `SIGTERM` first and closes its event tap before it exits:
+	/// killed with the tap live, it can make the user's key arrive twice.
 	fn abandon(&mut self) {
-		if let Some(Helper { child: Some(mut child), .. }) = self.helper.take() {
+		if let Some(Helper { child: Some(mut child), socket: _stream, .. }) = self.helper.take() {
+			let asked = libc::pid_t::try_from(child.id())
+				// SAFETY: the helper is this request's unreaped child.
+				.is_ok_and(|pid| unsafe { libc::kill(pid, libc::SIGTERM) } == 0);
+			let deadline = Instant::now() + STOP_TIMEOUT;
+			while asked && Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+				thread::sleep(Duration::from_millis(2));
+			}
 			let _ = child.kill();
 			let _ = child.wait();
 		}
@@ -808,6 +820,87 @@ mod tests {
 		assert!(lock(&other), "ownership ends with the helper");
 		drop(other);
 		std::fs::remove_file(&path).expect("remove test lock");
+	}
+
+	#[test]
+	fn an_abandoned_helper_is_asked_to_stop_before_it_is_killed() {
+		let directory = HelperDirectory::create("omp-release-test").expect("directory");
+		// Answers once its SIGTERM trap is set, and records the signal beside
+		// itself before it exits.
+		let script = concat!(
+			"#!/bin/sh\n",
+			"trap 'echo > \"$0.stopped\"; kill $!; exit 0' TERM\n",
+			"printf '\\377' >&0\n",
+			"sleep 10 &\n",
+			"wait\n",
+		);
+		let path = directory
+			.write("helper", script.as_bytes(), 0o700)
+			.expect("stand-in helper");
+		let mut helper = spawn_at(&path, None).expect("helper");
+		helper
+			.socket
+			.set_read_timeout(Some(Duration::from_secs(5)))
+			.expect("read timeout");
+		helper.socket.read_exact(&mut [0u8]).expect("trap set");
+		let mut ledger = Ledger {
+			open:      Vec::new(),
+			next_id:   0,
+			helper:    Some(helper),
+			unguarded: false,
+			connect:   peer,
+		};
+		ledger.abandon();
+		assert!(ledger.unguarded);
+		assert!(
+			path.with_extension("stopped").exists(),
+			"the helper handled SIGTERM before it was killed"
+		);
+	}
+
+	#[test]
+	fn the_helper_exits_itself_on_its_deadline_or_when_asked_to_stop() {
+		let directory = HelperDirectory::create("omp-release-test").expect("directory");
+		let executable = directory
+			.write("omp-input-release", HELPER, 0o700)
+			.expect("helper executable");
+		for signal in [libc::SIGALRM, libc::SIGTERM] {
+			let Helper { child, socket, .. } = spawn_at(&executable, None).expect("helper");
+			let mut child = child.expect("child");
+			let pid = libc::pid_t::try_from(child.id()).expect("process id");
+			// Its signal thread starts once these signals are blocked; before
+			// that they would end it directly.
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while threads(pid) < 2 {
+				assert!(Instant::now() < deadline, "the helper never started its signal thread");
+				thread::sleep(Duration::from_millis(1));
+			}
+			// SAFETY: the helper is this test's unreaped child.
+			unsafe { libc::kill(pid, signal) };
+			let status = loop {
+				if let Some(status) = child.try_wait().expect("helper status") {
+					break status;
+				}
+				if Instant::now() >= deadline {
+					let _ = child.kill();
+					panic!("signal {signal} did not end the helper");
+				}
+				thread::sleep(Duration::from_millis(1));
+			};
+			assert_eq!(status.code(), Some(0), "signal {signal} ended the helper itself: {status:?}");
+			drop(socket);
+		}
+	}
+
+	fn threads(pid: libc::pid_t) -> i32 {
+		// SAFETY: a zeroed `proc_taskinfo` is a valid output buffer.
+		let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+		let size = i32::try_from(size_of::<libc::proc_taskinfo>()).expect("size");
+		// SAFETY: `info` is a writable buffer of `size` bytes.
+		let read = unsafe {
+			libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size)
+		};
+		if read == size { info.pti_threadnum } else { 0 }
 	}
 
 	#[test]
