@@ -11,7 +11,8 @@ use objc2_core_foundation::{CFRange, CFString};
 
 use super::{
 	AxTextSelection, CoreResult, DesktopError, TextSelectRequest, Utf16Range, attribute_settable,
-	ax_result, copy_bool, copy_range, copy_string, element_pid, popup::poll, skylight, utf16_slice,
+	ax_result, control, copy_bool, copy_range, copy_string, element_pid, may_borrow_focus,
+	popup::poll, skylight, utf16_slice,
 };
 
 const SELECTED_RANGE: &str = "AXSelectedTextRange";
@@ -24,6 +25,10 @@ pub(super) fn select(
 	element: &AXUIElement,
 	request: &TextSelectRequest,
 ) -> CoreResult<AxTextSelection> {
+	let pid = element_pid(element)?;
+	// Selecting moves the caret that typing into a focused field replaces, so
+	// an app the user brings forward during the call is left to them.
+	let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
 	let role = copy_string(element, "AXRole").unwrap_or_else(|| "element".to_owned());
 	if !attribute_settable(element, SELECTED_RANGE) {
 		return Err(DesktopError::ax_failed(format!(
@@ -37,11 +42,11 @@ pub(super) fn select(
 		)));
 	};
 	let wanted = request.locate(&before)?;
-	let pid = element_pid(element)?;
 	let applied = apply(
 		&before,
 		wanted,
 		|action| skylight::with_background_guard(pid, action),
+		|| started_in_background && !may_borrow_focus(skylight::front_pid(), pid),
 		|| write_range(element, wanted),
 		|| read_range(element),
 		|| copy_string(element, "AXValue"),
@@ -65,12 +70,23 @@ fn apply(
 	before: &str,
 	wanted: Utf16Range,
 	guard: impl FnOnce(&mut dyn FnMut() -> CoreResult<()>) -> CoreResult<()>,
+	brought_forward: impl Fn() -> bool,
 	write: impl Fn() -> CoreResult<()>,
 	read_range: impl Fn() -> Option<Utf16Range>,
 	read_value: impl Fn() -> Option<String>,
 	settle: Duration,
 ) -> CoreResult<Utf16Range> {
 	guard(&mut || {
+		// The probes before the write can block, the front-app read included.
+		// The selection is not moved in an app the user brought forward, nor
+		// by a run cancelled meanwhile.
+		if brought_forward() {
+			return Err(DesktopError::ax_failed(
+				"the app came to the front during the call, so its caret is the user's; nothing was \
+				 selected",
+			));
+		}
+		control::check()?;
 		write()?;
 		poll(settle, || (read_range() == Some(wanted)).then_some(()));
 		Ok(())
@@ -132,6 +148,7 @@ mod tests {
 	use std::{cell::Cell, time::Duration};
 
 	use super::{CoreResult, Utf16Range, apply};
+	use crate::desktop::{control, error::ErrorCode};
 
 	const VALUE: &str = "alpha beta gamma";
 	const WANTED: Utf16Range = Utf16Range { start: 6, length: 4 };
@@ -154,6 +171,7 @@ mod tests {
 				settled.set(true);
 				result
 			},
+			|| false,
 			|| {
 				writes.set(writes.get() + 1);
 				Ok(())
@@ -205,5 +223,46 @@ mod tests {
 	fn a_value_changed_while_selecting_is_reported() {
 		let error = run(|_, _| Some(WANTED), "alpha beta gamma!").unwrap_err();
 		assert!(error.message.contains("value changed"), "{error}");
+	}
+
+	/// Runs `apply` with a write that would succeed, cancelling the run during
+	/// the front-app read, the last probe before the write, and returns the
+	/// outcome and whether the selection was written.
+	fn checked(cancel: bool, brought_forward: bool) -> (Result<Utf16Range, ErrorCode>, bool) {
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let wrote = Cell::new(false);
+		let result = control::with_token_for_test(&token, || {
+			apply(
+				VALUE,
+				WANTED,
+				|action| action(),
+				|| {
+					if cancel {
+						source.cancel();
+					}
+					brought_forward
+				},
+				|| {
+					wrote.set(true);
+					Ok(())
+				},
+				|| Some(WANTED),
+				|| Some(VALUE.to_owned()),
+				Duration::ZERO,
+			)
+		});
+		(result.map_err(|error| error.code), wrote.get())
+	}
+
+	#[test]
+	fn a_run_cancelled_before_the_write_selects_nothing() {
+		assert_eq!(checked(false, false), (Ok(WANTED), true));
+		assert_eq!(checked(true, false), (Err(ErrorCode::Cancelled), false));
+	}
+
+	#[test]
+	fn an_app_brought_forward_during_the_call_keeps_its_caret() {
+		assert_eq!(checked(false, true), (Err(ErrorCode::AxFailed), false));
 	}
 }
