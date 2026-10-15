@@ -270,6 +270,29 @@ describe("SnapcompactInlineTransformer", () => {
 		}
 	});
 
+	it("brackets a line-number read's rows behind a suffix-resolution notice", async () => {
+		// Line-number mode (`N|`, hashlines off) has no header to lift the notice with.
+		const notice = "[Path 'a.ts' not found; resolved to 'src/a.ts' via suffix match]";
+		const rows = [notice];
+		for (let line = 1; rows.join("\n").length < DEFAULT_CAPACITY * 2; line++)
+			rows.push(`${line}|\t\t${denseText(2)}`);
+		const context: Context = {
+			systemPrompt: ["system"],
+			messages: [userMessage("go"), toolResult("read-numbered", rows.join("\n"), "read")],
+		};
+		const spy = spyOn(snapcompact, "renderMany");
+		try {
+			await new SnapcompactInlineTransformer(
+				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+			).transform(context, makeModel({ id: "claude-opus-5-5" }));
+			const rendered = spy.mock.calls[0][0];
+			expect(rendered.startsWith(`${notice}\n1|[»2]w`)).toBe(true);
+			expect(rendered).not.toMatch(/\n\d+\|\t/);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
 	it("applies option changes on the next request, re-rendering cached frames when the shape changes", async () => {
 		const options = withTestShape({ renderSystemPrompt: "none", renderToolResults: false });
 		const renderedFonts: string[] = [];

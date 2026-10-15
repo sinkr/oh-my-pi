@@ -68,16 +68,21 @@ const SAVINGS_MARGIN = 0.9;
 /** Loose block-array view shared by live contexts and session-history estimates. */
 type BlockViews = ReadonlyArray<{ type?: unknown; text?: unknown }>;
 
+/** The one-line notice `prependSuffixResolutionNotice` writes ahead of a resolved read. */
+const READ_NOTICE = "(?:\\[[^\\n]*\\]\\n)?";
 /**
- * A `read` result's snapshot header (`[path#TAG]`), optionally after the one-line
- * notice `prependSuffixResolutionNotice` writes. Edits copy the tag, so it stays text.
+ * A `read` result's snapshot header (`[path#TAG]`), optionally after the notice.
+ * Edits copy the tag, so it stays text.
  */
 const READ_HEADER = new RegExp(
-	`^(?:\\[[^\\n]*\\]\\n)?\\${HL_FILE_PREFIX}[^\\n]+${HL_FILE_HASH_SEP}[0-9A-F]{${HL_FILE_HASH_LENGTH}}\\${HL_FILE_SUFFIX}\\n`,
+	`^${READ_NOTICE}${RegExp.escape(HL_FILE_PREFIX)}[^\\n]+${RegExp.escape(HL_FILE_HASH_SEP)}[0-9A-F]{${HL_FILE_HASH_LENGTH}}${RegExp.escape(HL_FILE_SUFFIX)}\\n`,
 );
-const READ_ROW_PREFIX = `\\d+(?:-\\d+)?[${HL_LINE_BODY_SEP}|]`;
-/** A numbered read (hashline `N:`, line-number `N|`) opens with a numbered row. */
-const READ_NUMBERED = new RegExp(`^${READ_ROW_PREFIX}`);
+const READ_ROW_PREFIX = `\\d+(?:-\\d+)?[${RegExp.escape(HL_LINE_BODY_SEP)}|]`;
+/**
+ * A numbered read (hashline `N:`, line-number `N|`) opens with a numbered row,
+ * after the notice when no header lifted it (line-number mode has none).
+ */
+const READ_NUMBERED = new RegExp(`^${READ_NOTICE}${READ_ROW_PREFIX}`);
 /**
  * A row's leading indentation, after an optional line-number prefix. Anchored on
  * `\n` only: a `m`-flag `^` would also match after `\r` and U+2028 inside a row.
