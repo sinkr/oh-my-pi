@@ -71,6 +71,50 @@ describe("computeRepairRegion", () => {
 describe("repairParseRegression", () => {
 	const broken = BASE.replace("const doubled = b * 2;", "const doubled = (b * 2;");
 
+	test.each([24, 26])("repairs both syntax culprits among %i separate changes", async count => {
+		const beforeLines = Array.from({ length: count }, (_, i) => [
+			`export function step${i}(): number {`,
+			`\treturn ${i} + 0;`,
+			"}",
+			`// separator ${i}`,
+			"",
+		]).flat();
+		beforeLines.push("export const unchangedTail = 1;");
+		const afterLines = [...beforeLines];
+		const repairedLines = [...beforeLines];
+		for (let i = 0; i < count; i++) {
+			afterLines[i * 5 + 1] = i < count - 2 ? `\treturn ${i} + 1;` : `\treturn (${i} + 1;`;
+			repairedLines[i * 5 + 1] = i < count - 2 ? `\treturn ${i} + 1;` : `\treturn (${i} + 1);`;
+		}
+		const prev = beforeLines.join("\n");
+		const next = afterLines.join("\n");
+		expect(sourceParses(prev)).toBe(true);
+		expect(sourceParses(next)).toBe(false);
+		const bStart = (count - 3) * 5;
+		const bEnd = afterLines.length;
+		const referenceLines = [...afterLines];
+		for (let i = count - 2; i < count; i++) referenceLines[i * 5 + 1] = beforeLines[i * 5 + 1];
+		let completions = 0;
+		const repair = await repairParseRegression({ path: PATH, prev, next }, async () => {
+			completions++;
+			return repairedLines.slice(bStart, bEnd).join("\n");
+		});
+		expect(completions).toBe(1);
+		expect(repair).toEqual({
+			content: repairedLines.join("\n"),
+			attempts: 1,
+			region: {
+				bStart,
+				bEnd,
+				brokenText: afterLines.slice(bStart, bEnd).join("\n"),
+				referenceText: referenceLines.slice(bStart, bEnd).join("\n"),
+				language: "typescript",
+			},
+		});
+		if (!repair) throw new Error("Expected both syntax errors to be repaired");
+		expect(sourceParses(repair.content)).toBe(true);
+	});
+
 	test("accepts a candidate that fixes the syntax while keeping the intended change", async () => {
 		const repair = await repairParseRegression({ path: PATH, prev: BASE, next: broken }, async built => {
 			expect(built).toContain("(b * 2;");

@@ -6,6 +6,35 @@ use napi_derive::napi;
 use crate::task;
 
 #[napi(object)]
+pub struct ParseStatusOptions {
+	pub code: String,
+	pub lang: Option<String>,
+	pub path: Option<String>,
+}
+
+#[napi(object)]
+pub struct ParseStatus {
+	/// Canonical language name only when parsing succeeded.
+	pub language: Option<String>,
+	pub parsed:   bool,
+}
+
+/// Check syntax through the shared parse cache without constructing a summary.
+#[napi]
+pub fn parse_code_status(options: ParseStatusOptions) -> Result<ParseStatus> {
+	let language = pi_ast::summary::parse_code_status(
+		&options.code,
+		options.lang.as_deref(),
+		options.path.as_deref(),
+	)
+	.map_err(|error| Error::from_reason(error.to_string()))?;
+	Ok(ParseStatus {
+		language: language.map(|language| language.canonical_name().to_string()),
+		parsed:   language.is_some(),
+	})
+}
+
+#[napi(object)]
 pub struct SummaryOptions {
 	/// Source code to summarize.
 	pub code:               String,
