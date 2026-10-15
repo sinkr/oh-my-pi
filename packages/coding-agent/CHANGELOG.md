@@ -97,6 +97,7 @@
 - Fixed startup without an explicit model picking an unrelated authenticated provider instead of the first available model in the configured default fallback chain ([#15781](https://github.com/can1357/oh-my-pi/pull/15781) by [@mvid](https://github.com/mvid))
 - Fixed the end of a long reply going missing from scrollback, then reappearing duplicated or out of order, when the status area below the transcript stays taller after the turn than at startup
 - Fixed the end of a long reply going missing from scrollback, then reappearing duplicated or out of order, when the status area below the transcript stays taller after the turn than at startup ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
+- Fixed output temporarily being dropped from scrollback, then reappearing duplicated or out of order, when the status area below the transcript stays taller after the turn than at startup ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 
 ## [18.11.0] - 2026-10-14
 
