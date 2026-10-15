@@ -17,8 +17,8 @@ const CHROMIUM_AVAILABLE = await chromiumAvailable();
 // Drop zones that read `files`, read only `items`, are delegated from one document listener (React 16 and older,
 // jQuery `.on("drop", selector)`), or are taken by a document capture listener the page registered before the upload
 // ran, which stops the drop there; and a plain element that neither opens a chooser nor takes a drop, though it reads
-// `items` on dragenter as zones do to style themselves. Like react-dropzone, the page cancels dragover and drop
-// everywhere so a file dropped outside a zone does not navigate away.
+// `items` on dragenter, and again deferred to a microtask on dragover, as zones do to style themselves. Like
+// react-dropzone, the page cancels dragover and drop everywhere so a file dropped outside a zone does not navigate away.
 const html = `<!doctype html>
 <style>div { display: block; margin: 8px; padding: 8px; }</style>
 <div id="drop">Drop files here</div>
@@ -46,6 +46,9 @@ document.getElementById("items").addEventListener("drop", event => {
 });
 const inert = document.getElementById("inert");
 inert.addEventListener("dragenter", event => log.push({ id: "inert-dragenter", items: event.dataTransfer.items.length }));
+inert.addEventListener("dragover", event =>
+  queueMicrotask(() => log.push({ id: "inert-dragover", items: event.dataTransfer.items.length })),
+);
 inert.addEventListener("drop", event => log.push({ id: "inert", names: [] }));
 document.addEventListener("drop", event => {
   if (!event.target.closest("#delegated")) return;
@@ -126,7 +129,8 @@ return { errors, log: await tab.evaluate(() => window.log) };`,
 				null,
 				expect.stringContaining("nothing on the page took the dropped files"),
 			]);
-			// The inert element and the document saw the drag events but did not take the drop's files.
+			// The inert element and the document saw the drag events but did not take the drop's files; the inert
+			// element's deferred dragover read lands after the drop.
 			expect(log).toEqual([
 				{ id: "drop", names: ["alpha.txt"] },
 				{ id: "items", names: ["alpha.txt"] },
@@ -134,6 +138,7 @@ return { errors, log: await tab.evaluate(() => window.log) };`,
 				{ id: "captured", names: ["alpha.txt"] },
 				{ id: "inert-dragenter", items: 1 },
 				{ id: "inert", names: [] },
+				{ id: "inert-dragover", items: 1 },
 			]);
 		} finally {
 			await prelude.invoke({ action: "close", name, kill: true }, context).catch(() => undefined);
@@ -141,39 +146,47 @@ return { errors, log: await tab.evaluate(() => window.log) };`,
 	}, 60_000);
 });
 
-test("ends a drop watch that lands after the upload was cancelled", async () => {
-	const { promise: watching, resolve: land } = Promise.withResolvers<unknown>();
-	const controller = new AbortController();
-	let ended = false;
-	let disposed = false;
-	// Only what the watch touches before the drop: adopting the zone into the main world and installing the watch,
-	// which the cancel interrupts.
-	const realm = {
-		adoptHandle: async () => ({ dispose: async () => {} }),
-		evaluateHandle: () => {
-			controller.abort();
-			return watching;
-		},
-	};
-	const zone = { frame: { mainRealm: () => realm } } as unknown as ElementHandle;
-	let dropped = false;
-	await rejectionOf(
-		dropRead(
-			zone,
-			async () => {
-				dropped = true;
+test.each(["adoptHandle", "evaluateHandle"] as const)(
+	"releases what %s returns after the upload was cancelled",
+	async step => {
+		const { promise: late, resolve: land } = Promise.withResolvers<unknown>();
+		const controller = new AbortController();
+		const released: string[] = [];
+		// Only what the watch touches before the drop: adopting the zone into the main world and installing the
+		// watch; the cancel interrupts `step`.
+		const steps = {
+			adoptHandle: async () => ({ dispose: async () => {} }) as unknown,
+			evaluateHandle: async () => ({}) as unknown,
+		};
+		const realm = {
+			...steps,
+			[step]: () => {
+				controller.abort();
+				return late;
 			},
-			controller.signal,
-		),
-	);
-	land({
-		evaluate: async () => {
-			ended = true;
-		},
-		dispose: async () => {
-			disposed = true;
-		},
-	});
-	for (let turn = 0; turn < 5; turn++) await Promise.resolve();
-	expect({ dropped, ended, disposed }).toEqual({ dropped: false, ended: true, disposed: true });
-});
+		};
+		const zone = { frame: { mainRealm: () => realm } } as unknown as ElementHandle;
+		let dropped = false;
+		await rejectionOf(
+			dropRead(
+				zone,
+				async () => {
+					dropped = true;
+				},
+				controller.signal,
+			),
+		);
+		land({
+			evaluate: async () => {
+				released.push("ended");
+			},
+			dispose: async () => {
+				released.push("disposed");
+			},
+		});
+		for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+		expect(dropped).toBe(false);
+		// A late watch is ended before its handle goes; a late adoption only has a handle to release.
+		expect(released).toEqual(step === "evaluateHandle" ? ["ended", "disposed"] : ["disposed"]);
+	},
+);

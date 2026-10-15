@@ -920,55 +920,63 @@ function assignInputFiles(el: unknown, files: unknown[]): string | null {
 }
 
 /** Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world. */
-function dropUploadFiles(el: unknown, files: unknown[], arm: string): void {
+function dropUploadFiles(el: unknown, files: unknown[], watch: string): void {
 	const element = el as PageElement;
 	const page = globalThis as unknown as PageGlobals;
 	const transfer = new page.DataTransfer();
 	for (const file of files) transfer.items.add(file);
-	// `arm`, private to this drop, comes right before `drop` for {@link watchDropRead}.
-	for (const type of ["dragenter", "dragover", arm, "drop"]) {
+	// `watch`, private to this drop, opens the count of reads for {@link watchDropRead} right before `drop` and closes it
+	// right after, so only reads made while `drop` is dispatched count.
+	for (const type of ["dragenter", "dragover", watch, "drop", watch]) {
 		element.dispatchEvent(new page.DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer }));
 	}
 }
 
 /** A watch for a page reading a drop's files; see {@link watchDropRead}. */
 interface DropReadWatch {
+	counting: boolean;
 	read: boolean;
 	end(): void;
 }
 
 /**
- * Watch for the page reading the files of the drop on an element: getting the drop's `files` or `items` once the
- * private `arm` event, which {@link dropUploadFiles} fires right before `drop`, has wrapped them. No page listener can
- * run before it, as one registered for `drop` itself could, and reads during dragenter and dragover stay uncounted.
- * Runs in the main world, where the page's listeners get the wrapper whose reads it watches.
+ * Watch for the page reading the files of the drop on an element: getting the drop's `files` or `items` while `drop` is
+ * dispatched. {@link dropUploadFiles} fires the private `type` event right before `drop`, which wraps the getters and
+ * opens the count, and again right after, which closes it. No page listener can run before the first, as one
+ * registered for `drop` itself could; reads during dragenter and dragover, or deferred from them or from `drop` to a
+ * microtask, stay uncounted. Runs in the main world, where the page's listeners get the wrapper whose reads it watches.
  */
-function watchDropRead(el: unknown, arm: string): DropReadWatch {
+function watchDropRead(el: unknown, type: string): DropReadWatch {
 	interface DropEvent {
 		dataTransfer: object | null;
 	}
-	interface ArmTarget {
+	interface WatchTarget {
 		addEventListener(type: string, listener: (event: DropEvent) => void): void;
 		removeEventListener(type: string, listener: (event: DropEvent) => void): void;
 	}
-	const element = el as unknown as ArmTarget;
+	const element = el as unknown as WatchTarget;
 	const instrument = (event: DropEvent): void => {
 		const transfer = event.dataTransfer;
 		if (!transfer) return;
+		if (watch.counting) {
+			watch.counting = false;
+			return;
+		}
 		for (const key of ["files", "items"]) {
 			// The wrapper's own prototype, not the `DataTransfer` global a page may replace.
 			const get = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(transfer), key)?.get;
 			Object.defineProperty(transfer, key, {
 				configurable: true,
 				get() {
-					watch.read = true;
+					if (watch.counting) watch.read = true;
 					return get?.call(transfer);
 				},
 			});
 		}
+		watch.counting = true;
 	};
-	const watch = { read: false, end: () => element.removeEventListener(arm, instrument) };
-	element.addEventListener(arm, instrument);
+	const watch = { counting: false, read: false, end: () => element.removeEventListener(type, instrument) };
+	element.addEventListener(type, instrument);
 	return watch;
 }
 
@@ -978,8 +986,32 @@ function endDropReadWatch(watch: DropReadWatch): boolean {
 	return watch.read;
 }
 
+/** End a drop watch and release its handle. */
+async function releaseDropReadWatch(watch: JSHandle<DropReadWatch>): Promise<void> {
+	try {
+		await watch.evaluate(endDropReadWatch);
+	} finally {
+		await watch.dispose();
+	}
+}
+
 /**
- * Run `drop` on `zone` with a fresh private arm event type and report whether the page read the dropped files.
+ * Wait for `pending` under `signal`. An abort does not stop the call behind it, so a result that arrives after the
+ * abort is handed to `release`.
+ */
+async function untilAbortedOrReleased<T>(
+	signal: AbortSignal | undefined,
+	pending: Promise<T>,
+	release: (late: T) => Promise<unknown>,
+): Promise<T> {
+	return await untilAborted(signal, () => pending).catch(error => {
+		void pending.then(release).catch(() => undefined);
+		throw error;
+	});
+}
+
+/**
+ * Run `drop` on `zone` with a fresh private watch event type and report whether the page read the dropped files.
  * Canceling proves nothing: pages cancel dragover and drop document-wide only to stop the browser navigating to a
  * dropped file. A read is the strongest signal there is, not proof of acceptance: a document guard that checks
  * `files.length` counts too, and counting element-level reads only would fail delegated drop zones, which read at the
@@ -987,24 +1019,21 @@ function endDropReadWatch(watch: DropReadWatch): boolean {
  */
 export async function dropRead(
 	zone: ElementHandle,
-	drop: (arm: string) => Promise<void>,
+	drop: (watch: string) => Promise<void>,
 	signal: AbortSignal | undefined,
 ): Promise<boolean> {
-	const arm = `omp-upload-drop-${crypto.randomUUID()}`;
+	const type = `omp-upload-drop-${crypto.randomUUID()}`;
 	const realm = zone.frame.mainRealm();
-	const target = await untilAborted(signal, () => realm.adoptHandle(zone));
+	const target = await untilAbortedOrReleased(signal, realm.adoptHandle(zone), late => late.dispose());
 	try {
-		const watching = realm.evaluateHandle(watchDropRead, target, arm);
-		const watch = await untilAborted(signal, () => watching).catch(error => {
-			// An abort does not stop the evaluation; end the watch once it arrives.
-			void watching
-				.then(late => late.evaluate(endDropReadWatch).finally(() => late.dispose()))
-				.catch(() => undefined);
-			throw error;
-		});
+		const watch = await untilAbortedOrReleased(
+			signal,
+			realm.evaluateHandle(watchDropRead, target, type),
+			releaseDropReadWatch,
+		);
 		try {
 			try {
-				await drop(arm);
+				await drop(type);
 			} catch (error) {
 				await watch.evaluate(endDropReadWatch).catch(() => undefined);
 				throw error;
@@ -1126,7 +1155,7 @@ async function deliverToDropZone(
 		try {
 			const read = await dropRead(
 				zone,
-				arm => untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files, arm)),
+				watch => untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files, watch)),
 				signal,
 			);
 			if (!read) {
