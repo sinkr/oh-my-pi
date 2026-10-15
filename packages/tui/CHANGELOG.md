@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Changed settings section IDs to use the shared `slugify` from `@oh-my-pi/pi-utils`; IDs are unchanged ([#14283](https://github.com/can1357/oh-my-pi/pull/14283) by [@jaredlyon](https://github.com/jaredlyon))
 ### Fixed
 
 - Fixed macOS editor spelling assistance hanging silently when the spelling service stops responding; it now reports and disables itself instead ([#12084](https://github.com/can1357/oh-my-pi/issues/12084), [#14341](https://github.com/can1357/oh-my-pi/pull/14341) by [@F0Rextasy](https://github.com/F0Rextasy))

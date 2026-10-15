@@ -4,7 +4,6 @@
 
 ### Changed
 
-- Changed Cursor and Devin lane IDs to use the shared `slugify` from `@oh-my-pi/pi-utils`; IDs are unchanged ([#14283](https://github.com/can1357/oh-my-pi/pull/14283) by [@jaredlyon](https://github.com/jaredlyon))
 - GPT Image models (`gpt-image-*`, `chatgpt-image-*`) now classify as their own `gpt-image` family instead of `gpt` or `chatgpt`, so GPT chat-model rules no longer apply to them ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
 
 ## [18.11.1] - 2026-10-15
