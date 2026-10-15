@@ -697,6 +697,7 @@ describe("ExtensionUiController tool approval", () => {
 		await clipboard.promise;
 		await Promise.resolve();
 		expect(harness.editor.getText()).toBe("x");
+		// Path-shaped text has no image provenance: it pastes as literal text.
 		harness.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
 		await Promise.resolve();
 		expect(harness.editor.getText()).toContain("/tmp/shot.png");
