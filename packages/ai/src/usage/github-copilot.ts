@@ -290,7 +290,7 @@ function normalizeBillingUsage(data: BillingUsageResponse): UsageLimit[] {
 		? `${data.timePeriod.year}-${String(data.timePeriod.month).padStart(2, "0")}`
 		: `${data.timePeriod.year}`;
 	const window: UsageWindow = {
-		id: "billing-period",
+		id: "monthly",
 		label: periodLabel,
 	};
 
