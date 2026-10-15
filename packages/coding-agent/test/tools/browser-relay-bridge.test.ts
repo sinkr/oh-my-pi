@@ -1772,6 +1772,7 @@ describe("RelayBridge file chooser interception", () => {
 			JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId: detached } }),
 		);
 		await flush();
+		ack(bridge, ext, "send");
 		expect(sent(ext)).toEqual([true, false]);
 
 		const killed = await attachPage(bridge, ext, cdp, connId, 1);
@@ -1779,5 +1780,73 @@ describe("RelayBridge file chooser interception", () => {
 		bridge.cdpClosed(connId);
 		await flush();
 		expect(sent(ext)).toEqual([true, false, true, false]);
+	});
+
+	/** Send an interception command without answering it; returns its CDP id. */
+	function request(bridge: RelayBridge, connId: number, sessionId: string, enabled: boolean): number {
+		const id = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id, sessionId, method: "Page.setInterceptFileChooserDialog", params: { enabled } }),
+		);
+		return id;
+	}
+
+	/** Answer the oldest unanswered interception RPC: the extension settles RPCs in any order. */
+	async function settleOldest(bridge: RelayBridge, ext: FakeExtSocket, ok: boolean): Promise<void> {
+		const rpc = ext.pending("send").find(pending => pending.method === "Page.setInterceptFileChooserDialog");
+		if (!rpc) throw new Error("no interception RPC pending");
+		ext.markAcked(rpc.id);
+		bridge.extMessage(ext, JSON.stringify({ t: "rpcResult", id: rpc.id, ok, error: ok ? undefined : "rpc failed" }));
+		await flush();
+	}
+
+	it("keeps a later enable when an earlier overlapping enable on the session fails", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const holderCdp = new FakeCdpSocket();
+		const holderId = bridge.cdpConnected(holderCdp);
+		await attachPage(bridge, ext, holderCdp, holderId, 1);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+
+		request(bridge, connId, sessionId, true);
+		const later = request(bridge, connId, sessionId, true);
+		await flush();
+		await settleOldest(bridge, ext, false);
+		await settleOldest(bridge, ext, true);
+		expect(cdp.messages.find(message => message.id === later)).toMatchObject({ result: {} });
+		// The later enable succeeded, so the session still owns interception and its detach must switch it off.
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId } }),
+		);
+		await flush();
+		expect(sent(ext).at(-1)).toBe(false);
+	});
+
+	it("keeps interception on for an owner whose disable failed while another owner's disable succeeded", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const first = await attachPage(bridge, ext, cdp, connId, 1);
+		const second = await attachPage(bridge, ext, cdp, connId, 1);
+		await intercept(bridge, ext, connId, first, true);
+		await intercept(bridge, ext, connId, second, true);
+
+		const failed = request(bridge, connId, first, false);
+		request(bridge, connId, second, false);
+		await flush();
+		await settleOldest(bridge, ext, false);
+		await settleOldest(bridge, ext, true);
+		expect(cdp.messages.find(message => message.id === failed)).toHaveProperty("error");
+		// `first` still asks for interception, so the tab must be left intercepting.
+		expect(sent(ext).at(-1)).toBe(true);
+		await intercept(bridge, ext, connId, first, false);
+		expect(sent(ext).at(-1)).toBe(false);
 	});
 });
