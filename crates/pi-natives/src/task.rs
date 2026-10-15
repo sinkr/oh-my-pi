@@ -38,7 +38,7 @@ pub use pi_shell::cancel::{AbortReason, AbortToken};
 use pi_vfs::BlockingFs;
 use tokio_util::sync::CancellationToken;
 
-use crate::prof::profile_region;
+use crate::{memory::native_work, prof::profile_region};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cancellation
@@ -172,6 +172,7 @@ where
 
 	fn compute(&mut self) -> Result<Self::Output> {
 		let _guard = profile_region(self.tag);
+		let _work = native_work();
 		let work = self
 			.work
 			.take()
@@ -263,6 +264,7 @@ where
 
 	fn compute(&mut self) -> Result<Self::Output> {
 		let _guard = profile_region(self.tag);
+		let _work = native_work();
 		let work = self
 			.work
 			.take()
@@ -408,6 +410,7 @@ where
 	let worker_token = cancel_token.clone();
 	let mut worker = tokio::task::spawn_blocking(move || {
 		let _guard = profile_region(tag);
+		let _work = native_work();
 		catch_worker_panic(tag, move || work(fs, worker_token))?
 	});
 	tokio::select! {

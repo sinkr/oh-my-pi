@@ -133,7 +133,6 @@ export const structuredPatchHunks = nativeBindings.structuredPatchHunks ?? missi
 export const summarizeCode = nativeBindings.summarizeCode ?? missingNativeExport("summarizeCode");
 export const summarizeCodeAsync = nativeBindings.summarizeCodeAsync ?? missingNativeExport("summarizeCodeAsync");
 export const supportsLanguage = nativeBindings.supportsLanguage ?? missingNativeExport("supportsLanguage");
-export const trimNativeMemory = nativeBindings.trimNativeMemory ?? missingNativeExport("trimNativeMemory");
 export const truncateToWidth = nativeBindings.truncateToWidth ?? missingNativeExport("truncateToWidth");
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir ?? missingNativeExport("vcsDetachGitDir");
 export const vcsDiscover = nativeBindings.vcsDiscover ?? missingNativeExport("vcsDiscover");

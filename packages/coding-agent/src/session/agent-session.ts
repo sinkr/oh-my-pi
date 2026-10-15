@@ -88,12 +88,7 @@ import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import {
-	type EditStore,
-	type PowerAssertion,
-	type PowerAssertionOptions,
-	trimNativeMemory,
-} from "@oh-my-pi/pi-natives";
+import { type EditStore, type PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
 	$env,
 	escapeXmlText,
@@ -895,7 +890,6 @@ export class AgentSession implements SettingsScope {
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	/** Epoch ms the current run went `running`; undefined while idle. */
 	#runStartedAt: number | undefined;
-	#nativeMemoryDirty = false;
 	/** The last `agent_end` that {@link #settleAgentEnd} published; a failed maintenance pass settles any other. */
 	#settledAgentEnd: AgentEndEvent | undefined;
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
@@ -3231,13 +3225,6 @@ export class AgentSession implements SettingsScope {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
-		if (event.type === "tool_execution_end") this.#nativeMemoryDirty = true;
-		if (event.type === "agent_end" && event.isTerminal && this.#nativeMemoryDirty) {
-			this.#nativeMemoryDirty = false;
-			void Promise.resolve()
-				.then(() => (this.#isDisposed ? false : trimNativeMemory()))
-				.catch(error => logger.debug("Native memory trim failed", { error: String(error) }));
-		}
 		// Listener array is copy-on-write (see `subscribe`), so iterating the
 		// current array is safe against (un)subscribes made by a listener.
 		for (const l of this.#eventListeners) {
@@ -5585,7 +5572,6 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
-		this.#nativeMemoryDirty = false;
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -6934,7 +6920,6 @@ export class AgentSession implements SettingsScope {
 
 	/** Drop mutable tool decisions and directives owned by the previous logical session. */
 	#clearSessionScopedToolState(): void {
-		this.#nativeMemoryDirty = false;
 		this.agent.clearDeferredToolDirectives();
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();

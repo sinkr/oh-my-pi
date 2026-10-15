@@ -3638,15 +3638,6 @@ export interface TextPredictorOptions {
 }
 
 /**
- * Return unused allocator pages to the OS without evicting caches.
- *
- * Runs off the JS thread, at most once per 60 seconds per process on
- * GNU/Linux. Returns false when throttled, unsupported, or no pages could be
- * released.
- */
-export declare function trimNativeMemory(): Promise<boolean>
-
-/**
  * Truncate text to a visible width, preserving ANSI codes.
  *
  * Pads with spaces when requested.
