@@ -1,7 +1,7 @@
 import * as native from "@oh-my-pi/pi-natives";
 import { TERMINAL } from "../index";
 import type { EditorInlineReplacement, EditorTextAssistProvider, EditorWordReplacements } from "../components/editor";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { isMagicKeyword } from "./magic-keywords";
 import { maskNonProse } from "./markdown-prose";
 import { isProseWord, lineContext, ProseSource, type SpellingDecorationContext } from "./prose-gate";
@@ -46,6 +46,12 @@ const NATIVE_BACKEND: SpellingBackend = {
 };
 
 /**
+ * The native side awaits a `flume::bounded(1)` reply with no timeout, so a stuck call
+ * stays pending and never reaches the `catch` that disables the provider.
+ */
+const BACKEND_TIMEOUT_MS = 2_000;
+
+/**
  * Bridges Apple's spelling service into the editor's typo and autocorrection
  * paths. Word completion is the cross-platform `WordCompletionProvider`
  * (`word-completion.ts`).
@@ -56,6 +62,8 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#availabilityChecked = false;
 	#cacheGeneration = 0;
 	#typoCache = new Map<string, readonly native.SpellingRange[]>();
+	/** {@link #projectTypoRanges} answers for the current {@link #typoCache}; segments re-ask every frame. */
+	#projectionMemo = new Map<string, readonly native.SpellingRange[] | undefined>();
 	#typoInFlight = new Map<string, Promise<readonly native.SpellingRange[]>>();
 	#automaticTypoActive = false;
 	#automaticTypoQueue = new Map<string, string>();
@@ -165,7 +173,11 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		const context = lineContext(lines, cursorLine);
 		if (!this.#prose.isProse(context, start, start + word.length)) return null;
 		try {
-			const correction = await this.backend.autocorrectWord(textBeforeCursor, start, word.length);
+			const correction = await withTimeout(
+				this.backend.autocorrectWord(textBeforeCursor, start, word.length),
+				BACKEND_TIMEOUT_MS,
+				`macOS spelling service did not respond within ${BACKEND_TIMEOUT_MS}ms`,
+			);
 			if (!correction || correction === word) return null;
 			return { replaceLen: word.length + boundary.length, insert: correction + boundary };
 		} catch (error) {
@@ -198,7 +210,11 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		try {
 			const seen = new Set<string>();
 			const items: string[] = [];
-			for (const guess of await this.backend.spellingGuesses(line, range.start, range.length)) {
+			for (const guess of await withTimeout(
+				this.backend.spellingGuesses(line, range.start, range.length),
+				BACKEND_TIMEOUT_MS,
+				`macOS spelling service did not respond within ${BACKEND_TIMEOUT_MS}ms`,
+			)) {
 				if (!guess || seen.has(guess)) continue;
 				seen.add(guess);
 				items.push(guess);
@@ -237,6 +253,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		return request;
 	}
 	#projectTypoRanges(text: string): readonly native.SpellingRange[] | undefined {
+		if (this.#projectionMemo.has(text)) return this.#projectionMemo.get(text);
 		let projected: native.SpellingRange[] | undefined;
 		let matchLength = -1;
 		for (const [previous, ranges] of this.#typoCache) {
@@ -265,6 +282,8 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 			});
 			matchLength = prefix + suffix;
 		}
+		if (this.#projectionMemo.size >= CACHE_LIMIT) this.#projectionMemo.clear();
+		this.#projectionMemo.set(text, projected);
 		return projected;
 	}
 
@@ -300,7 +319,11 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	async #fetchTypoRanges(text: string, generation: number): Promise<readonly native.SpellingRange[]> {
 		let checked: readonly native.SpellingRange[];
 		try {
-			checked = await this.backend.checkSpelling(text);
+			checked = await withTimeout(
+				this.backend.checkSpelling(text),
+				BACKEND_TIMEOUT_MS,
+				`macOS spelling service did not respond within ${BACKEND_TIMEOUT_MS}ms`,
+			);
 		} catch (error) {
 			this.#disable(error);
 			return [];
@@ -316,6 +339,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		const hadProjectedRanges = (this.#projectTypoRanges(text)?.length ?? 0) > 0;
 		if (this.#typoCache.size >= CACHE_LIMIT) this.#typoCache.clear();
 		this.#typoCache.set(text, ranges);
+		this.#projectionMemo.clear();
 		if (ranges.length > 0 || hadProjectedRanges) this.onUpdate?.();
 		return ranges;
 	}
@@ -323,6 +347,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#clearCaches(): void {
 		this.#cacheGeneration++;
 		this.#typoCache.clear();
+		this.#projectionMemo.clear();
 		this.#typoInFlight.clear();
 		this.#automaticTypoQueue.clear();
 	}
