@@ -892,7 +892,22 @@ mod tests {
 	#[cfg(target_os = "macos")]
 	#[test]
 	fn a_helper_holding_the_shared_lock_keeps_other_hosts_out_until_it_exits() {
-		let _serial = OWNERSHIP_TEST.lock();
+		// The worker tests in this process take its one input ownership to send
+		// input, so the test runs alone in a child test process.
+		const ALONE: &str = "PI_DESKTOP_TEST_ALONE";
+		if std::env::var_os(ALONE).is_none() {
+			let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+				.args([
+					"--exact",
+					"desktop::control::tests::a_helper_holding_the_shared_lock_keeps_other_hosts_out_until_it_exits",
+				])
+				.env(ALONE, "1")
+				.output()
+				.expect("child test");
+			let stdout = String::from_utf8_lossy(&output.stdout);
+			assert!(output.status.success() && stdout.contains(" 1 passed;"), "{stdout}");
+			return;
+		}
 		assert!(shared_ownership().is_none());
 		let owner = KernelOwner::acquire().expect("test kernel owner");
 		// Started as the release helper is: the shared lock is its standard
