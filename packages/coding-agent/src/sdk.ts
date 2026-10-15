@@ -1603,9 +1603,28 @@ export function createAutoLearnCaptureRunner(
 
 		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
 		const captureProviderSessionState = new Map<string, ProviderSessionState>();
+		const stripInheritedReasoning =
+			captureModel.api === "openai-responses" ||
+			(captureModel.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0");
 		const captureMessages = options.sourceAgent.state.messages.map((message): AgentMessage => {
 			if (message.role === "assistant") {
-				return { ...message, responseId: undefined, providerPayload: undefined };
+				let content = message.content;
+				if (
+					stripInheritedReasoning &&
+					message.provider === captureModel.provider &&
+					message.api === captureModel.api &&
+					message.model === captureModel.id &&
+					content.some(block => block.type === "thinking" && block.thinkingSignature !== undefined)
+				) {
+					// Fresh capture transport skips inherited native reasoning on its first request.
+					// Keep that history stable when the transport warms; new capture reasoning is untouched.
+					content = content.map(block =>
+						block.type === "thinking" && block.thinkingSignature !== undefined
+							? { ...block, thinkingSignature: undefined }
+							: block,
+					);
+				}
+				return { ...message, content, responseId: undefined, providerPayload: undefined };
 			}
 			if (message.role === "user" || message.role === "developer") {
 				return { ...message, providerPayload: undefined };
@@ -3192,27 +3211,98 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return true;
 			};
 
+			const tryResolveDefaultRoleFallback = (fallbackCandidates: Model[]): boolean => {
+				const originalSelector = settings.getModelRole("default");
+				if (hasExplicitModel || !originalSelector || !cfgRetryModelFallback.get(settings)) return false;
+				const chains = expandDefaultRetryFallbackChains(cfgRetryFallbackChains.get(settings), [
+					...Object.keys(settings.getModelRoles()),
+					"default",
+				]);
+				// Candidates come only from configured chain entries. Without one,
+				// bail before any catalog lookup so the first-paint path never
+				// composes the full catalog.
+				if (!Object.values(chains).some(chain => Array.isArray(chain) && chain.length > 0)) return false;
+				const fallbackContext: RetryFallbackResolutionContext = {
+					chains,
+					getModelRole: role => settings.getModelRole(role),
+					modelLookup: modelRegistry,
+				};
+				const parsedOriginal = parseModelString(originalSelector, {
+					allowMaxSuffix: true,
+					allowAutoAlias: true,
+					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+				});
+				// A provider-qualified selector resolves within its provider's
+				// catalog; only bare/alias selectors need the full catalog.
+				const originalModel = parsedOriginal
+					? (modelRegistry.find(parsedOriginal.provider, parsedOriginal.id) ??
+						parseModelPattern(
+							originalSelector,
+							modelRegistry.getProviderModels(parsedOriginal.provider),
+							modelMatchPreferences,
+						).model)
+					: parseModelPattern(originalSelector, modelRegistry.getAll(), modelMatchPreferences).model;
+				const chainKey = resolveRetryFallbackChainKey(fallbackContext, originalSelector, originalModel, "default");
+				if (!chainKey) return false;
+				const retryFallback: InitialRetryFallbackState = {
+					role: chainKey,
+					originalSelector,
+					originalThinkingLevel: parsedOriginal?.thinkingLevel,
+				};
+				// `fallbackCandidates` is the default-availability pool, which ignores
+				// cross-provider env aliases (`xai-oauth` borrowing `XAI_API_KEY`).
+				// An explicit chain entry is bound only by the `enabledModels` scope,
+				// so outside one it resolves from its provider's catalog and
+				// `hasModelAuth` decides whether requests can authenticate.
+				const scopedByEnabledModels = (cfgEnabledModels.get(settings)?.length ?? 0) > 0;
+				const disabledProviders = cfgDisabledProviders.get(settings);
+				for (const candidate of findRetryFallbackCandidates(
+					fallbackContext,
+					chainKey,
+					originalSelector,
+					originalModel,
+					{ allowMissingPrimary: true },
+				)) {
+					let resolved = parseModelPattern(candidate.raw, fallbackCandidates, modelMatchPreferences);
+					if (!resolved.model && !scopedByEnabledModels && !disabledProviders?.includes(candidate.provider)) {
+						resolved = parseModelPattern(
+							candidate.raw,
+							modelRegistry.getProviderModels(candidate.provider),
+							modelMatchPreferences,
+						);
+					}
+					if (!resolved.model || !hasModelAuth(resolved.model)) continue;
+					model = resolved.model;
+					initialRetryFallback = retryFallback;
+					modelFallbackMessage = undefined;
+					if (resolved.explicitThinkingLevel) {
+						restoredSessionThinkingLevel = resolved.thinkingLevel;
+					} else if (retryFallback.originalThinkingLevel !== undefined) {
+						restoredSessionThinkingLevel = retryFallback.originalThinkingLevel;
+					}
+					adoptThinkingForModel(resolved.model);
+					preconnectModelHost(resolved.model.baseUrl);
+					return true;
+				}
+				return false;
+			};
+
 			await tryResolveDefaultRole();
 
 			if (!model) {
-				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+				let fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
 				let pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth), provider =>
 					modelRegistry.hasConcreteAuth(provider),
 				);
 
 				// Cold-cache discovery race (issues #6114, #6162): a discovery
-				// provider (models.yml `openai-models-list`, LM Studio/Ollama/
+				// provider (models.yml openai-models-list, LM Studio/Ollama/
 				// llama.cpp, or an openai-compat proxy) ships no static models, so
 				// the static+cached catalog resolved nothing above. Background
 				// discovery in main.ts fires only AFTER createAgentSession returns,
-				// so on a cache-cold boot the configured default stays unresolved
-				// and `pick` silently degrades to an unrelated authed provider's
-				// default (#6162) or "No models available" (#6114) — even though
-				// `omp models` (which awaits discovery) lists the model. Await one
-				// cache-aware discovery pass and retry when a default role is
-				// configured (must win over `pick`) or nothing resolved at all.
-				// The common path — role already resolved, or a `pick` with no
-				// configured default — never pays for it.
+				// so on a cache-cold boot the configured default stays unresolved.
+				// Await one cache-aware discovery pass before choosing either its
+				// configured retry fallback or an unrelated provider default.
 				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
 				if (
 					!hasExplicitModel &&
@@ -3221,18 +3311,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				) {
 					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
 					if (!(await tryResolveDefaultRole()) && !model) {
-						const refreshedCandidates = await resolveAllowedModels(
-							modelRegistry,
-							settings,
-							modelMatchPreferences,
-						);
-						pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth), provider =>
+						fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+						pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth), provider =>
 							modelRegistry.hasConcreteAuth(provider),
 						);
 					}
 				}
 
-				if (!model && pick) {
+				if (!model && !tryResolveDefaultRoleFallback(fallbackCandidates) && pick) {
 					model = pick;
 					adoptThinkingForModel(pick);
 				}

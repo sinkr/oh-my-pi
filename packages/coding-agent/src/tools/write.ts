@@ -355,7 +355,7 @@ function emitWriteProgress(
 }
 
 /**
- * If `content` begins with a `#!` shebang, ensure the file is executable.
+ * If `content` begins with an interpreter shebang (not a Rust inner attribute), ensure the file is executable.
  *
  * Mirrors `chmod a+x` (adds user/group/other execute bits to existing mode).
  * Errors are swallowed: chmod failure (e.g. Windows ACL, read-only mount)
@@ -364,7 +364,7 @@ function emitWriteProgress(
  * since Windows (and some mounts) accept it while keeping no execute bits.
  */
 async function maybeMarkExecutableForShebang(absolutePath: string, content: string): Promise<boolean> {
-	if (!content.startsWith("#!")) return false;
+	if (!content.startsWith("#!") || content.startsWith("#![")) return false;
 	try {
 		const stat = await fs.stat(absolutePath);
 		const currentMode = stat.mode & 0o7777;
@@ -799,8 +799,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			!coordination &&
 			!(await targetsLocalSandbox(this.session, path, signal))
 		) {
+			// A device-only session that still has `yield` is the read-only subagent
+			// shape: `write` is present only as the xd:// transport, yet the parent's
+			// briefing names a file path. Without naming the channel that does work,
+			// the rejection reads as a dead end (#14308). Keyed on `yield` being
+			// active rather than on an `isReadOnlyAgent` flag, which never reaches
+			// this session: a caller without `yield` keeps today's message verbatim.
+			const yieldFallback =
+				this.session.isToolActive?.("yield") === true
+					? " To deliver results to the caller, return the content in `yield` instead."
+					: "";
 			throw new ToolError(
-				"This `write` tool is limited to the xd:// device transport and local:// session scratch: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices), or write a `local://<name>` file. Filesystem writes are not available elsewhere.",
+				"This `write` tool is limited to the xd:// device transport and local:// session scratch: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices), or write a `local://<name>` file. Filesystem writes are not available elsewhere." +
+					yieldFallback,
 			);
 		}
 		return untilAborted(signal, async () => {
