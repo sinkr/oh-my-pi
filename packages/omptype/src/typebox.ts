@@ -273,17 +273,43 @@ function tNumber(opts?: NumberOpts, integer = false): TNumber {
 	const keyword = integer ? "number.integer" : "number";
 	// The `LO <= TYPE <= HI` range spelling requires both bounds; a min-only
 	// bound must use the postfix `TYPE >= LO` form (see parseBounded in ir.ts).
+	// Exponent-form bounds cannot be represented by the DSL's decimal literals.
+	const canonicalNumber = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
+	const dslSafe =
+		(!lower || canonicalNumber.test(String(lower.value))) && (!upper || canonicalNumber.test(String(upper.value)));
 	let src: string;
-	if (lower && upper) {
-		src = `${lower.value} ${lower.exclusive ? "<" : "<="} ${keyword} ${upper.exclusive ? "<" : "<="} ${upper.value}`;
-	} else if (lower) {
-		src = `${keyword} ${lower.exclusive ? ">" : ">="} ${lower.value}`;
-	} else if (upper) {
-		src = `${keyword} ${upper.exclusive ? "<" : "<="} ${upper.value}`;
+	if (dslSafe) {
+		if (lower && upper) {
+			src = `${lower.value} ${lower.exclusive ? "<" : "<="} ${keyword} ${upper.exclusive ? "<" : "<="} ${upper.value}`;
+		} else if (lower) {
+			src = `${keyword} ${lower.exclusive ? ">" : ">="} ${lower.value}`;
+		} else if (upper) {
+			src = `${keyword} ${upper.exclusive ? "<" : "<="} ${upper.value}`;
+		} else {
+			src = keyword;
+		}
 	} else {
 		src = keyword;
 	}
 	let schema = asRuntime<number>(type.raw(src));
+	if (!dslSafe && (lower || upper)) {
+		if (
+			lower &&
+			upper &&
+			(lower.value > upper.value || (lower.value === upper.value && (lower.exclusive || upper.exclusive)))
+		) {
+			throw new OmpTypeError("numeric range is unsatisfiable");
+		}
+		schema = schema.narrow((value, ctx) => {
+			if (lower && (value < lower.value || (lower.exclusive && value === lower.value))) {
+				return ctx.mustBe(`${lower.exclusive ? "greater than" : "at least"} ${lower.value}`);
+			}
+			if (upper && (value > upper.value || (upper.exclusive && value === upper.value))) {
+				return ctx.mustBe(`${upper.exclusive ? "less than" : "at most"} ${upper.value}`);
+			}
+			return true;
+		});
+	}
 	if (opts?.multipleOf !== undefined) {
 		const divisor = opts.multipleOf;
 		schema = schema.narrow((value, ctx) => {
@@ -294,8 +320,18 @@ function tNumber(opts?: NumberOpts, integer = false): TNumber {
 			);
 		});
 	}
+	if (!dslSafe) {
+		// Runtime narrows do not add bounds to the emitted JSON Schema.
+		const json: Record<string, unknown> = { type: integer ? "integer" : "number" };
+		if (lower) json[lower.exclusive ? "exclusiveMinimum" : "minimum"] = lower.value;
+		if (upper) json[upper.exclusive ? "exclusiveMaximum" : "maximum"] = upper.value;
+		if (opts?.multipleOf !== undefined) json.multipleOf = opts.multipleOf;
+		schema = asRuntime<number>(type.withJsonSchema(schema, json));
+	}
 	const result = applyMeta(schema, opts);
-	return opts?.multipleOf !== undefined ? withJsonSchemaKeywords(result, { multipleOf: opts.multipleOf }) : result;
+	return opts?.multipleOf !== undefined && dslSafe
+		? withJsonSchemaKeywords(result, { multipleOf: opts.multipleOf })
+		: result;
 }
 
 function tLiteral<const V extends string | number | boolean | null>(value: V, opts?: Meta): TLiteral<V> {
