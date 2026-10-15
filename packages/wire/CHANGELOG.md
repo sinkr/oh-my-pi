@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `SessionState.runActive` so collab guests can distinguish an open logical run across stream-idle pauses ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
-
 ## [18.10.2] - 2026-10-12
 
 ### Added

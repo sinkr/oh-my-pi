@@ -192,7 +192,7 @@ export class SessionFocusController {
 				});
 				if (generation === this.#attachGeneration) this.ctx.eventController.restorePendingToolResults();
 			};
-			const unsubscribeEvents = target.subscribe(async event => {
+			this.ctx.unsubscribe = target.subscribe(async event => {
 				if (generation !== this.#attachGeneration) return;
 				if (event.type === "message_start" && event.message.role === "assistant") {
 					assistantStreamSynced = true;
@@ -211,28 +211,16 @@ export class SessionFocusController {
 				if (event.type === "message_end" && event.message.role === "assistant") assistantStreamSynced = false;
 				await this.ctx.eventController.handleEvent(event);
 			});
-			this.ctx.unsubscribe = unsubscribeEvents;
 
 			await target.settleInFlightMessagePersistence();
 			if (generation !== this.#attachGeneration) return false;
 			this.ctx.statusLine.setSession(target, this.#focusedAgentId);
-			// A stream-idle pulse clears runStartedAt even when this logical run
-			// still owns a continuation. Restore its activity and settlement watch.
-			this.ctx.eventController.restoreRunActivity();
+			// Reset run bookkeeping before replay populates pending tool handles.
 			if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
 			else setRunStatus({ state: "idle" });
 			if (generation !== this.#attachGeneration) return false;
-			// The main subscription was dropped for the whole focus, so a terminal
-			// `agent_end` that fired meanwhile never flushed a deferred model switch.
-			if (target === this.ctx.session && !target.isStreaming) {
-				await this.ctx.eventController.flushDeferredMainModelSwitch();
-				if (generation !== this.#attachGeneration) return false;
-			}
 			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 			if (generation !== this.#attachGeneration) return false;
-			// Command panels queued while main streamed mount into the rebuilt main
-			// transcript; a worker settling meanwhile left them queued for this.
-			if (target === this.ctx.session) this.ctx.eventController.flushDeferredMainCommandOutput();
 			this.ctx.eventController.restorePendingToolResults();
 
 			const live = target.agent.state.streamMessage;

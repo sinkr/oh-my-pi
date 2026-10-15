@@ -791,6 +791,16 @@ describe("composer inline shrink (#11007)", () => {
 			await scheduler.settle(terminal);
 			// Buffered keystrokes replay into the editor before the runtime mounts.
 			composer.editor.setText("draft1\ndraft2\ndraft3\ndraft4\ndraft5");
+			const originalRender = composer.editor.render.bind(composer.editor);
+			let editorRenders = 0;
+			composer.editor.render = (width: number) => {
+				editorRenders++;
+				return originalRender(width);
+			};
+			composer.renderFrame({ columns: COLUMNS, rows });
+			composer.editor.render = originalRender;
+			// A pre-mount frame renders the editor once, not once for layout and again for row tracking.
+			expect(editorRenders).toBe(1);
 			editorRoot.addChild(composer.editor);
 			composer.setRuntimeChildren([transcript, editorRoot], { transientChrome: [editorRoot] });
 			await scheduler.settle(terminal);

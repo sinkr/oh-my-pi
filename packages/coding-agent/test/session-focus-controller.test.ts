@@ -21,13 +21,12 @@ interface SessionStub {
 	setQueue: (queue: { steering?: string[]; followUp?: string[] }) => void;
 }
 
-function makeSessionStub(opts: { isStreaming?: boolean; runStartedAt?: number } = {}): SessionStub {
+function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
 	let unsubscribeCalls = 0;
 	let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 	const stub = {
 		isStreaming: opts.isStreaming ?? false,
-		runStartedAt: opts.runStartedAt ?? (opts.isStreaming ? 1 : undefined),
 		agent: { state: { streamMessage: null } },
 		subscribe(fn: (event: AgentSessionEvent) => Promise<void> | void) {
 			listener = fn;
@@ -65,21 +64,15 @@ interface Harness {
 	setSessionCalls: Array<[AgentSession, string | undefined]>;
 	reloadTodoSessions: AgentSession[];
 	pendingMessagesContainer: Container;
-	/** Run flag last handed to the composer's chrome-floor accounting. */
-	runActive: () => boolean;
 	counts: {
 		clearTransientSessionUi: () => number;
 		resetTranscriptAnchors: () => number;
 		renderInitialMessages: () => number;
 		mainUnsubscribe: () => number;
-		mainModelSwitchFlushes: () => number;
-		mainCommandOutputFlushes: () => number;
 	};
 }
 
-function makeHarness(
-	options: { renderInitialMessages?: () => void | Promise<void>; onMainCommandOutputFlush?: () => void } = {},
-): Harness {
+function makeHarness(options: { renderInitialMessages?: () => void | Promise<void> } = {}): Harness {
 	const main = makeSessionStub();
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
@@ -89,9 +82,6 @@ function makeHarness(
 	let resetTranscriptAnchors = 0;
 	let renderInitialMessages = 0;
 	let mainUnsubscribe = 0;
-	let runActive = false;
-	let mainModelSwitchFlushes = 0;
-	let mainCommandOutputFlushes = 0;
 
 	const ctx = {
 		session: main.session,
@@ -112,16 +102,6 @@ function makeHarness(
 				resetTranscriptAnchors++;
 			},
 			restorePendingToolResults() {},
-			async flushDeferredMainModelSwitch() {
-				mainModelSwitchFlushes++;
-			},
-			flushDeferredMainCommandOutput() {
-				mainCommandOutputFlushes++;
-				options.onMainCommandOutputFlush?.();
-			},
-			restoreRunActivity() {
-				runActive = ctx.viewSession.runStartedAt !== undefined;
-			},
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {
@@ -144,11 +124,6 @@ function makeHarness(
 		updatePendingMessagesDisplay: () => uiHelpers.updatePendingMessagesDisplay(),
 		updateEditorBorderColor() {},
 		ui: { requestRender() {}, requestComponentRender() {} },
-		composer: {
-			setRunActive: (active: boolean) => {
-				runActive = active;
-			},
-		},
 		showStatus() {},
 		collabGuest: undefined,
 	} as unknown as InteractiveModeContext;
@@ -167,14 +142,11 @@ function makeHarness(
 		setSessionCalls,
 		reloadTodoSessions,
 		pendingMessagesContainer,
-		runActive: () => runActive,
 		counts: {
 			clearTransientSessionUi: () => clearTransientSessionUi,
 			resetTranscriptAnchors: () => resetTranscriptAnchors,
 			renderInitialMessages: () => renderInitialMessages,
 			mainUnsubscribe: () => mainUnsubscribe,
-			mainModelSwitchFlushes: () => mainModelSwitchFlushes,
-			mainCommandOutputFlushes: () => mainCommandOutputFlushes,
 		},
 	};
 }
@@ -308,75 +280,6 @@ describe("SessionFocusController", () => {
 		// Guard fires once: subsequent updates pass through unsynthesized.
 		await worker.emit({ type: "message_update", message });
 		expect(h.handledEvents.slice(3)).toEqual([{ type: "message_update", message }]);
-	});
-
-	it("clears the run flag when unfocusing a streaming worker back to an idle main session", async () => {
-		const h = makeHarness();
-		const worker = makeSessionStub({ isStreaming: true });
-		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
-
-		await h.controller.focusAgent("Worker");
-		expect(h.runActive()).toBe(true);
-		// The worker is still streaming, so no agent_end ever reaches the main view.
-		await h.controller.focusParent();
-		expect(h.controller.target).toBeUndefined();
-		expect(h.runActive()).toBe(false);
-	});
-
-	it("flushes a deferred main model switch when focus returns to a main session that settled meanwhile", async () => {
-		const h = makeHarness();
-		const worker = makeSessionStub();
-		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
-		// The switch was queued while main streamed; focusing away drops main's subscription.
-		h.main.setStreaming(true);
-		await h.controller.focusAgent("Worker");
-		expect(h.counts.mainModelSwitchFlushes()).toBe(0);
-
-		// Main finishes while hidden: its terminal agent_end is never observed.
-		h.main.setStreaming(false);
-		await h.controller.focusParent();
-
-		expect(h.counts.mainModelSwitchFlushes()).toBe(1);
-	});
-
-	it("does not flush the main model switch when focus returns to a main session that is still streaming", async () => {
-		const h = makeHarness();
-		const worker = makeSessionStub();
-		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
-		h.main.setStreaming(true);
-		await h.controller.focusAgent("Worker");
-		await h.controller.focusParent();
-
-		// Its own terminal settle will flush it; applying it mid-turn would retarget the live run.
-		expect(h.counts.mainModelSwitchFlushes()).toBe(0);
-	});
-
-	it("does not flush the main model switch when a worker is focused", async () => {
-		const h = makeHarness();
-		const worker = makeSessionStub();
-		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
-		await h.controller.focusAgent("Worker");
-
-		expect(h.counts.mainModelSwitchFlushes()).toBe(0);
-	});
-
-	it("mounts queued main command panels after the transcript rebuild when focus returns to main", async () => {
-		const order: string[] = [];
-		const h = makeHarness({
-			renderInitialMessages: () => void order.push("render"),
-			onMainCommandOutputFlush: () => void order.push("flush"),
-		});
-		const worker = makeSessionStub();
-		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
-		await h.controller.focusAgent("Worker");
-		// A worker attach never mounts main's queued panels into the worker transcript.
-		expect(h.counts.mainCommandOutputFlushes()).toBe(0);
-
-		await h.controller.focusParent();
-
-		expect(h.counts.mainCommandOutputFlushes()).toBe(1);
-		// Flushing before the rebuild would let renderInitialMessages clear the panels.
-		expect(order.slice(-2)).toEqual(["render", "flush"]);
 	});
 
 	it("does not restart the next assistant when an older message end finishes rendering", async () => {

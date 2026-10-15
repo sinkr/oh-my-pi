@@ -136,18 +136,6 @@ export function createSessionStub(
 		subscribe: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
 	if (overrides) layer(stub, overrides);
-	// Mirrors AgentSession.hasLogicalRunActivity over the stub's own members, read
-	// lazily so per-test overrides of any flag keep the derived value consistent.
-	Object.defineProperty(stub, "hasLogicalRunActivity", {
-		configurable: true,
-		get: () =>
-			(stub as { runStartedAt?: number }).runStartedAt !== undefined ||
-			stub.isStreaming ||
-			stub.isRetrying ||
-			stub.hasPostPromptWork ||
-			stub.hasPendingAsyncWork() ||
-			stub.queuedMessageCount > 0,
-	});
 	return stub as unknown as AgentSession;
 }
 

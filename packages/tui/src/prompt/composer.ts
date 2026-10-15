@@ -387,12 +387,18 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
-			const bootstrap = this.#renderRoots(roots, width);
 			if (!this.#runtimeMounted) {
-				const editorRows = this.editor.render(width).length;
-				this.#bootstrapEditorRows = Math.min(this.#bootstrapEditorRows ?? editorRows, editorRows);
+				const editorRows = this.editor.render(width);
+				this.#bootstrapEditorRows = Math.min(this.#bootstrapEditorRows ?? editorRows.length, editorRows.length);
+				const bootstrap = [
+					...this.#header.render(width),
+					...this.#bootstrapInputGap.render(width),
+					...editorRows,
+					...this.#statusHost.render(width),
+				];
+				return { viewport: bootstrap.slice(-rows) };
 			}
-			return { viewport: bootstrap.slice(-rows) };
+			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);

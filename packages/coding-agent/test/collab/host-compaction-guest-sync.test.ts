@@ -88,7 +88,6 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 		streamingMessage: undefined,
 		pendingTools: new Map(),
 		loadingAnimation: undefined,
-		composer: { setRunActive: () => {} },
 		autoCompactionLoader: undefined,
 		retryLoader: undefined,
 		ensureLoadingAnimation: () => {},
