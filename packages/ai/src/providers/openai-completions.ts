@@ -34,7 +34,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 } from "../types";
-import { normalizeSystemPrompts, resolveCacheRetention } from "../utils";
+import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
@@ -111,6 +111,7 @@ import {
 	type OpenAIRequestSetup,
 	type OpenAIStrictToolsState,
 	parseAzureDeploymentNameMap,
+	readOpenRouterRawMetadata,
 	resolveOpenAICompatPolicy,
 	resolveOpenAICompletionsOutputClamp,
 	resolveOpenAIOutputTokenParam,
@@ -127,6 +128,8 @@ import {
 
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
 
+const OPENAI_TOOL_CALL_ID_MAX_LENGTH = 40;
+
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
 
 type ProviderAttributedChatCompletionChunk = ChatCompletionChunk & {
@@ -141,7 +144,7 @@ type OpenAICompletionsDeltaWithReasoningDetails = ChatCompletionChunk.Choice["de
 	reasoning_details?: unknown;
 };
 
-type GeminiMessageThoughtSignatureField = "thinking_signature" | "thought_signature";
+type GeminiMessageThoughtSignatureField = "thinking_signature" | "thought_signature" | "reasoning_signature";
 
 type GeminiMessageThoughtSignature = {
 	field: GeminiMessageThoughtSignatureField;
@@ -163,6 +166,7 @@ const GEMINI_THOUGHT_SIGNATURE_NAMESPACES: readonly GeminiThoughtSignatureNamesp
 const GEMINI_MESSAGE_THOUGHT_SIGNATURE_FIELDS: readonly GeminiMessageThoughtSignatureField[] = [
 	"thinking_signature",
 	"thought_signature",
+	"reasoning_signature",
 ];
 
 function getGeminiThoughtSignatureExtraContent(value: unknown): GeminiThoughtSignatureExtraContent | undefined {
@@ -199,9 +203,10 @@ function parseStoredThoughtSignature(thoughtSignature: string | undefined): unkn
 
 // A single tool-call turn on an OpenAI-compatible Gemini wire can carry two
 // independent signatures: a per-call one (`extra_content.google|vertex` or an
-// encrypted `reasoning_details` entry) and a message-level `thinking_signature`
-// / `thought_signature`. Both are stashed together on the originating tool
-// call's `thoughtSignature` so persistence and replay preserve each field.
+// encrypted `reasoning_details` entry) and a message-level signature
+// (`thinking_signature`, `thought_signature`, or `reasoning_signature`).
+// Both are stashed together on the originating tool call's `thoughtSignature`
+// so persistence and replay preserve each field.
 // `perCall` holds the raw extra_content object or reasoning detail; `message`
 // holds the message-level signature in its wire shape.
 type StoredGeminiSignature = {
@@ -1790,7 +1795,7 @@ const streamOpenAICompletionsOnce = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			// Some providers via OpenRouter include extra details here.
-			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
+			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -2303,10 +2308,10 @@ export function convertMessages(
 	const maxNormalizedToolCallIdLength = compat.requiresMistralToolIds
 		? 9
 		: compat.usesOpenAIToolCallIdLimit
-			? 40
+			? OPENAI_TOOL_CALL_ID_MAX_LENGTH
 			: undefined;
 	const duplicateToolCallIdSuffixPrefix = compat.requiresMistralToolIds ? "dup" : undefined;
-	const normalizeToolCallId = (id: string, source?: AssistantMessage): string => {
+	const normalizeCompletionsToolCallId = (id: string, source?: AssistantMessage): string => {
 		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id, true);
 
 		const isSameModelSource =
@@ -2319,16 +2324,17 @@ export function convertMessages(
 		// Chat Completions IDs are provider-issued opaque correlation tokens.
 		if (!isSameModelSource && id.includes("|")) {
 			const [callId] = id.split("|");
-			return callId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
+			return normalizeToolCallId(callId, OPENAI_TOOL_CALL_ID_MAX_LENGTH);
 		}
 
-		if (compat.usesOpenAIToolCallIdLimit) return id.length > 40 ? id.slice(0, 40) : id;
+		if (compat.usesOpenAIToolCallIdLimit)
+			return id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH ? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH) : id;
 		return id;
 	};
 	const transformedMessages = transformMessages(
 		context.messages,
 		model,
-		(id, _target, source) => normalizeToolCallId(id, source),
+		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
 		maxNormalizedToolCallIdLength,
 		duplicateToolCallIdSuffixPrefix,
 		compat,
@@ -2361,7 +2367,7 @@ export function convertMessages(
 	};
 
 	const ensureToolCallId = (rawId: string, seed: string, source?: AssistantMessage): string => {
-		const normalized = normalizeToolCallId(rawId, source);
+		const normalized = normalizeCompletionsToolCallId(rawId, source);
 		if (normalized.trim().length > 0) return normalized;
 		return generateFallbackToolCallId(seed);
 	};
@@ -2931,6 +2937,19 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
 			return {
 				stopReason: "error",
 				errorMessage: "Provider returned error finish_reason: insufficient_system_resource",
+			};
+		case "unknown":
+		case "other":
+		case "unspecified":
+		case "finish_reason_unspecified":
+			// The provider ended the stream without saying why (a dropped
+			// connection behind a gateway, a backend that lost the stop code).
+			// Pinning it as a terminal error strands a turn that a resample
+			// fixes. Word the message to match the transient-transport retry
+			// pattern; the retry budget bounds the replay.
+			return {
+				stopReason: "error",
+				errorMessage: `Provider returned error finish_reason: ${normalized}`,
 			};
 		default:
 			return {

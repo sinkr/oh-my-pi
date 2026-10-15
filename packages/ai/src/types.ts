@@ -900,11 +900,12 @@ export interface RedactedThinkingContent {
 
 /**
  * Anthropic server-side-fallback boundary marker persisted on assistant
- * turns whose provider request opted into
- * `AnthropicOptions.fallbacks`. Consumers other than the Anthropic
- * provider MUST ignore it — `transformMessages` strips the block on any
- * cross-provider hop and on non-official Anthropic replays, so downstream
- * converters never see it.
+ * turns whose response switched models mid-stream, whether the request
+ * opted into `AnthropicOptions.fallbacks` or a gateway opted in on its
+ * behalf. Consumers other than the Anthropic provider MUST ignore it —
+ * `transformMessages` strips the block on any non-Anthropic hop, and
+ * `convertAnthropicMessages` only puts it on the wire for an opted-in
+ * request to the official endpoint.
  */
 export interface AnthropicFallbackContent {
 	type: "fallback";
@@ -1228,6 +1229,12 @@ export type AssistantRetryRecovery =
 export interface ContextSnapshot {
 	promptTokens: number; // authoritative provider prompt/input tokens
 	nonMessageTokens: number; // estimated non-message total at send time
+	/**
+	 * Estimated tool-schema tokens included in `nonMessageTokens` (0 when the
+	 * model defers schemas server-side). Lets a later model whose schema policy
+	 * differs rebase the provider anchor instead of inheriting its schemas.
+	 */
+	toolSchemaTokens?: number;
 	/** Estimated prompt tokens removed by local history rewrites after this provider snapshot was recorded. */
 	historyRewriteTokensRemoved?: number;
 	/**

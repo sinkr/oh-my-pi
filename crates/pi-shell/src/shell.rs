@@ -6105,6 +6105,74 @@ mod tests {
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
 	}
 
+	/// Runs `command` on a dedicated single-worker runtime and fails after five
+	/// seconds. The deadline lives on the calling thread, so it still fires when
+	/// a builtin blocks the runtime's only worker.
+	#[cfg(unix)]
+	fn capture_on_single_worker(command: &'static str) -> (ShellExecuteResult, String) {
+		capture_on_runtime(command, 512)
+	}
+
+	/// [`capture_on_single_worker`] with the blocking pool capped at
+	/// `max_blocking_threads`.
+	#[cfg(unix)]
+	fn capture_on_runtime(
+		command: &'static str,
+		max_blocking_threads: usize,
+	) -> (ShellExecuteResult, String) {
+		let (tx, rx) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.max_blocking_threads(max_blocking_threads)
+				.enable_all()
+				.build()
+				.expect("single-worker runtime");
+			let _ = tx.send(runtime.block_on(run_command_capture(
+				command,
+				None,
+				None,
+				CancelToken::default(),
+			)));
+		});
+		rx.recv_timeout(Duration::from_secs(5))
+			.expect("read must not wait on a blocking worker it cannot get")
+	}
+
+	/// Owned-shell pipeline stages already hold a blocking worker. Two `read`
+	/// stages fill a two-thread pool; offloading each read again would queue it
+	/// behind the workers its own stages hold, forever.
+	#[cfg(unix)]
+	#[test]
+	fn pipeline_reads_do_not_nest_on_a_full_blocking_pool() {
+		let (result, output) =
+			capture_on_runtime("printf 'a\\n' | read -r x | read -r y; printf 'done\\n'", 2);
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "done\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn read_process_substitution_assigns_line() {
+		let (result, output) =
+			capture_on_single_worker("read -r line < <(printf 'ok\\n'); printf '%s\\n' \"$line\"");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "ok\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn read_process_substitution_delivers_lines_and_reaches_eof() {
+		let (result, output) = capture_on_single_worker(
+			"while IFS= read -r l; do export X=\"$l\"; done < <(printf 'v\\n'); printf '%s\\n' \"$X\"",
+		);
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "v\n");
+	}
+
 	/// Builtins share the host process, so a descriptor path must reach the
 	/// command's descriptors rather than the host's: the host's fd 0 is its
 	/// terminal (`cat /dev/stdin` once blocked on the TUI's keystrokes for
