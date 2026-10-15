@@ -9,7 +9,9 @@
  *   `provider/*`. Absent allows every served model; `[]` allows none.
  * - `accounts`: per provider, the broker OAuth accounts (identity keys, as in
  *   account pools) its requests may use. A listed provider never falls back to
- *   a sibling account or an API key; an empty list allows no account.
+ *   a sibling account or an API key; an empty list allows no account. When
+ *   present, it is also a provider allow-list: a provider it omits is refused,
+ *   so a binding can never be bypassed through another provider's accounts.
  *
  * Account binding reuses `AuthStorage.sessions.restrict`. Each admitted
  * version of a client (its token, models and accounts) resolves a bound
@@ -45,7 +47,9 @@ export interface AuthGatewayClientScope {
 	/**
 	 * Session id the client's credential lookups for `provider` resolve under:
 	 * its own restricted session when `accounts` lists the provider, otherwise
-	 * the request's `sessionId`.
+	 * the request's `sessionId`. Throws for a provider `accounts` omits, and for
+	 * a bound provider once the restriction is lifted, so a lookup can never
+	 * resolve unrestricted on the client's behalf.
 	 */
 	credentialSessionId(provider: string, sessionId: string): string;
 	/**
@@ -137,11 +141,16 @@ class ClientScope implements AuthGatewayClientScope {
 	/** Providers granted with `provider/*`. */
 	readonly #providers = new Set<string>();
 	readonly #accounts = new Map<string, readonly string[]>();
+	/** Whether `models` was given; absent allows every served model `accounts` permits. */
+	readonly #grantsModels: boolean;
+	/** Whether `accounts` was given, which makes it a provider allow-list too. */
+	readonly #bindsAccounts: boolean;
 	readonly #sessionId = crypto.randomUUID();
 	#leases: Array<[provider: string, lease: SessionRestrictionLease]> = [];
 	#sessions: RestrictionSessions | undefined;
 	#holds = 0;
 	#retired = false;
+	#released = false;
 
 	constructor(client: AuthGatewayClient) {
 		const { name } = client;
@@ -151,7 +160,9 @@ class ClientScope implements AuthGatewayClientScope {
 		if (!SHA256_HEX.test(client.tokenSha256)) throw invalid(`${name}.tokenSha256`, "expected 64 hex digits");
 		this.name = name;
 		this.tokenSha256 = client.tokenSha256.toLowerCase();
-		this.limitsModels = client.models !== undefined;
+		this.#grantsModels = client.models !== undefined;
+		this.#bindsAccounts = client.accounts !== undefined;
+		this.limitsModels = this.#grantsModels || this.#bindsAccounts;
 		for (const grant of client.models ?? []) {
 			const slash = grant.indexOf("/");
 			const provider = grant.slice(0, slash);
@@ -178,17 +189,30 @@ class ClientScope implements AuthGatewayClientScope {
 			}
 			this.#accounts.set(provider, keys);
 		}
+		if (this.#bindsAccounts) {
+			// A grant `accounts` cannot serve is a typo or a misunderstanding; refusing it at load beats a silent 404.
+			const granted = [...this.#providers, ...Array.from(this.#models, grant => grant.slice(0, grant.indexOf("/")))];
+			const unbound = granted.find(provider => !this.#accounts.has(provider));
+			if (unbound !== undefined) {
+				throw invalid(`${name}.models`, `grants provider "${unbound}", which "accounts" does not list`);
+			}
+		}
 		this.policy = JSON.stringify([name, this.tokenSha256, client.models ?? null, client.accounts ?? null]);
 	}
 
 	allows(model: Model<Api>): boolean {
-		return (
-			!this.limitsModels || this.#providers.has(model.provider) || this.#models.has(`${model.provider}/${model.id}`)
-		);
+		if (this.#bindsAccounts && !this.#accounts.has(model.provider)) return false;
+		if (!this.#grantsModels) return true;
+		return this.#providers.has(model.provider) || this.#models.has(`${model.provider}/${model.id}`);
 	}
 
 	credentialSessionId(provider: string, sessionId: string): string {
-		return this.#accounts.has(provider) ? this.#sessionId : sessionId;
+		if (!this.#bindsAccounts) return sessionId;
+		if (!this.#accounts.has(provider)) {
+			throw new Error(`auth-gateway client ${this.name} is not bound to provider ${provider}`);
+		}
+		if (this.#released) throw new Error(`auth-gateway client ${this.name} was retired`);
+		return this.#sessionId;
 	}
 
 	retain(): () => void {
@@ -218,6 +242,7 @@ class ClientScope implements AuthGatewayClientScope {
 
 	#releaseIfDone(): void {
 		if (!this.#retired || this.#holds > 0) return;
+		this.#released = true;
 		for (const [provider, lease] of this.#leases) this.#sessions?.unrestrict(provider, this.#sessionId, lease);
 		this.#leases = [];
 	}

@@ -106,12 +106,11 @@ export async function resolveGatewayApiKey(
 	signal: AbortSignal,
 	peer: string,
 ): Promise<ResolvedApiKey | GatewayErrorClassification> {
-	const credentialSessionId = opts.client?.credentialSessionId(model.provider, sessionId) ?? sessionId;
 	let apiKey: ResolvedApiKey | undefined;
 	try {
 		apiKey = await opts.storage.keys.getWithCredential(
 			model.provider,
-			credentialSessionId,
+			gatewayCredentialSessionId(opts, model, sessionId),
 			modelKeyOptions(model, signal),
 		);
 	} catch (error) {
@@ -229,7 +228,6 @@ export function buildGatewayApiKeyResolver(
 	onResolvedKey?: (resolved: ResolvedApiKey) => void,
 ): ApiKeyResolver {
 	const { storage } = opts;
-	const credentialSessionId = opts.client?.credentialSessionId(model.provider, sessionId) ?? sessionId;
 	let lastKey = initialKey.apiKey;
 	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
@@ -238,11 +236,15 @@ export function buildGatewayApiKeyResolver(
 			return initialKey;
 		}
 		if (!lastChance) {
-			const refreshed = await storage.keys.getWithCredential(model.provider, credentialSessionId, {
-				...modelKeyOptions(model, sig),
-				forceRefresh: true,
-				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
-			});
+			const refreshed = await storage.keys.getWithCredential(
+				model.provider,
+				gatewayCredentialSessionId(opts, model, sessionId),
+				{
+					...modelKeyOptions(model, sig),
+					forceRefresh: true,
+					refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+				},
+			);
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) onResolvedKey?.(refreshed);
 			return refreshed;
@@ -250,7 +252,7 @@ export function buildGatewayApiKeyResolver(
 		const next = await refreshGatewayApiKeyAfterAuthError(
 			storage,
 			model,
-			credentialSessionId,
+			gatewayCredentialSessionId(opts, model, sessionId),
 			model.provider,
 			previousKey ?? lastKey,
 			error,
@@ -262,6 +264,16 @@ export function buildGatewayApiKeyResolver(
 		if (next) onResolvedKey?.(next);
 		return next;
 	};
+}
+
+/**
+ * The session a request's credential lookup resolves under: a scoped client's
+ * own restricted session for a provider it binds. Asked on every lookup, not
+ * once per request, so a retry after the client's restriction is lifted fails
+ * instead of resolving unrestricted.
+ */
+function gatewayCredentialSessionId(opts: AuthGatewayCredentialOptions, model: Model<Api>, sessionId: string): string {
+	return opts.client?.credentialSessionId(model.provider, sessionId) ?? sessionId;
 }
 
 /**

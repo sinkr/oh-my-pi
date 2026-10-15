@@ -171,18 +171,21 @@ omp auth-gateway check   [--strict] [--json]
   "ci": {
     "tokenSha256": "<hex SHA-256 of the client's token>",
     "models": ["anthropic/claude-sonnet-4-5", "openai-codex/*"],
-    "accounts": { "anthropic": ["email:ci@example.com|org:org-team"] }
+    "accounts": {
+      "anthropic": ["email:ci@example.com|org:org-team"],
+      "openai-codex": ["email:ci@example.com|org:ws-team"]
+    }
   }
 }
 ```
 
 - `tokenSha256` is the hex SHA-256 of the token the client sends as `Authorization: Bearer <token>` (`printf %s "$TOKEN" | shasum -a 256`); the file never holds a raw token. A digest shared by two clients, or equal to the gateway token's, is rejected.
 - `models` lists exact `provider/id` grants or `provider/*`. Absent allows every served model; `[]` allows none. A model outside the list answers `404 Unknown model` before any credential lookup, and `GET /v1/models` lists only granted models. A bare id resolves to the first served model of that id the client may call; a provider-qualified id is never reread as another provider's bare id.
-- `accounts` maps a provider to the OAuth identity keys (the `identityKey` values of [account pools](#client-account-pools-routing-not-authorization), which `omp usage accounts` lists) its requests to that provider may use. Selection, refresh, usage-limit blocking and auth-recovery rotation stay inside the list, stored, runtime and environment API keys are never used, and a request fails rather than borrow another account. An empty list allows no account. A provider the map omits resolves credentials as for the gateway token, so a provider id must match exactly: one with surrounding whitespace rejects the file, and a misspelled one binds nothing.
-- A client's conversations share one account pin per listed provider, and never share retained provider state (learned fallbacks, Codex transport sessions) with another client's or with gateway-token traffic.
+- `accounts` maps a provider to the OAuth identity keys (the `identityKey` values of [account pools](#client-account-pools-routing-not-authorization), which `omp usage accounts` lists) its requests to that provider may use. Selection, refresh, usage-limit blocking and auth-recovery rotation stay inside the list, stored, runtime and environment API keys are never used, and a request fails rather than borrow another account. An empty list allows no account. When `accounts` is present it is also a provider allow-list: a provider it omits is refused like a model outside `models`, so a binding cannot be sidestepped through another provider. A `models` grant for a provider `accounts` omits rejects the file, as does a provider id with surrounding whitespace. Without `accounts`, every provider resolves credentials as for the gateway token.
+- A client's conversations share one account pin per listed provider: with several accounts listed, the client's traffic stays on one of them until usage-limit blocking or auth recovery moves it, rather than spreading conversations across them. They never share retained provider state (learned fallbacks, Codex transport sessions) with another client's or with gateway-token traffic.
 - `/v1/usage` and `/v1/credentials/check` cover every account the gateway holds, so client tokens get `403` there.
 - The gateway token stays valid and unscoped. `--clients` cannot be combined with `--no-auth`.
-- An unknown field or malformed entry rejects the whole file; `serve` fails to start on it. While serving, the file is re-read every 10 s: a removed or changed token is refused from its next request, while a request already in flight finishes, retries included, on the model and accounts it was admitted with. A changed entry starts a new account pin. A file that cannot be read or parsed refuses every client token until it is fixed.
+- An unknown field or malformed entry rejects the whole file; `serve` fails to start on it. While serving, the file is re-read every 10 s: a removed or changed token is refused from its next request, while a request already in flight finishes, retries included, on the model and accounts it was admitted with. A changed entry starts a new account pin. A file that cannot be read or parsed refuses every client token until it is fixed, and every client starts a new account pin once it is; replace the file atomically (write a temporary file, then rename it over the original) so a reload never reads it half-written.
 
 ### stdio
 

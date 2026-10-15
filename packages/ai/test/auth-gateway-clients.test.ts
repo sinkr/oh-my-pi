@@ -179,6 +179,25 @@ describe("auth-gateway scoped clients", () => {
 		expect((await get(CI_TOKEN, "/v1/credentials/check")).status).toBe(403);
 	});
 
+	it("refuses every provider its accounts omit, even without a models list", async () => {
+		const unbound = createMockModel({ provider: "alpha", id: "free", handler: { content: ["unbound"] } });
+		const bound = createMockModel({
+			provider: "mock",
+			id: "granted",
+			handler: (_context, options) => ({ content: [`served:${options?.apiKey}`] }),
+		});
+		await storage.credentials.set("alpha", [{ type: "api_key", key: "alpha-key" }]);
+		boot([unbound, bound], [{ name: "ci", tokenSha256: CI_CLIENT.tokenSha256, accounts: CI_CLIENT.accounts }]);
+
+		expect((await chat(CI_TOKEN, "alpha/free")).status).toBe(404);
+		expect(unbound.calls).toHaveLength(0);
+		expect(await answer(await chat(CI_TOKEN, "mock/granted"))).toBe("served:access-b");
+		const listed = (await (await get(CI_TOKEN, "/v1/models")).json()) as { data: Array<{ id: string }> };
+		expect(listed.data.map(row => row.id)).toEqual(["mock/granted"]);
+		// The gateway token still reaches the unbound provider.
+		expect(await answer(await chat(GATEWAY_TOKEN, "alpha/free"))).toBe("unbound");
+	});
+
 	it("keeps bearer auth on for an empty table and refuses a removed client's token", async () => {
 		const granted = createMockModel({ provider: "mock", id: "granted", handler: { content: ["ok"] } });
 		const handle = boot([granted], [], []);
@@ -315,6 +334,11 @@ describe("parseAuthGatewayClients", () => {
 			"identity keys that are not a list",
 			{ ci: { tokenSha256: digest, accounts: { mock: "account:acc-b" } } },
 			"list",
+		],
+		[
+			"a model grant for a provider its accounts do not bind",
+			{ ci: { tokenSha256: digest, models: ["mock/granted", "alpha/*"], accounts: { mock: ["account:acc-b"] } } },
+			'grants provider "alpha"',
 		],
 		[
 			"two clients with one token",

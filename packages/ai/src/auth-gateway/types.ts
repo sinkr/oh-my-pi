@@ -170,10 +170,9 @@ export interface AuthGatewayServerHandle {
 	close(): Promise<void>;
 	/**
 	 * Replace the scoped clients. A removed or changed token is refused from
-	 * the next request on; a request already in flight keeps its model access,
-	 * and its credential retries stay within the client's current accounts (a
-	 * removed client's last ones). Throws, changing nothing, when the table is
-	 * invalid. Turns bearer auth on.
+	 * the next request on; a request already in flight keeps the models and
+	 * accounts it was admitted with, retries included, until it finishes.
+	 * Throws, changing nothing, when the table is invalid. Turns bearer auth on.
 	 */
 	setClients(clients: readonly AuthGatewayClient[]): void;
 }
