@@ -389,4 +389,36 @@ describe("EventController superseded agent_end", () => {
 		expect(report).toHaveBeenCalledTimes(1);
 		expect(report).toHaveBeenLastCalledWith({ state: "error", msg: "boom" });
 	});
+
+	it("does not arm a recovery watch while a terminal agent_end is still tearing down", async () => {
+		const { ctx, streamState } = createContext();
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const waitForIdle = vi.spyOn(ctx.viewSession, "waitForIdle").mockImplementation(async () => {});
+		// The terminal teardown parks on the deferred model switch.
+		const switching = Promise.withResolvers<void>();
+		ctx.flushPendingModelSwitch = vi.fn(() => switching.promise);
+		const controller = new EventController(ctx);
+
+		const ended = controller.handleEvent({
+			type: "agent_end",
+			messages: [{ role: "assistant", stopReason: "error", errorMessage: "boom", content: [] }],
+		} as unknown as AgentSessionEvent);
+		await Promise.resolve();
+		expect(report).toHaveBeenCalledTimes(1);
+
+		// A focus attachment resumes mid-teardown and still sees post-prompt work.
+		streamState.hasPostPromptWork = true;
+		controller.restoreRunActivity();
+		streamState.hasPostPromptWork = false;
+		await Promise.resolve();
+
+		switching.resolve();
+		await ended;
+		await controller.dispatchSessionEvent({ type: "turn_start" });
+
+		// No second, message-less teardown ran over the real status.
+		expect(waitForIdle).not.toHaveBeenCalled();
+		expect(report).toHaveBeenCalledTimes(1);
+		expect(report).toHaveBeenLastCalledWith({ state: "error", msg: "boom" });
+	});
 });

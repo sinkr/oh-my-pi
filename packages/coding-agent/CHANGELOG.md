@@ -95,13 +95,6 @@
 - Fixed `read` ignoring JSON and JSONL `?q=` filters and pagination for `local://` and `artifact://` files ([#15767](https://github.com/can1357/oh-my-pi/issues/15767)).
 - Agents can now read saved context notes without accidentally clearing them ([#15748](https://github.com/can1357/oh-my-pi/pull/15748) by [@Komzpa](https://github.com/Komzpa))
 - Fixed startup without an explicit model picking an unrelated authenticated provider instead of the first available model in the configured default fallback chain ([#15781](https://github.com/can1357/oh-my-pi/pull/15781) by [@mvid](https://github.com/mvid))
-- Fixed the end of a long reply going missing from scrollback, then reappearing duplicated or out of order, when the status area below the transcript stays taller after the turn than at startup
-- Fixed the end of a long reply going missing from scrollback, then reappearing duplicated or out of order, when the status area below the transcript stays taller after the turn than at startup ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
-- Fixed focused worker views becoming idle during background waits or staying busy after completion while the main agent runs ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
-- Fixed gaps inside the transcript after persistent widgets close, preserving native scrollback by letting the editor move upward until new output fills the screen ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
-- Fixed busy indicators and scrollback becoming inconsistent when an extension starts a turn during startup or focus changes while events are queued ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
-- Fixed scrollback gaps when focusing paused continuations or when extensions add widgets after a turn ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
-- Fixed various scrollback issues when extensions or widgets change height, idle view during background waits / busy after completion, and inconsistencies when extensions start turns or focus changes while events are queued ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 
 ## [18.11.0] - 2026-10-14
 

@@ -309,6 +309,13 @@ export class EventController {
 	 * watch's synthetic (message-less) teardown.
 	 */
 	#terminalSettleCount = 0;
+	/**
+	 * Held while a terminal `agent_end` teardown runs. {@link #finishAgentEnd}
+	 * awaits a deferred model switch, and a focus attachment resuming in that
+	 * window must not arm a recovery watch that later runs a second,
+	 * message-less teardown over the real terminal status.
+	 */
+	#terminalTeardownActive = false;
 	/** Changes whenever transcript ownership is detached, including same-session reattachment. */
 	#transcriptGeneration = 0;
 	// Coalescing window for `message_update` events at the subscription boundary.
@@ -2322,9 +2329,13 @@ export class EventController {
 			return;
 		}
 		this.#terminalSettleCount += 1;
-		setRunStatus(this.#settledRunStatus(event));
-
-		await this.#finishAgentEnd(event);
+		this.#terminalTeardownActive = true;
+		try {
+			setRunStatus(this.#settledRunStatus(event));
+			await this.#finishAgentEnd(event);
+		} finally {
+			this.#terminalTeardownActive = false;
+		}
 		// This settle may belong to an extension-started turn while the main
 		// input loop remains asleep. Do not await session-idle from its own event.
 		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
@@ -2343,7 +2354,7 @@ export class EventController {
 	 */
 	async #finishWhenRunSettles(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
 		const epoch = this.#runEpoch;
-		if (this.#settleWatchEpoch === epoch) return;
+		if (this.#terminalTeardownActive || this.#settleWatchEpoch === epoch) return;
 		this.#settleWatchEpoch = epoch;
 		const session = this.ctx.viewSession;
 		const generation = this.#transcriptGeneration;
@@ -2408,6 +2419,16 @@ export class EventController {
 	async #flushMainModelSwitch(): Promise<void> {
 		if (this.ctx.session.isStreaming) return;
 		await this.ctx.flushPendingModelSwitch();
+	}
+
+	/**
+	 * Apply a model switch deferred while the main run streamed, once focus
+	 * returns to a quiet main session. The main subscription is dropped for the
+	 * whole focus, so its terminal `agent_end` may have gone unobserved and no
+	 * later settle is guaranteed to flush it.
+	 */
+	async flushDeferredMainModelSwitch(): Promise<void> {
+		await this.#flushMainModelSwitch();
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {

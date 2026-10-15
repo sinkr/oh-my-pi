@@ -72,6 +72,7 @@ interface Harness {
 		resetTranscriptAnchors: () => number;
 		renderInitialMessages: () => number;
 		mainUnsubscribe: () => number;
+		mainModelSwitchFlushes: () => number;
 	};
 }
 
@@ -86,6 +87,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	let renderInitialMessages = 0;
 	let mainUnsubscribe = 0;
 	let runActive = false;
+	let mainModelSwitchFlushes = 0;
 
 	const ctx = {
 		session: main.session,
@@ -106,6 +108,9 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 				resetTranscriptAnchors++;
 			},
 			restorePendingToolResults() {},
+			async flushDeferredMainModelSwitch() {
+				mainModelSwitchFlushes++;
+			},
 			restoreRunActivity() {
 				runActive = ctx.viewSession.runStartedAt !== undefined;
 			},
@@ -160,6 +165,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			resetTranscriptAnchors: () => resetTranscriptAnchors,
 			renderInitialMessages: () => renderInitialMessages,
 			mainUnsubscribe: () => mainUnsubscribe,
+			mainModelSwitchFlushes: () => mainModelSwitchFlushes,
 		},
 	};
 }
@@ -306,6 +312,43 @@ describe("SessionFocusController", () => {
 		await h.controller.focusParent();
 		expect(h.controller.target).toBeUndefined();
 		expect(h.runActive()).toBe(false);
+	});
+
+	it("flushes a deferred main model switch when focus returns to a main session that settled meanwhile", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		// The switch was queued while main streamed; focusing away drops main's subscription.
+		h.main.setStreaming(true);
+		await h.controller.focusAgent("Worker");
+		expect(h.counts.mainModelSwitchFlushes()).toBe(0);
+
+		// Main finishes while hidden: its terminal agent_end is never observed.
+		h.main.setStreaming(false);
+		await h.controller.focusParent();
+
+		expect(h.counts.mainModelSwitchFlushes()).toBe(1);
+	});
+
+	it("does not flush the main model switch when focus returns to a main session that is still streaming", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		h.main.setStreaming(true);
+		await h.controller.focusAgent("Worker");
+		await h.controller.focusParent();
+
+		// Its own terminal settle will flush it; applying it mid-turn would retarget the live run.
+		expect(h.counts.mainModelSwitchFlushes()).toBe(0);
+	});
+
+	it("does not flush the main model switch when a worker is focused", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		await h.controller.focusAgent("Worker");
+
+		expect(h.counts.mainModelSwitchFlushes()).toBe(0);
 	});
 
 	it("does not restart the next assistant when an older message end finishes rendering", async () => {

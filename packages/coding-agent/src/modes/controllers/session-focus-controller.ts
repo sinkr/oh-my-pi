@@ -222,6 +222,12 @@ export class SessionFocusController {
 			if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
 			else setRunStatus({ state: "idle" });
 			if (generation !== this.#attachGeneration) return false;
+			// The main subscription was dropped for the whole focus, so a terminal
+			// `agent_end` that fired meanwhile never flushed a deferred model switch.
+			if (target === this.ctx.session && !target.isStreaming) {
+				await this.ctx.eventController.flushDeferredMainModelSwitch();
+				if (generation !== this.#attachGeneration) return false;
+			}
 			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 			if (generation !== this.#attachGeneration) return false;
 			this.ctx.eventController.restorePendingToolResults();
