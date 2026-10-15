@@ -9,12 +9,16 @@
 //! arenas instead slows that work 13-51%, and only takes effect from the
 //! environment before the process starts.
 //!
-//! Every blocking native job holds a [`NativeWork`] guard. When the last one
+//! Every compute-bound native job holds a [`NativeWork`] guard: the
+//! [`crate::task`] blocking paths and the edit preview pass. When the last one
 //! drops, a dedicated thread waits for [`QUIET_PERIOD`] without new work and
 //! then trims once. It sleeps on a condition variable in between, so an idle
 //! process does nothing, and a trim never runs while counted jobs are using
-//! the arenas it locks. Synchronous exports on the JS thread are not counted;
-//! the next trim covers their arena too.
+//! the arenas it locks. Long-lived I/O jobs (PTY sessions, overlay mounts) are
+//! not counted, since holding a guard for a whole shell command would block
+//! trimming for its duration; a trim overlapping them only costs brief arena
+//! lock contention. Synchronous exports on the JS thread are not counted
+//! either; the next trim covers their arena too.
 
 /// Marks one blocking native job as running for the idle trimmer.
 #[must_use = "work counts as running only while the guard is alive"]

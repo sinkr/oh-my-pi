@@ -44,6 +44,8 @@ use pi_edit::{
 	text::normalize_to_lf,
 };
 
+use crate::memory::native_work;
+
 fn parse_mode(mode: &str) -> Result<EditMode> {
 	EditMode::parse(mode)
 		.ok_or_else(|| napi::Error::from_reason(format!("Unknown edit mode: {mode}")))
@@ -717,6 +719,7 @@ async fn settled_preview(shared: &Arc<Shared>) -> Option<PreviewBatch> {
 		}
 		let compute = Arc::clone(shared);
 		let pass = napi::bindgen_prelude::spawn_blocking(move || {
+			let _work = native_work();
 			compute.preview_pass(&mut compute.session.blocking_lock())
 		})
 		.await;
