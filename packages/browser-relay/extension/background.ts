@@ -19,6 +19,13 @@ const RECONNECT_MAX_MS = 10_000;
 const REMOVE_TAB_ATTEMPTS = 3;
 const REMOVE_TAB_RETRY_MS = 500;
 
+/**
+ * The omp version that installed this script, declared by the line the installer puts above it
+ * (`stampRelayExtensionScript`); undeclared in an unstamped build. Read from the script, not the manifest:
+ * after the files change, a Chrome restart re-reads manifest.json but keeps running the old service worker.
+ */
+declare const OMP_INSTALL_VERSION: string | undefined;
+
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
@@ -207,7 +214,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
-		ompVersion: chrome.runtime.getManifest().version_name,
+		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
 		tabs: snapshots,
 		attachedTabIds,
 	};
