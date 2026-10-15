@@ -346,20 +346,26 @@ function deduplicateToolCallIds(
 }
 
 const MAX_TOOL_CALL_NAME_LENGTH = 128;
-const TOOL_CALL_NAME_SEPARATOR_RE = /[\s\p{Cc}]/u;
+/**
+ * Union of the tool-name charsets providers accept in declarations: Anthropic,
+ * Bedrock and OpenAI allow `[a-zA-Z0-9_-]`; Google additionally allows `.` and `:`.
+ */
+const DECLARABLE_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_.:-]+$/;
 
 /**
  * Whether a tool-call name cannot belong to any declared tool: missing, empty,
- * longer than OpenAI's 128-character replay limit, or containing whitespace or
- * control characters (tool schemas never allow them; their presence means the
- * name slot carries invocation text).
+ * longer than OpenAI's 128-character replay limit, or containing a character
+ * outside every provider's declaration charset. Models emit such names when the
+ * name slot carries invocation text (whitespace, NULs) or an invented name such
+ * as an internal URL (`proc://*`, #15839); Bedrock validates replayed
+ * `toolUse.name` against `[a-zA-Z0-9_-]+` and rejects the whole request.
  */
 export function isMalformedToolCallName(name: unknown): boolean {
 	return (
 		typeof name !== "string" ||
 		name.length === 0 ||
 		name.length > MAX_TOOL_CALL_NAME_LENGTH ||
-		TOOL_CALL_NAME_SEPARATOR_RE.test(name)
+		!DECLARABLE_TOOL_CALL_NAME_RE.test(name)
 	);
 }
 

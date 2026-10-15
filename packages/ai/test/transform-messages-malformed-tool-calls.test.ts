@@ -224,6 +224,37 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 		]);
 	});
 
+	// Regression for #15839: models invent tool names from internal URL schemes
+	// (`proc://*`) while polling background work. Bedrock validates replayed
+	// `toolUse.name` against `[a-zA-Z0-9_-]+`, so the surviving block 400'd every
+	// later request. Google declarations allow `.` and `:`, so those must survive.
+	it("drops calls whose name has characters no provider declares, keeping Google-legal names", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "wait for the background job", timestamp: 1 },
+			assistant(
+				[
+					{ type: "toolCall", id: "call_proc", name: "proc://*", arguments: {} },
+					{ type: "toolCall", id: "call_history", name: "history://0-Sub", arguments: {} },
+					{ type: "toolCall", id: "call_unicode", name: "lées", arguments: {} },
+					{ type: "toolCall", id: "call_google", name: "ns.tool:v1", arguments: {} },
+				],
+				2,
+			),
+			toolResult("call_proc", "Tool proc://* not found", 3),
+			toolResult("call_history", "Tool history://0-Sub not found", 4),
+			toolResult("call_unicode", "Tool lées not found", 5),
+			toolResult("call_google", "google result", 6),
+			{ role: "user", content: "continue", timestamp: 7 },
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(getToolCalls(transformed).map(call => call.id)).toEqual(["call_google"]);
+		expect(transformed.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
+			"call_google",
+		]);
+	});
+
 	// Regression for PR #3459 review feedback: a tool-call id can legitimately
 	// repeat across history when an OpenAI-Responses composite id
 	// (`callId|itemId`) collapses on the wire — `deduplicateToolCallIds` exists
