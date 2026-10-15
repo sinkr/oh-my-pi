@@ -38,6 +38,7 @@
 - Fixed streamed links and inline math showing raw `[text](url` or LaTeX and then rewrapping the paragraph when they close, in the terminal UI and native (TSP) terminals: they now render in their closed form while they stream ([#15864](https://github.com/can1357/oh-my-pi/pull/15864) by [@H4vC](https://github.com/H4vC)).
 - Paint-only overlays no longer swallow typing intended for the focused input beneath them ([#15793](https://github.com/can1357/oh-my-pi/issues/15793)).
 - Fixed transcript rows going missing, or reappearing out of order later, when the chrome below the transcript stays taller after a turn than it was at startup
+- Fixed transcript rows going missing, or reappearing out of order later, when the chrome below the transcript stays taller after a turn than it was at startup ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 
 ## [18.11.0] - 2026-10-14
 
