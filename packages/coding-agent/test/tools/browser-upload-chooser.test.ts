@@ -10,6 +10,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+// Windows ignores POSIX read bits and root reads a mode-000 file, so neither can make delivery fail through one.
+const MODE_BITS_ENFORCED = process.platform !== "win32" && process.getuid?.() !== 0;
 
 // `#log` records what each control received; headless Chrome cancels a chooser nobody intercepts, so a `cancel`
 // entry proves a click reached a real, uninterrupted chooser.
@@ -133,7 +135,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile", () => {
 		}
 	}, 60_000);
 
-	test("cancels the chooser when delivering the files fails", async () => {
+	test.skipIf(!MODE_BITS_ENFORCED)("cancels the chooser when delivering the files fails", async () => {
 		const { attempt, close } = await openFixture();
 		try {
 			const failed = await attempt(`await tab.uploadFile("#trigger", "locked.txt");`);
