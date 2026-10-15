@@ -473,7 +473,10 @@ export async function fillViaHandle(
 					focus?: () => void;
 					isContentEditable?: boolean;
 					innerText?: string;
-					cloneNode(deep: boolean): { value?: string };
+					getAttribute(name: string): string | null;
+					ownerDocument: {
+						createElement(tag: "input"): { value: string; setAttribute(name: string, value: string): void };
+					};
 					dispatchEvent(event: unknown): boolean;
 				};
 				node.focus?.();
@@ -499,24 +502,53 @@ export async function fillViaHandle(
 				// localName, not tagName: an XHTML page keeps the tag's lower case.
 				if (node.localName === "input" && pickerTypes.includes(kind)) {
 					const before = node.value ?? "";
-					// Tried on a shallow copy, which keeps the type, min, max and step: a value written to the
-					// live control and then put back would still cut it off from its value attribute.
-					const probe = node.cloneNode(false);
-					if (setValue) setValue.call(probe, wanted);
-					else probe.value = wanted;
+					// Tried on a plain input with the same type, min, max and step: a value written to the live
+					// control and then put back would still cut it off from its value attribute, and a copy of a
+					// customized built-in would run the page's constructor.
+					const probe = node.ownerDocument.createElement("input");
+					for (const name of ["type", "min", "max", "step"]) {
+						const attribute = node.getAttribute(name);
+						if (attribute !== null) probe.setAttribute(name, attribute);
+					}
+					probe.value = wanted;
 					// The browser normalises what it accepts (a colour to #rrggbb, a time's seconds), turns what
-					// it rejects into "" (a range into its midpoint) and clamps a range. A colour is refused when
-					// the browser's CSS parser refuses it: a rejected one and a black one both land on #000000. A
+					// it rejects into "" (a colour into #000000, a range into its midpoint) and clamps a range. A
+					// colour stored as #000000 is accepted only if it draws black, so the browser resolves it rather
+					// than a parser saying it is well-formed (`var(--missing)` is, and is still refused). A
 					// rejected range number can land on the midpoint it coerces to (`0x5`), so its spelling is
 					// checked against the decimal form the browser parses. Only the date and time types can be
 					// cleared.
-					const actual = probe.value ?? "";
+					const actual = probe.value;
 					let refused: boolean;
 					if (kind === "color") {
-						const { CSS } = globalThis as unknown as {
-							CSS: { supports(property: string, value: string): boolean };
+						const { OffscreenCanvas } = globalThis as unknown as {
+							OffscreenCanvas: new (
+								width: number,
+								height: number,
+							) => {
+								getContext(type: "2d"): {
+									fillStyle: string;
+									fillRect(x: number, y: number, width: number, height: number): void;
+									getImageData(
+										x: number,
+										y: number,
+										width: number,
+										height: number,
+									): { data: ArrayLike<number> };
+								} | null;
+							};
 						};
-						refused = !CSS.supports("color", wanted);
+						// A colour the canvas cannot parse keeps the white set first, so it draws white.
+						const paint = new OffscreenCanvas(1, 1).getContext("2d");
+						let drawsBlack = false;
+						if (paint) {
+							paint.fillStyle = "#ffffff";
+							paint.fillStyle = wanted;
+							paint.fillRect(0, 0, 1, 1);
+							const [red, green, blue] = Array.from(paint.getImageData(0, 0, 1, 1).data);
+							drawsBlack = red === 0 && green === 0 && blue === 0;
+						}
+						refused = actual === "#000000" && !drawsBlack;
 					} else if (kind === "range") {
 						refused =
 							!/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(wanted) || Number(actual) !== Number(wanted);

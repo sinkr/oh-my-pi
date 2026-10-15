@@ -732,7 +732,8 @@ return { values, reported: await tab.evaluate(() => window.reported), refused, a
 					action: "run",
 					name: tabName,
 					code: `const colors = [];
-for (const value of ["red", "oklab(0.5 0.1 0.1)", "rgb(0 0 0)", "oklab(0 0 0)", "color(srgb 0 0 0)"]) {
+// A colour the input stores as #000000 is taken only if it draws black, so the last three leave red in place.
+for (const value of ["red", "oklab(0.5 0.1 0.1)", "rgb(0 0 0)", "oklab(0 0 0)", "color(srgb 0 0 0)", "currentcolor", "red", "var(--missing)", "light-dark(red, blue)", "rgb(from red r g b)"]) {
   try {
     await tab.fill("#color", value);
     colors.push(await tab.value("#color"));
@@ -744,13 +745,25 @@ let refused = "";
 try { await tab.fill("#date", "12/10/2026"); } catch (error) { refused = error.message; }
 // An input nothing has written to still takes its value from the attribute.
 await tab.evaluate(() => document.querySelector("#date").setAttribute("value", "2020-01-01"));
-return { colors, refused, date: await tab.value("#date") };`,
+return { colors, color: await tab.value("#color"), refused, date: await tab.value("#date") };`,
 					timeout: 20,
 				},
 				context,
 			);
-			expect(valueFrom<{ colors: string[]; refused: string; date: string }>(result)).toEqual({
-				colors: ["#ff0000", "#a14203", "#000000", "#000000", "#000000"],
+			expect(valueFrom<{ colors: string[]; color: string; refused: string; date: string }>(result)).toEqual({
+				colors: [
+					"#ff0000",
+					"#a14203",
+					"#000000",
+					"#000000",
+					"#000000",
+					"#000000",
+					"#ff0000",
+					expect.stringContaining('<input type=color> does not accept "var(--missing)"'),
+					expect.stringContaining('<input type=color> does not accept "light-dark(red, blue)"'),
+					expect.stringContaining('<input type=color> does not accept "rgb(from red r g b)"'),
+				],
+				color: "#ff0000",
 				refused: expect.stringContaining('<input type=date> does not accept "12/10/2026"'),
 				date: "2020-01-01",
 			});
@@ -839,15 +852,17 @@ return await tab.evaluate(() => ({ customized: Object.getPrototypeOf(document.qu
 		}
 	}, 30_000);
 
-	test("fills a customized built-in picker without running the page class's own value accessor", async () => {
+	test("fills a customized built-in picker without running the page class's own constructor or value accessor", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const tabName = `picker-accessor-${crypto.randomUUID()}`;
-		// The page's class overrides `value` and logs each write; fill reaches the native setter, not this one,
-		// so the accessor runs on neither the copy fill validates on nor the live input.
+		// The page's class counts its instances and overrides `value` to log each write. Fill validates on a plain
+		// input and reaches the native setter, so it makes no instance and the accessor never runs.
 		const accessorHtml = `<!doctype html><script>
 window.calls = [];
+window.made = 0;
 customElements.define("x-range", class extends HTMLInputElement {
+  constructor() { super(); made++; }
   get value() { return super.value; }
   set value(next) { calls.push(next); super.value = next; }
 }, { extends: "input" });
@@ -870,15 +885,17 @@ return {
   customized: await tab.evaluate(() => Object.getPrototypeOf(document.querySelector("#volume")) !== HTMLInputElement.prototype),
   values: [filled, await tab.value("#volume")],
   calls: await tab.evaluate(() => window.calls),
+  made: await tab.evaluate(() => window.made),
 };`,
 					timeout: 15,
 				},
 				context,
 			);
-			expect(valueFrom<{ customized: boolean; values: string[]; calls: string[] }>(result)).toEqual({
+			expect(valueFrom<{ customized: boolean; values: string[]; calls: string[]; made: number }>(result)).toEqual({
 				customized: true,
 				values: ["3", "7"],
 				calls: [],
+				made: 1,
 			});
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
