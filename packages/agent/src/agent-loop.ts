@@ -2098,7 +2098,12 @@ async function streamAssistantResponse(
 	// keep their arrival order. When the server re-sends a call it already ran
 	// (issue #15749), the newer result replaces the earlier one, matching the
 	// single result the host persists.
-	const cursorToolResults: { result: ToolResultMessage; additionalContext: string | undefined }[] = [];
+	const cursorToolResults: {
+		result: ToolResultMessage;
+		additionalContext: string | undefined;
+		/** The host transform, which the provider does not always await. */
+		pending: Promise<void>;
+	}[] = [];
 	const userCursorOnToolResult = config.cursorOnToolResult;
 	const collectCursorToolResult: AgentLoopConfig["cursorOnToolResult"] = userCursorOnToolResult
 		? async result => {
@@ -2106,14 +2111,22 @@ async function streamAssistantResponse(
 				if (superseded >= 0) cursorToolResults.splice(superseded, 1);
 				// Read before the transform, which may return a message without it.
 				const additionalContext = (result as ToolResultWithAdditionalContext)[TOOL_RESULT_ADDITIONAL_CONTEXT];
-				const entry = { result, additionalContext };
+				const { promise: pending, resolve: settle } = Promise.withResolvers<void>();
+				const entry = { result, additionalContext, pending };
 				cursorToolResults.push(entry);
-				const settled = await userCursorOnToolResult(result);
-				if (settled) entry.result = settled;
-				return settled;
+				try {
+					const settled = await userCursorOnToolResult(result);
+					if (settled) entry.result = settled;
+					return settled;
+				} finally {
+					settle();
+				}
 			}
 		: undefined;
-	const appendCursorToolResults = (): void => {
+	// Like the host before it persists, wait for transforms still running so the
+	// next request carries the result the transcript stores.
+	const appendCursorToolResults = async (): Promise<void> => {
+		await Promise.all(cursorToolResults.map(entry => entry.pending));
 		for (const { result } of cursorToolResults) context.messages.push(result);
 		const additionalContext = joinAdditionalContext(cursorToolResults.map(entry => entry.additionalContext));
 		if (additionalContext !== undefined) context.messages.push(createAdditionalContextMessage(additionalContext));
@@ -2332,7 +2345,7 @@ async function streamAssistantResponse(
 						} else {
 							context.messages.push(finalMessage);
 						}
-						appendCursorToolResults();
+						await appendCursorToolResults();
 						if (!addedPartial) {
 							stream.push({ type: "message_start", message: snapshotAssistantMessage(finalMessage) });
 						}
@@ -2613,7 +2626,7 @@ async function streamAssistantResponse(
 					context.messages.push(trailing);
 					stream.push({ type: "message_start", message: snapshotAssistantMessage(trailing) });
 				}
-				appendCursorToolResults();
+				await appendCursorToolResults();
 				stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
 				await finishChat(trailing);
 				speculationSettled = true;

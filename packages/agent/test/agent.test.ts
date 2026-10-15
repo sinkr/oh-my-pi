@@ -1129,6 +1129,77 @@ describe("Agent", () => {
 		}
 	});
 
+	it("gives an in-run follow-up the transformed result when the provider does not await the transform", async () => {
+		// Cursor reports some server-run calls (todo, SCM connect, web fetch)
+		// without awaiting the result sink, so the turn can end while the host's
+		// transform still runs. The host waits before persisting; the follow-up
+		// request must carry the same rewritten result, not the original.
+		const mock = createMockModel({ responses: [] });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "cursor-tool-unawaited",
+			name: "todo",
+			arguments: { todos: [] },
+			[kCursorExecResolved]: true,
+		};
+		const started = createAssistantMessage([toolCall]);
+		const realToolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "original" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const followUp = createUserMessage("background job finished");
+		const gate = Promise.withResolvers<void>();
+		const contexts: Message[][] = [];
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			cursorOnToolResult: async message => {
+				await gate.promise;
+				return { ...message, content: [{ type: "text" as const, text: "rewritten" }] };
+			},
+			streamFn: (_model, context, options) => {
+				contexts.push([...context.messages]);
+				const stream = new AssistantMessageEventStream();
+				const first = contexts.length === 1;
+				queueMicrotask(async () => {
+					if (first) {
+						// Fire-and-forget, as the provider does for these calls.
+						void options?.cursorOnToolResult?.(realToolResult);
+						agent.followUp(followUp);
+						stream.push({ type: "start", partial: started });
+						stream.push({ type: "done", reason: "stop", message: started });
+						// The transform settles only after the stream has finished: an
+						// unawaited append has already snapshotted the original by then.
+						for (let i = 0; i < 50; i++) await Promise.resolve();
+						gate.resolve();
+					} else {
+						const reply = createAssistantMessage([{ type: "text", text: "ok" }]);
+						stream.push({ type: "start", partial: reply });
+						stream.push({ type: "done", reason: "stop", message: reply });
+					}
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		expect(contexts).toHaveLength(2);
+		const second = contexts[1];
+		const assistantIndex = second.findIndex(message => message.role === "assistant");
+		expect(second[assistantIndex + 1]).toMatchObject({
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			content: [{ type: "text", text: "rewritten" }],
+		});
+		const persisted = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(persisted).toHaveLength(1);
+		expect(persisted[0]).toMatchObject({ content: [{ type: "text", text: "rewritten" }] });
+	});
+
 	it("injects Cursor-carried passive context after the buffered results on success and provider error", async () => {
 		for (const outcome of ["done", "fail"] as const) {
 			const mock = createMockModel({ responses: [] });
