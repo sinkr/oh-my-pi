@@ -10,6 +10,7 @@
 - Fixed GLM-5.2 on Ollama Cloud losing its reasoning between turns; Ollama Cloud now keeps assistant thinking in history for models verified to accept it ([#14440](https://github.com/can1357/oh-my-pi/pull/14440) by [@Dante-dan](https://github.com/Dante-dan))
 - Fixed GPT Image generation and edits failing on gateways that validate request parameters, such as LiteLLM; `response_format` is no longer sent to GPT Image models ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
 - Fixed OpenRouter errors such as "Access denied by security policy" dropping the routed upstream's own explanation from `error.metadata.raw` ([#10906](https://github.com/can1357/oh-my-pi/issues/10906), [#14435](https://github.com/can1357/oh-my-pi/pull/14435) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed GitHub Copilot usage reporting an AI-credit allowance as "Premium Requests" in request units; the unit each billing item reports is now honoured ([#13849](https://github.com/can1357/oh-my-pi/issues/13849), [#14501](https://github.com/can1357/oh-my-pi/pull/14501) by [@F0Rextasy](https://github.com/F0Rextasy))
 
 ## [18.11.1] - 2026-10-15
 
@@ -294,9 +295,9 @@
 - Added `recordAffinity: false` to credential resolution options, selecting as the session would without pinning the choice to that session ([#14512](https://github.com/can1357/oh-my-pi/pull/14512) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+
 - Codex native-lane steering rejections (`unsupported_native_inflight_message`) now classify as retryable from their error text alone, matching the provider's own classification, and `AIError.isCodexSteerRejection()` identifies them so the agent retry can stay on the same model ([#14242](https://github.com/can1357/oh-my-pi/pull/14242) by [@alphastorm](https://github.com/alphastorm))
 - Fixed replayed Responses and Codex history, including persisted Codex user/developer and assistant items, sending `detail: "original"` images to endpoints whose `supportsImageDetailOriginal` is off ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
-- The GitHub Copilot usage provider hardcoded `unit: "requests"` and the label "Premium Requests" for every plan, so an AI-credit allowance was reported as premium requests with the wrong unit; the per-item `unitType` is now honoured, and an unrecognised or absent value keeps the previous wording ([#13849](https://github.com/can1357/oh-my-pi/issues/13849), [#14501](https://github.com/can1357/oh-my-pi/pull/14501) by [@F0Rextasy](https://github.com/F0Rextasy)).
 - Fixed thinking in turns kept after Anthropic native compaction being rejected or dropped on the next request ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Claude usage being re-polled every 10 seconds while Anthropic rate-limits the account; a failed refresh now waits a minute before trying again ([#14515](https://github.com/can1357/oh-my-pi/pull/14515) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Devin requests skipping the `onPayload` hook, so payload capture now sees each Devin chat request and a returned replacement is what gets sent ([#14506](https://github.com/can1357/oh-my-pi/pull/14506) by [@will-bogusz](https://github.com/will-bogusz))
