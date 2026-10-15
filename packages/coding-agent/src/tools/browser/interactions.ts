@@ -910,6 +910,12 @@ function assignInputFiles(el: unknown, files: unknown[]): string | null {
 	return null;
 }
 
+/** Tell a page its chooser closed without a pick, as the browser does. Runs in the isolated world. */
+function cancelChooser(el: unknown): void {
+	const page = globalThis as unknown as PageGlobals;
+	(el as PageElement).dispatchEvent(new page.Event("cancel", { bubbles: true }));
+}
+
 /** Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world. */
 function dropUploadFiles(el: unknown, files: unknown[]): void {
 	const element = el as PageElement;
@@ -979,17 +985,24 @@ async function pickFiles(realm: Realm, paths: string[], signal: AbortSignal | un
 	}
 }
 
-/** Hand a file input the files: staged copies' paths, or contents streamed into the isolated world. */
+/**
+ * Hand a file input the files: staged copies' paths, or contents streamed into the isolated world. `filling` runs once
+ * the files are being set, after staging or streaming has succeeded.
+ */
 async function deliverToInput(
 	input: ElementHandle,
 	sources: UploadSource[],
 	route: UploadRoute,
 	staging: UploadStaging,
 	signal: AbortSignal | undefined,
+	filling?: () => void,
 ): Promise<void> {
 	if (route === "paths") {
 		const staged = await staging.stage(sources, signal);
-		await untilAborted(signal, () => setFileInputPaths(input, staged));
+		await untilAborted(signal, () => {
+			filling?.();
+			return setFileInputPaths(input, staged);
+		});
 		return;
 	}
 	const realm = input.frame.isolatedRealm();
@@ -997,7 +1010,10 @@ async function deliverToInput(
 	try {
 		const files = await streamUploadFiles(realm, sources, signal);
 		try {
-			const refusal = await untilAborted(signal, () => realm.evaluate(assignInputFiles, target, files));
+			const refusal = await untilAborted(signal, () => {
+				filling?.();
+				return realm.evaluate(assignInputFiles, target, files);
+			});
 			if (refusal) throw new ToolError(refusal);
 		} finally {
 			await files.dispose().catch(() => undefined);
@@ -1040,7 +1056,7 @@ export interface PreparedUpload {
 	/** Bytes `deliver` hands over. */
 	readonly bytes: number;
 	deliver(signal: AbortSignal): Promise<void>;
-	/** Release what finding the target held: a caught chooser's input. */
+	/** Release what finding the target held: a caught chooser's input, cancelled when it was never filled. */
 	dispose(): Promise<void>;
 }
 
@@ -1154,17 +1170,27 @@ export async function prepareElementUpload(
 	try {
 		const input = await catchChooserInput(page, handle, label, signal);
 		if (input) {
+			// A page learns a chooser closed from `change` or `cancel`; one that got neither would wait on a pick
+			// forever, so a refused or failed upload cancels the chooser as the browser would.
+			let filled = false;
+			const release = async (): Promise<void> => {
+				if (!filled) await input.evaluate(cancelChooser).catch(() => undefined);
+				await input.dispose().catch(() => undefined);
+			};
 			try {
 				const refusal = await untilAborted(signal, () => input.evaluate(fileInputRefusal, sources.length));
 				if (refusal) throw new ToolError(refusal);
 			} catch (error) {
-				await input.dispose().catch(() => undefined);
+				await release();
 				throw error;
 			}
 			return preparedUpload(
 				sources,
-				sig => deliverToInput(input, sources, route, staging, sig),
-				() => input.dispose().catch(() => undefined),
+				sig =>
+					deliverToInput(input, sources, route, staging, sig, () => {
+						filled = true;
+					}),
+				release,
 			);
 		}
 	} finally {

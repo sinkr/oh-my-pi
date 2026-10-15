@@ -99,6 +99,9 @@ beforeAll(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-upload-"));
 	await Bun.write(path.join(tempDir, "alpha.txt"), "alpha");
 	await Bun.write(path.join(tempDir, "beta.txt"), "beta");
+	// Readable enough to open for an upload (a stat), not to copy or read: delivery fails after the chooser is caught.
+	await Bun.write(path.join(tempDir, "locked.txt"), "locked");
+	await fs.chmod(path.join(tempDir, "locked.txt"), 0o000);
 	site = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
@@ -121,8 +124,21 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile", () => {
 			expect(await attempt(`await tab.uploadFile("#trigger", "alpha.txt");`)).toEqual({
 				log: [{ id: "trigger-input", event: "change", names: ["alpha.txt"] }],
 			});
+			// A refused upload leaves the chooser unfilled; the page hears it close as a user's cancel would.
 			const multiple = await attempt(`await tab.uploadFile("#trigger", "alpha.txt", "beta.txt");`);
 			expect(multiple.error).toContain("Multiple file uploads only work with <input type=file multiple>");
+			expect(multiple.log).toEqual([{ id: "trigger-input", event: "cancel", names: [] }]);
+		} finally {
+			await close();
+		}
+	}, 60_000);
+
+	test("cancels the chooser when delivering the files fails", async () => {
+		const { attempt, close } = await openFixture();
+		try {
+			const failed = await attempt(`await tab.uploadFile("#trigger", "locked.txt");`);
+			expect(failed.error).toBeDefined();
+			expect(failed.log).toEqual([{ id: "trigger-input", event: "cancel", names: [] }]);
 		} finally {
 			await close();
 		}
