@@ -98,6 +98,12 @@ export interface RuntimeChildrenOptions {
 	 * to the roots below the transcript in render order.
 	 */
 	readonly nativeDock?: readonly Component[];
+	/**
+	 * Below-transcript roots the user opens and closes (the editor surface that
+	 * drafts and dialogs swap into, docked reports). Their rows never become
+	 * part of the post-run chrome floor, so collapsing them refills the screen.
+	 */
+	readonly transientChrome?: readonly Component[];
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -261,11 +267,15 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// with rows — so it is retained across resizes rather than rediscovered
 	// from whatever chrome is expanded when the height changes.
 	#chromeFloor: number | undefined;
-	// Chrome height of the last frame with a streaming block. Chrome still that
-	// tall once the turn ends and its height settles is permanent, so it becomes
-	// the floor: otherwise the rows it clips off the live tail stay hidden until
-	// later output commits them out of order.
+	// Persistent chrome height of the last busy frame (a run in flight or a
+	// block streaming). Chrome still that tall once the run ends and its height
+	// settles is permanent, so it becomes the floor: otherwise the rows it clips
+	// off the live tail stay hidden until later output commits them out of order.
 	#lastBusyChrome: number | undefined;
+	#runActive = false;
+	#transientChrome: ReadonlySet<Component> = new Set();
+	// Fewest rows the transient roots have painted since mount; only rows above it are excluded from the floor.
+	#transientFloor: number | undefined;
 	// Idle chrome height awaiting the settle window, and whether it has elapsed.
 	// Turn-scoped HUDs can close a few frames after the last block finalizes;
 	// billing them first would commit rows they cover and strand a band.
@@ -375,8 +385,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const after: string[] = [];
 		const afterSpans: ViewportClickSpan[] = [];
 		const ends: { root: Component; end: number }[] = [];
+		let transientRows = 0;
 		for (const root of afterRoots) {
+			const start = after.length;
 			this.#renderBelowRoot(root, width, after, afterSpans);
+			if (this.#transientChrome.has(root)) transientRows += after.length - start;
 			ends.push({ root, end: after.length });
 		}
 		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
@@ -385,7 +398,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
 		this.#chromeFloor = Math.min(this.#chromeFloor ?? after.length, after.length);
-		this.#rebaselineChromeFloor(transcript.hasActiveBlock(), after.length);
+		this.#transientFloor = Math.min(this.#transientFloor ?? transientRows, transientRows);
+		this.#rebaselineChromeFloor(
+			this.#runActive || transcript.hasActiveBlock(),
+			after.length - (transientRows - this.#transientFloor),
+		);
 		const belowFloor = this.#chromeFloor;
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
@@ -909,6 +926,17 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.ui.requestRender();
 	}
 
+	/**
+	 * Mark whether a host agent run is in flight. Mid-run gaps with no streaming
+	 * block (tool arguments not yet parseable, between tool calls) then do not
+	 * count as the run ending when the post-run chrome floor is decided.
+	 */
+	setRunActive(active: boolean): void {
+		if (this.#runActive === active) return;
+		this.#runActive = active;
+		this.ui.requestRender();
+	}
+
 	/** Replace optional header content around the stable welcome scene. */
 	setHeaderExtras(before: readonly Component[], after: readonly Component[]): void {
 		if (this.#stopped) return;
@@ -949,6 +977,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#lastBusyChrome = undefined;
 		this.#resetIdleChrome();
 		this.#nativeDock = options.nativeDock;
+		this.#transientChrome = new Set(options.transientChrome);
+		this.#transientFloor = undefined;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);

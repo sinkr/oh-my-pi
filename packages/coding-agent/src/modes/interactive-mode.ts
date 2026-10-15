@@ -2204,6 +2204,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.hookWidgetContainerBelow,
 			],
 			{
+				// Drafts, dialogs and selectors swap into the editor surface; reports and
+				// queued messages are dismissed or consumed. None outlives the user's intent.
+				transientChrome: [this.editorContainer, this.reportContainer, this.pendingMessagesContainer],
 				// Natively the HUD pills lead the dock, queued messages sit between
 				// the working row and the composer, and the attachment chips live
 				// inside the composer.

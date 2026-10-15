@@ -111,6 +111,39 @@ function blankBand(terminal: VirtualTerminal, bottom = "EDITOR"): number {
 	return longest;
 }
 
+/** Stream a 110-paragraph answer one paragraph per frame, then finalize it. */
+async function streamFinalizedAnswer(h: Harness): Promise<void> {
+	const message = new AssistantMessageComponent();
+	h.transcript.addChild(message);
+	const reply = (text: string): AssistantMessage => ({
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		model: "gpt-5.6-sol",
+		stopReason: "stop",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: 1,
+	});
+	const lines = Array.from({ length: 110 }, (_, i) => `line${i}`);
+	for (let n = 1; n <= lines.length; n++) {
+		message.updateContent(reply(lines.slice(0, n).join("\n\n")), { transient: true });
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+	}
+	message.updateContent(reply(lines.join("\n\n")));
+	message.markTranscriptBlockFinalized();
+	h.composer.ui.requestRender();
+	await h.scheduler.settle(h.terminal);
+}
+
 beforeAll(async () => {
 	await initTheme();
 });
@@ -441,41 +474,47 @@ describe("composer inline shrink (#11007)", () => {
 		const rows = 30;
 		const h = makeHarness(COLUMNS, rows, 0);
 		await h.scheduler.settle(h.terminal);
-		const message = new AssistantMessageComponent();
-		h.transcript.addChild(message);
 		h.hud.rows = 23;
-		const reply = (text: string): AssistantMessage => ({
-			role: "assistant",
-			content: [{ type: "text", text }],
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			model: "gpt-5.6-sol",
-			stopReason: "stop",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: 1,
-		});
-		const lines = Array.from({ length: 110 }, (_, i) => `line${i}`);
-		for (let n = 1; n <= lines.length; n++) {
-			message.updateContent(reply(lines.slice(0, n).join("\n\n")), { transient: true });
-			h.composer.ui.requestRender();
-			await h.scheduler.settle(h.terminal);
-		}
-		message.updateContent(reply(lines.join("\n\n")));
-		message.markTranscriptBlockFinalized();
-		h.composer.ui.requestRender();
-		await h.scheduler.settle(h.terminal);
+		await streamFinalizedAnswer(h);
 		// The HUD outlives the finalizing paint by a frame, as a loader does when
 		// the turn-end event trails the message-end event.
 		h.hud.rows = 0;
 		h.composer.ui.requestRender();
 		await h.scheduler.advance(h.terminal, 300);
+		expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+		expect(blankBand(h.terminal)).toBeLessThanOrEqual(1);
+		h.composer.stop();
+	});
+
+	it("keeps turn-scoped chrome out of the floor across a mid-run gap with no streaming block", async () => {
+		const rows = 30;
+		const h = makeHarness(COLUMNS, rows, 0);
+		await h.scheduler.settle(h.terminal);
+		h.composer.setRunActive(true);
+		h.hud.rows = 23;
+		await streamFinalizedAnswer(h);
+		// A tool runs between assistant blocks for longer than the settle window.
+		await h.scheduler.advance(h.terminal, 300);
+		h.hud.rows = 0;
+		h.composer.setRunActive(false);
+		await h.scheduler.advance(h.terminal, 300);
+		expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+		expect(blankBand(h.terminal)).toBeLessThanOrEqual(1);
+		h.composer.stop();
+	});
+
+	it("keeps a draft left open after the run out of the floor", async () => {
+		const rows = 30;
+		const h = makeHarness(COLUMNS, rows, 0);
+		h.composer.setRuntimeChildren([h.transcript, h.hud, h.editor], { transientChrome: [h.editor] });
+		await h.scheduler.settle(h.terminal);
+		h.widget.rows = 15;
+		await streamFinalizedAnswer(h);
+		await h.scheduler.advance(h.terminal, 300);
+		// Submitting or clearing the draft collapses the editor surface.
+		h.widget.rows = 0;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
 		expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
 		expect(blankBand(h.terminal)).toBeLessThanOrEqual(1);
 		h.composer.stop();

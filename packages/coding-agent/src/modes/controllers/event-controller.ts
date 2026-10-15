@@ -1112,6 +1112,7 @@ export class EventController {
 		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
+		this.ctx.composer.setRunActive(true);
 		setRunStatus({ state: "working" });
 		this.ctx.ui.requestRender();
 	}
@@ -2353,6 +2354,7 @@ export class EventController {
 			this.ctx.loadingAnimation = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
+		this.ctx.composer.setRunActive(false);
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#blockingPrompts.clear();
