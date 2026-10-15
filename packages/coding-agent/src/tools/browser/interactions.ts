@@ -920,12 +920,13 @@ function assignInputFiles(el: unknown, files: unknown[]): string | null {
 }
 
 /** Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world. */
-function dropUploadFiles(el: unknown, files: unknown[]): void {
+function dropUploadFiles(el: unknown, files: unknown[], arm: string): void {
 	const element = el as PageElement;
 	const page = globalThis as unknown as PageGlobals;
 	const transfer = new page.DataTransfer();
 	for (const file of files) transfer.items.add(file);
-	for (const type of ["dragenter", "dragover", "drop"]) {
+	// `arm`, private to this drop, comes right before `drop` for {@link watchDropRead}.
+	for (const type of ["dragenter", "dragover", arm, "drop"]) {
 		element.dispatchEvent(new page.DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer }));
 	}
 }
@@ -937,24 +938,23 @@ interface DropReadWatch {
 }
 
 /**
- * Watch for the page reading the files of the next drop on an element: getting the drop's `files` or `items`. Runs in
- * the main world, where the page's listeners get the wrapper whose reads it watches.
+ * Watch for the page reading the files of the drop on an element: getting the drop's `files` or `items` once the
+ * private `arm` event, which {@link dropUploadFiles} fires right before `drop`, has wrapped them. No page listener can
+ * run before it, as one registered for `drop` itself could, and reads during dragenter and dragover stay uncounted.
+ * Runs in the main world, where the page's listeners get the wrapper whose reads it watches.
  */
-function watchDropRead(el: unknown): DropReadWatch {
+function watchDropRead(el: unknown, arm: string): DropReadWatch {
 	interface DropEvent {
-		target: unknown;
 		dataTransfer: object | null;
 	}
-	interface EventRoot {
-		addEventListener(type: string, listener: (event: DropEvent) => void, capture: boolean): void;
-		removeEventListener(type: string, listener: (event: DropEvent) => void, capture: boolean): void;
+	interface ArmTarget {
+		addEventListener(type: string, listener: (event: DropEvent) => void): void;
+		removeEventListener(type: string, listener: (event: DropEvent) => void): void;
 	}
-	const element = el as PageElement;
-	// The drop is not composed, so it never leaves the element's document or shadow root.
-	const root = element.getRootNode() as unknown as EventRoot;
+	const element = el as unknown as ArmTarget;
 	const instrument = (event: DropEvent): void => {
 		const transfer = event.dataTransfer;
-		if (event.target !== element || !transfer) return;
+		if (!transfer) return;
 		for (const key of ["files", "items"]) {
 			// The wrapper's own prototype, not the `DataTransfer` global a page may replace.
 			const get = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(transfer), key)?.get;
@@ -967,8 +967,8 @@ function watchDropRead(el: unknown): DropReadWatch {
 			});
 		}
 	};
-	const watch = { read: false, end: () => root.removeEventListener("drop", instrument, true) };
-	root.addEventListener("drop", instrument, true);
+	const watch = { read: false, end: () => element.removeEventListener(arm, instrument) };
+	element.addEventListener(arm, instrument);
 	return watch;
 }
 
@@ -979,24 +979,32 @@ function endDropReadWatch(watch: DropReadWatch): boolean {
 }
 
 /**
- * Run `drop` on `zone` and report whether the page read the dropped files. Canceling proves nothing: pages cancel
- * dragover and drop document-wide only to stop the browser navigating to a dropped file. A read is the strongest signal
- * there is, not proof of acceptance: a document guard that checks `files.length` counts too, and counting element-level
- * reads only would fail delegated drop zones, which read at the document (React 16 and older, jQuery
- * `.on("drop", selector)`).
+ * Run `drop` on `zone` with a fresh private arm event type and report whether the page read the dropped files.
+ * Canceling proves nothing: pages cancel dragover and drop document-wide only to stop the browser navigating to a
+ * dropped file. A read is the strongest signal there is, not proof of acceptance: a document guard that checks
+ * `files.length` counts too, and counting element-level reads only would fail delegated drop zones, which read at the
+ * document (React 16 and older, jQuery `.on("drop", selector)`).
  */
-async function dropRead(
+export async function dropRead(
 	zone: ElementHandle,
-	drop: () => Promise<void>,
+	drop: (arm: string) => Promise<void>,
 	signal: AbortSignal | undefined,
 ): Promise<boolean> {
+	const arm = `omp-upload-drop-${crypto.randomUUID()}`;
 	const realm = zone.frame.mainRealm();
 	const target = await untilAborted(signal, () => realm.adoptHandle(zone));
 	try {
-		const watch = await untilAborted(signal, () => realm.evaluateHandle(watchDropRead, target));
+		const watching = realm.evaluateHandle(watchDropRead, target, arm);
+		const watch = await untilAborted(signal, () => watching).catch(error => {
+			// An abort does not stop the evaluation; end the watch once it arrives.
+			void watching
+				.then(late => late.evaluate(endDropReadWatch).finally(() => late.dispose()))
+				.catch(() => undefined);
+			throw error;
+		});
 		try {
 			try {
-				await drop();
+				await drop(arm);
 			} catch (error) {
 				await watch.evaluate(endDropReadWatch).catch(() => undefined);
 				throw error;
@@ -1118,7 +1126,7 @@ async function deliverToDropZone(
 		try {
 			const read = await dropRead(
 				zone,
-				() => untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files)),
+				arm => untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files, arm)),
 				signal,
 			);
 			if (!read) {
