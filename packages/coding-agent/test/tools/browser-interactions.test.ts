@@ -732,7 +732,7 @@ return { values, reported: await tab.evaluate(() => window.reported), refused, a
 					action: "run",
 					name: tabName,
 					code: `const colors = [];
-for (const value of ["red", "oklab(0.5 0.1 0.1)", "rgb(0 0 0)"]) {
+for (const value of ["red", "oklab(0.5 0.1 0.1)", "rgb(0 0 0)", "oklab(0 0 0)", "color(srgb 0 0 0)"]) {
   try {
     await tab.fill("#color", value);
     colors.push(await tab.value("#color"));
@@ -750,7 +750,7 @@ return { colors, refused, date: await tab.value("#date") };`,
 				context,
 			);
 			expect(valueFrom<{ colors: string[]; refused: string; date: string }>(result)).toEqual({
-				colors: ["#ff0000", "#a14203", "#000000"],
+				colors: ["#ff0000", "#a14203", "#000000", "#000000", "#000000"],
 				refused: expect.stringContaining('<input type=date> does not accept "12/10/2026"'),
 				date: "2020-01-01",
 			});
@@ -833,6 +833,52 @@ return await tab.evaluate(() => ({ customized: Object.getPrototypeOf(document.qu
 			expect(valueFrom<{ customized: boolean; seen: string[] }>(result)).toEqual({
 				customized: true,
 				seen: ["7", "3"],
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
+	test("fills a customized built-in picker without running the page class's own value accessor", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `picker-accessor-${crypto.randomUUID()}`;
+		// The page's class overrides `value` and logs each write; fill reaches the native setter, not this one,
+		// so the accessor runs on neither the copy fill validates on nor the live input.
+		const accessorHtml = `<!doctype html><script>
+window.calls = [];
+customElements.define("x-range", class extends HTMLInputElement {
+  get value() { return super.value; }
+  set value(next) { calls.push(next); super.value = next; }
+}, { extends: "input" });
+</script><input id="volume" is="x-range" type="range" min="0" max="10" aria-label="Volume">`;
+		const context = { session, toolCallId: "browser-picker-accessor" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(accessorHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#volume", "3");
+const filled = await tab.value("#volume");
+const { elements } = await tab.observe();
+await (await tab.id(elements.find(element => element.name === "Volume").id)).fill("7");
+return {
+  customized: await tab.evaluate(() => Object.getPrototypeOf(document.querySelector("#volume")) !== HTMLInputElement.prototype),
+  values: [filled, await tab.value("#volume")],
+  calls: await tab.evaluate(() => window.calls),
+};`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<{ customized: boolean; values: string[]; calls: string[] }>(result)).toEqual({
+				customized: true,
+				values: ["3", "7"],
+				calls: [],
 			});
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);

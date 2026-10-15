@@ -479,7 +479,9 @@ export async function fillViaHandle(
 				node.focus?.();
 				// The native setter bypasses value trackers that frameworks (React) install on the element, so
 				// they see the new value as a change instead of their own write. It is looked up past the
-				// prototypes of a customized built-in (`<input is=…>`), which do not own `value`.
+				// prototypes of a customized built-in (`<input is=…>`), which do not own `value`. A page class
+				// that defines its own `value` accessor is not on the chain this function sees, so that accessor
+				// never runs here.
 				let proto = Object.getPrototypeOf(node);
 				let descriptor: PropertyDescriptor | undefined;
 				while (proto && !(descriptor = Object.getOwnPropertyDescriptor(proto, "value"))) {
@@ -503,26 +505,18 @@ export async function fillViaHandle(
 					if (setValue) setValue.call(probe, wanted);
 					else probe.value = wanted;
 					// The browser normalises what it accepts (a colour to #rrggbb, a time's seconds), turns what
-					// it rejects into "" (a colour into #000000, a range into its midpoint) and clamps a range. A
-					// colour is refused when it lands on #000000 without naming black, as canvas resolves it. A
+					// it rejects into "" (a range into its midpoint) and clamps a range. A colour is refused when
+					// the browser's CSS parser refuses it: a rejected one and a black one both land on #000000. A
 					// rejected range number can land on the midpoint it coerces to (`0x5`), so its spelling is
 					// checked against the decimal form the browser parses. Only the date and time types can be
 					// cleared.
 					const actual = probe.value ?? "";
 					let refused: boolean;
 					if (kind === "color") {
-						const { OffscreenCanvas } = globalThis as unknown as {
-							OffscreenCanvas: new (
-								width: number,
-								height: number,
-							) => { getContext(type: "2d"): { fillStyle: string } | null };
+						const { CSS } = globalThis as unknown as {
+							CSS: { supports(property: string, value: string): boolean };
 						};
-						const paint = new OffscreenCanvas(1, 1).getContext("2d");
-						if (paint) {
-							paint.fillStyle = "#ffffff";
-							paint.fillStyle = wanted;
-						}
-						refused = actual === "#000000" && paint?.fillStyle !== "#000000";
+						refused = !CSS.supports("color", wanted);
 					} else if (kind === "range") {
 						refused =
 							!/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(wanted) || Number(actual) !== Number(wanted);
