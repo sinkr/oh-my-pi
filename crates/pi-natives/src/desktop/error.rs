@@ -15,6 +15,7 @@ pub enum ErrorCode {
 	StaleRef,
 	AxUnsupported,
 	AxFailed,
+	AxUnconfirmed,
 	Unsupported,
 	SpaceUnsupported,
 	SpaceMoveDenied,
@@ -39,6 +40,7 @@ impl ErrorCode {
 			Self::StaleRef => "StaleRef",
 			Self::AxUnsupported => "AxUnsupported",
 			Self::AxFailed => "AxFailed",
+			Self::AxUnconfirmed => "AxUnconfirmed",
 			Self::Unsupported => "Unsupported",
 			Self::SpaceUnsupported => "SpaceUnsupported",
 			Self::SpaceMoveDenied => "SpaceMoveDenied",
@@ -112,6 +114,12 @@ impl DesktopError {
 		Self::new(ErrorCode::AxFailed, message)
 	}
 
+	#[cfg(target_os = "macos")]
+	pub(crate) fn ax_unconfirmed(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::AxUnconfirmed, message)
+	}
+
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	pub(crate) fn unsupported(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::Unsupported, message)
 	}
