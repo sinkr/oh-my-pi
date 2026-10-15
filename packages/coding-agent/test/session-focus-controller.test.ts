@@ -64,6 +64,8 @@ interface Harness {
 	setSessionCalls: Array<[AgentSession, string | undefined]>;
 	reloadTodoSessions: AgentSession[];
 	pendingMessagesContainer: Container;
+	/** Run flag last handed to the composer's chrome-floor accounting. */
+	runActive: () => boolean;
 	counts: {
 		clearTransientSessionUi: () => number;
 		resetTranscriptAnchors: () => number;
@@ -82,6 +84,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	let resetTranscriptAnchors = 0;
 	let renderInitialMessages = 0;
 	let mainUnsubscribe = 0;
+	let runActive = false;
 
 	const ctx = {
 		session: main.session,
@@ -124,6 +127,11 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		updatePendingMessagesDisplay: () => uiHelpers.updatePendingMessagesDisplay(),
 		updateEditorBorderColor() {},
 		ui: { requestRender() {}, requestComponentRender() {} },
+		composer: {
+			setRunActive: (active: boolean) => {
+				runActive = active;
+			},
+		},
 		showStatus() {},
 		collabGuest: undefined,
 	} as unknown as InteractiveModeContext;
@@ -142,6 +150,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		setSessionCalls,
 		reloadTodoSessions,
 		pendingMessagesContainer,
+		runActive: () => runActive,
 		counts: {
 			clearTransientSessionUi: () => clearTransientSessionUi,
 			resetTranscriptAnchors: () => resetTranscriptAnchors,
@@ -280,6 +289,19 @@ describe("SessionFocusController", () => {
 		// Guard fires once: subsequent updates pass through unsynthesized.
 		await worker.emit({ type: "message_update", message });
 		expect(h.handledEvents.slice(3)).toEqual([{ type: "message_update", message }]);
+	});
+
+	it("clears the run flag when unfocusing a streaming worker back to an idle main session", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub({ isStreaming: true });
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+
+		await h.controller.focusAgent("Worker");
+		expect(h.runActive()).toBe(true);
+		// The worker is still streaming, so no agent_end ever reaches the main view.
+		await h.controller.focusParent();
+		expect(h.controller.target).toBeUndefined();
+		expect(h.runActive()).toBe(false);
 	});
 
 	it("does not restart the next assistant when an older message end finishes rendering", async () => {

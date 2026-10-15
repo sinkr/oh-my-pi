@@ -216,6 +216,8 @@ export class SessionFocusController {
 			if (generation !== this.#attachGeneration) return false;
 			this.ctx.statusLine.setSession(target, this.#focusedAgentId);
 			// Reset run bookkeeping before replay populates pending tool handles.
+			// The detached view's run never delivers its agent_end here, so the flag follows the new target.
+			this.ctx.composer.setRunActive(target.isStreaming);
 			if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
 			else setRunStatus({ state: "idle" });
 			if (generation !== this.#attachGeneration) return false;
