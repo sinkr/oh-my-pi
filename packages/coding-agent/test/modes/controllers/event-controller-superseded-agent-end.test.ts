@@ -447,4 +447,70 @@ describe("EventController superseded agent_end", () => {
 		await ended;
 		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
 	});
+
+	it("keeps main command panels queued when a focused worker settles while the main session streams", async () => {
+		const { ctx, streamState } = createContext();
+		const controller = new EventController(ctx);
+
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		// Main still streams (so its panels are queued) while the focused worker ends.
+		streamState.isStreaming = true;
+		streamState.viewIsStreaming = false;
+		await controller.handleEvent(AGENT_END);
+		expect(ctx.flushPendingCommandOutput).not.toHaveBeenCalled();
+
+		// The non-terminal settle path honours the same main-stream guard.
+		await controller.handleEvent({
+			type: "agent_end",
+			messages: [],
+			isTerminal: false,
+		} as unknown as AgentSessionEvent);
+		expect(ctx.flushPendingCommandOutput).not.toHaveBeenCalled();
+
+		// Main's own settle mounts them.
+		streamState.isStreaming = false;
+		await controller.handleEvent(AGENT_END);
+		expect(ctx.flushPendingCommandOutput).toHaveBeenCalledTimes(1);
+	});
+
+	it("flushes queued command panels on a quiet-main reattach and not while main streams", async () => {
+		const { ctx, streamState } = createContext();
+		const controller = new EventController(ctx);
+
+		streamState.isStreaming = true;
+		controller.flushDeferredMainCommandOutput();
+		expect(ctx.flushPendingCommandOutput).not.toHaveBeenCalled();
+
+		streamState.isStreaming = false;
+		controller.flushDeferredMainCommandOutput();
+		expect(ctx.flushPendingCommandOutput).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a different paused session's composer busy when a stale teardown ends", async () => {
+		const { ctx } = createContext();
+		vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const switching = Promise.withResolvers<void>();
+		ctx.flushPendingModelSwitch = vi.fn(() => switching.promise);
+		const controller = new EventController(ctx);
+
+		const ended = controller.handleEvent({
+			type: "agent_end",
+			messages: [{ role: "assistant", stopReason: "stop", content: [] }],
+		} as unknown as AgentSessionEvent);
+		await Promise.resolve();
+
+		// Focus attaches a different session that is paused (post-prompt work, not streaming).
+		const paused = createInteractiveModeContext({
+			viewSession: { isStreaming: false, hasPostPromptWork: true, getLastAssistantMessage: () => undefined },
+		}).viewSession;
+		Object.defineProperty(ctx, "viewSession", { get: () => paused });
+		controller.restoreRunActivity();
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+
+		switching.resolve();
+		await ended;
+		// The old view's teardown must not clear the restored busy flag.
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+	});
 });

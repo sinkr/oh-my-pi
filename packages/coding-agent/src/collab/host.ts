@@ -1091,6 +1091,7 @@ export class CollabHost {
 		const tokens = breakdown.usedTokens ?? 0;
 		return {
 			isStreaming: session.isStreaming,
+			runActive: session.hasLogicalRunActivity,
 			isAborting: session.isAborting,
 			queuedMessageCount: session.queuedMessageCount,
 			sessionName: session.sessionName,

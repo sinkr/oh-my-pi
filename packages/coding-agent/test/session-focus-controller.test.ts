@@ -73,10 +73,13 @@ interface Harness {
 		renderInitialMessages: () => number;
 		mainUnsubscribe: () => number;
 		mainModelSwitchFlushes: () => number;
+		mainCommandOutputFlushes: () => number;
 	};
 }
 
-function makeHarness(options: { renderInitialMessages?: () => void | Promise<void> } = {}): Harness {
+function makeHarness(
+	options: { renderInitialMessages?: () => void | Promise<void>; onMainCommandOutputFlush?: () => void } = {},
+): Harness {
 	const main = makeSessionStub();
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
@@ -88,6 +91,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	let mainUnsubscribe = 0;
 	let runActive = false;
 	let mainModelSwitchFlushes = 0;
+	let mainCommandOutputFlushes = 0;
 
 	const ctx = {
 		session: main.session,
@@ -110,6 +114,10 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			restorePendingToolResults() {},
 			async flushDeferredMainModelSwitch() {
 				mainModelSwitchFlushes++;
+			},
+			flushDeferredMainCommandOutput() {
+				mainCommandOutputFlushes++;
+				options.onMainCommandOutputFlush?.();
 			},
 			restoreRunActivity() {
 				runActive = ctx.viewSession.runStartedAt !== undefined;
@@ -166,6 +174,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			renderInitialMessages: () => renderInitialMessages,
 			mainUnsubscribe: () => mainUnsubscribe,
 			mainModelSwitchFlushes: () => mainModelSwitchFlushes,
+			mainCommandOutputFlushes: () => mainCommandOutputFlushes,
 		},
 	};
 }
@@ -349,6 +358,25 @@ describe("SessionFocusController", () => {
 		await h.controller.focusAgent("Worker");
 
 		expect(h.counts.mainModelSwitchFlushes()).toBe(0);
+	});
+
+	it("mounts queued main command panels after the transcript rebuild when focus returns to main", async () => {
+		const order: string[] = [];
+		const h = makeHarness({
+			renderInitialMessages: () => void order.push("render"),
+			onMainCommandOutputFlush: () => void order.push("flush"),
+		});
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		await h.controller.focusAgent("Worker");
+		// A worker attach never mounts main's queued panels into the worker transcript.
+		expect(h.counts.mainCommandOutputFlushes()).toBe(0);
+
+		await h.controller.focusParent();
+
+		expect(h.counts.mainCommandOutputFlushes()).toBe(1);
+		// Flushing before the rebuild would let renderInitialMessages clear the panels.
+		expect(order.slice(-2)).toEqual(["render", "flush"]);
 	});
 
 	it("does not restart the next assistant when an older message end finishes rendering", async () => {

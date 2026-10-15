@@ -230,6 +230,9 @@ export class SessionFocusController {
 			}
 			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 			if (generation !== this.#attachGeneration) return false;
+			// Command panels queued while main streamed mount into the rebuilt main
+			// transcript; a worker settling meanwhile left them queued for this.
+			if (target === this.ctx.session) this.ctx.eventController.flushDeferredMainCommandOutput();
 			this.ctx.eventController.restorePendingToolResults();
 
 			const live = target.agent.state.streamMessage;

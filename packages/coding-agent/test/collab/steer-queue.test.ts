@@ -87,7 +87,7 @@ interface StreamingHostHarness {
 }
 
 /** Context double for a host whose agent is mid-turn (isStreaming === true). */
-function makeStreamingHostContext(): StreamingHostHarness {
+function makeStreamingHostContext(options: { paused?: boolean } = {}): StreamingHostHarness {
 	const prompts: CapturedPrompt[] = [];
 	const promptWaiters: ((prompt: CapturedPrompt) => void)[] = [];
 	const ctx = {
@@ -102,7 +102,9 @@ function makeStreamingHostContext(): StreamingHostHarness {
 			onEntryAppended: undefined,
 		},
 		session: {
-			isStreaming: true,
+			isStreaming: !options.paused,
+			// A paused host is stream-idle but its logical run is still open.
+			hasLogicalRunActivity: true,
 			get queuedMessageCount(): number {
 				return prompts.filter(prompt => prompt.options?.queueChipText).length;
 			},
@@ -207,5 +209,23 @@ describe("collab mid-turn guest prompts", () => {
 			if (frame.t === "state" && frame.state.queuedMessageCount === 1) sawQueuedCount = true;
 		}
 		expect(sawQueuedCount).toBe(true);
+	});
+
+	it("reports an open logical run to guests while the stream is idle", async () => {
+		const relay = startTestRelay();
+		cleanups.push(relay.stop);
+		// Post-prompt work / an async wake: the stream is idle but the run resumes.
+		const harness = makeStreamingHostContext({ paused: true });
+		const host = new CollabHost(harness.ctx);
+		await host.start(relay.url);
+		cleanups.push(() => host.stop("test done"));
+
+		const guest = await joinAsGuest(host.link, "reader");
+		cleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		expect(welcome.state.isStreaming).toBe(false);
+		expect(welcome.state.runActive).toBe(true);
 	});
 });

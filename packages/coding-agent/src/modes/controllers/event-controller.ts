@@ -812,13 +812,7 @@ export class EventController {
 	/** Restore the viewed logical run, including pauses whose stream timestamp was cleared. */
 	restoreRunActivity(): void {
 		const session = this.ctx.viewSession;
-		const active =
-			session.runStartedAt !== undefined ||
-			session.isStreaming ||
-			session.isRetrying ||
-			session.hasPostPromptWork ||
-			session.hasPendingAsyncWork() ||
-			session.queuedMessageCount > 0;
+		const active = session.hasLogicalRunActivity;
 		this.ctx.composer.setRunActive(active);
 		if (active && !session.isStreaming) {
 			// Attachment can miss the nonterminal event. Reuse its cancellation/
@@ -2325,22 +2319,33 @@ export class EventController {
 			// panels queued would render them out of order, minutes later, after the
 			// user was told they were only waiting for the turn. The transcript is
 			// quiescent at a settle, which is the condition #4806 wanted.
-			this.ctx.flushPendingCommandOutput();
+			this.#flushMainCommandOutput();
 			return;
 		}
 		this.#terminalSettleCount += 1;
 		this.#terminalTeardownActive = true;
 		const epoch = this.#runEpoch;
+		const session = this.ctx.viewSession;
+		const generation = this.#transcriptGeneration;
 		try {
 			setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		} finally {
 			this.#terminalTeardownActive = false;
 			// A focus attach can land `restoreRunActivity()` while the teardown awaits the model
-			// switch; it reads the still-live post-prompt work and flips the composer back to busy,
-			// and its watcher refused to arm under the teardown token. The teardown is authoritative,
-			// so settle the composer unless a new run started meanwhile (which bumps the epoch).
-			if (epoch === this.#runEpoch && !this.ctx.viewSession.isStreaming) this.ctx.composer.setRunActive(false);
+			// switch and flip the composer back to busy, and its watcher refused to arm under the
+			// teardown token. Settle the composer only when this same view is still the one that
+			// ended: a different attached session, a rebuilt transcript, or a newer run owns its own
+			// flag. Even then, defer to the logical predicate so paused work (post-prompt, async
+			// wake, queued continuation) keeps the composer busy.
+			if (
+				epoch === this.#runEpoch &&
+				generation === this.#transcriptGeneration &&
+				this.ctx.viewSession === session &&
+				!session.hasLogicalRunActivity
+			) {
+				this.ctx.composer.setRunActive(false);
+			}
 		}
 		// This settle may belong to an extension-started turn while the main
 		// input loop remains asleep. Do not await session-idle from its own event.
@@ -2428,13 +2433,32 @@ export class EventController {
 	}
 
 	/**
+	 * Mount command panels queued while the main run streamed. `presentCommandOutput`
+	 * queues against the main session, so a focused worker settling first must not
+	 * flush them: they would mount into the worker's transcript and the next focus
+	 * rebuild would drop them. They flush at the main settle, or on quiet-main
+	 * reattachment via {@link flushDeferredMainOutput}.
+	 */
+	#flushMainCommandOutput(): void {
+		if (this.ctx.session.isStreaming) return;
+		this.ctx.flushPendingCommandOutput();
+	}
+
+	/**
 	 * Apply a model switch deferred while the main run streamed, once focus
 	 * returns to a quiet main session. The main subscription is dropped for the
 	 * whole focus, so its terminal `agent_end` may have gone unobserved and no
-	 * later settle is guaranteed to flush it.
+	 * later settle is guaranteed to flush it. Queued command panels are handled
+	 * separately by {@link flushDeferredMainCommandOutput}: they must mount after
+	 * the transcript rebuild.
 	 */
 	async flushDeferredMainModelSwitch(): Promise<void> {
 		await this.#flushMainModelSwitch();
+	}
+
+	/** Mount queued main command panels after a quiet-main reattach has rebuilt the transcript. */
+	flushDeferredMainCommandOutput(): void {
+		this.#flushMainCommandOutput();
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
@@ -2468,7 +2492,7 @@ export class EventController {
 		// final history — seal it instead of letting its spinner tick while idle.
 		this.#resolveDisplaceablePoll();
 		this.#resolveDisplaceableTodo();
-		this.ctx.flushPendingCommandOutput();
+		this.#flushMainCommandOutput();
 		this.#lastAssistantComponent = undefined;
 		// When the interrupted/failed turn died on a tool call, this replaces the
 		// torn-down "Working…" row with the "F5 to Retry" affordance.
