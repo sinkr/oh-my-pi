@@ -303,6 +303,8 @@ export class EventController {
 	#runEpoch = 0;
 	/** Epoch of the in-flight {@link #finishWhenRunSettles} watch, if any. */
 	#settleWatchEpoch: number | undefined = undefined;
+	/** Changes whenever transcript ownership is detached, including same-session reattachment. */
+	#transcriptGeneration = 0;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -779,7 +781,19 @@ export class EventController {
 		// the listener's first await, preserving the timing the coalescing
 		// tests assert on. `message_update` enqueue is itself synchronous and
 		// needs no serialization.
-		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event));
+		this.ctx.unsubscribe?.();
+		const session = this.ctx.session;
+		let active = true;
+		// Startup can finish after agent_start has already fired.
+		this.ctx.composer.setRunActive(session.runStartedAt !== undefined);
+		const unsubscribe = session.subscribe(event => {
+			if (!active || this.ctx.viewSession !== session) return;
+			return this.dispatchSessionEvent(event);
+		});
+		this.ctx.unsubscribe = () => {
+			active = false;
+			unsubscribe();
+		};
 	}
 
 	/**
@@ -797,12 +811,16 @@ export class EventController {
 	 * snapshot first so ordering is preserved.
 	 */
 	async dispatchSessionEvent(event: AgentSessionEvent): Promise<void> {
+		const generation = this.#transcriptGeneration;
+		const session = this.ctx.viewSession;
 		if (event.type === "message_update") {
 			this.#enqueueMessageUpdate(event);
 			return;
 		}
 		await this.#runSerialized(async () => {
+			if (generation !== this.#transcriptGeneration || session !== this.ctx.viewSession) return;
 			await this.#flushPendingMessageUpdate();
+			if (generation !== this.#transcriptGeneration || session !== this.ctx.viewSession) return;
 			await this.handleEvent(event);
 		});
 	}
@@ -871,6 +889,8 @@ export class EventController {
 		this.#vocalizedMessageUpdates.add(event);
 		this.#pendingMessageUpdate = event;
 		if (this.#messageUpdateTimer) return;
+		const generation = this.#transcriptGeneration;
+		const session = this.ctx.viewSession;
 		this.#messageUpdateTimer = setTimeout(() => {
 			this.#messageUpdateTimer = undefined;
 			// Mirror AgentSession.#emit: attach a catch so a streaming rebuild
@@ -880,6 +900,7 @@ export class EventController {
 			// agent_end landing mid-window cannot overtake this flush (issue
 			// #7443 follow-up).
 			void this.#runSerialized(async () => {
+				if (generation !== this.#transcriptGeneration || session !== this.ctx.viewSession) return;
 				await this.#flushPendingMessageUpdate();
 			}).catch(err => {
 				logger.warn("Message update flush rejected", {
@@ -917,6 +938,8 @@ export class EventController {
 	 * session's transcript and must not bleed into the new one.
 	 */
 	resetTranscriptAnchors(): void {
+		this.#transcriptGeneration++;
+		this.#settleWatchEpoch = undefined;
 		if (this.#messageUpdateTimer) {
 			clearTimeout(this.#messageUpdateTimer);
 			this.#messageUpdateTimer = undefined;
@@ -2298,10 +2321,15 @@ export class EventController {
 		if (this.#settleWatchEpoch === epoch) return;
 		this.#settleWatchEpoch = epoch;
 		const session = this.ctx.viewSession;
+		const generation = this.#transcriptGeneration;
 		// No `hasAdmittedSubmission` gate: this very settle is emitted while the
 		// prompt that produced it is still admitted, and a new submission starts a
 		// run whose `agent_start` bumps the epoch anyway.
-		const superseded = () => this.#runEpoch !== epoch || this.ctx.viewSession !== session || session.isStreaming;
+		const superseded = () =>
+			this.#runEpoch !== epoch ||
+			this.#transcriptGeneration !== generation ||
+			this.ctx.viewSession !== session ||
+			session.isStreaming;
 		try {
 			while (!superseded()) {
 				await session.waitForIdle();
@@ -2324,7 +2352,9 @@ export class EventController {
 		} catch (error) {
 			logger.warn("Non-terminal settle teardown failed", { error: String(error) });
 		} finally {
-			if (this.#settleWatchEpoch === epoch) this.#settleWatchEpoch = undefined;
+			if (this.#transcriptGeneration === generation && this.#settleWatchEpoch === epoch) {
+				this.#settleWatchEpoch = undefined;
+			}
 		}
 	}
 

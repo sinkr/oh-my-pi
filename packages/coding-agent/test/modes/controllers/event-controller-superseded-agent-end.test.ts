@@ -235,6 +235,91 @@ describe("EventController superseded agent_end", () => {
 		expect(loader.stop).not.toHaveBeenCalled();
 	});
 
+	it("ignores a disposed main listener even after the same session is attached again", async () => {
+		const { ctx, loader } = createContext();
+		Object.defineProperty(ctx, "viewSession", { get: () => ctx.session });
+		let listener: ((event: AgentSessionEvent) => void | Promise<void>) | undefined;
+		vi.spyOn(ctx.session, "subscribe").mockImplementation(fn => {
+			listener = fn;
+			return () => {};
+		});
+		const controller = new EventController(ctx);
+		controller.subscribeToAgent();
+		if (!listener) throw new Error("No main subscription");
+		const detachedListener = listener;
+		ctx.unsubscribe?.();
+		controller.resetTranscriptAnchors();
+		controller.subscribeToAgent();
+		await controller.handleEvent(AGENT_START);
+		await detachedListener(AGENT_END);
+
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(loader.stop).not.toHaveBeenCalled();
+		ctx.unsubscribe?.();
+	});
+
+	it.each([false, true])(
+		"does not let a queued main end stop a paused view after reset (same session: %s)",
+		async sameSession => {
+			const { ctx, loader } = createContext();
+			const main = ctx.session;
+			const worker = ctx.viewSession;
+			let view = main;
+			Object.defineProperty(ctx, "viewSession", { get: () => view });
+			const controller = new EventController(ctx);
+			await controller.handleEvent(AGENT_START);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const handle = controller.handleEvent.bind(controller);
+			vi.spyOn(controller, "handleEvent").mockImplementation(async event => {
+				if (event.type === "turn_start") {
+					entered.resolve();
+					await release.promise;
+				} else {
+					await handle(event);
+				}
+			});
+			const blocked = controller.dispatchSessionEvent({ type: "turn_start" });
+			await entered.promise;
+			const staleEnd = controller.dispatchSessionEvent(AGENT_END);
+			view = worker;
+			controller.resetTranscriptAnchors();
+			if (sameSession) {
+				view = main;
+				controller.resetTranscriptAnchors();
+			}
+			release.resolve();
+			await blocked;
+			await staleEnd;
+
+			expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+			expect(loader.stop).not.toHaveBeenCalled();
+			expect(ctx.loadingAnimation).toBe(loader);
+		},
+	);
+
+	it("invalidates a settle watch when the same paused session is reattached", async () => {
+		const { ctx, loader } = createContext();
+		const controller = new EventController(ctx);
+		const continuation = Promise.withResolvers<void>();
+		const waitFinished = Promise.withResolvers<void>();
+		vi.spyOn(ctx.viewSession, "waitForIdle").mockImplementation(async () => {
+			await continuation.promise;
+			waitFinished.resolve();
+		});
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent({ type: "agent_end", messages: [], isTerminal: false });
+		controller.resetTranscriptAnchors();
+		controller.resetTranscriptAnchors();
+		continuation.resolve();
+		await waitFinished.promise;
+		await Promise.resolve();
+		await controller.dispatchSessionEvent({ type: "turn_start" });
+
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(loader.stop).not.toHaveBeenCalled();
+	});
+
 	it("flushes queued command panels at a non-terminal settle", async () => {
 		const { ctx, streamState } = createContext();
 		const controller = new EventController(ctx);
