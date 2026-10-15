@@ -723,6 +723,55 @@ describe("composer inline shrink (#11007)", () => {
 		}
 	});
 
+	it("does not bill a transient HUD already painted on the first frame into the floor", async () => {
+		const rows = 30;
+		const shell = Array.from({ length: 12 }, (_, i) => `shell${i}`);
+		const terminal = new VirtualTerminal(COLUMNS, rows);
+		terminal.write(`${shell.join("\r\n")}${"\r\n".repeat(rows + 1)}`);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		const todos = new InlineWidget();
+		const editor = new Container();
+		editor.addChild(new Text("EDITOR", 0, 0));
+		// A resumed session paints its restored todo HUD before the first frame.
+		todos.rows = 8;
+		composer.setRuntimeChildren([transcript, todos, editor], {
+			transientChrome: [editor],
+			selfClearingChrome: [todos],
+		});
+		composer.start({ playWelcomeIntro: false });
+		const h = { terminal, scheduler, composer, transcript, editor };
+		try {
+			await h.scheduler.settle(h.terminal);
+			composer.setRunActive(true);
+			const answer = Array.from({ length: 110 }, (_, i) => `line${i}`);
+			for (const row of answer) transcript.addChild({ render: () => [row] });
+			composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+			composer.setRunActive(false);
+			await h.scheduler.advance(h.terminal, 300);
+
+			// The todo HUD auto-clears: rows it covered must come back, not leave a band.
+			todos.rows = 0;
+			composer.ui.requestRender();
+			await h.scheduler.advance(h.terminal, 300);
+			expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+			expect(blankBand(h.terminal)).toBeLessThanOrEqual(2);
+			const history = h.terminal
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trim())
+				.filter(row => /^(shell|line)\d+$/.test(row));
+			expect(history).toEqual([...shell, ...answer]);
+		} finally {
+			composer.stop();
+		}
+	});
+
 	it("keeps the editor on the bottom row when a live block collapses under retired history", async () => {
 		const h = makeHarness();
 		const transcript = new TranscriptContainer();

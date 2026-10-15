@@ -104,6 +104,14 @@ export interface RuntimeChildrenOptions {
 	 * part of the post-run chrome floor, so collapsing them refills the screen.
 	 */
 	readonly transientChrome?: readonly Component[];
+	/**
+	 * Transient roots that clear themselves (todo and subagent HUDs, progress).
+	 * Their first paint can be their tallest, e.g. a restored todo list on a
+	 * resumed session, so unlike {@link transientChrome} it is never treated as
+	 * their resting height: all of their rows stay out of the floor. Roots listed
+	 * here are transient and need not also appear in `transientChrome`.
+	 */
+	readonly selfClearingChrome?: readonly Component[];
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -271,7 +279,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#chromeFloorPromoted = false;
 	#runActive = false;
 	#transientChrome: ReadonlySet<Component> = new Set();
-	// Fewest rows the transient roots have painted since mount; only rows above it are excluded from the floor.
+	#selfClearingChrome: ReadonlySet<Component> = new Set();
+	// Fewest rows the user-driven transient roots have painted since mount; only rows above it are excluded from the floor.
 	#transientFloor: number | undefined;
 	// Idle chrome height awaiting the settle window, and whether it has elapsed.
 	// Turn-scoped HUDs can close a few frames after the last block finalizes;
@@ -383,10 +392,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const afterSpans: ViewportClickSpan[] = [];
 		const ends: { root: Component; end: number }[] = [];
 		let transientRows = 0;
+		let selfClearingRows = 0;
 		for (const root of afterRoots) {
 			const start = after.length;
 			this.#renderBelowRoot(root, width, after, afterSpans);
-			if (this.#transientChrome.has(root)) transientRows += after.length - start;
+			if (this.#selfClearingChrome.has(root)) selfClearingRows += after.length - start;
+			else if (this.#transientChrome.has(root)) transientRows += after.length - start;
 			ends.push({ root, end: after.length });
 		}
 		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
@@ -395,8 +406,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
 		this.#transientFloor = Math.min(this.#transientFloor ?? transientRows, transientRows);
-		// Eligible chrome excludes transient rows above their painted minimum; contraction, floor and rebaseline all use it.
-		const eligibleChrome = after.length - (transientRows - this.#transientFloor);
+		// Eligible chrome excludes user-driven transient rows above their painted minimum and every
+		// self-clearing row; contraction, floor and rebaseline all use it.
+		const eligibleChrome = after.length - (transientRows - this.#transientFloor) - selfClearingRows;
 		const promotedChromeContracted = this.#chromeFloorPromoted && eligibleChrome < (this.#chromeFloor ?? 0);
 		this.#chromeFloor = Math.min(this.#chromeFloor ?? eligibleChrome, eligibleChrome);
 		this.#rebaselineChromeFloor(this.#runActive || transcript.hasActiveBlock(), eligibleChrome);
@@ -977,6 +989,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#resetIdleChrome();
 		this.#nativeDock = options.nativeDock;
 		this.#transientChrome = new Set(options.transientChrome);
+		this.#selfClearingChrome = new Set(options.selfClearingChrome);
 		this.#transientFloor = undefined;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {
