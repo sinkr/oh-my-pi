@@ -476,9 +476,15 @@ export async function fillViaHandle(
 					dispatchEvent(event: unknown): boolean;
 				};
 				node.focus?.();
-				// The prototype setter bypasses value trackers that frameworks (React) install on the
-				// element, so they see the new value as a change instead of their own write.
-				const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), "value")?.set;
+				// The native setter bypasses value trackers that frameworks (React) install on the element, so
+				// they see the new value as a change instead of their own write. It is looked up past the
+				// prototypes of a customized built-in (`<input is=…>`), which do not own `value`.
+				let proto = Object.getPrototypeOf(node);
+				let descriptor: PropertyDescriptor | undefined;
+				while (proto && !(descriptor = Object.getOwnPropertyDescriptor(proto, "value"))) {
+					proto = Object.getPrototypeOf(proto);
+				}
+				const setValue = descriptor?.set;
 				const write = (next: string) => (setValue ? setValue.call(node, next) : (node.value = next));
 				// Like the browser's own, input leaves a shadow root and change stays inside it.
 				const report = () => {

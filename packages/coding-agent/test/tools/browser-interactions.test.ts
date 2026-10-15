@@ -716,6 +716,59 @@ return { values, reported: await tab.evaluate(() => window.reported), refused, a
 		}
 	}, 40_000);
 
+	test("fills a customized built-in picker past a value tracker on the element", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `picker-tracker-${crypto.randomUUID()}`;
+		// Like React's value tracker: an own `value` on the element that records each write through it, so an
+		// input event whose value it already recorded reads as no change. The element is a customized built-in, whose
+		// own prototype does not hold `value`; both an observed element's handle and `tab.fill` must still reach the
+		// native setter.
+		const trackerHtml = `<!doctype html><script>
+customElements.define("x-range", class extends HTMLInputElement {}, { extends: "input" });
+</script><input id="volume" is="x-range" type="range" min="0" max="10" aria-label="Volume"><script>
+const field = document.querySelector("#volume");
+const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+let tracked = field.value;
+Object.defineProperty(field, "value", {
+  configurable: true,
+  get() { return native.get.call(this); },
+  set(next) { tracked = String(next); native.set.call(this, next); },
+});
+window.seen = [];
+field.addEventListener("input", () => {
+  if (field.value !== tracked) seen.push(field.value);
+  tracked = field.value;
+});
+</script>`;
+		const context = { session, toolCallId: "browser-picker-tracker" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(trackerHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const { elements } = await tab.observe();
+const main = await tab.id(elements.find(element => element.name === "Volume").id);
+await main.fill("7");
+await tab.fill("#volume", "3");
+return await tab.evaluate(() => ({ customized: Object.getPrototypeOf(document.querySelector("#volume")) !== HTMLInputElement.prototype, seen: window.seen }));`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<{ customized: boolean; seen: string[] }>(result)).toEqual({
+				customized: true,
+				seen: ["7", "3"],
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
 	// Backgrounded headless tabs deliver no animation frames, which stalls every
 	// Puppeteer `Locator` precondition (viewport/stability/enabled) forever.
 	// Virtual time pinned at "pause" reproduces that state deterministically.
