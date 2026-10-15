@@ -19,8 +19,9 @@ import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare"
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
 import { embeddedImageDataUrl } from "../images/shared";
 import * as AIError from "../error";
+import type { ImageContent } from "../types";
 import { type JsonValue, type JudgmentRequest, tokenUsage } from "./types";
-import { type DecodedJudgment, finiteNumber, type JudgmentWire } from "./wire";
+import { JEV_IMAGE_INPUT, type DecodedJudgment, finiteNumber, type JudgmentWire } from "./wire";
 
 function decodeSystemOne(payload: unknown): DecodedJudgment | undefined {
 	if (!isRecord(payload) || !isRecord(payload.answers)) return undefined;
@@ -45,6 +46,21 @@ function stateWithImageReferences(
 	return { ...state, [key]: references };
 }
 
+interface SystemOneImageAsset {
+	type: "image";
+	format: "png" | "jpeg";
+	data_base64: string;
+}
+
+function encodeSystemOneImage(image: ImageContent): SystemOneImageAsset {
+	const mimeType = image.mimeType.toLowerCase();
+	return {
+		type: "image",
+		format: mimeType === "image/png" ? "png" : "jpeg",
+		data_base64: Buffer.from(image.data, "base64").toString("base64"),
+	};
+}
+
 /** A System One dialect posting the verbatim request to `path` under the base URL with the key as bearer. */
 function systemOneWire(path: string): JudgmentWire {
 	return {
@@ -57,31 +73,33 @@ function systemOneWire(path: string): JudgmentWire {
 /** TypeSafe's own route, shared by every System One server. */
 export const typesafeWire: JudgmentWire = {
 	...systemOneWire("/v1/systemone"),
-	images: {
-		mimeTypes: ["image/png", "image/jpeg"],
-		maxBytes: 16 * 1024 * 1024,
-		maxPixels: 2_458_624,
-	},
-	requestHeaders: request => (request.images?.length ? { "TypeSafe-Danger-Zone-Images": "true" } : undefined),
-	encode(request, model) {
-		if (!request.images?.length) return { state: request.state, model, questions: request.questions };
+	images: JEV_IMAGE_INPUT,
+	supportsImageAssets: true,
+	imagesRequireOptIn: true,
+	requestHeaders: (request, imageAssets) =>
+		(request.images?.length ?? 0) > 0 || Object.keys(imageAssets ?? {}).length > 0
+			? { "TypeSafe-Danger-Zone-Images": "true" }
+			: undefined,
+	encode(request, model, imageAssets) {
+		const suppliedAssets = Object.entries(imageAssets ?? {});
+		const images = request.images ?? [];
+		if (suppliedAssets.length === 0 && images.length === 0) {
+			return { state: request.state, model, questions: request.questions };
+		}
 
-		const assets: Record<string, { type: "image"; format: "png" | "jpeg"; data_base64: string }> = {};
+		const assets: Record<string, SystemOneImageAsset> = Object.fromEntries(
+			suppliedAssets.map(([reference, image]) => [reference, encodeSystemOneImage(image)]),
+		);
 		const references: string[] = [];
-		for (const image of request.images) {
+		for (const image of images) {
 			let reference = crypto.randomUUID();
 			while (Object.hasOwn(assets, reference)) reference = crypto.randomUUID();
-			const mimeType = image.mimeType.toLowerCase();
-			assets[reference] = {
-				type: "image",
-				format: mimeType === "image/png" ? "png" : "jpeg",
-				data_base64: Buffer.from(image.data, "base64").toString("base64"),
-			};
+			assets[reference] = encodeSystemOneImage(image);
 			references.push(reference);
 		}
 
 		return {
-			state: stateWithImageReferences(request.state, references),
+			state: references.length ? stateWithImageReferences(request.state, references) : request.state,
 			model,
 			questions: request.questions,
 			assets,
@@ -92,11 +110,8 @@ export const typesafeWire: JudgmentWire = {
 /** OpenRouter Decisions: System One body under `/api/alpha`, with image parts preserved in state. */
 export const openrouterDecisionsWire: JudgmentWire = {
 	...systemOneWire("/decisions"),
-	images: {
-		mimeTypes: ["image/png", "image/jpeg"],
-		maxBytes: 16 * 1024 * 1024,
-		maxPixels: 2_458_624,
-	},
+	images: JEV_IMAGE_INPUT,
+	imagesRequireOptIn: true,
 	encode(request, model) {
 		const imageParts: JsonValue[] = (request.images ?? []).map(image => ({
 			type: "image_url",

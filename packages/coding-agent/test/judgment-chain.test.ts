@@ -77,8 +77,6 @@ const IMAGE_TWO: ImageContent = {
 	mimeType: "image/png",
 };
 
-const OPENROUTER_TEXT_ONLY_NATIVE = OPENROUTER_TEXT_ONLY;
-
 const BUCKET_QUESTION: ChoiceQuestion<"trivial" | "moderate" | "hard"> = {
 	type: "choice",
 	instructions: "Choose a coarse task bucket.",
@@ -95,6 +93,7 @@ function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): 
 	const authStorage = createInMemoryAuthStorage();
 	for (const provider in keys) authStorage.keys.setRuntime(provider, keys[provider]!);
 	const registry = new ModelRegistry(authStorage, "/nonexistent/judgment-chain-models.yml");
+	// Return the supplied fixtures directly; getAvailable's normal auth filtering is intentionally bypassed.
 	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 	return registry;
 }
@@ -352,16 +351,16 @@ describe("ChainJudge", () => {
 		expect(serializedInput).toContain('"detail":"original"');
 	});
 
-	it("selects image-capable OpenRouter Jev after filtering catalog text-only decisions", async () => {
+	it("selects OpenRouter Jev after filtering the text-only native candidate", async () => {
 		expect(OPENROUTER_JEV.input).toContain("image");
-		expect(OPENROUTER_TEXT_ONLY_NATIVE.input).toEqual(["text"]);
+		expect(OPENROUTER_TEXT_ONLY.input).toEqual(["text"]);
 		const settings = Settings.isolated({
-			modelRoles: { judge: `${OPENROUTER_TEXT_ONLY_NATIVE.provider}/${OPENROUTER_TEXT_ONLY_NATIVE.id}` },
+			modelRoles: { judge: `${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}` },
 			"retry.fallbackChains": {
 				judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`, `${VISION_CHAT.provider}/${VISION_CHAT.id}`],
 			},
 		});
-		const registry = makeRegistry([OPENROUTER_TEXT_ONLY_NATIVE, OPENROUTER_JEV, VISION_CHAT], {
+		const registry = makeRegistry([OPENROUTER_TEXT_ONLY, OPENROUTER_JEV, VISION_CHAT], {
 			openrouter: "or-key",
 			[VISION_CHAT.provider]: "vision-key",
 		});
@@ -406,17 +405,14 @@ describe("ChainJudge", () => {
 		expect(local).not.toHaveBeenCalled();
 	});
 
-	it("uses vision chat after filtering catalog text-only native candidates", async () => {
+	it("uses vision chat after filtering the text-only native candidate", async () => {
 		const settings = Settings.isolated({
-			modelRoles: { judge: `${OPENROUTER_TEXT_ONLY_NATIVE.provider}/${OPENROUTER_TEXT_ONLY_NATIVE.id}` },
+			modelRoles: { judge: `${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}` },
 			"retry.fallbackChains": {
-				judge: [
-					`${OPENROUTER_TEXT_ONLY_NATIVE.provider}/${OPENROUTER_TEXT_ONLY_NATIVE.id}`,
-					`${VISION_CHAT.provider}/${VISION_CHAT.id}`,
-				],
+				judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`],
 			},
 		});
-		const registry = makeRegistry([OPENROUTER_TEXT_ONLY_NATIVE, VISION_CHAT], {
+		const registry = makeRegistry([OPENROUTER_TEXT_ONLY, VISION_CHAT], {
 			openrouter: "or-key",
 			[VISION_CHAT.provider]: "vision-key",
 		});
@@ -608,10 +604,10 @@ describe("ChainJudge", () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": {
-				judge: [`${OPENROUTER_TEXT_ONLY_NATIVE.provider}/${OPENROUTER_TEXT_ONLY_NATIVE.id}`],
+				judge: [`${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}`],
 			},
 		});
-		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_TEXT_ONLY_NATIVE], {
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_TEXT_ONLY], {
 			[VISION_CHAT.provider]: "vision-key",
 		});
 		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));
@@ -641,10 +637,10 @@ describe("ChainJudge", () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": {
-				judge: [`${OPENROUTER_TEXT_ONLY_NATIVE.provider}/${OPENROUTER_TEXT_ONLY_NATIVE.id}`],
+				judge: [`${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}`],
 			},
 		});
-		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_TEXT_ONLY_NATIVE], {
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_TEXT_ONLY], {
 			[TEXT_ONLY.provider]: "text-key",
 		});
 		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));

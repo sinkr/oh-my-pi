@@ -288,6 +288,23 @@ describe("NativeJudge", () => {
 		expect(result.usage.input).toBe(5);
 		expect(result.usage.totalTokens).toBe(6);
 	});
+
+	it("requires explicit image opt-in for an unknown direct System One model", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			apiKey: "ts-key",
+			model: "jev-unlisted",
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+
+		const error = await judge.judge({ ...request, images: [IMAGE_REFS[0]] }).catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(calls).toBe(0);
+	});
 	it("encodes TypeSafe images as referenced assets with canonical base64 and the opt-in header", async () => {
 		const state = { ticket: "Inspect the caller's unchanged state." };
 		const originalState = structuredClone(state);
@@ -298,6 +315,7 @@ describe("NativeJudge", () => {
 		const calls: { body: string; headers: Headers }[] = [];
 		const judge = new NativeJudge({
 			apiKey: "ts-key",
+			supportsImages: true,
 			model: "jev-1.14.0",
 			fetch: async (_url, init) => {
 				calls.push({ body: String(init?.body), headers: new Headers(init?.headers) });
@@ -342,6 +360,7 @@ describe("NativeJudge", () => {
 		const bodies: Array<{ state: unknown; assets: Record<string, unknown> }> = [];
 		const judge = new NativeJudge({
 			apiKey: "ts-key",
+			supportsImages: true,
 			fetch: async (_url, init) => {
 				bodies.push(JSON.parse(String(init?.body)));
 				return answered();
@@ -371,6 +390,7 @@ describe("NativeJudge", () => {
 		const calls: Array<{ question: string; reference: string; header: string | null }> = [];
 		const judge = new NativeJudge({
 			apiKey: "ts-key",
+			supportsImages: true,
 			model: "jev-1.14.0",
 			maxQuestions: 1,
 			fetch: async (_url, init) => {
@@ -413,10 +433,118 @@ describe("NativeJudge", () => {
 		expect(new Set(calls.map(call => call.reference)).size).toBe(2);
 	});
 
+	it("retains separate TypeSafe assets through retries and question chunks", async () => {
+		const reference = "caller-chosen-image-ref";
+		const imageAssets = { [reference]: IMAGE_REFS[0] };
+		const state = { photo: reference };
+		const originalState = structuredClone(state);
+		const questions = {
+			first: { type: "noul", instructions: "First?" },
+			second: { type: "noul", instructions: "Second?" },
+		} as const;
+		const attempts = new Map<string, number>();
+		const calls: Array<{
+			question: string;
+			state: unknown;
+			assets: Record<string, unknown>;
+			header: string | null;
+		}> = [];
+		const judge = new NativeJudge({
+			apiKey: "ts-key",
+			supportsImages: true,
+			maxQuestions: 1,
+			fetch: async (_url, init) => {
+				const body = JSON.parse(String(init?.body)) as {
+					state: unknown;
+					assets: Record<string, unknown>;
+					questions: Record<string, unknown>;
+				};
+				const question = Object.keys(body.questions)[0];
+				const count = attempts.get(question) ?? 0;
+				attempts.set(question, count + 1);
+				calls.push({
+					question,
+					state: body.state,
+					assets: body.assets,
+					header: new Headers(init?.headers).get("TypeSafe-Danger-Zone-Images"),
+				});
+				if (count === 0) return new Response("busy", { status: 503, headers: { "retry-after-ms": "1" } });
+				return Response.json({
+					model: "jev-latest",
+					answers: { [question]: { type: "noul", noul: 0.5 } },
+					usage: {},
+				});
+			},
+		});
+
+		const result = await judge.judge({ state, questions }, { imageAssets });
+
+		expect(Object.keys(result.answers).sort()).toEqual(["first", "second"]);
+		expect(calls).toHaveLength(4);
+		for (const call of calls) {
+			expect(call.state).toEqual(state);
+			expect(Object.keys(call.assets)).toEqual([reference]);
+			expect(call.assets[reference]).toEqual({ type: "image", format: "png", data_base64: "AQID" });
+			expect(call.header).toBe("true");
+		}
+		expect(state).toEqual(originalState);
+	});
+
+	it("combines referenced TypeSafe assets with ordinary image attachments", async () => {
+		const reference = "existing-photo-ref";
+		const imageAssets = { [reference]: IMAGE_REFS[0] };
+		const state = { photo: reference };
+		let body: { state: Record<string, unknown>; assets: Record<string, unknown> } | undefined;
+		const judge = new NativeJudge({
+			apiKey: "ts-key",
+			supportsImages: true,
+			fetch: async (_url, init) => {
+				body = JSON.parse(String(init?.body));
+				return answered();
+			},
+		});
+
+		await judge.judge({ ...request, state, images: [IMAGE_REFS[1]] }, { imageAssets });
+
+		const encoded = body as { state: Record<string, unknown>; assets: Record<string, unknown> };
+		const generatedReferences = encoded.state.__omp_judgment_images as string[];
+		expect(encoded.state).toEqual({ ...state, __omp_judgment_images: generatedReferences });
+		expect(generatedReferences).toHaveLength(1);
+		expect(generatedReferences[0]).not.toBe(reference);
+		expect(Object.keys(encoded.assets)).toHaveLength(2);
+		expect(encoded.assets[reference]).toEqual({ type: "image", format: "png", data_base64: "AQID" });
+		expect(encoded.assets[generatedReferences[0]]).toEqual({ type: "image", format: "jpeg", data_base64: "BAUG" });
+	});
+
+	it("validates separate assets against combined Jev image limits before fetching", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			apiKey: "ts-key",
+			supportsImages: true,
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+		const oversized: ImageContent = {
+			type: "image",
+			data: Buffer.alloc(16 * 1024 * 1024 + 1).toString("base64"),
+			mimeType: "image/png",
+		};
+		const error = await judge
+			.judge({ ...request, images: [IMAGE_REFS[0]] }, { imageAssets: { additional: oversized } })
+			.catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toMatch(/up to 16777216 bytes; images\[1\] is 16777217 bytes/);
+		expect(calls).toBe(0);
+	});
+
 	it("rejects malformed TypeSafe image data before fetching", async () => {
 		let calls = 0;
 		const judge = new NativeJudge({
 			apiKey: "ts-key",
+			supportsImages: true,
 			fetch: async () => {
 				calls++;
 				return answered();
@@ -577,6 +705,7 @@ describe("NativeJudge", () => {
 		const calls: { body: Record<string, unknown>; headers: Headers }[] = [];
 		const judge = new NativeJudge({
 			apiKey: "or-key",
+			supportsImages: true,
 			api: "openrouter-decisions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/alpha",
@@ -643,6 +772,7 @@ describe("NativeJudge", () => {
 		let calls = 0;
 		const judge = new NativeJudge({
 			apiKey: "or-key",
+			supportsImages: true,
 			api: "openrouter-decisions",
 			provider: "openrouter",
 			fetch: async () => {
@@ -657,6 +787,27 @@ describe("NativeJudge", () => {
 				images: [{ type: "image", data: "A==", mimeType: "image/png" }],
 			}),
 		).rejects.toBeInstanceOf(ValidationError);
+		expect(calls).toBe(0);
+	});
+
+	it("rejects a separate asset map for unsupported OpenRouter image transport before fetching", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			apiKey: "or-key",
+			api: "openrouter-decisions",
+			supportsImages: true,
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+
+		const error = await judge
+			.judge(request, { imageAssets: { attachment: IMAGE_REFS[0] } })
+			.catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toContain("does not support image assets");
 		expect(calls).toBe(0);
 	});
 
@@ -1183,13 +1334,16 @@ describe("NativeJudge Workers AI dialect", () => {
 	});
 
 	it("keeps structured JSON state and sends image data URLs in the top-level images array", async () => {
-		const visionClef = { ...clef, input: ["text" as const, "image" as const] };
 		const state = {
 			description: "Inspect this JSON-shaped state.",
 			serializedImage: { type: "image", data: "U1RBVEU=", mimeType: "image/png" },
 		};
 		const bodies: unknown[] = [];
-		const judge = createNativeJudge(visionClef, {
+		const judge = new NativeJudge({
+			api: "workers-ai-systemone",
+			provider: "cloudflare-workers-ai",
+			baseUrl: "https://api.cloudflare.com/client/v4/accounts/<account>/ai/run",
+			model: "@cf/cloudflare/clef",
 			apiKey: JSON.stringify({ token: "cf-token", accountId: "acct123" }),
 			fetch: async (_url, init) => {
 				bodies.push(JSON.parse(String(init?.body)));

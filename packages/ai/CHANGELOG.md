@@ -24,6 +24,10 @@
 
 - Added experimental native image judgments for TypeSafe Jev's `jev-latest`, `jev-preview`, `jev-1.13.0`, and `jev-1.14.0`, plus OpenRouter's `typesafe/jev-1.13`, `typesafe/jev-1.14`, and `~typesafe/jev-latest` models ([#15887](https://github.com/can1357/oh-my-pi/pull/15887) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
+### Fixed
+
+- Fixed auth-gateway System One image forwarding to accept TypeSafe's inline `assets` form alongside the existing `images` field.
+
 ## [18.11.1] - 2026-10-15
 
 ### Added

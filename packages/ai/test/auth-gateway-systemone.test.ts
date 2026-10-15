@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NativeJudge, type ImageContent, type JudgmentRequest } from "@oh-my-pi/pi-ai";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { buildGatewayApiKeyResolver } from "@oh-my-pi/pi-ai/auth-gateway/dispatch";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -37,6 +38,11 @@ interface Harness {
 	upstream: { url: string; init: RequestInit | undefined }[];
 	storage: AuthStorage;
 	close: () => Promise<void>;
+}
+
+interface CapturedGatewayResponse {
+	headers: { get(name: string): string | null };
+	json(): Promise<unknown>;
 }
 
 function openaiDecisionModel(id: string, input: ("text" | "image")[]) {
@@ -164,6 +170,137 @@ describe("auth-gateway POST /v1/systemone", () => {
 		expect(recorded[0].client?.app).toBe("robomp");
 	});
 
+	it("round-trips referenced image assets through NativeJudge and the gateway", async () => {
+		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
+		const recorded: { provider: string; model: string; costUsd?: number }[] = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => {
+			recorded.push(entry);
+		});
+
+		const reference = "__proto__";
+		const state = {
+			ticket: "payouts",
+			context: {
+				customer: "My payout has been delayed.",
+				attachment: { asset_ref: reference },
+			},
+			history: [{ evidence: { image: reference } }],
+		};
+		const questions = {
+			urgent: {
+				type: "noul",
+				instructions: { question: "Does this convey urgency?", asset_ref: reference },
+				criteria: { true: `The referenced ${reference} image is urgent.`, false: "It is not urgent." },
+			},
+		};
+		const request = { state, questions } as unknown as JudgmentRequest;
+		const imageAssets: Record<string, ImageContent> = {
+			[reference]: { type: "image", data: PNG_DATA, mimeType: "image/png" },
+		};
+		let gatewayResponse: CapturedGatewayResponse | undefined;
+		let clientHeaders: Headers | undefined;
+		const client = new NativeJudge({
+			api: "typesafe",
+			provider: "typesafe",
+			model: "typesafe/jev-latest",
+			baseUrl: harness.url,
+			apiKey: "gw-token",
+			supportsImages: true,
+			fetch: async (input, init) => {
+				clientHeaders = new Headers(init?.headers);
+				const response = await fetch(input, init);
+				gatewayResponse = response.clone();
+				return response;
+			},
+		});
+		const result = await client.judge(request, { imageAssets });
+
+		expect(result.answers).toEqual({ urgent: { type: "noul", noul: 0.92 } });
+		expect(result.usage).toMatchObject({ input: 300, output: 20 });
+		expect(clientHeaders?.get("TypeSafe-Danger-Zone-Images")).toBe("true");
+		const response = gatewayResponse;
+		if (!response) throw new Error("NativeJudge did not reach the auth gateway");
+		expect(await response.json()).toEqual({
+			model: "jev-1.13.0",
+			answers: { urgent: { type: "noul", noul: 0.92 } },
+			usage: { input_tokens: 300, output_tokens: 20 },
+		});
+		const cost = Number(response.headers.get("x-litellm-response-cost"));
+		expect(cost).toBeGreaterThan(0);
+		expect(recorded).toHaveLength(1);
+		expect(recorded[0]).toMatchObject({ provider: "typesafe", model: "jev-latest", costUsd: cost });
+
+		expect(harness.upstream).toHaveLength(1);
+		expect(harness.upstream[0].url).toBe("https://api.typesafe.ai/v1/systemone");
+		const headers = new Headers(harness.upstream[0].init?.headers);
+		expect(headers.get("authorization")).toBe("Bearer ts-secret");
+		expect(headers.get("TypeSafe-Danger-Zone-Images")).toBe("true");
+		const upstreamBody = JSON.parse(String(harness.upstream[0].init?.body)) as {
+			model: string;
+			state: typeof state;
+			questions: typeof questions;
+			assets: Record<string, { type: "image"; format: "png" | "jpeg"; data_base64: string }>;
+		};
+		expect(Object.keys(upstreamBody).sort()).toEqual(["assets", "model", "questions", "state"]);
+		expect(upstreamBody.model).toBe("jev-latest");
+		expect(upstreamBody.state).toEqual(state);
+		expect(upstreamBody.questions).toEqual(questions);
+		expect(upstreamBody.assets).toEqual({
+			[reference]: { type: "image", format: "png", data_base64: PNG_DATA },
+		});
+		expect(Buffer.from(upstreamBody.assets[reference].data_base64, "base64")).toEqual(
+			Buffer.from(PNG_DATA, "base64"),
+		);
+	});
+
+	it("rejects malformed inline assets before credential lookup", async () => {
+		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
+		harness.storage.keys.removeRuntime("typesafe");
+		const credentialLookup = vi.spyOn(harness.storage.keys, "getWithCredential");
+		for (const asset of [
+			{ format: "png", data_base64: "AQ=I" },
+			{ format: "gif", data_base64: PNG_DATA },
+			{ format: "png", data_base64: PNG_DATA, part: "multipart-only" },
+		]) {
+			const response = await post(harness.url, "/v1/systemone", {
+				model: "typesafe/jev-latest",
+				...REQUEST,
+				assets: { attachment: asset },
+			});
+			expect(response.status).toBe(422);
+		}
+		const invalidMap = await post(harness.url, "/v1/systemone", {
+			model: "typesafe/jev-latest",
+			...REQUEST,
+			assets: [{ format: "png", data_base64: PNG_DATA }],
+		});
+		expect(invalidMap.status).toBe(422);
+		expect(credentialLookup).not.toHaveBeenCalled();
+		expect(harness.upstream).toHaveLength(0);
+	});
+
+	it("rejects inline assets above Jev's per-image cap before credential lookup", async () => {
+		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
+		harness.storage.keys.removeRuntime("typesafe");
+		const credentialLookup = vi.spyOn(harness.storage.keys, "getWithCredential");
+		const oversized = Buffer.alloc(16 * 1024 * 1024 + 1).toString("base64");
+		const response = await post(harness.url, "/v1/systemone", {
+			model: "typesafe/jev-latest",
+			...REQUEST,
+			assets: { attachment: { format: "png", data_base64: oversized } },
+		});
+
+		expect(response.status).toBe(422);
+		expect(await response.json()).toMatchObject({
+			error: {
+				type: "invalid_request_error",
+				message: expect.stringContaining("images[0] is 16777217 bytes"),
+			},
+		});
+		expect(credentialLookup).not.toHaveBeenCalled();
+		expect(harness.upstream).toHaveLength(0);
+	});
+
 	it("serves the OpenRouter Decisions path with the same handler", async () => {
 		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
 		const response = await post(harness.url, "/alpha/decisions", { model: "jev-latest", ...REQUEST });
@@ -218,6 +355,25 @@ describe("auth-gateway POST /v1/systemone", () => {
 			Buffer.from(PNG_DATA, "base64"),
 		);
 		expect(state).toEqual(originalState);
+	});
+
+	it("rejects asset maps for wires that cannot preserve them before credential lookup", async () => {
+		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
+		harness.storage.keys.removeRuntime("openrouter");
+		const credentialLookup = vi.spyOn(harness.storage.keys, "getWithCredential");
+		const response = await post(harness.url, "/v1/systemone", {
+			model: OPENROUTER_JEV.id,
+			state: { evidence: { asset_ref: "attachment" } },
+			questions: REQUEST.questions,
+			assets: { attachment: { format: "png", data_base64: PNG_DATA } },
+		});
+
+		expect(response.status).toBe(422);
+		expect(await response.json()).toMatchObject({
+			error: { type: "invalid_request_error", message: expect.stringMatching(/asset/i) },
+		});
+		expect(credentialLookup).not.toHaveBeenCalled();
+		expect(harness.upstream).toHaveLength(0);
 	});
 
 	it("translates embedded images with case-insensitive MIME types and questions to OpenAI Decisions input", async () => {
