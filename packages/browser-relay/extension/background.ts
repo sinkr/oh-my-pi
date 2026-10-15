@@ -215,6 +215,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
+		reloadProtocol: 1, // Keep in sync with EXTENSION_RELOAD_PROTOCOL_VERSION.
 		tabs: snapshots,
 		attachedTabIds,
 	};
@@ -274,6 +275,11 @@ function handleRelayMessage(socket: WebSocket, raw: string): void {
 		return;
 	}
 	if (msg.t === "pong") return;
+	if (msg.t === "reload") {
+		// The relay rewrote this extension's files; reloading re-reads them (a Chrome restart would not).
+		chrome.runtime.reload();
+		return;
+	}
 	// Answer only on the socket the RPC came in on: RPC ids are local to that connection, and the relay already
 	// failed the call when it closed.
 	const answer = (reply: ExtToRelayMessage): void => {

@@ -173,6 +173,7 @@ async function buildHello() {
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     discardedTabsProtocol: 1,
     ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
+    reloadProtocol: 1,
     tabs: snapshots,
     attachedTabIds
   };
@@ -227,6 +228,10 @@ function handleRelayMessage(socket, raw) {
   }
   if (msg.t === "pong")
     return;
+  if (msg.t === "reload") {
+    chrome.runtime.reload();
+    return;
+  }
   const answer = (reply) => {
     if (socket.readyState === WebSocket.OPEN)
       socket.send(JSON.stringify(reply));

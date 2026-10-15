@@ -222,6 +222,11 @@
 - Fixed session loading on Windows treating a session path with a regular-file component as a missing session (an empty session) instead of rejecting it with `ENOTDIR` like POSIX does ([#16145](https://github.com/can1357/oh-my-pi/pull/16145) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed models from extension providers listed in `enabledModels` or `--models` missing from `/model`, the Ctrl+P cycle and the startup model scope notice until the background catalog refresh finished ([#16096](https://github.com/can1357/oh-my-pi/pull/16096) by [@skipper019](https://github.com/skipper019))
 
+### Added
+
+- Added a note to relay `browser.open` results when the OMP Browser Relay extension in Chrome was installed by an older omp, naming `omp browser-relay install` and a reload; `omp browser-relay install` now records the installing omp's version in the extension ([#15105](https://github.com/can1357/oh-my-pi/pull/15105) by [@will-bogusz](https://github.com/will-bogusz))
+- The browser relay now keeps its Chrome extension current after an omp upgrade: when the extension in `~/.omp/browser-relay/extension` is older and no omp session is using the relay, it rewrites the files and the extension reloads itself ([#15105](https://github.com/can1357/oh-my-pi/pull/15105) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.1] - 2026-10-17
 
 ### Breaking Changes
@@ -233,10 +238,6 @@
 - Added `advisor.continueSeverity` (`nit`, `concern`, `blocker`) to choose the minimum advisor note severity that wakes the agent after it finished with a final answer; lower-severity notes stay as a card at the end of the transcript
 - Printed DataFrames/Series render as tables, large dicts/lists and objects as JSON trees, and Markdown objects as Markdown for the user, while the model sees the printed text
 - Printing a figure or image in eval attaches the image to the result
-
-### Added
-
-- Added a note to relay `browser.open` results when the OMP Browser Relay extension in Chrome was installed by an older omp, naming `omp browser-relay install` and a reload; `omp browser-relay install` now records the installing omp's version in the extension ([#15105](https://github.com/can1357/oh-my-pi/pull/15105) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
