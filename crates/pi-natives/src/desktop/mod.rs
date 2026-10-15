@@ -3602,7 +3602,23 @@ mod capture_tests {
 
 	#[test]
 	fn held_control_leaves_omitted_takeover_in_the_background() {
-		let _serial = control::OWNERSHIP_TEST.lock();
+		// Holding control takes this process's one input ownership, which the
+		// other worker tests here take to send input, so the test runs alone in
+		// a child test process.
+		const ALONE: &str = "PI_DESKTOP_TEST_ALONE";
+		if std::env::var_os(ALONE).is_none() {
+			let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+				.args([
+					"--exact",
+					"desktop::capture_tests::held_control_leaves_omitted_takeover_in_the_background",
+				])
+				.env(ALONE, "1")
+				.output()
+				.expect("child test");
+			let stdout = String::from_utf8_lossy(&output.stdout);
+			assert!(output.status.success() && stdout.contains(" 1 passed;"), "{stdout}");
+			return;
+		}
 		let backend = FakeWaylandBackend::new();
 		let modes = Arc::clone(&backend.modes);
 		let mut worker = worker_with(backend);
