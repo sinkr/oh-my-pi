@@ -210,6 +210,8 @@ function makeSession(
 ): SessionStub {
 	let messages = initialMessages;
 	let streaming = initialStreaming;
+	let runStartedAt: number | undefined = initialStreaming || runningJobIds.length > 0 ? 1 : undefined;
+	const runStateListeners = new Set<(state: "running" | "idle") => void>();
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
 	let persistence = Promise.resolve();
 	const activeToolUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
@@ -219,6 +221,13 @@ function makeSession(
 	const stub = {
 		get isStreaming() {
 			return streaming;
+		},
+		get runStartedAt() {
+			return runStartedAt;
+		},
+		subscribeRunState(listener: (state: "running" | "idle") => void) {
+			runStateListeners.add(listener);
+			return () => runStateListeners.delete(listener);
 		},
 		retryAttempt: 0,
 		agent: {
@@ -270,6 +279,8 @@ function makeSession(
 			persistence = pending.promise;
 			return () => {
 				messages = [danglingWait, completedWait];
+				runStartedAt = undefined;
+				for (const listener of runStateListeners) listener("idle");
 				pending.resolve();
 			};
 		},

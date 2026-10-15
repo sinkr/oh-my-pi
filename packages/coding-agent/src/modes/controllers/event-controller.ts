@@ -2237,8 +2237,8 @@ export class EventController {
 		}
 	}
 	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
-		// A superseded agent_end: the agent is already streaming a fresh turn, so
-		// this event belongs to a turn that has already been replaced. The session
+		// A superseded agent_end: the viewed agent is already streaming a fresh turn,
+		// so this event belongs to a turn that has already been replaced. The session
 		// dispatches to listeners fire-and-forget across an async extension-emit hop
 		// (#emitSessionEvent), so an interrupted turn's agent_end can land AFTER the
 		// resumed turn's agent_start (e.g. any post-turn agent.continue()). Running
@@ -2246,11 +2246,7 @@ export class EventController {
 		// leaving "Working…" gone while the agent keeps running. The live turn owns
 		// the loader and finalizes it at its own agent_end (isStreaming === false by
 		// then). Mirrors the collab guest's !isStreaming loader reconciler.
-		if (this.ctx.session.isStreaming) {
-			// A focused worker can end while the main session streams; the run flag follows the viewed session.
-			this.ctx.composer.setRunActive(this.ctx.viewSession.isStreaming);
-			return;
-		}
+		if (this.ctx.viewSession.isStreaming) return;
 		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
 		// end of the run: the agent's own continuation (reminder, retry, queued
 		// steer/follow-up, IRC wake) follows, or background work may re-wake it.
@@ -2293,7 +2289,7 @@ export class EventController {
 	 * cancelled background job enqueues no wake (acknowledged/watched ones are
 	 * suppressed). Mirrors `RpcSessionSettleWatcher`: wait out retries, scheduled
 	 * continuations, and owner-scoped background work, then — if no new run
-	 * started and the session is quiet — run the same teardown a terminal
+	 * started and the viewed session is quiet — run the same teardown a terminal
 	 * `agent_end` would. A continuation that does start bumps the epoch and its
 	 * own `agent_end` finalizes the run instead.
 	 */
@@ -2301,11 +2297,11 @@ export class EventController {
 		const epoch = this.#runEpoch;
 		if (this.#settleWatchEpoch === epoch) return;
 		this.#settleWatchEpoch = epoch;
-		const session = this.ctx.session;
+		const session = this.ctx.viewSession;
 		// No `hasAdmittedSubmission` gate: this very settle is emitted while the
 		// prompt that produced it is still admitted, and a new submission starts a
 		// run whose `agent_start` bumps the epoch anyway.
-		const superseded = () => this.#runEpoch !== epoch || this.ctx.session !== session || session.isStreaming;
+		const superseded = () => this.#runEpoch !== epoch || this.ctx.viewSession !== session || session.isStreaming;
 		try {
 			while (!superseded()) {
 				await session.waitForIdle();

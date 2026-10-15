@@ -12,7 +12,10 @@ import { createInteractiveModeContext } from "../../helpers/interactive-mode-con
  * streaming getter is backed by mutable flags the tests drive directly.
  */
 function createContext() {
-	const streamState = { isStreaming: false, viewIsStreaming: false };
+	const streamState: { isStreaming: boolean; viewIsStreaming?: boolean; hasPostPromptWork: boolean } = {
+		isStreaming: false,
+		hasPostPromptWork: false,
+	};
 	const ctx = createInteractiveModeContext({
 		session: {
 			get isStreaming() {
@@ -23,7 +26,10 @@ function createContext() {
 			isCompacting: false,
 			getLastAssistantMessage: () => undefined,
 			get isStreaming() {
-				return streamState.viewIsStreaming;
+				return streamState.viewIsStreaming ?? streamState.isStreaming;
+			},
+			get hasPostPromptWork() {
+				return streamState.hasPostPromptWork;
 			},
 		},
 	});
@@ -100,7 +106,7 @@ describe("EventController superseded agent_end", () => {
 	});
 
 	it("clears the run flag when a focused worker ends while the main session still streams", async () => {
-		const { ctx, streamState } = createContext();
+		const { ctx, streamState, loader } = createContext();
 		const controller = new EventController(ctx);
 
 		streamState.viewIsStreaming = true;
@@ -113,6 +119,120 @@ describe("EventController superseded agent_end", () => {
 		await controller.handleEvent(AGENT_END);
 
 		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+		expect(loader.stop).toHaveBeenCalledTimes(1);
+		expect(ctx.loadingAnimation).toBeUndefined();
+	});
+
+	it("keeps a focused worker active through async wait and ends it when its own background work drains", async () => {
+		const { ctx, streamState, loader } = createContext();
+		const controller = new EventController(ctx);
+		const settling = Promise.withResolvers<void>();
+		const drained = Promise.withResolvers<void>();
+		const finished = Promise.withResolvers<void>();
+		let pending = true;
+		const mainWait = vi.spyOn(ctx.session, "waitForIdle");
+		const workerWait = vi.spyOn(ctx.viewSession, "waitForIdle");
+		vi.spyOn(ctx.viewSession, "hasPendingAsyncWork").mockImplementation(() => pending);
+		vi.spyOn(ctx.viewSession, "settleAsyncWork").mockImplementation(() => {
+			settling.resolve();
+			return drained.promise;
+		});
+		vi.spyOn(ctx.composer, "setRunActive").mockImplementation(active => {
+			if (!active) finished.resolve();
+		});
+
+		streamState.isStreaming = true;
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		streamState.viewIsStreaming = false;
+		await controller.handleEvent({
+			type: "agent_end",
+			messages: [],
+			isTerminal: false,
+			awaitingAsyncWork: true,
+		});
+
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(loader.stop).not.toHaveBeenCalled();
+		expect(workerWait).toHaveBeenCalled();
+		expect(mainWait).not.toHaveBeenCalled();
+		await settling.promise;
+
+		pending = false;
+		drained.resolve();
+		await finished.promise;
+		await controller.dispatchSessionEvent({ type: "turn_start" });
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+		expect(loader.stop).toHaveBeenCalledTimes(1);
+		expect(streamState.isStreaming).toBe(true);
+	});
+
+	it("ends a focused worker when its scheduled continuation is cancelled without a terminal event", async () => {
+		const { ctx, streamState, loader } = createContext();
+		const controller = new EventController(ctx);
+		const continuation = Promise.withResolvers<void>();
+		const finished = Promise.withResolvers<void>();
+		vi.spyOn(ctx.viewSession, "waitForIdle").mockImplementation(() => continuation.promise);
+		vi.spyOn(ctx.composer, "setRunActive").mockImplementation(active => {
+			if (!active) finished.resolve();
+		});
+		streamState.isStreaming = true;
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		streamState.viewIsStreaming = false;
+		streamState.hasPostPromptWork = true;
+		await controller.handleEvent({ type: "agent_end", messages: [], isTerminal: false });
+
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(loader.stop).not.toHaveBeenCalled();
+		streamState.hasPostPromptWork = false;
+		continuation.resolve();
+		await finished.promise;
+		await controller.dispatchSessionEvent({ type: "turn_start" });
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+		expect(loader.stop).toHaveBeenCalledTimes(1);
+	});
+
+	it("ignores a stale worker end while a newer worker run streams even if the main session is idle", async () => {
+		const { ctx, streamState, loader } = createContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent(AGENT_START);
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(AGENT_END);
+
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(loader.stop).not.toHaveBeenCalled();
+		streamState.viewIsStreaming = false;
+		await controller.handleEvent(AGENT_END);
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+		expect(loader.stop).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not let a detached worker's settle watch tear down the newly focused view", async () => {
+		const { ctx, streamState, loader } = createContext();
+		const controller = new EventController(ctx);
+		const continuation = Promise.withResolvers<void>();
+		const waitFinished = Promise.withResolvers<void>();
+		vi.spyOn(ctx.viewSession, "waitForIdle").mockImplementation(async () => {
+			await continuation.promise;
+			waitFinished.resolve();
+		});
+		streamState.isStreaming = true;
+		streamState.viewIsStreaming = false;
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent({ type: "agent_end", messages: [], isTerminal: false });
+
+		Object.defineProperty(ctx, "viewSession", { get: () => ctx.session });
+		// The replacement view can itself pause without emitting agent_start here.
+		streamState.isStreaming = false;
+		continuation.resolve();
+		await waitFinished.promise;
+		await Promise.resolve();
+		// A serialized event is a barrier after the old watch's queued teardown.
+		await controller.dispatchSessionEvent({ type: "turn_start" });
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(loader.stop).not.toHaveBeenCalled();
 	});
 
 	it("flushes queued command panels at a non-terminal settle", async () => {

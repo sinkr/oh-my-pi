@@ -98,6 +98,8 @@
 - Fixed the end of a long reply going missing from scrollback, then reappearing duplicated or out of order, when the status area below the transcript stays taller after the turn than at startup
 - Fixed the end of a long reply going missing from scrollback, then reappearing duplicated or out of order, when the status area below the transcript stays taller after the turn than at startup ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 - Fixed output temporarily being dropped from scrollback, then reappearing duplicated or out of order, when the status area below the transcript stays taller after the turn than at startup ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
+- Fixed focused worker views becoming idle during background waits or staying busy after completion while the main agent runs ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
+- Fixed gaps inside the transcript after persistent widgets close, preserving native scrollback by letting the editor move upward until new output fills the screen ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 
 ## [18.11.0] - 2026-10-14
 

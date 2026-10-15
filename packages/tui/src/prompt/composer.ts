@@ -267,10 +267,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// with rows — so it is retained across resizes rather than rediscovered
 	// from whatever chrome is expanded when the height changes.
 	#chromeFloor: number | undefined;
-	// Persistent chrome height of the last busy frame (a run in flight or a
-	// block streaming). Chrome still that tall once the run ends and its height
-	// settles is permanent, so it becomes the floor: otherwise the rows it clips
-	// off the live tail stay hidden until later output commits them out of order.
+	#chromeFloorPromoted = false;
+	// Promote settled post-run chrome so displaced transcript rows reach history.
+	// A later contraction leaves space below the editor instead of erasing native history.
 	#lastBusyChrome: number | undefined;
 	#runActive = false;
 	#transientChrome: ReadonlySet<Component> = new Set();
@@ -397,6 +396,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
+		const promotedChromeContracted = this.#chromeFloorPromoted && after.length < (this.#chromeFloor ?? 0);
 		this.#chromeFloor = Math.min(this.#chromeFloor ?? after.length, after.length);
 		this.#transientFloor = Math.min(this.#transientFloor ?? transientRows, transientRows);
 		this.#rebaselineChromeFloor(
@@ -440,8 +440,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			history?.kind === "replay" || !(history !== undefined || this.ui.hasProviderHistory())
 				? undefined
 				: this.ui.getFilledHistoryRows();
+		// Once settled chrome has retired rows, shrinking it cannot pull those
+		// rows back out of native scrollback. Let the editor move up instead of
+		// inserting a seam band; subsequent frames retain that natural anchor
+		// until new output fills the screen again. Shell history stays untouched.
 		const slack =
-			filledHistoryRows === undefined
+			filledHistoryRows === undefined || promotedChromeContracted
 				? 0
 				: Math.max(0, rows - Math.min(rows, filledHistoryRows + (history?.rows.length ?? 0)) - mutable.length);
 		// Park the slack below the live rows rather than above them. Above, it
@@ -688,7 +692,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 		if (this.#lastBusyChrome === undefined) return;
 		if (this.#idleChromeSettled && this.#idleChrome === chrome) {
-			this.#chromeFloor = Math.max(this.#chromeFloor ?? chrome, Math.min(this.#lastBusyChrome, chrome));
+			const floor = Math.max(this.#chromeFloor ?? chrome, Math.min(this.#lastBusyChrome, chrome));
+			this.#chromeFloorPromoted ||= floor > (this.#chromeFloor ?? floor);
+			this.#chromeFloor = floor;
 			this.#lastBusyChrome = undefined;
 			this.#resetIdleChrome();
 			return;
@@ -974,6 +980,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	setRuntimeChildren(children: readonly Component[], options: RuntimeChildrenOptions = {}): void {
 		if (this.#stopped) return;
 		this.#chromeFloor = undefined;
+		this.#chromeFloorPromoted = false;
 		this.#lastBusyChrome = undefined;
 		this.#resetIdleChrome();
 		this.#nativeDock = options.nativeDock;

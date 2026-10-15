@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
+import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, Container, getKeybindings, setKeybindings, Text } from "@oh-my-pi/pi-tui";
@@ -58,8 +59,14 @@ interface Harness {
 	editor: Container;
 }
 
-function makeHarness(columns = COLUMNS, rows = ROWS, transcriptRows = TRANSCRIPT_ROWS): Harness {
+function makeHarness(
+	columns = COLUMNS,
+	rows = ROWS,
+	transcriptRows = TRANSCRIPT_ROWS,
+	shellHistory: readonly string[] = [],
+): Harness {
 	const terminal = new VirtualTerminal(columns, rows);
+	if (shellHistory.length > 0) terminal.write(`${shellHistory.join("\r\n")}${"\r\n".repeat(rows + 1)}`);
 	const scheduler = new VirtualRenderScheduler();
 	const composer = new Composer({
 		terminal,
@@ -519,6 +526,69 @@ describe("composer inline shrink (#11007)", () => {
 		expect(blankBand(h.terminal)).toBeLessThanOrEqual(1);
 		h.composer.stop();
 	});
+
+	for (const placement of ["above", "below"] as const) {
+		it(`clears a settled extension widget ${placement} the editor without a seam band or erasing shell history`, async () => {
+			const rows = 30;
+			const shell = Array.from({ length: 12 }, (_, i) => `shell${i}`);
+			const h = makeHarness(COLUMNS, rows, 0, shell);
+			const above = new Container();
+			above.addChild(new EditorTopGap(() => false));
+			const below = new Container();
+			const widget = new InlineWidget();
+			const root = placement === "above" ? above : below;
+			root.addChild(widget);
+			h.composer.setRuntimeChildren([h.transcript, above, h.editor, below]);
+			await h.scheduler.settle(h.terminal);
+			h.composer.setRunActive(true);
+			widget.rows = 7;
+			await streamFinalizedAnswer(h);
+			h.composer.setRunActive(false);
+			await h.scheduler.advance(h.terminal, 300);
+			const history = (): string[] =>
+				h.terminal
+					.getScrollBuffer()
+					.map(row => Bun.stripANSI(row).trim())
+					.filter(row => /^(shell|line|next)\d+$/.test(row));
+			const expected = [...shell, ...Array.from({ length: 110 }, (_, i) => `line${i}`)];
+			expect(history()).toEqual(expected);
+			expect(
+				h.terminal
+					.getViewport()
+					.map(row => Bun.stripANSI(row).trim())
+					.filter(row => row.startsWith("Live widget row ")),
+			).toEqual(Array.from({ length: 7 }, (_, i) => `Live widget row ${i}`));
+
+			root.removeChild(widget);
+			h.composer.ui.requestRender();
+			await h.scheduler.advance(h.terminal, 300);
+			const editorRow = h.terminal.getViewport().findIndex(row => row.includes("EDITOR"));
+			expect(editorRow).toBeLessThan(rows - 1);
+			expect(editorRow).toBeGreaterThanOrEqual(0);
+			expect(blankBand(h.terminal)).toBeLessThanOrEqual(2);
+			expect(history()).toEqual(expected);
+			for (let frame = 0; frame < 3; frame++) {
+				h.composer.ui.requestRender();
+				await h.scheduler.advance(h.terminal, 300);
+				expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(editorRow);
+				expect(blankBand(h.terminal)).toBeLessThanOrEqual(2);
+				expect(history()).toEqual(expected);
+			}
+
+			// New output naturally fills the freed rows and restores bottom alignment.
+			const next = Array.from({ length: 40 }, (_, i) => `next${i}`);
+			h.composer.setRunActive(true);
+			for (const row of next) h.transcript.addChild({ render: () => [row] });
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+			h.composer.setRunActive(false);
+			await h.scheduler.advance(h.terminal, 300);
+			expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+			expect(blankBand(h.terminal)).toBeLessThanOrEqual(2);
+			expect(history()).toEqual([...expected, ...next]);
+			h.composer.stop();
+		});
+	}
 
 	it("keeps the editor on the bottom row when a live block collapses under retired history", async () => {
 		const h = makeHarness();
