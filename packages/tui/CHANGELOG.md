@@ -41,6 +41,7 @@
 - Fixed transcript rows going missing, or reappearing out of order later, when the chrome below the transcript stays taller after a turn than it was at startup ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 - Fixed gaps inside the transcript after persistent chrome shrinks, preserving native scrollback by letting the editor move upward until new output fills the screen ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 - Fixed transcript rows disappearing when persistent extension widgets appear after a turn ends or while a restored session is idle ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
+- Fixed various scrollback issues with respect to chrome shrinks and inconsistencies when widgets appear after a turn ends or while a restored session is idle ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
 
 ## [18.11.0] - 2026-10-14
 
