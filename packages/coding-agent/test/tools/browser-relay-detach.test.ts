@@ -18,8 +18,8 @@ const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const TAB_ID = 1;
 /** Chrome's refusal while another extension's frame is in the tab. */
 const FOREIGN_FRAME_REFUSAL = "Cannot access a chrome-extension:// URL of different extension";
-/** A call that stays in flight until something ends it. */
-const HANG = { code: "await page.evaluate(() => new Promise(() => {}));", timeout: 30 };
+/** A call that stays in flight until something ends it; its evaluation names `ompHang`, so the test can tell it apart. */
+const HANG = { code: "await page.evaluate(() => new Promise(function ompHang() {}));", timeout: 30 };
 
 /**
  * The relay extension's side of the wire, played over a real headless Chromium's CDP endpoint: `attach`,
@@ -36,8 +36,8 @@ class ChromeBackedExtension {
 	#root: string | undefined;
 	/** Chrome command id → relay RPC id of in-flight `send`s, answered with Chrome's error when the attachment ends. */
 	readonly #inFlight = new Map<number, number>();
-	/** Resolved by the next forwarded command of that method. */
-	readonly #sendWaiters = new Map<string, () => void>();
+	/** Resolved by the next forwarded command each one matches. */
+	readonly #sendWaiters = new Set<{ method: string; match: (params: unknown) => boolean; resolve: () => void }>();
 	/** Answer attaches with Chrome's refusal, as while a foreign extension frame is in the tab. */
 	refuseAttach = false;
 
@@ -164,8 +164,11 @@ class ChromeBackedExtension {
 					typeof message.sessionId === "string" ? message.sessionId : root,
 				);
 				this.#inFlight.set(sent.id, id);
-				this.#sendWaiters.get(method)?.();
-				this.#sendWaiters.delete(method);
+				for (const waiter of this.#sendWaiters) {
+					if (waiter.method !== method || !waiter.match(message.params)) continue;
+					this.#sendWaiters.delete(waiter);
+					waiter.resolve();
+				}
 				const answer = await sent.promise;
 				// Chrome already answered this RPC when the attachment ended under it.
 				if (!this.#inFlight.delete(sent.id)) return;
@@ -177,11 +180,22 @@ class ChromeBackedExtension {
 		}
 	}
 
-	/** Resolves once the relay forwards a command of `method` to the tab. */
-	nextSend(method: string): Promise<void> {
+	/** Resolves once the relay forwards a command of `method` whose params `match` accepts to the tab. */
+	nextSend(method: string, match: (params: unknown) => boolean = () => true): Promise<void> {
 		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#sendWaiters.set(method, resolve);
+		this.#sendWaiters.add({ method, match, resolve });
 		return promise;
+	}
+
+	/**
+	 * Resolves once the relay forwards the evaluation of {@link HANG}. omp itself also evaluates in the page between
+	 * and before calls (holding the page's `print()`), so any `Runtime.callFunctionOn` is not yet the call's code.
+	 */
+	hanging(): Promise<void> {
+		return this.nextSend(
+			"Runtime.callFunctionOn",
+			params => isRecord(params) && String(params.functionDeclaration).includes("ompHang"),
+		);
 	}
 
 	/** Chrome ends the attachment by itself: the command in flight fails, then `onDetach` fires. */
@@ -279,7 +293,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 		"fails the call in flight at once, names the cause, and re-adopts the same page for the next call",
 		async () => {
 			const ext = await openRelayTab();
-			const evaluating = ext.nextSend("Runtime.callFunctionOn");
+			const evaluating = ext.hanging();
 			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
 			await evaluating;
 			await ext.chromeDetach("target_closed");
@@ -307,7 +321,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 				throw signal.reason;
 			});
 			try {
-				const evaluating = ext.nextSend("Runtime.callFunctionOn");
+				const evaluating = ext.hanging();
 				const code = `void __omp_call_tool__("probe", {}); ${HANG.code}`;
 				const stalled = invoke({ action: "run", code, timeout: HANG.timeout }).catch((error: unknown) => error);
 				const signal = await started.promise;
@@ -439,7 +453,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 		async () => {
 			const ext = await openRelayTab();
 			ext.refuseAttach = true;
-			const evaluating = ext.nextSend("Runtime.callFunctionOn");
+			const evaluating = ext.hanging();
 			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
 			await evaluating;
 			await ext.chromeDetach("target_closed");
@@ -469,7 +483,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 			});
 			try {
 				const ac = new AbortController();
-				const evaluating = ext.nextSend("Runtime.callFunctionOn");
+				const evaluating = ext.hanging();
 				const stalled = runInTab(name, {
 					code: HANG.code,
 					timeoutMs: 30_000,
