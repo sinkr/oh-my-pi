@@ -49,6 +49,8 @@ export interface JudgmentWire {
 	target(baseUrl: string, model: string, key: string): JudgmentTarget;
 	/** Request body for `model`. */
 	encode(request: JudgmentRequest, model: string): unknown;
+	/** Extra request headers derived by this dialect; NativeJudge calls this only for nonempty images. */
+	requestHeaders?(request: JudgmentRequest): Readonly<Record<string, string>> | undefined;
 	/** Image input this dialect accepts; absent means text-only. */
 	images?: JudgmentImageInput;
 	/** The response's answers and usage; `undefined` when the payload is not this API's response shape. */

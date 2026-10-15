@@ -29,6 +29,9 @@ const OPENAI_ANSWER = {
 	usage: { input_tokens: 300, output_tokens: 20 },
 };
 
+const OPENROUTER_JEV = getBundledModel("openrouter", "~typesafe/jev-latest");
+if (!OPENROUTER_JEV) throw new Error("expected bundled openrouter/~typesafe/jev-latest");
+
 interface Harness {
 	url: string;
 	upstream: { url: string; init: RequestInit | undefined }[];
@@ -57,6 +60,7 @@ async function boot(respond: (init: RequestInit | undefined) => Response): Promi
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.keys.setRuntime("typesafe", "ts-secret");
 	storage.keys.setRuntime("openai", "openai-secret");
+	storage.keys.setRuntime("openrouter", "or-secret");
 	const jev = getBundledModel("typesafe", "jev-latest");
 	if (!jev) throw new Error("expected bundled typesafe/jev-latest");
 	const chat = createMockModel({ provider: "openrouter", id: "chat-only" });
@@ -84,18 +88,16 @@ async function boot(respond: (init: RequestInit | undefined) => Response): Promi
 		bind: "127.0.0.1:0",
 		bearerTokens: ["gw-token"],
 		storage,
-		resolveModel: id =>
-			id === "jev-latest" || id === "typesafe/jev-latest"
-				? jev
-				: id === "chat-only"
-					? chat
-					: id === "openjev-4b"
-						? openjev
-						: id === "openai-vision"
-							? openaiVision
-							: id === "openai-text-only"
-								? openaiTextOnly
-								: undefined,
+		resolveModel: id => {
+			if (id === "jev-latest" || id === "typesafe/jev-latest") return jev;
+			if (id === OPENROUTER_JEV.id || id === `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`)
+				return OPENROUTER_JEV;
+			if (id === "chat-only") return chat;
+			if (id === "openjev-4b") return openjev;
+			if (id === "openai-vision") return openaiVision;
+			if (id === "openai-text-only") return openaiTextOnly;
+			return undefined;
+		},
 		version: "test",
 		fetch: fetchStub,
 	});
@@ -167,6 +169,55 @@ describe("auth-gateway POST /v1/systemone", () => {
 		const response = await post(harness.url, "/alpha/decisions", { model: "jev-latest", ...REQUEST });
 		expect(response.status).toBe(200);
 		expect(harness.upstream).toHaveLength(1);
+	});
+
+	it("routes OpenRouter Jev image judgments through Decisions without TypeSafe image opt-in", async () => {
+		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
+		expect(OPENROUTER_JEV.input).toContain("image");
+		const state = {
+			__omp_judgment_images: "caller-owned base key",
+			__omp_judgment_images_1: { retained: true },
+			ticket: "payouts",
+			messages: [{ author: "customer", text: "My payout has been delayed." }],
+		};
+		const originalState = structuredClone(state);
+		const questions = REQUEST.questions;
+		const imagePart = {
+			type: "image_url",
+			image_url: { url: `data:image/png;base64,${PNG_DATA}` },
+		};
+		const response = await post(harness.url, "/v1/systemone", {
+			model: OPENROUTER_JEV.id,
+			state,
+			questions,
+			images: [{ type: "image", data: PNG_DATA, mimeType: "image/png" }],
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual(UPSTREAM_ANSWER);
+		expect(harness.upstream).toHaveLength(1);
+		expect(harness.upstream[0].url).toBe(`${OPENROUTER_JEV.baseUrl}/decisions`);
+		const headers = new Headers(harness.upstream[0].init?.headers);
+		expect(headers.get("authorization")).toBe("Bearer or-secret");
+		expect(headers.get("TypeSafe-Danger-Zone-Images")).toBeNull();
+		const upstreamBody = JSON.parse(String(harness.upstream[0].init?.body)) as {
+			model: string;
+			state: Record<string, unknown>;
+			questions: typeof questions;
+		};
+		expect(upstreamBody).toEqual({
+			model: OPENROUTER_JEV.id,
+			state: { ...state, __omp_judgment_images_2: [imagePart] },
+			questions,
+		});
+		expect(upstreamBody.state.ticket).toBe(state.ticket);
+		expect(upstreamBody.state.__omp_judgment_images).toBe(state.__omp_judgment_images);
+		expect(upstreamBody.state.__omp_judgment_images_1).toEqual(state.__omp_judgment_images_1);
+		const sentImages = upstreamBody.state.__omp_judgment_images_2 as (typeof imagePart)[];
+		expect(Buffer.from(sentImages[0].image_url.url.slice("data:image/png;base64,".length), "base64")).toEqual(
+			Buffer.from(PNG_DATA, "base64"),
+		);
+		expect(state).toEqual(originalState);
 	});
 
 	it("translates embedded images with case-insensitive MIME types and questions to OpenAI Decisions input", async () => {

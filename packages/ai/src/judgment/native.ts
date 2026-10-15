@@ -25,6 +25,7 @@ import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { validateImageInput } from "../images/shared";
 import type { ImageContent, Model, Usage } from "../types";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { openaiDecisionsWire } from "./openai-decisions";
@@ -166,6 +167,7 @@ function checkImageLimits(label: string, images: readonly ImageContent[], limits
 	}
 	let totalBytes = 0;
 	for (const [index, image] of images.entries()) {
+		validateImageInput(image);
 		const mimeType = image.mimeType.toLowerCase();
 		if (limits.mimeTypes && !limits.mimeTypes.includes(mimeType)) {
 			reject(`does not accept ${mimeType} images (images[${index}]); use ${limits.mimeTypes.join(", ")}`);
@@ -309,8 +311,9 @@ export class NativeJudge implements Judge {
 		options: JudgeOptions | undefined,
 	): Promise<JudgmentResult<Q>> {
 		const body = JSON.stringify(this.#wire.encode(request, this.model));
+		const requestHeaders = request.images?.length ? this.#wire.requestHeaders?.(request) : undefined;
 		const signal = options?.signal;
-		const payload = await withAuth(this.#apiKey, key => this.#attempt(body, key, signal), { signal });
+		const payload = await withAuth(this.#apiKey, key => this.#attempt(body, key, signal, requestHeaders), { signal });
 		const decoded = this.#wire.decode(payload);
 		if (!decoded) {
 			throw new AIError.ProviderResponseError(`${this.label} returned a malformed judgment response`, {
@@ -346,10 +349,16 @@ export class NativeJudge implements Judge {
 		};
 	}
 
-	async #attempt(body: string, key: string, signal: AbortSignal | undefined): Promise<unknown> {
+	async #attempt(
+		body: string,
+		key: string,
+		signal: AbortSignal | undefined,
+		requestHeaders: Readonly<Record<string, string>> | undefined,
+	): Promise<unknown> {
 		const target = this.#wire.target(this.baseUrl, this.model, key);
 		const headers: Record<string, string> = {
 			...this.#headers,
+			...requestHeaders,
 			Authorization: `Bearer ${target.token}`,
 			Accept: "application/json",
 			"Content-Type": "application/json",

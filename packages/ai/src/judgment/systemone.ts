@@ -1,7 +1,8 @@
 /**
- * TypeSafe System One dialects. TypeSafe and OpenRouter forward the
- * `{ model, state, questions }` body and answer map verbatim; Cloudflare's
- * envelope uses the same fields and optionally carries image data URLs.
+ * TypeSafe and OpenRouter use the `{ model, state, questions }` body. TypeSafe
+ * adds image assets and stores their references in state, while OpenRouter
+ * places image data URL parts in state without replacing object roots. Cloudflare
+ * optionally accepts image data URLs in its envelope.
  *
  * - `typesafe`: `POST {baseUrl}/v1/systemone` — TypeSafe and every System One
  *   server (OpenJEV, Kev, self-hosted Clef, OpenCode Zen, Command Code).
@@ -16,9 +17,9 @@
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
-import * as AIError from "../error";
 import { embeddedImageDataUrl } from "../images/shared";
-import { tokenUsage } from "./types";
+import * as AIError from "../error";
+import { type JsonValue, type JudgmentRequest, tokenUsage } from "./types";
 import { type DecodedJudgment, finiteNumber, type JudgmentWire } from "./wire";
 
 function decodeSystemOne(payload: unknown): DecodedJudgment | undefined {
@@ -32,6 +33,18 @@ function decodeSystemOne(payload: unknown): DecodedJudgment | undefined {
 	};
 }
 
+function stateWithImageReferences(
+	state: JudgmentRequest["state"],
+	references: readonly JsonValue[],
+): JudgmentRequest["state"] {
+	if (!isRecord(state)) return { __omp_state: state, __omp_judgment_images: references };
+
+	const baseKey = "__omp_judgment_images";
+	let key = baseKey;
+	for (let suffix = 1; Object.hasOwn(state, key); suffix++) key = `${baseKey}_${suffix}`;
+	return { ...state, [key]: references };
+}
+
 /** A System One dialect posting the verbatim request to `path` under the base URL with the key as bearer. */
 function systemOneWire(path: string): JudgmentWire {
 	return {
@@ -42,10 +55,70 @@ function systemOneWire(path: string): JudgmentWire {
 }
 
 /** TypeSafe's own route, shared by every System One server. */
-export const typesafeWire = systemOneWire("/v1/systemone");
+export const typesafeWire: JudgmentWire = {
+	...systemOneWire("/v1/systemone"),
+	images: {
+		mimeTypes: ["image/png", "image/jpeg"],
+		maxBytes: 16 * 1024 * 1024,
+		maxPixels: 2_458_624,
+	},
+	requestHeaders: request => (request.images?.length ? { "TypeSafe-Danger-Zone-Images": "true" } : undefined),
+	encode(request, model) {
+		if (!request.images?.length) return { state: request.state, model, questions: request.questions };
 
-/** OpenRouter Decisions: the System One body under `/api/alpha`. */
-export const openrouterDecisionsWire = systemOneWire("/decisions");
+		const assets: Record<string, { type: "image"; format: "png" | "jpeg"; data_base64: string }> = {};
+		const references: string[] = [];
+		for (const image of request.images) {
+			let reference = crypto.randomUUID();
+			while (Object.hasOwn(assets, reference)) reference = crypto.randomUUID();
+			const mimeType = image.mimeType.toLowerCase();
+			assets[reference] = {
+				type: "image",
+				format: mimeType === "image/png" ? "png" : "jpeg",
+				data_base64: Buffer.from(image.data, "base64").toString("base64"),
+			};
+			references.push(reference);
+		}
+
+		return {
+			state: stateWithImageReferences(request.state, references),
+			model,
+			questions: request.questions,
+			assets,
+		};
+	},
+};
+
+/** OpenRouter Decisions: System One body under `/api/alpha`, with image parts preserved in state. */
+export const openrouterDecisionsWire: JudgmentWire = {
+	...systemOneWire("/decisions"),
+	images: {
+		mimeTypes: ["image/png", "image/jpeg"],
+		maxBytes: 16 * 1024 * 1024,
+		maxPixels: 2_458_624,
+	},
+	encode(request, model) {
+		const imageParts: JsonValue[] = (request.images ?? []).map(image => ({
+			type: "image_url",
+			image_url: {
+				url: embeddedImageDataUrl(image),
+				...(image.detail !== undefined ? { detail: image.detail === "original" ? "auto" : image.detail } : {}),
+			},
+		}));
+		const state = request.state;
+		return {
+			state: imageParts.length
+				? Array.isArray(state)
+					? [...state, ...imageParts]
+					: isRecord(state)
+						? stateWithImageReferences(state, imageParts)
+						: [state, ...imageParts]
+				: state,
+			model,
+			questions: request.questions,
+		};
+	},
+};
 
 /** Cloudflare Workers AI decision models (Clef) through the account-scoped `ai/run` route. */
 export const workersAiWire: JudgmentWire = {

@@ -564,8 +564,10 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 	return [...models];
 }
 
-async function generateModels(selectedProvider?: string) {
-	// Fetch models from dynamic sources.
+async function generateModels(selectedProvider?: string, selectedModelIds?: readonly string[]) {
+	if (selectedModelIds !== undefined && selectedProvider === undefined) {
+		throw new Error("--model requires --provider");
+	}
 	const modelsDevModels = await loadModelsDevData();
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
 		(descriptor): descriptor is CatalogProviderDescriptor =>
@@ -746,32 +748,29 @@ async function generateModels(selectedProvider?: string) {
 	};
 
 	const modelSpecs: Record<string, Record<string, ModelSpec>> = sortObj(providers);
-	// Validated against the generated rows, not a descriptor list, so every
-	// source kind (descriptor, special discovery, models.dev, seed) is selectable
-	// and a typo fails before models.json is rewritten.
-	if (selectedProvider !== undefined && modelSpecs[selectedProvider] === undefined) {
-		throw new Error(`No catalog rows generated for provider: ${selectedProvider}`);
-	}
-	// A provider-only update must not re-bake unrelated snapshot metadata.
-	// Keep cross-provider inputs above for reference fills, but replace only
-	// the requested provider in the generated output.
-	const MODELS: Record<string, Record<string, Model<Api>>> = selectedProvider === undefined
-		? {}
-		: { ...(prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>) };
-	if (selectedProvider !== undefined) delete MODELS[selectedProvider];
-	for (const [provider, models] of Object.entries(modelSpecs)) {
-		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
-		MODELS[provider] = Object.fromEntries(
-			Object.entries(sortObj(models)).map(([id, model]) => [id, buildGeneratedModel(model)]),
-		);
-	}
+	// Every requested ID is validated against generated rows before writing.
+	// Provider/model-scoped updates preserve untouched previous-snapshot rows.
+	const MODELS = selectGeneratedModels(
+		modelSpecs,
+		prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
+		selectedProvider,
+		selectedModelIds,
+	);
 
 	// Generate JSON file
 	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(sortObj(MODELS)));
 	console.log("Generated src/models.json");
 
 	// Print statistics for the rows this run regenerated.
-	const writtenModels = selectedProvider === undefined ? allModels : Object.values(MODELS[selectedProvider] ?? {});
+	const writtenModels =
+		selectedProvider === undefined
+			? allModels
+			: selectedModelIds === undefined
+				? Object.values(MODELS[selectedProvider] ?? {})
+				: [...new Set(selectedModelIds)].flatMap(id => {
+						const model = MODELS[selectedProvider]?.[id];
+						return model === undefined ? [] : [model];
+					});
 	const totalModels = writtenModels.length;
 	const reasoningModels = writtenModels.filter(m => m.reasoning).length;
 
@@ -782,7 +781,11 @@ Model Statistics:`);
 
 	for (const [provider, models] of Object.entries(MODELS)) {
 		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
-		console.log(`  ${provider}: ${Object.keys(models).length} models`);
+		const modelCount =
+			provider === selectedProvider && selectedModelIds !== undefined
+				? new Set(selectedModelIds).size
+				: Object.keys(models).length;
+		console.log(`  ${provider}: ${modelCount} models`);
 	}
 }
 
@@ -820,9 +823,62 @@ export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
 	return buildModel(spec);
 }
 
+/**
+ * Selects generated output without rebaking untouched previous-snapshot rows.
+ * A provider-only run replaces that provider; model selection replaces only
+ * the requested rows while preserving every other row and provider.
+ */
+export function selectGeneratedModels(
+	modelSpecs: Readonly<Record<string, Readonly<Record<string, ModelSpec<Api>>>>>,
+	previousModels: Readonly<Record<string, Readonly<Record<string, Model<Api>>>>>,
+	selectedProvider?: string,
+	selectedModelIds?: readonly string[],
+): Record<string, Record<string, Model<Api>>> {
+	if (selectedModelIds !== undefined && selectedProvider === undefined) {
+		throw new Error("--model requires --provider");
+	}
+
+	const MODELS: Record<string, Record<string, Model<Api>>> = selectedProvider === undefined
+		? {}
+		: { ...previousModels };
+	if (selectedProvider !== undefined) {
+		const providerModels = modelSpecs[selectedProvider];
+		if (providerModels === undefined) {
+			throw new Error(`No catalog rows generated for provider: ${selectedProvider}`);
+		}
+		const modelIds = selectedModelIds ?? Object.keys(providerModels).sort((a, b) => a.localeCompare(b));
+		const missingIds = selectedModelIds?.filter(id => !Object.hasOwn(providerModels, id)) ?? [];
+		if (missingIds.length > 0) {
+			throw new Error(`No catalog rows generated for ${selectedProvider} model(s): ${missingIds.join(", ")}`);
+		}
+
+		const outputModels = selectedModelIds === undefined ? {} : { ...MODELS[selectedProvider] };
+		for (const id of modelIds) {
+			const model = providerModels[id];
+			if (model === undefined) {
+				throw new Error(`No catalog row generated for ${selectedProvider} model: ${id}`);
+			}
+			outputModels[id] = buildGeneratedModel(model);
+		}
+		MODELS[selectedProvider] = outputModels;
+		return MODELS;
+	}
+
+	for (const [provider, models] of Object.entries(modelSpecs)) {
+		MODELS[provider] = {};
+		for (const [id, model] of Object.entries(models).sort(([a], [b]) => a.localeCompare(b))) {
+			MODELS[provider][id] = buildGeneratedModel(model);
+		}
+	}
+	return MODELS;
+}
+
 if (import.meta.main) {
-	const { values } = parseArgs({ args: Bun.argv.slice(2), options: { provider: { type: "string" } } });
-	generateModels(values.provider).catch(error => {
+	const { values } = parseArgs({
+		args: Bun.argv.slice(2),
+		options: { provider: { type: "string" }, model: { type: "string", multiple: true } },
+	});
+	generateModels(values.provider, values.model).catch(error => {
 		console.error(error);
 		process.exitCode = 1;
 	});
