@@ -23,6 +23,7 @@ import {
 	HL_FILE_SUFFIX,
 	HL_LINE_BODY_SEP,
 } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { prompt } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
@@ -81,18 +82,24 @@ const READ_HEADER = new RegExp(
 const READ_ROW_SEP = `[${RegExp.escape(HL_LINE_BODY_SEP)}|]`;
 const READ_ROW_PREFIX = `\\d+(?:-\\d+)?${READ_ROW_SEP}`;
 /**
- * A line-number read's first two rows (after the notice when no header lifted
- * it; an elision row may sit between them). A raw read never prefixes rows, but
- * its lines can look like them (`200:  OK`), so numbering is proven by the
- * second row continuing the count: the next line, or past the elision.
+ * Fallback for a read without `rowPrefixes` metadata (results from older
+ * sessions, read paths that do not record it): its first two rows, after the
+ * notice when no header lifted it, an elision row possibly between them. A raw
+ * read never prefixes rows, but its lines can look like them (`200:  OK`), so
+ * numbering is proven by the second row continuing the count.
  */
 const READ_FIRST_ROWS = new RegExp(
 	`^${READ_NOTICE}(\\d+)(?:-(\\d+))?${READ_ROW_SEP}[^\\n]*\\n(${RegExp.escape(BRACKET_CONTEXT_ELLIPSIS)}\\n)?(\\d+)(?:-\\d+)?${READ_ROW_SEP}`,
 );
 
-/** Whether `rest` carries line-number prefixes: hashline reads open with their header. */
-function isNumberedRead(header: string, rest: string): boolean {
+/**
+ * Whether `rest` carries line-number prefixes: a hashline read opens with its
+ * header, and the read tool records the mode as `rowPrefixes` (one-row reads
+ * included); otherwise the first two rows must count up.
+ */
+function isNumberedRead(header: string, rest: string, rowPrefixes: boolean | undefined): boolean {
 	if (header) return true;
+	if (rowPrefixes !== undefined) return rowPrefixes;
 	const rows = READ_FIRST_ROWS.exec(rest);
 	if (!rows) return false;
 	const last = Number(rows[2] ?? rows[1]);
@@ -123,11 +130,11 @@ interface ReadFramePayload {
  * Frames collapse whitespace, so draw each row's leading indentation as a count
  * bracket and lift the snapshot header out to text (see snapcompact-read-note.md).
  */
-function encodeReadForFrames(text: string): ReadFramePayload {
+function encodeReadForFrames(text: string, rowPrefixes: boolean | undefined): ReadFramePayload {
 	const header = READ_HEADER.exec(text)?.[0] ?? "";
 	const rest = text.slice(header.length);
 	const body = rest.replace(
-		isNumberedRead(header, rest) ? READ_ROW_INDENT : READ_LINE_INDENT,
+		isNumberedRead(header, rest, rowPrefixes) ? READ_ROW_INDENT : READ_LINE_INDENT,
 		(_, lineStart: string, prefix = "", indent: string) => `${lineStart}${prefix}${indentBracket(indent)}`,
 	);
 	const note = prompt.render(readNoteTemplate, {
@@ -435,6 +442,8 @@ export interface InlineMessageView {
 	toolName?: string;
 	content?: unknown;
 	isError?: boolean;
+	/** Tool metadata; a `read` result's `rowPrefixes` tells numbered rows from content. */
+	details?: unknown;
 }
 
 interface BuiltInlineToolResultCandidate {
@@ -455,6 +464,7 @@ function buildInlineToolResultCandidate(
 	toolName: string | undefined,
 	content: unknown,
 	messageIsError: boolean | undefined,
+	details: unknown,
 	imagesThrough: number,
 	tokenizer: Tokenizer,
 	shape: snapcompact.Shape,
@@ -476,7 +486,9 @@ function buildInlineToolResultCandidate(
 	const isError = messageIsError === true;
 	const eligible = !isError && textTokens >= MIN_TOOL_RESULT_TOKENS;
 	// The planner keeps `read` as text for a reader that has not opted in; skip encoding it.
-	const read = eligible && toolName === "read" && imageReadResults ? encodeReadForFrames(text) : undefined;
+	const rowPrefixes = (details as Pick<ReadToolDetails, "rowPrefixes"> | undefined)?.rowPrefixes;
+	const read =
+		eligible && toolName === "read" && imageReadResults ? encodeReadForFrames(text, rowPrefixes) : undefined;
 	const frameText = read?.body ?? text;
 	// An imaged `read` keeps its header and legend beside the frames: not saved.
 	const keptTokens = read ? Math.max(0, tokenizer.countTokens(read.note) - tokenizer.countTokens(toolResultNote)) : 0;
@@ -531,6 +543,7 @@ function scanInlineContext(
 			message.toolName,
 			message.content,
 			message.isError,
+			message.details,
 			images,
 			tokenizer,
 			shape,

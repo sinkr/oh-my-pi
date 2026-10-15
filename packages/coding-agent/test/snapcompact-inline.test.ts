@@ -299,6 +299,36 @@ describe("SnapcompactInlineTransformer", () => {
 		}
 	});
 
+	it("trusts the read's recorded row-prefix mode over the row shape", async () => {
+		// One huge line (output columns uncapped): no second row proves numbering.
+		const row = `42|    ${denseText(Math.ceil((DEFAULT_CAPACITY * 2) / 7))}`;
+		// Raw content whose rows count up like `N:` prefixes.
+		const raw = Array.from(
+			{ length: Math.ceil((DEFAULT_CAPACITY * 2) / 20) },
+			(_, i) => `${i + 1}:  ${denseText(2)}`,
+		);
+		const read = (id: string, text: string, rowPrefixes: boolean): ToolResultMessage => ({
+			...toolResult(id, text, "read"),
+			details: { rowPrefixes },
+		});
+		const context: Context = {
+			systemPrompt: ["system"],
+			messages: [userMessage("go"), read("one-row", row, true), read("raw", raw.join("\n"), false)],
+		};
+		const spy = spyOn(snapcompact, "renderMany");
+		try {
+			await new SnapcompactInlineTransformer(
+				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+			).transform(context, makeModel({ id: "claude-opus-5-5" }));
+			const [oneRow, rawRows] = spy.mock.calls.map(call => call[0]);
+			expect(oneRow.startsWith("42|[·4]w")).toBe(true);
+			expect(rawRows.startsWith("1:  w")).toBe(true);
+			expect(rawRows).not.toContain("[·");
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
 	it("applies option changes on the next request, re-rendering cached frames when the shape changes", async () => {
 		const options = withTestShape({ renderSystemPrompt: "none", renderToolResults: false });
 		const renderedFonts: string[] = [];
