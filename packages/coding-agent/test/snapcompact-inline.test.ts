@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
 	Context,
@@ -10,6 +11,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import toolResultNote from "../src/prompts/system/snapcompact-toolresult-note.md" with { type: "text" };
 import {
 	estimateInlineSavings,
 	planInlineSwaps,
@@ -242,17 +244,22 @@ describe("SnapcompactInlineTransformer", () => {
 				messages: context.messages,
 			});
 			expect(estimate.toolResults?.frames).toBe(frames.length);
+			// The header and legend still go out as text, so they are not counted as saved.
+			const tokenizer = new Tokenizer(model);
+			const kept = tokenizer.countTokens(note) - tokenizer.countTokens(toolResultNote);
+			expect(kept).toBeGreaterThan(0);
+			expect(estimate.toolResults?.textTokens).toBe(tokenizer.countTokens(raw) - kept);
 		} finally {
 			spy.mockRestore();
 		}
 	});
 
 	it("treats a leading `N:` as content, not a line number, in a read without line numbers", async () => {
-		// A `:raw` YAML read: `200:` is a key, so the spaces after it are content,
-		// not indentation; indented rows still get a bracket at line start.
-		const rows = ["responses:"];
+		// A `:raw` YAML read opening with status keys: `200:`/`404:` look like row
+		// prefixes but do not count up, so the spaces after them are content;
+		// indented rows still get a bracket at line start.
+		const rows = ["200:  OK", "404:  Not found", "responses:"];
 		while (rows.join("\n").length < DEFAULT_CAPACITY * 2) rows.push(`  ${denseText(2)}`);
-		rows.push("200:  OK");
 		const context: Context = {
 			systemPrompt: ["system"],
 			messages: [userMessage("go"), toolResult("read-raw", rows.join("\n"), "read")],
@@ -263,8 +270,7 @@ describe("SnapcompactInlineTransformer", () => {
 				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
 			).transform(context, makeModel({ id: "claude-opus-5-5" }));
 			const rendered = spy.mock.calls[0][0];
-			expect(rendered.startsWith("responses:\n[·2]w")).toBe(true);
-			expect(rendered.endsWith("\n200:  OK")).toBe(true);
+			expect(rendered.startsWith("200:  OK\n404:  Not found\nresponses:\n[·2]w")).toBe(true);
 		} finally {
 			spy.mockRestore();
 		}

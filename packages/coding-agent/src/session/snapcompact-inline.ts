@@ -32,6 +32,7 @@ import readNoteTemplate from "../prompts/system/snapcompact-read-note.md" with {
 import systemFramesNote from "../prompts/system/snapcompact-system-frames-note.md" with { type: "text" };
 import systemStub from "../prompts/system/snapcompact-system-stub.md" with { type: "text" };
 import toolResultNote from "../prompts/system/snapcompact-toolresult-note.md" with { type: "text" };
+import { BRACKET_CONTEXT_ELLIPSIS } from "../tools/read-format";
 
 export type SnapcompactSystemPromptMode = "none" | "agents-md" | "all";
 
@@ -77,12 +78,28 @@ const READ_NOTICE = "(?:\\[[^\\n]*\\]\\n)?";
 const READ_HEADER = new RegExp(
 	`^${READ_NOTICE}${RegExp.escape(HL_FILE_PREFIX)}[^\\n]+${RegExp.escape(HL_FILE_HASH_SEP)}[0-9A-F]{${HL_FILE_HASH_LENGTH}}${RegExp.escape(HL_FILE_SUFFIX)}\\n`,
 );
-const READ_ROW_PREFIX = `\\d+(?:-\\d+)?[${RegExp.escape(HL_LINE_BODY_SEP)}|]`;
+const READ_ROW_SEP = `[${RegExp.escape(HL_LINE_BODY_SEP)}|]`;
+const READ_ROW_PREFIX = `\\d+(?:-\\d+)?${READ_ROW_SEP}`;
 /**
- * A numbered read (hashline `N:`, line-number `N|`) opens with a numbered row,
- * after the notice when no header lifted it (line-number mode has none).
+ * A line-number read's first two rows (after the notice when no header lifted
+ * it; an elision row may sit between them). A raw read never prefixes rows, but
+ * its lines can look like them (`200:  OK`), so numbering is proven by the
+ * second row continuing the count: the next line, or past the elision.
  */
-const READ_NUMBERED = new RegExp(`^${READ_NOTICE}${READ_ROW_PREFIX}`);
+const READ_FIRST_ROWS = new RegExp(
+	`^${READ_NOTICE}(\\d+)(?:-(\\d+))?${READ_ROW_SEP}[^\\n]*\\n(${RegExp.escape(BRACKET_CONTEXT_ELLIPSIS)}\\n)?(\\d+)(?:-\\d+)?${READ_ROW_SEP}`,
+);
+
+/** Whether `rest` carries line-number prefixes: hashline reads open with their header. */
+function isNumberedRead(header: string, rest: string): boolean {
+	if (header) return true;
+	const rows = READ_FIRST_ROWS.exec(rest);
+	if (!rows) return false;
+	const last = Number(rows[2] ?? rows[1]);
+	const next = Number(rows[4]);
+	return rows[3] ? next > last + 1 : next === last + 1;
+}
+
 /**
  * A row's leading indentation, after an optional line-number prefix. Anchored on
  * `\n` only: a `m`-flag `^` would also match after `\r` and U+2028 inside a row.
@@ -98,10 +115,8 @@ const TOOL_RESULT_NOTE = toolResultNote.trim();
 interface ReadFramePayload {
 	/** Body rendered into frames, indentation drawn as count brackets. */
 	body: string;
-	/** Lifted snapshot header; empty when the result has none. */
-	header: string;
-	/** Whether any bracket was drawn, so the note explains them. */
-	indented: boolean;
+	/** Text beside the frames: the tool-result note, the bracket legend when used, then the lifted header. */
+	note: string;
 }
 
 /**
@@ -112,20 +127,20 @@ function encodeReadForFrames(text: string): ReadFramePayload {
 	const header = READ_HEADER.exec(text)?.[0] ?? "";
 	const rest = text.slice(header.length);
 	const body = rest.replace(
-		READ_NUMBERED.test(rest) ? READ_ROW_INDENT : READ_LINE_INDENT,
+		isNumberedRead(header, rest) ? READ_ROW_INDENT : READ_LINE_INDENT,
 		(_, lineStart: string, prefix = "", indent: string) => `${lineStart}${prefix}${indentBracket(indent)}`,
 	);
-	return { body, header: header.trimEnd(), indented: body !== rest };
+	const note = prompt.render(readNoteTemplate, {
+		note: TOOL_RESULT_NOTE,
+		header: header.trimEnd(),
+		indented: body !== rest,
+	});
+	return { body, note };
 }
 
 /** `\t\t  ` → `[»2·2]`: one count per tab or space run. */
 function indentBracket(indent: string): string {
 	return `[${indent.replace(READ_INDENT_RUN, run => `${run[0] === "\t" ? "»" : "·"}${run.length}`)}]`;
-}
-
-/** The note for an imaged `read`: the bracket legend when used, then the lifted header. */
-function readFramesNote(read: ReadFramePayload): string {
-	return prompt.render(readNoteTemplate, { note: TOOL_RESULT_NOTE, header: read.header, indented: read.indented });
 }
 
 /** Count image blocks in one message's content. */
@@ -202,7 +217,11 @@ function selectSystemPromptImageTarget(
 export interface InlineToolResultCandidate {
 	/** Stable identifier for rendering cache key and applying the swap. */
 	id: string;
-	/** Token count of all joined text blocks, including text beside images. */
+	/**
+	 * Text tokens a swap takes off the wire: all joined text blocks (including
+	 * text beside images), less what an imaged `read` keeps as text beyond the
+	 * shared note (its header and bracket legend).
+	 */
 	textTokens: number;
 	/** Frames needed to render the joined text (0 = empty or below floor). */
 	frames: number;
@@ -428,8 +447,8 @@ interface BuiltInlineToolResultCandidate {
 /**
  * Build the exact same frame payload and planning candidate for estimation and
  * live transformation. Image blocks do not suppress co-resident text. Frames
- * are counted on the payload the swap renders; `textTokens` stays the bill of
- * the text it replaces.
+ * are counted on the payload the swap renders; `textTokens` is the text the
+ * swap removes, so the savings gate and journal see the net trade.
  */
 function buildInlineToolResultCandidate(
 	toolCallId: string,
@@ -459,10 +478,12 @@ function buildInlineToolResultCandidate(
 	// The planner keeps `read` as text for a reader that has not opted in; skip encoding it.
 	const read = eligible && toolName === "read" && imageReadResults ? encodeReadForFrames(text) : undefined;
 	const frameText = read?.body ?? text;
+	// An imaged `read` keeps its header and legend beside the frames: not saved.
+	const keptTokens = read ? Math.max(0, tokenizer.countTokens(read.note) - tokenizer.countTokens(toolResultNote)) : 0;
 	return {
 		candidate: {
 			id: toolCallId,
-			textTokens,
+			textTokens: textTokens - keptTokens,
 			frames: eligible ? snapcompact.frames(frameText, { shape }) : 0,
 			isError,
 			...(toolName !== undefined && { toolName }),
@@ -545,7 +566,7 @@ export interface SnapcompactSavingsEstimate {
 		/** Tool results currently in history. */
 		total: number;
 		swapped: number;
-		/** Text tokens of the swapped results only. */
+		/** Text tokens the swaps remove (an imaged `read` keeps its header and legend as text). */
 		textTokens: number;
 		frames: number;
 		imageTokens: number;
@@ -754,7 +775,7 @@ export class SnapcompactInlineTransformer {
 			const message = messages[target.index];
 			if (message.role !== "toolResult") continue;
 			const frames = await this.#framesFor(this.#toolCache, swap.id, target.frameText, shape, shapeKey);
-			const note = target.read ? readFramesNote(target.read) : toolResultNote;
+			const note = target.read?.note ?? toolResultNote;
 			const content: (TextContent | ImageContent)[] = [{ type: "text", text: note }, ...frames];
 			let sourceImageIndex = 0;
 			for (const block of message.content) {
