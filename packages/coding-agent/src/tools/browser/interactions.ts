@@ -467,12 +467,13 @@ export async function fillViaHandle(
 		handle.evaluate(
 			(el, wanted, pickerTypes) => {
 				const node = el as unknown as {
-					tagName?: string;
+					localName?: string;
 					type?: string;
 					value?: string;
 					focus?: () => void;
 					isContentEditable?: boolean;
 					innerText?: string;
+					cloneNode(deep: boolean): { value?: string };
 					dispatchEvent(event: unknown): boolean;
 				};
 				node.focus?.();
@@ -493,25 +494,46 @@ export async function fillViaHandle(
 					node.dispatchEvent(new Event("change", { bubbles: true }));
 				};
 				const kind = node.type?.toLowerCase() ?? "";
-				if (node.tagName === "INPUT" && pickerTypes.includes(kind)) {
+				// localName, not tagName: an XHTML page keeps the tag's lower case.
+				if (node.localName === "input" && pickerTypes.includes(kind)) {
 					const before = node.value ?? "";
-					write(wanted);
-					// The browser normalises what it accepts (a colour to lower case, a time's seconds), turns
-					// what it rejects into "" (a colour into #000000, a range into its midpoint) and clamps a
-					// range. A rejected range number can land on the midpoint it coerces to (`0x5`), so its
-					// spelling is checked against the decimal form the browser parses. Only the date and time
-					// types can be cleared.
-					const actual = node.value ?? "";
-					const refused =
-						kind === "color"
-							? actual !== wanted.toLowerCase()
-							: kind === "range"
-								? !/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(wanted) ||
-									Number(actual) !== Number(wanted)
-								: wanted !== "" && actual === "";
-					if (refused) write(before);
+					// Tried on a shallow copy, which keeps the type, min, max and step: a value written to the
+					// live control and then put back would still cut it off from its value attribute.
+					const probe = node.cloneNode(false);
+					if (setValue) setValue.call(probe, wanted);
+					else probe.value = wanted;
+					// The browser normalises what it accepts (a colour to #rrggbb, a time's seconds), turns what
+					// it rejects into "" (a colour into #000000, a range into its midpoint) and clamps a range. A
+					// colour is refused when it lands on #000000 without naming black, as canvas resolves it. A
+					// rejected range number can land on the midpoint it coerces to (`0x5`), so its spelling is
+					// checked against the decimal form the browser parses. Only the date and time types can be
+					// cleared.
+					const actual = probe.value ?? "";
+					let refused: boolean;
+					if (kind === "color") {
+						const { OffscreenCanvas } = globalThis as unknown as {
+							OffscreenCanvas: new (
+								width: number,
+								height: number,
+							) => { getContext(type: "2d"): { fillStyle: string } | null };
+						};
+						const paint = new OffscreenCanvas(1, 1).getContext("2d");
+						if (paint) {
+							paint.fillStyle = "#ffffff";
+							paint.fillStyle = wanted;
+						}
+						refused = actual === "#000000" && paint?.fillStyle !== "#000000";
+					} else if (kind === "range") {
+						refused =
+							!/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(wanted) || Number(actual) !== Number(wanted);
+					} else {
+						refused = wanted !== "" && actual === "";
+					}
 					// A picker reports a pick that changes the value, not one that keeps it.
-					else if (actual !== before) report();
+					if (!refused && actual !== before) {
+						write(wanted);
+						report();
+					}
 					return { kind, refused };
 				}
 				const before = node.isContentEditable ? node.innerText : node.value;

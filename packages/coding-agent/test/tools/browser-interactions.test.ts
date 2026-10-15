@@ -660,7 +660,7 @@ const read = async () => {
 };
 const values = await read();
 const refused = [];
-for (const [id, value] of [["date", "12/10/2026"], ["color", "red"], ["color", ""], ["range", "11"], ["range", ""], ["range", "0x5"]]) {
+for (const [id, value] of [["date", "12/10/2026"], ["color", "nonsense"], ["color", ""], ["range", "11"], ["range", ""], ["range", "0x5"]]) {
   try { await tab.fill("#" + id, value); } catch (error) { refused.push(error.message); }
 }
 // An exponent spelling of the current value is accepted and changes nothing.
@@ -703,7 +703,7 @@ return { values, reported: await tab.evaluate(() => window.reported), refused, a
 			]);
 			expect(value.refused).toEqual([
 				expect.stringContaining('<input type=date> does not accept "12/10/2026"'),
-				expect.stringContaining('<input type=color> does not accept "red"'),
+				expect.stringContaining('<input type=color> does not accept "nonsense"'),
 				expect.stringContaining('<input type=color> does not accept ""'),
 				expect.stringContaining('<input type=range> does not accept "11"'),
 				expect.stringContaining('<input type=range> does not accept ""'),
@@ -715,6 +715,76 @@ return { values, reported: await tab.evaluate(() => window.reported), refused, a
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 40_000);
+
+	test("fills a colour by any CSS name and leaves a refused picker following its value attribute", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `picker-css-${crypto.randomUUID()}`;
+		const html = `<!doctype html><input id="color" type="color" value="#123456"><input id="date" type="date" value="2026-10-12">`;
+		const context = { session, toolCallId: "browser-picker-css" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(html)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const colors = [];
+for (const value of ["red", "oklab(0.5 0.1 0.1)", "rgb(0 0 0)"]) {
+  try {
+    await tab.fill("#color", value);
+    colors.push(await tab.value("#color"));
+  } catch (error) {
+    colors.push(error.message);
+  }
+}
+let refused = "";
+try { await tab.fill("#date", "12/10/2026"); } catch (error) { refused = error.message; }
+// An input nothing has written to still takes its value from the attribute.
+await tab.evaluate(() => document.querySelector("#date").setAttribute("value", "2020-01-01"));
+return { colors, refused, date: await tab.value("#date") };`,
+					timeout: 20,
+				},
+				context,
+			);
+			expect(valueFrom<{ colors: string[]; refused: string; date: string }>(result)).toEqual({
+				colors: ["#ff0000", "#a14203", "#000000"],
+				refused: expect.stringContaining('<input type=date> does not accept "12/10/2026"'),
+				date: "2020-01-01",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
+	test("fills picker inputs on an XHTML page with their value", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `picker-xhtml-${crypto.randomUUID()}`;
+		const xhtml = `<html xmlns="http://www.w3.org/1999/xhtml"><body><input id="date" type="date"/></body></html>`;
+		const context = { session, toolCallId: "browser-picker-xhtml" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:application/xhtml+xml,${encodeURIComponent(xhtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#date", "2026-10-12");
+return { tag: await tab.evaluate(() => document.querySelector("#date").tagName), date: await tab.value("#date") };`,
+					timeout: 20,
+				},
+				context,
+			);
+			expect(valueFrom<{ tag: string; date: string }>(result)).toEqual({ tag: "input", date: "2026-10-12" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
 
 	test("fills a customized built-in picker past a value tracker on the element", async () => {
 		const session = makeSession();
