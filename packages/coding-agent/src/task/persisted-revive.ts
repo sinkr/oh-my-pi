@@ -2,7 +2,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
+import { validateAgentAccountPools } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
@@ -13,7 +15,12 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
-import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
+import {
+	extractSessionInit,
+	hasConversationalHistory,
+	type PersistedSessionInit,
+	SessionManager,
+} from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
@@ -23,6 +30,7 @@ import {
 	followMCPTools,
 	subagentRetryFallbackRole,
 } from "./executor";
+import { cfgTaskAgentAccountPools } from "./settings";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -46,6 +54,20 @@ export interface PersistedSubagentReviveContext {
 	eventBus?: EventBus;
 	/** Root-scoped observability bus the revived run's frames also publish to. */
 	subagentEventBus?: EventBus;
+}
+
+/**
+ * The agent definition a cold-revived subagent's monitored turns report (IRC wakes,
+ * `omp --restore`): persisted files predate an agent-source field, so frames carry
+ * the runtime-neutral `user` source; the name is the registry ref's.
+ */
+export function persistedAgentDefinition(displayName: string, init: PersistedSessionInit): AgentDefinition {
+	return {
+		name: displayName,
+		description: "",
+		systemPrompt: init.systemPrompt.join("\n\n"),
+		source: "user",
+	};
 }
 
 /**
@@ -121,8 +143,11 @@ export function createPersistedSubagentReviverFactory(
 				);
 			}
 			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
-			// advisor-role model, anything else = the explicit pattern stamped onto
-			// this session's `modelRoles.advisor`. Absent = unadvised (the
+			// advisor-role model, anything else = the pattern stamped onto this
+			// session's `modelRoles.advisor`. Spawn persists it already expanded
+			// against the spawning owner's roles (a parent subagent may override
+			// them); expanding again is a no-op for those and only resolves aliases
+			// in files written before that. Absent = unadvised (the
 			// createSubagentSettings default).
 			const subagentSettings = createSubagentSettings(ctx.settings, {
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
@@ -130,7 +155,12 @@ export function createPersistedSubagentReviverFactory(
 					? {
 							"advisor.enabled": true,
 							...(init.advisor !== "on"
-								? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
+								? {
+										modelRoles: {
+											...ctx.settings.getModelRoles(),
+											advisor: resolveAgentAdvisorRolePattern(init.advisor, ctx.settings),
+										},
+									}
 								: undefined),
 						}
 					: undefined),
@@ -142,6 +172,11 @@ export function createPersistedSubagentReviverFactory(
 			if (init.retryFallback) {
 				installRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback);
 			}
+			// Account pools are owner policy, like the extension roots below: take the
+			// live exact-name `task.agentAccountPools` entry, never a transcript copy.
+			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(ctx.settings));
+			const oauthAccountPools =
+				init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
 			const persistedModelPattern =
 				init.modelRole && init.modelRole !== "default"
 					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
@@ -158,6 +193,8 @@ export function createPersistedSubagentReviverFactory(
 			// A restricted persisted contract must not consult process-global MCP
 			// state: same-name MCP tools are untrusted capability sources.
 			const restrictToolNames = init.restrictToolNames === true;
+			// The spawn's result contract: a session persisted without `yield` returned its final message.
+			const structured = revivedToolNames.includes("yield");
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
@@ -196,14 +233,16 @@ export function createPersistedSubagentReviverFactory(
 							? init.agent
 							: ref.displayName,
 					parentTaskPrefix: ref.id,
+					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
+					oauthAccountPools,
 					expectedAgentRef: expectedRef,
 					taskDepth,
 					toolNames: revivedToolNames,
 					outputSchema: init.outputSchema,
 					outputSchemaMode: init.outputSchemaMode,
 					restrictToolNames: restrictToolNames || undefined,
-					requireYieldTool: true,
+					requireYieldTool: structured,
 					systemPrompt: () => [...init.systemPrompt],
 					// Inherit current owner policy, never extension authority from a transcript.
 					extensionRoots: () => ctx.session.effectiveExtensionRoots,
@@ -253,20 +292,13 @@ export function createPersistedSubagentReviverFactory(
 			// The internal run-state signal precedes deferrable public `agent_end`,
 			// keeping idle-TTL ownership synchronized even while prompts unwind.
 			registry.syncSessionStatus(ref.id, session);
-			// Persisted files predate an agent-source field, so cold-revived frames
-			// report the runtime-neutral `user` source; name comes from the ref.
-			const wakeAgent: AgentDefinition = {
-				name: ref.displayName,
-				description: "",
-				systemPrompt: init.systemPrompt.join("\n\n"),
-				source: "user",
-			};
 			attachIrcWakeTurnMonitor(session, {
 				id: ref.id,
-				agent: wakeAgent,
+				agent: persistedAgentDefinition(ref.displayName, init),
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 				sessionFile,
+				structured,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				// Anchor artifacts to the revived ref's own dir (its parent's children
