@@ -2206,12 +2206,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			{
 				// Roots that collapse without new transcript output must not raise the
 				// post-run chrome floor: user-driven ones (editor drafts, dialogs and
-				// selectors, reports, queued messages) and HUDs that clear themselves on a
+				// selectors, staged attachments, reports, queued messages, dismissible
+				// panels and the error banner) and HUDs that clear themselves on a
 				// timer or registry change (todos, background subagents, model cycle, progress).
 				transientChrome: [
 					this.editorContainer,
+					this.attachmentChipsContainer,
 					this.reportContainer,
 					this.pendingMessagesContainer,
+					this.btwContainer,
+					this.omfgContainer,
+					this.cleanseContainer,
+					this.errorBannerContainer,
 					this.todoContainer,
 					this.subagentContainer,
 					this.modelCycleContainer,
