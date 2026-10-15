@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { summarizeCode } from "@oh-my-pi/pi-natives";
+import { parseCodeStatus } from "@oh-my-pi/pi-natives";
 import { computeRepairRegion, repairParseRegression } from "./auto-repair";
 
 const PATH = "/repo/src/sample.ts";
 
 function sourceParses(code: string): boolean {
-	return summarizeCode({ code: code.length === 0 ? "\n" : code, path: PATH }).parsed;
+	return parseCodeStatus({ code: code.length === 0 ? "\n" : code, path: PATH }).parsed;
 }
 
 /** A parseable base file with distinct sections so multi-hunk edits stay apart. */
