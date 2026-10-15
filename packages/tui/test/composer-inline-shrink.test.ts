@@ -654,6 +654,75 @@ describe("composer inline shrink (#11007)", () => {
 		}
 	}
 
+	it("contracts a promoted persistent widget floor even while a tall transient draft masks the removal", async () => {
+		const rows = 30;
+		const shell = Array.from({ length: 12 }, (_, i) => `shell${i}`);
+		const h = makeHarness(COLUMNS, rows, 0, shell);
+		const persistent = new InlineWidget();
+		h.composer.setRuntimeChildren([h.transcript, persistent, h.editor], { transientChrome: [h.editor] });
+		try {
+			await h.scheduler.settle(h.terminal);
+			h.composer.setRunActive(true);
+			persistent.rows = 7;
+			await streamFinalizedAnswer(h);
+			h.composer.setRunActive(false);
+			await h.scheduler.advance(h.terminal, 300);
+			const history = (): string[] =>
+				h.terminal
+					.getScrollBuffer()
+					.map(row => Bun.stripANSI(row).trim())
+					.filter(row => /^(shell|line|next)\d+$/.test(row));
+			const widgetRows = (): number =>
+				h.terminal.getViewport().filter(row => Bun.stripANSI(row).trim().startsWith("Live widget row ")).length;
+			const expected = [...shell, ...Array.from({ length: 110 }, (_, i) => `line${i}`)];
+			// The persistent widget settled and was promoted into the retirement floor.
+			expect(history()).toEqual(expected);
+			expect(widgetRows()).toBe(7);
+
+			// A tall multi-line draft expands the transient editor by 15 rows.
+			h.widget.rows = 15;
+			h.composer.ui.requestRender();
+			await h.scheduler.advance(h.terminal, 300);
+			expect(widgetRows()).toBe(22);
+
+			// The persistent widget disappears while the draft stays expanded: the
+			// total painted chrome is still taller than the old floor, so only the
+			// transient-adjusted height reveals the contraction.
+			persistent.rows = 0;
+			h.composer.ui.requestRender();
+			await h.scheduler.advance(h.terminal, 300);
+			expect(widgetRows()).toBe(15);
+
+			// Output finalized now must retire against the contracted floor, not the
+			// stale 7-row one.
+			const next = Array.from({ length: 40 }, (_, i) => `next${i}`);
+			h.composer.setRunActive(true);
+			for (const row of next) h.transcript.addChild({ render: () => [row] });
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+			h.composer.setRunActive(false);
+			await h.scheduler.advance(h.terminal, 300);
+			expect(widgetRows()).toBe(15);
+
+			// Closing the draft refills the freed rows from the transcript with no seam.
+			h.widget.rows = 0;
+			h.composer.ui.requestRender();
+			await h.scheduler.advance(h.terminal, 300);
+			expect(widgetRows()).toBe(0);
+			expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+			expect(blankBand(h.terminal)).toBeLessThanOrEqual(2);
+			const viewport = h.terminal.getViewport().map(row => Bun.stripANSI(row).trim());
+			expect(viewport.filter(row => /^next\d+$/.test(row)).at(-1)).toBe("next39");
+			expect(history()).toEqual([...expected, ...next]);
+			h.composer.ui.requestRender();
+			await h.scheduler.advance(h.terminal, 300);
+			expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+			expect(history()).toEqual([...expected, ...next]);
+		} finally {
+			h.composer.stop();
+		}
+	});
+
 	it("keeps the editor on the bottom row when a live block collapses under retired history", async () => {
 		const h = makeHarness();
 		const transcript = new TranscriptContainer();

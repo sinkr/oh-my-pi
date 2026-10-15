@@ -394,13 +394,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
-		const promotedChromeContracted = this.#chromeFloorPromoted && after.length < (this.#chromeFloor ?? 0);
-		this.#chromeFloor = Math.min(this.#chromeFloor ?? after.length, after.length);
 		this.#transientFloor = Math.min(this.#transientFloor ?? transientRows, transientRows);
-		this.#rebaselineChromeFloor(
-			this.#runActive || transcript.hasActiveBlock(),
-			after.length - (transientRows - this.#transientFloor),
-		);
+		// Eligible chrome excludes transient rows above their painted minimum; contraction, floor and rebaseline all use it.
+		const eligibleChrome = after.length - (transientRows - this.#transientFloor);
+		const promotedChromeContracted = this.#chromeFloorPromoted && eligibleChrome < (this.#chromeFloor ?? 0);
+		this.#chromeFloor = Math.min(this.#chromeFloor ?? eligibleChrome, eligibleChrome);
+		this.#rebaselineChromeFloor(this.#runActive || transcript.hasActiveBlock(), eligibleChrome);
 		const belowFloor = this.#chromeFloor;
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
