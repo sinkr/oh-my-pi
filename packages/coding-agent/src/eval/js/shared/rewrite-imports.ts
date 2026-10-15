@@ -596,14 +596,22 @@ function getLexicalBindingNames(node: BabelPublishableDecl): string[] {
 	return names;
 }
 
+/** `var` declaration nested in top-level control flow, with the simple catch parameters enclosing it. */
+type NestedVarDeclaration = {
+	node: BabelVariableDeclaration;
+	parentType: string;
+	catchParams: ReadonlySet<string>;
+};
+
 function collectNestedVarDeclarations(
 	value: unknown,
-	targets: Array<{ node: BabelVariableDeclaration; parentType: string }>,
+	targets: NestedVarDeclaration[],
 	parentType = "Program",
+	catchParams: ReadonlySet<string> = new Set(),
 ): void {
 	if (!value || typeof value !== "object") return;
 	if (Array.isArray(value)) {
-		for (const item of value) collectNestedVarDeclarations(item, targets, parentType);
+		for (const item of value) collectNestedVarDeclarations(item, targets, parentType, catchParams);
 		return;
 	}
 	const node = value as Record<string, unknown>;
@@ -615,23 +623,36 @@ function collectNestedVarDeclarations(
 	)
 		return;
 	if (node.type === "VariableDeclaration") {
-		if (node.kind === "var") targets.push({ node: node as BabelVariableDeclaration, parentType });
+		if (node.kind === "var") {
+			targets.push({ node: node as BabelVariableDeclaration, parentType, catchParams });
+		}
+		return;
+	}
+	if (node.type === "CatchClause") {
+		// Annex B lets `var e = v` redeclare a simple catch parameter `e`; the initializer
+		// assigns the catch binding while the function-scoped `e` stays undefined.
+		const param = node.param as BabelBindingPattern | null | undefined;
+		const bodyCatchParams =
+			param?.type === "Identifier" && typeof param.name === "string"
+				? new Set([...catchParams, param.name])
+				: catchParams;
+		collectNestedVarDeclarations(node.body, targets, node.type, bodyCatchParams);
 		return;
 	}
 	for (const key in node) {
 		if (key === "loc" || key === "extra" || key === "range") continue;
 		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
-		collectNestedVarDeclarations(node[key], targets, node.type);
+		collectNestedVarDeclarations(node[key], targets, node.type, catchParams);
 	}
 }
 
-function renderNestedVarDeclaration(code: string, node: BabelVariableDeclaration, parentType: string): string {
+function renderNestedVarDeclaration(code: string, { node, parentType, catchParams }: NestedVarDeclaration): string {
 	if (parentType === "ForInStatement" || parentType === "ForOfStatement") {
 		const id = node.declarations?.[0]?.id;
 		return id ? code.slice(id.start, id.end) : "";
 	}
 	const inForInit = parentType === "ForStatement";
-	const statements = renderGlobalVariableDeclaration(code, node, inForInit);
+	const statements = renderGlobalVariableDeclaration(code, node, { inForInit, catchParams });
 	if (inForInit) return statements;
 	if (!statements) return ";";
 	return (node.declarations?.filter(declaration => declaration.init).length ?? 0) > 1
@@ -639,26 +660,35 @@ function renderNestedVarDeclaration(code: string, node: BabelVariableDeclaration
 		: statements;
 }
 
-function renderGlobalVariableDeclaration(code: string, node: BabelVariableDeclaration, inForInit = false): string {
+/**
+ * Renders a `var` declaration as assignments that publish its bindings on the worker global.
+ * Names in `catchParams` assign the enclosing catch binding instead, matching Annex B semantics.
+ */
+function renderGlobalVariableDeclaration(
+	code: string,
+	node: BabelVariableDeclaration,
+	options: { inForInit?: boolean; catchParams?: ReadonlySet<string> } = {},
+): string {
 	const assignments: string[] = [];
 	for (const declaration of node.declarations ?? []) {
 		if (!declaration.init) continue;
 		const target = code.slice(declaration.id.start, declaration.id.end);
 		const value = code.slice(declaration.init.start, declaration.init.end);
-		if (declaration.id.type === "Identifier" && typeof declaration.id.name === "string") {
-			assignments.push(`this[${JSON.stringify(declaration.id.name)}] = (${value})`);
+		const name = declaration.id.type === "Identifier" ? declaration.id.name : undefined;
+		if (typeof name === "string" && !options.catchParams?.has(name)) {
+			assignments.push(`this[${JSON.stringify(name)}] = (${value})`);
 		} else {
 			assignments.push(`(${target} = (${value}))`);
 		}
 	}
-	return inForInit ? assignments.join(", ") : assignments.map(assignment => `${assignment};`).join("\n");
+	return options.inForInit ? assignments.join(", ") : assignments.map(assignment => `${assignment};`).join("\n");
 }
 
 function globalizeTopLevelDeclarations(
 	code: string,
 	ast: { program: { body: ReadonlyArray<BabelProgramNode> } },
 	targets: ReadonlyArray<{ node: BabelPublishableDecl }>,
-	nestedVars: ReadonlyArray<{ node: BabelVariableDeclaration; parentType: string }>,
+	nestedVars: readonly NestedVarDeclaration[],
 	bindingNames: readonly string[],
 ): string {
 	const prelude = bindingNames.map(
@@ -687,8 +717,12 @@ function globalizeTopLevelDeclarations(
 			replacement: `this[${JSON.stringify(node.id.name)}] = (${segment});`,
 		});
 	}
-	for (const { node, parentType } of nestedVars) {
-		edits.push({ start: node.start, end: node.end, replacement: renderNestedVarDeclaration(code, node, parentType) });
+	for (const nested of nestedVars) {
+		edits.push({
+			start: nested.node.start,
+			end: nested.node.end,
+			replacement: renderNestedVarDeclaration(code, nested),
+		});
 	}
 
 	edits.sort((left, right) => right.start - left.start);
@@ -990,7 +1024,7 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 			if (decl.id) targets.push({ node: decl, demote: false });
 		}
 	}
-	const nestedVars: Array<{ node: BabelVariableDeclaration; parentType: string }> = [];
+	const nestedVars: NestedVarDeclaration[] = [];
 	if (publishGlobals) {
 		for (const node of ast.program.body) {
 			if (

@@ -260,6 +260,20 @@ if (nested() !== 9) throw new Error("function local was lost");`);
 		}
 	});
 
+	it("keeps a catch-parameter var initializer on the catch binding after await", async () => {
+		const global = globalThis;
+		const wrapped = await wrapCode(`await Promise.resolve();
+try { throw 0; } catch (ompCaught) { var ompCaught = 1; var ompAfterCatch = ompCaught + 1; }`);
+		try {
+			await indirectEval(wrapped.source);
+			expect(indirectEval("[typeof ompCaught, ompAfterCatch]")).toEqual(["undefined", 2]);
+			expect(Reflect.has(global, "ompCaught")).toBe(true);
+		} finally {
+			Reflect.deleteProperty(global, "ompCaught");
+			Reflect.deleteProperty(global, "ompAfterCatch");
+		}
+	});
+
 	it("retains var bindings declared by top-level for loops after await", async () => {
 		const global = globalThis;
 		const wrapped = await wrapCode(`await Promise.resolve();
