@@ -397,8 +397,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded
 			? retainModelIds(mergedModels, dynamicModels)
-			: !dynamicFetchSucceeded && isAuthoritativeDynamicCache && preparedCacheModels.length > 0
-				? retainModelIds(mergedModels, preparedCacheModels)
+			: !dynamicFetchSucceeded && isAuthoritativeDynamicCache && usableCachedModels.length > 0
+				? retainModelIds(mergedModels, usableCachedModels)
 				: mergedModels,
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
@@ -453,8 +453,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				mergeAuthority,
 			);
 			const fallbackSnapshotModels = collapseBuiltVariants(
-				isAuthoritativeDynamicCache && preparedLatestCacheModels.length > 0
-					? retainModelIds(mergedFallbackModels, preparedLatestCacheModels)
+				isAuthoritativeDynamicCache && latestUsableCacheModels.length > 0
+					? retainModelIds(mergedFallbackModels, latestUsableCacheModels)
 					: mergedFallbackModels,
 			);
 			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {

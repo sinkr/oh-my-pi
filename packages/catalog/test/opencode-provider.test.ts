@@ -725,6 +725,38 @@ describe("OpenCode provider discovery", () => {
 		}
 	});
 
+	test("keeps bundled drop-listed Zen models when refresh fails on a multi-row authoritative cache", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-gemini37-multi-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const options = opencodeZenModelManagerOptions({ apiKey: "zen-account-key" });
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("OpenCode Zen cache provider id is missing");
+			const bundledModels = getBundledModels("opencode-zen");
+			const gemini = bundledModels.find(model => model.id === "gemini-3.7-flash");
+			const pickle = bundledModels.find(model => model.id === "big-pickle");
+			if (!gemini || !pickle) throw new Error("OpenCode Zen bundled models are missing");
+			const managerOptions = {
+				...options,
+				staticModels: bundledModels,
+				cacheDbPath,
+				modelsDev: undefined,
+				fetchDynamicModels: async (): Promise<never> => {
+					throw new Error("offline");
+				},
+			};
+
+			for (const strategy of ["online-if-uncached", "offline"] as const) {
+				writeModelCache(cacheProviderId, Date.now(), [gemini, pickle], true, "merge-v3:pre-10543", cacheDbPath);
+				const resolved = await resolveProviderModels(managerOptions, strategy);
+				expect(resolved.models.map(model => model.id)).toContain("gemini-3.7-flash");
+				expect(resolved.models.map(model => model.id)).toContain("big-pickle");
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test("routes opencode-go deepseek-v4-flash to the responses API", () => {
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
 		// The gateway serves Flash on /v1/responses, not /v1/chat/completions;
