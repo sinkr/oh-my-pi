@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed `/handoff` failing with `400 Provider returned error` on OpenRouter Muse Spark and Muse Wonder models: requests no longer send a `tool_choice` the upstream Meta backend rejects ([#15910](https://github.com/can1357/oh-my-pi/issues/15910))
+- Fixed `/handoff` failing with `400 Provider returned error` on OpenRouter's hosted Muse Spark 1.x and Muse Wonder models: requests no longer send a `tool_choice` the upstream Meta backend rejects ([#15910](https://github.com/can1357/oh-my-pi/issues/15910))
 
 ## [18.11.1] - 2026-10-15
 
