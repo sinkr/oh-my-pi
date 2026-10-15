@@ -424,6 +424,38 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 		expect(after.text).toBe("\nAfter");
 	});
 
+	it("keeps quoted prose after an unclosed wrapper with no invoke", () => {
+		const input =
+			"之前这些源的完整 `<｜DSML｜tool_calls>` 信封显示为纯文本，工具从不执行。\n\n## Next section\nmore text";
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < input.length; i += 7) visible += healing.feed(input.slice(i, i + 7));
+		visible += healing.flushPending();
+		expect(visible).toBe(input);
+		expect(stripDsmlToolMarkup(visible)).toBeUndefined();
+		expect(healing.drainCompleted()).toEqual([]);
+	});
+
+	it("passes an unclosed, unquoted wrapper to leak recovery without losing later prose", () => {
+		const input = "Intro. <|DSML|tool_calls>broken call\n\nThe build passed.";
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < input.length; i += 5) visible += healing.feed(input.slice(i, i + 5));
+		visible += healing.flushPending();
+		expect(stripDsmlToolMarkup(visible)).toBe("Intro.\n\nThe build passed.");
+		expect(healing.drainCompleted()).toEqual([]);
+	});
+
+	it("passes a closed wrapper without an invoke to leak recovery", () => {
+		const input = "Intro.<|DSML|tool_calls>broken</|DSML|tool_calls>Outro.";
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < input.length; i += 6) visible += healing.feed(input.slice(i, i + 6));
+		visible += healing.flushPending();
+		expect(stripDsmlToolMarkup(visible)).toBe("Intro.\n\nOutro.");
+		expect(healing.drainCompleted()).toEqual([]);
+	});
+
 	it("drops partial calls when the stream ends mid-envelope", () => {
 		const healing = new StreamMarkupHealing({ pattern: "dsml" });
 		const truncated = REPORTED_DSML_LEAK.slice(0, REPORTED_DSML_LEAK.length - 30);
@@ -1124,7 +1156,7 @@ describe("OpenAI completions MiniMax thinking healing", () => {
 
 		expect(result.content).toEqual([
 			{ type: "text", text: "visible " },
-			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined },
+			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined, summary: false },
 			{ type: "text", text: " answer" },
 		]);
 	});
@@ -1261,5 +1293,96 @@ describe("OpenAI completions provider DSML envelope healing", () => {
 		expect(toolCalls.map(call => call.name)).toEqual(["read", "read"]);
 		expect(toolCalls.map(call => call.arguments)).toEqual([{ path: "a.ts" }, { path: "b.ts" }]);
 		expect(result.stopReason).toBe("toolUse");
+	});
+
+	it("keeps parallel tool calls isolated when separate chunks reuse index 0 with distinct IDs", async () => {
+		const model = getBundledModel<"openai-completions">("nanogpt", "deepseek/deepseek-v4-pro");
+		const fetchMock = mockFetch([
+			chunk(model.id, {
+				tool_calls: [
+					{ index: 0, id: "call_a", type: "function", function: { name: "read", arguments: '{"path":"a.ts"}' } },
+				],
+			}),
+			chunk(model.id, {
+				tool_calls: [
+					{ index: 0, id: "call_b", type: "function", function: { name: "read", arguments: '{"path":' } },
+				],
+			}),
+			chunk(model.id, {
+				tool_calls: [{ index: 0, function: { arguments: '"b.ts"}' } }],
+			}),
+			chunk(model.id, {}, "tool_calls"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(
+			model,
+			{ messages: [{ role: "user", content: "Read a.ts and b.ts", timestamp: Date.now() }], tools: [readTool] },
+			{ apiKey: "test-key", reasoning: "high", fetch: fetchMock },
+		).result();
+
+		const toolCalls = result.content.filter((b): b is ToolCall => b.type === "toolCall");
+		expect(toolCalls).toHaveLength(2);
+		expect(toolCalls.map(call => call.id)).toEqual(["call_a", "call_b"]);
+		expect(toolCalls.map(call => call.name)).toEqual(["read", "read"]);
+		expect(toolCalls.map(call => call.arguments)).toEqual([{ path: "a.ts" }, { path: "b.ts" }]);
+		expect(result.stopReason).toBe("toolUse");
+	});
+
+	it("keeps one tool call whole when a gateway mints a new id for each argument fragment at index 0", async () => {
+		const model = getBundledModel<"openai-completions">("nanogpt", "deepseek/deepseek-v4-pro");
+		const fetchMock = mockFetch([
+			chunk(model.id, {
+				tool_calls: [
+					{ index: 0, id: "call_1", type: "function", function: { name: "read", arguments: '{"path":' } },
+				],
+			}),
+			chunk(model.id, { tool_calls: [{ index: 0, id: "call_2", function: { arguments: '"a.ts"}' } }] }),
+			chunk(model.id, {}, "tool_calls"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(
+			model,
+			{ messages: [{ role: "user", content: "Read a.ts", timestamp: Date.now() }], tools: [readTool] },
+			{ apiKey: "test-key", fetch: fetchMock },
+		).result();
+
+		const toolCalls = result.content.filter((b): b is ToolCall => b.type === "toolCall");
+		expect(toolCalls.map(call => ({ name: call.name, arguments: call.arguments }))).toEqual([
+			{ name: "read", arguments: { path: "a.ts" } },
+		]);
+	});
+
+	it("routes id-less continuations at a reused index to the call that resumed by id", async () => {
+		const model = getBundledModel<"openai-completions">("nanogpt", "deepseek/deepseek-v4-pro");
+		const fetchMock = mockFetch([
+			chunk(model.id, {
+				tool_calls: [
+					{ index: 0, id: "call_a", type: "function", function: { name: "read", arguments: '{"path":' } },
+				],
+			}),
+			chunk(model.id, {
+				tool_calls: [
+					{ index: 0, id: "call_b", type: "function", function: { name: "read", arguments: '{"path":"b.ts"}' } },
+				],
+			}),
+			chunk(model.id, { tool_calls: [{ index: 0, id: "call_a", function: { arguments: '"a' } }] }),
+			chunk(model.id, { tool_calls: [{ index: 0, function: { arguments: '.ts"}' } }] }),
+			chunk(model.id, {}, "tool_calls"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(
+			model,
+			{ messages: [{ role: "user", content: "Read a.ts and b.ts", timestamp: Date.now() }], tools: [readTool] },
+			{ apiKey: "test-key", fetch: fetchMock },
+		).result();
+
+		const toolCalls = result.content.filter((b): b is ToolCall => b.type === "toolCall");
+		expect(toolCalls.map(call => ({ id: call.id, arguments: call.arguments }))).toEqual([
+			{ id: "call_a", arguments: { path: "a.ts" } },
+			{ id: "call_b", arguments: { path: "b.ts" } },
+		]);
 	});
 });
