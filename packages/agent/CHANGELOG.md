@@ -17,6 +17,9 @@
 ### Fixed
 
 - Cancelling an `ask` after a background job finishes now reports the user cancellation instead of telling the model to retry a skipped tool ([#15985](https://github.com/can1357/oh-my-pi/issues/15985))
+### Fixed
+
+- Fixed Cursor turns failing with `PROVIDER_ERROR` when a follow-up (a finished background job, a late diagnostic, a reminder) arrived while the previous turn was still streaming
 
 ## [18.11.1] - 2026-10-15
 
