@@ -40,6 +40,34 @@ impl Drop for NativeWork {
 	}
 }
 
+/// Report that a job's result was converted for JavaScript, freeing its Rust
+/// allocations.
+///
+/// Conversion runs on the JS thread after the job's [`NativeWork`] guard has
+/// dropped, possibly after the trim that guard scheduled; reporting it counts
+/// as finished work, so the pages it frees are trimmed in turn.
+#[inline]
+pub fn result_settled() {
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	allocator::settled();
+}
+
+/// A job result that reports [`result_settled`] once converted for
+/// JavaScript.
+pub struct Settled<T>(pub T);
+
+impl<T: napi::bindgen_prelude::ToNapiValue> napi::bindgen_prelude::ToNapiValue for Settled<T> {
+	unsafe fn to_napi_value(
+		env: napi::sys::napi_env,
+		val: Self,
+	) -> napi::Result<napi::sys::napi_value> {
+		// SAFETY: forwarded unchanged from the caller's contract.
+		let value = unsafe { T::to_napi_value(env, val.0) };
+		result_settled();
+		value
+	}
+}
+
 #[cfg(any(all(target_os = "linux", target_env = "gnu"), test))]
 mod allocator {
 	use std::time::Duration;
@@ -91,6 +119,16 @@ mod allocator {
 		fn end(&self) {
 			let mut activity = self.activity.lock();
 			activity.running -= 1;
+			self.finish(activity);
+		}
+
+		/// Record finished work outside any job, such as a result freed on the
+		/// JS thread.
+		fn settled(&self) {
+			self.finish(self.activity.lock());
+		}
+
+		fn finish(&self, mut activity: MutexGuard<'_, Activity>) {
 			activity.finished += 1;
 			if activity.running == 0 {
 				self.idle.notify_one();
@@ -141,6 +179,11 @@ mod allocator {
 	#[cfg(all(target_os = "linux", target_env = "gnu"))]
 	pub(super) fn end() {
 		TRIMMER.end();
+	}
+
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	pub(super) fn settled() {
+		TRIMMER.settled();
 	}
 
 	#[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -223,6 +266,33 @@ mod allocator {
 				.recv_timeout(Duration::from_secs(10))
 				.expect("trim covering the later job");
 			proceed_tx.send(()).unwrap();
+		}
+
+		#[test]
+		fn a_result_settled_after_the_trim_is_trimmed_again_but_not_under_running_work() {
+			const QUIET: Duration = Duration::from_millis(50);
+			let (trimmed_tx, trimmed) = mpsc::channel();
+			let trimmer = spawn_trimmer(QUIET, move || trimmed_tx.send(()).unwrap());
+
+			trimmer.begin();
+			trimmer.end();
+			trimmed
+				.recv_timeout(Duration::from_secs(10))
+				.expect("trim after the job");
+			// The JS thread converts the result late, freeing its allocations.
+			trimmer.settled();
+			trimmed
+				.recv_timeout(Duration::from_secs(10))
+				.expect("trim after the result is freed");
+
+			// A settlement while another job runs waits for that job.
+			trimmer.begin();
+			trimmer.settled();
+			assert!(trimmed.recv_timeout(QUIET * 4).is_err());
+			trimmer.end();
+			trimmed
+				.recv_timeout(Duration::from_secs(10))
+				.expect("trim once the job ends");
 		}
 	}
 }

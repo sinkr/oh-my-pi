@@ -38,7 +38,10 @@ pub use pi_shell::cancel::{AbortReason, AbortToken};
 use pi_vfs::BlockingFs;
 use tokio_util::sync::CancellationToken;
 
-use crate::{memory::native_work, prof::profile_region};
+use crate::{
+	memory::{Settled, native_work, result_settled},
+	prof::profile_region,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cancellation
@@ -190,6 +193,11 @@ where
 		}
 		Ok(output)
 	}
+
+	fn finally(self, _env: Env) -> Result<()> {
+		result_settled();
+		Ok(())
+	}
 }
 
 /// Construct the same named rejection napi uses when an `AbortSignal` cancels
@@ -296,6 +304,11 @@ where
 		}
 		Ok(output)
 	}
+
+	fn finally(self, _env: Env) -> Result<()> {
+		result_settled();
+		Ok(())
+	}
 }
 
 /// Promise type produced by [`blocking_mapped`].
@@ -378,7 +391,7 @@ where
 	T: ToNapiValue + Send + 'static,
 {
 	let settlement_token = cancel_token.clone();
-	env.spawn_future_with_callback(
+	let promise = env.spawn_future_with_callback(
 		async move { Ok(run_filesystem_worker(tag, cancel_token, fs, work).await) },
 		move |env, result| {
 			if let Some(reason) = settlement_token.abort_reason() {
@@ -389,9 +402,14 @@ where
 			}
 			// An elapsed deadline has no explicit abort flag. The worker was
 			// already cancelled, so the provider cannot hold up this Promise.
-			result.unwrap_or_else(|| Err(Error::from_reason("Aborted: Timeout")))
+			result
+				.unwrap_or_else(|| Err(Error::from_reason("Aborted: Timeout")))
+				.map(Settled)
 		},
-	)
+	)?;
+	// `Settled` only changes what happens after conversion; the Promise still
+	// resolves to `T`.
+	Ok(PromiseRaw::new(env.raw(), promise.raw()))
 }
 
 /// Stop waiting for a queued or running worker when its caller cancels.
