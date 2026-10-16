@@ -13,6 +13,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { trackUserWaits } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/user-wait";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -135,5 +136,30 @@ describe("SDK session dialogs and the computer display hold", () => {
 		open.answer("Deny");
 		await running;
 		expect(releases).toEqual([1, 2]);
+	});
+});
+
+describe("trackUserWaits", () => {
+	it("re-reads an optional dialog getter on every access", async () => {
+		// Like the RPC UI context's `askDialog`, which `set_ask_dialog` turns off: once off, the ask must fall back to
+		// `select`, not keep the wrapper of the dialog it read while on.
+		const tracked: string[] = [];
+		const rpcLike = {
+			enabled: true,
+			get askDialog(): ExtensionUIContext["askDialog"] {
+				if (!this.enabled) return undefined;
+				return async () => undefined;
+			},
+		};
+		const ui = trackUserWaits(rpcLike as unknown as ExtensionUIContext, dialog => {
+			tracked.push("ask");
+			return dialog();
+		});
+		await ui.askDialog?.([]);
+		expect(tracked).toEqual(["ask"]);
+		rpcLike.enabled = false;
+		expect(ui.askDialog).toBeUndefined();
+		rpcLike.enabled = true;
+		expect(ui.askDialog).toBeFunction();
 	});
 });
