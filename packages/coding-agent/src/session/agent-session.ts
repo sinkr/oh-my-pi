@@ -1791,7 +1791,7 @@ export class AgentSession implements SettingsScope {
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
 			restoreThinkingLevel: level => this.#models.restoreThinkingLevel(level),
 			resolveDefaultPrewalk: () => this.#resolveDefaultPrewalk(),
-			resolveAutoPrewalk: () => this.#resolveAutoPrewalk(),
+			resolveAutoPrewalk: signal => this.#resolveAutoPrewalk(signal),
 			captureThinking: () => {
 				const { thinkingLevel, isAutoThinking, autoResolvedThinkingLevel } = this.#models;
 				return () => this.#models.restoreThinkingSnapshot(thinkingLevel, isAutoThinking, autoResolvedThinkingLevel);
@@ -1867,11 +1867,12 @@ export class AgentSession implements SettingsScope {
 			sessionId: () => this.sessionId,
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
-			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
+			syncAfterModelChange: (previousEditMode, isCurrent) =>
+				this.#tools.syncAfterModelChange(previousEditMode, isCurrent),
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
-				await this.#setModelWithProviderSessionReset(model);
-				// Only a completed explicit selection, including same-model reselection, takes ownership.
+				// Explicit selection takes ownership at mutation, including same-model reselection.
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				await this.#setModelWithProviderSessionReset(model);
 			},
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -1961,7 +1962,10 @@ export class AgentSession implements SettingsScope {
 			}
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
+		this.agent.canDeliverLiveSteering = this.#canDeliverLiveSteering;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+			await this.#prewalk.autoRollback;
+			signal?.throwIfAborted();
 			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -2682,17 +2686,21 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Resolves auto-prewalk's source then target; each needs a credential that actually yields a key. */
-	async #resolveAutoPrewalk(): Promise<AutoPrewalkSelection | undefined> {
+	async #resolveAutoPrewalk(signal: AbortSignal): Promise<AutoPrewalkSelection | undefined> {
 		const resolveUsable = async (label: string, selector: string) => {
+			if (signal.aborted) return undefined;
 			let resolved = this.#resolvePrewalkSelector(selector);
 			if (typeof resolved !== "string") {
 				try {
-					if (await this.#modelRegistry.getApiKey(resolved.model, this.sessionId)) return resolved;
+					const apiKey = await this.#modelRegistry.getApiKey(resolved.model, this.sessionId, { signal });
+					if (signal.aborted) return undefined;
+					if (apiKey) return resolved;
 					resolved = `no API key for ${resolved.model.provider}/${resolved.model.id}`;
 				} catch (error) {
 					resolved = error instanceof Error ? error.message : String(error);
 				}
 			}
+			if (signal.aborted) return undefined;
 			this.emitNotice("warning", `Auto-prewalk skipped: ${label} "${selector}": ${resolved}.`, "prewalk");
 			return undefined;
 		};
@@ -5691,6 +5699,9 @@ export class AgentSession implements SettingsScope {
 		if (this.agent.prepareQueuedMessages === this.#prepareQueuedUserMessages) {
 			this.agent.prepareQueuedMessages = undefined;
 		}
+		if (this.agent.canDeliverLiveSteering === this.#canDeliverLiveSteering) {
+			this.agent.canDeliverLiveSteering = undefined;
+		}
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
@@ -7884,6 +7895,9 @@ export class AgentSession implements SettingsScope {
 		return images.length > 0 ? this.#buildImageDescriptionNotice(images) : undefined;
 	}
 
+	#canDeliverLiveSteering = (messages: readonly AgentMessage[]): boolean =>
+		!this.#prewalk.needsAutoRouting() || !messages.some(message => this.#isAutoPrewalkTurn(message));
+
 	/** Queue ownership belongs to Agent; only actual user deliveries refresh submission policy. */
 	#prepareQueuedUserMessages = (
 		messages: readonly AgentMessage[],
@@ -7907,15 +7921,60 @@ export class AgentSession implements SettingsScope {
 			}
 			text.push(parts.join(""));
 		}
-		return this.#prepareAgentStart(
+		return this.#prepareQueuedUserTurn(
 			first,
 			text.join("\n\n"),
 			images.length > 0 ? images : undefined,
-			this.#promptGeneration,
 			signal,
-			"queued",
+			userMessages.some(message => this.#isAutoPrewalkTurn(message)),
 		);
 	};
+
+	async #prepareQueuedUserTurn(
+		message: AgentMessage,
+		prompt: string,
+		images: ImageContent[] | undefined,
+		signal: AbortSignal,
+		autoPrewalkTurn: boolean,
+	): Promise<QueuedMessagePreparation> {
+		const generation = this.#promptGeneration;
+		const selectionEpoch = this.#prewalk.selectionEpoch;
+		const cancelled = { commit: () => undefined };
+		try {
+			// Select the source before staging recall and hooks: their commit still belongs to Agent's claim.
+			if (autoPrewalkTurn) {
+				const switched = await this.#prewalk.applyAuto(prompt, generation, signal, selectionEpoch);
+				if (signal.aborted || this.#promptGeneration !== generation) {
+					await this.#prewalk.rollbackAuto(generation, signal);
+					return cancelled;
+				}
+				if (switched && !(await this.#runUsageAwarePreflightForNextModelCall(signal))) {
+					await this.#prewalk.rollbackAuto(generation, signal);
+					return cancelled;
+				}
+			}
+			const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
+			if (this.isAutoThinking && autoPrewalkTurn) {
+				await this.#models.applyAutoThinkingLevel(prompt, generation, undefined, signal);
+			}
+			if (signal.aborted || this.#promptGeneration !== generation) {
+				await this.#prewalk.rollbackAuto(generation, signal);
+				return cancelled;
+			}
+			return {
+				commit: () => {
+					const additional = preparation.commit();
+					if (additional === undefined) return undefined;
+					const planMessage = this.#prewalk.commitAuto(generation, signal);
+					if (this.#prewalk.willHandoff) this.#toolChoiceQueue.removeByLabel("eager-todo");
+					return planMessage ? [...additional, planMessage] : additional;
+				},
+			};
+		} catch (error) {
+			await this.#prewalk.rollbackAuto(generation, signal);
+			throw error;
+		}
+	}
 
 	/**
 	 * Stage extension results; committing them must remain synchronous with delivery validation.
@@ -7934,6 +7993,7 @@ export class AgentSession implements SettingsScope {
 	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
 		const sessionGeneration = this.#sessionGeneration;
 		const alreadyDisposing = this.#isDisposed && origin === "direct";
+		await this.#prewalk.autoRollback;
 		const isCurrent = () =>
 			this.#promptGeneration === generation &&
 			this.#sessionGeneration === sessionGeneration &&
@@ -8061,6 +8121,7 @@ export class AgentSession implements SettingsScope {
 		// the typed text back to the host instead of losing it.
 		const inFlightEpoch = this.#beginInFlight();
 		const generation = this.#promptGeneration;
+		const selectionEpoch = this.#prewalk.selectionEpoch;
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
@@ -8184,16 +8245,17 @@ export class AgentSession implements SettingsScope {
 			// blocks the turn: a failed classification or an unusable selector changes nothing.
 			if (autoPrewalkTurn) {
 				const baseBeforeSwitch = this.#tools.baseSystemPrompt;
-				const switched = await this.#prewalk.applyAuto(expandedText, generation, setupAbort.signal);
+				const switched = await this.#prewalk.applyAuto(expandedText, generation, setupAbort.signal, selectionEpoch);
 				if (this.#promptGeneration !== generation) {
 					return false;
 				}
 				if (switched) {
 					// The earlier usage preflight covered the previous model.
-					if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
-					// A model-policy rebuild replaced the base prompt and dropped this turn's memory recall; the
-					// already-run hook outputs (messages, override) stay as prepared.
-					if (this.#tools.baseSystemPrompt !== baseBeforeSwitch) this.#tools.reapplyTurnRecall();
+					if (!(await this.#runUsageAwarePreflightForNextModelCall(setupAbort.signal))) return false;
+				}
+				// Any rebuild drops committed recall, even when a no-op arm rolled the source switch back.
+				if (this.#tools.baseSystemPrompt !== baseBeforeSwitch) {
+					this.#tools.reapplyTurnRecall();
 				}
 				// The eager todo reminder was built before this turn could arm. Like a configured prewalk (#10510),
 				// an actionable one owns todo creation, plan first, so the reminder would contradict its nudge.
@@ -8215,7 +8277,12 @@ export class AgentSession implements SettingsScope {
 			// back to a concrete level inside the helper.
 			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
 			if (this.isAutoThinking && isUserTurn) {
-				await this.#models.applyAutoThinkingLevel(expandedText, generation, options?.solutionSpace);
+				await this.#models.applyAutoThinkingLevel(
+					expandedText,
+					generation,
+					options?.solutionSpace,
+					setupAbort.signal,
+				);
 				if (this.#promptGeneration !== generation) {
 					return false;
 				}
@@ -8293,6 +8360,8 @@ export class AgentSession implements SettingsScope {
 				this.#planReferenceSent = true;
 			}
 			try {
+				const planMessage = this.#prewalk.commitAuto(generation, setupAbort.signal);
+				if (planMessage) messages.push(planMessage);
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
@@ -8302,6 +8371,7 @@ export class AgentSession implements SettingsScope {
 			}
 			return true;
 		} finally {
+			await this.#prewalk.rollbackAuto(generation, setupAbort.signal);
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -9961,7 +10031,7 @@ export class AgentSession implements SettingsScope {
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
 			this.abortRetry();
-			this.#promptGeneration++;
+			const autoPrewalkRollback = this.#prewalk.rollbackAuto(this.#promptGeneration++);
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
@@ -9986,7 +10056,7 @@ export class AgentSession implements SettingsScope {
 			const computerControlRevocation = revokeComputerControlForOwner(this.#eval.getKernelOwnerId());
 			const postPromptDrain = this.#cancelPostPromptTasks();
 			this.agent.abort(options?.reason);
-			await Promise.all([postPromptDrain, computerControlRevocation]);
+			await Promise.all([postPromptDrain, computerControlRevocation, autoPrewalkRollback]);
 			await this.agent.waitForIdle();
 			// agent_end maintenance can enqueue a retry after the first cancellation.
 			// Keep the abort barrier up until those handlers settle, then cancel

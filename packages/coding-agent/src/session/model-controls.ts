@@ -68,7 +68,7 @@ export interface ModelControlsHost {
 	sessionId(): string;
 	promptGeneration(): number;
 	resolveActiveEditMode(): EditMode;
-	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
+	syncAfterModelChange(previousEditMode: EditMode, isCurrent?: () => boolean): Promise<void>;
 	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic"): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
@@ -282,7 +282,7 @@ export class ModelControls {
 	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
+		options?: { ephemeral?: boolean; isCurrent?: () => boolean },
 		selection: "explicit" | "automatic" = "explicit",
 	): Promise<void> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
@@ -291,10 +291,12 @@ export class ModelControls {
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		if (options?.isCurrent?.() === false) return;
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
+		if (options?.isCurrent?.() === false) return;
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
@@ -308,7 +310,7 @@ export class ModelControls {
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
-		await this.#host.syncAfterModelChange(previousEditMode);
+		await this.#host.syncAfterModelChange(previousEditMode, options?.isCurrent);
 	}
 
 	/**
@@ -629,7 +631,13 @@ export class ModelControls {
 	 * level, or uses the provisional concrete level before the first resolution.
 	 * Never throws into the turn, and never clears `#autoThinking`.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
+	async applyAutoThinkingLevel(
+		promptText: string,
+		generation: number,
+		solutionSpace?: string,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (signal?.aborted) return;
 		const model = this.#model;
 		if (!model?.reasoning || model.thinking?.unverified) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -658,7 +666,7 @@ export class ModelControls {
 						registry: this.#host.modelRegistry,
 						model,
 						sessionId: this.#host.sessionId(),
-						signal: controller.signal,
+						signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
 						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
 						onUsage: usage => {
 							const entryId = this.#host.sessionManager.appendModelUsage(usage, usageOwner);
@@ -677,7 +685,7 @@ export class ModelControls {
 		}
 
 		// Drop the result if the turn was aborted/superseded while classifying.
-		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
+		if (signal?.aborted || this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
 
 		const effort = clampThinkingLevelToCeiling(
 			model,

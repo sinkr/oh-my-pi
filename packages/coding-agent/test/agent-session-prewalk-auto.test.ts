@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, type Context, Effort, type Model, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AUTO_PREWALK_TIMEOUT_MS, type PrewalkRoute } from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
@@ -15,6 +15,8 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { PrewalkCoordinator } from "@oh-my-pi/pi-coding-agent/session/prewalk";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgPrewalkAuto, cfgPrewalkAutoSource, cfgPrewalkAutoTarget } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/todo-tracker";
@@ -114,10 +116,13 @@ describe("AgentSession auto-prewalk", () => {
 
 	/**
 	 * Answer System One requests from `replies` (then `DIRECT`) and record each one.
-	 * Auto-thinking's `level` question is answered inline so it never consumes a reply.
-	 * `gate` parks `route` requests until its promise settles.
+	 * Auto-thinking's `level` question never consumes a reply.
+	 * `gate` parks the selected question (route by default) until its promise settles.
 	 */
-	function stubJudge(replies: Reply[] = [], gate?: { hold: Promise<void>; requested: () => void }): JudgeCall[] {
+	function stubJudge(
+		replies: Reply[] = [],
+		gate?: { hold: Promise<void>; requested: () => void; question?: "route" | "level"; skip?: number },
+	): JudgeCall[] {
 		const calls: JudgeCall[] = [];
 		const usage = { input_tokens: 8, output_tokens: 2 };
 		vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -134,13 +139,18 @@ describe("AgentSession auto-prewalk", () => {
 					model: session?.model?.id,
 					configured: session?.configuredThinkingLevel(),
 				});
+				if (questions.includes(gate?.question ?? "route") && gate) {
+					if (gate.skip) gate.skip--;
+					else {
+						gate.requested();
+						await gate.hold;
+					}
+				}
 				if (questions.includes("level")) {
 					const probabilities = { low: 0, medium: 0, high: 1, xhigh: 0 };
 					const level = { type: "choice", choice: "high", probabilities, confidence: 1 };
 					return Response.json({ model: "jev", answers: { level }, usage });
 				}
-				gate?.requested();
-				await gate?.hold;
 				const reply = replies.shift() ?? DIRECT;
 				if (reply === "http-400") return new Response("bad request", { status: 400 });
 				return Response.json({ model: "jev", answers: { route: reply }, usage });
@@ -164,10 +174,13 @@ describe("AgentSession auto-prewalk", () => {
 		extensionRunner?: ExtensionRunner;
 		/** Rebuild the base system prompt per active model, so a model switch changes it. */
 		rebuildBase?: boolean;
+		/** Park a rebuild for `model` after its bytes are captured, before it can publish. */
+		renderGate?: { model: string; requested: () => void; hold: Promise<void> };
 		/** Extra model roles, e.g. a custom planner. */
 		roles?: Record<string, string>;
 		autoSource?: string;
 		autoTarget?: string;
+		beforeStream?: (context: Context, options?: SimpleStreamOptions) => Promise<void>;
 	}
 
 	function createFixture(responses: MockResponse[], options: FixtureOptions = {}) {
@@ -202,6 +215,7 @@ describe("AgentSession auto-prewalk", () => {
 		const nudges: string[][] = [];
 		const customs: string[][] = [];
 		const systemPrompts: string[] = [];
+		const rebuiltModels: Array<string | undefined> = [];
 		let requestCustoms: string[] = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -216,12 +230,13 @@ describe("AgentSession auto-prewalk", () => {
 				requestCustoms = messages.flatMap(message => (message.role === "custom" ? [message.customType] : []));
 				return convertToLlm(messages);
 			},
-			streamFn: (model, context, streamOptions) => {
+			streamFn: async (model, context, streamOptions) => {
 				requested.push(model.id);
 				efforts.push(agent.state.thinkingLevel);
 				nudges.push(requestCustoms.filter(customType => customType.startsWith("prewalk-")));
 				customs.push(requestCustoms);
 				systemPrompts.push((context.systemPrompt ?? []).join("\n"));
+				await options.beforeStream?.(context, streamOptions);
 				return mock.stream(model, context, streamOptions);
 			},
 		});
@@ -237,7 +252,17 @@ describe("AgentSession auto-prewalk", () => {
 			agentKind: options.agentKind,
 			extensionRunner: options.extensionRunner,
 			rebuildSystemPrompt: options.rebuildBase
-				? async () => ({ systemPrompt: [`base for ${session?.model?.id}`] })
+				? async () => {
+						const id = session?.model?.id;
+						rebuiltModels.push(id);
+						const bytes = [`base for ${id}`];
+						const gate = options.renderGate;
+						if (gate && gate.model === id) {
+							gate.requested();
+							await gate.hold;
+						}
+						return { systemPrompt: bytes };
+					}
 				: undefined,
 			suppressAutoPrewalk: options.suppressAutoPrewalk,
 		});
@@ -266,6 +291,7 @@ describe("AgentSession auto-prewalk", () => {
 			nudges,
 			customs,
 			systemPrompts,
+			rebuiltModels,
 			notices,
 			ctx,
 		};
@@ -419,6 +445,413 @@ describe("AgentSession auto-prewalk", () => {
 			expect(f.notices).toEqual([]);
 		});
 
+		it.each([false, true])(
+			"rolls back an aborted source switch with previously resolved auto thinking: %s",
+			async resolved => {
+				const hold = Promise.withResolvers<void>();
+				const requested = Promise.withResolvers<void>();
+				const calls = stubJudge(resolved ? [DIRECT, PREWALK, DIRECT] : [PREWALK, DIRECT], {
+					hold: hold.promise,
+					requested: requested.resolve,
+					question: "level",
+					skip: resolved ? 1 : 0,
+				});
+				const f = createFixture([done("warmup"), done("next")], {
+					auto: "on",
+					autoSource: "anthropic/claude-opus-4-6",
+				});
+				f.session.setThinkingLevel(AUTO_THINKING);
+				if (resolved) {
+					await f.session.prompt("warmup");
+					await f.session.waitForIdle();
+				}
+				const previous = {
+					configured: f.session.configuredThinkingLevel(),
+					effective: f.session.thinkingLevel,
+					autoResolved: f.session.autoResolvedThinkingLevel(),
+				};
+				expect(previous.autoResolved).toBe(resolved ? Effort.High : undefined);
+				const boundary = f.requested.length;
+				const pending = f.session.prompt(TASK);
+				await requested.promise;
+				const sourceId = f.session.model?.id;
+				const armedTarget = f.session.getPrewalkState()?.target.id;
+				try {
+					await f.session.abort();
+					expect(f.session.model).toBe(f.primary);
+					expect(f.session.configuredThinkingLevel()).toBe(previous.configured);
+					expect(f.session.thinkingLevel).toBe(previous.effective);
+					expect(f.session.autoResolvedThinkingLevel()).toBe(previous.autoResolved);
+					expect(f.session.getPrewalkState()).toBeUndefined();
+				} finally {
+					hold.resolve();
+					await pending.catch(() => {});
+					await f.session.waitForIdle();
+				}
+
+				expect(f.requested).toHaveLength(boundary);
+				expect(sourceId).toBe("claude-opus-4-6");
+				expect(armedTarget).toBe(f.target.id);
+				expect(f.session.model).toBe(f.primary);
+				expect(f.session.configuredThinkingLevel()).toBe(previous.configured);
+				expect(f.session.thinkingLevel).toBe(previous.effective);
+				expect(f.session.autoResolvedThinkingLevel()).toBe(previous.autoResolved);
+				expect(f.session.getPrewalkState()).toBeUndefined();
+				await f.session.prompt("next task");
+				expect(asked(calls)).toHaveLength(resolved ? 3 : 2);
+				expect(f.requested.at(-1)).toBe(f.primary.id);
+			},
+		);
+
+		it("does not publish an auto source render that finishes after abort restored the primary", async () => {
+			const hold = Promise.withResolvers<void>();
+			const requested = Promise.withResolvers<void>();
+			const calls = stubJudge([PREWALK]);
+			const f = createFixture([done("never requested")], {
+				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6",
+				rebuildBase: true,
+				renderGate: { model: "claude-opus-4-6", requested: requested.resolve, hold: hold.promise },
+			});
+			await f.session.refreshBaseSystemPrompt();
+			const primaryPrompt = [`base for ${f.primary.id}`];
+			expect(f.session.systemPrompt).toEqual(primaryPrompt);
+			const thinking = f.session.configuredThinkingLevel();
+
+			const restored = Promise.withResolvers<void>();
+			const setModel = f.session.agent.setModel.bind(f.session.agent);
+			vi.spyOn(f.session.agent, "setModel").mockImplementation(model => {
+				setModel(model);
+				if (model === f.primary) restored.resolve();
+			});
+			const pending = f.session.prompt(TASK);
+			await requested.promise;
+			const aborting = f.session.abort();
+			try {
+				// Rollback restores the model at once; its prompt sync queues behind the held source render.
+				await restored.promise;
+				expect(f.session.model).toBe(f.primary);
+			} finally {
+				hold.resolve();
+				await aborting;
+				await pending.catch(() => {});
+				await f.session.waitForIdle();
+			}
+
+			expect(f.session.systemPrompt).toEqual(primaryPrompt);
+			expect(f.session.model).toBe(f.primary);
+			expect(f.session.configuredThinkingLevel()).toBe(thinking);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			expect(f.requested).toEqual([]);
+			expect(asked(calls)).toHaveLength(1);
+		});
+
+		it.each([
+			["classification", "model"],
+			["classification", "effort"],
+			["authentication", "model"],
+			["authentication", "effort"],
+			["recall", "model"],
+			["recall", "effort"],
+		] as const)("preserves manual %s-time %s selection through automatic routing", async (phase, selection) => {
+			const hold = Promise.withResolvers<void>();
+			const reached = Promise.withResolvers<void>();
+			stubJudge(
+				[PREWALK],
+				phase === "classification" ? { hold: hold.promise, requested: reached.resolve } : undefined,
+			);
+			if (phase === "recall") {
+				const backend: MemoryBackend = {
+					id: "mnemopi",
+					async start() {},
+					async buildDeveloperInstructions() {
+						return undefined;
+					},
+					async clear() {},
+					async enqueue() {},
+					async beforeAgentStartPrompt() {
+						reached.resolve();
+						await hold.promise;
+						return { context: "<memories>manual selection wins</memories>", commit: () => true };
+					},
+				};
+				vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+			}
+			const f = createFixture([done("selected")], {
+				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6:high",
+			});
+			if (phase === "authentication") {
+				const getApiKey = f.modelRegistry.getApiKey.bind(f.modelRegistry);
+				vi.spyOn(f.modelRegistry, "getApiKey").mockImplementation(async (model, ...rest) => {
+					if (model.id === "claude-opus-4-6") {
+						reached.resolve();
+						await hold.promise;
+					}
+					return getApiKey(model, ...rest);
+				});
+			}
+
+			const pending = f.session.prompt(TASK);
+			await reached.promise;
+			try {
+				if (selection === "model") await f.session.setModel(f.target);
+				else f.session.setThinkingLevel(Effort.Low);
+			} finally {
+				hold.resolve();
+			}
+			await pending;
+			await f.session.waitForIdle();
+
+			expect(f.requested).toEqual([selection === "model" ? f.target.id : f.primary.id]);
+			expect(f.efforts).toEqual([selection === "effort" ? Effort.Low : Effort.High]);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			expect(f.nudges.flat()).toEqual([]);
+		});
+
+		it("still routes a positive task after an explicit selection made before submission", async () => {
+			stubJudge([PREWALK]);
+			const f = createFixture(cycle(), { auto: "on", autoSource: "anthropic/claude-opus-4-6:high" });
+			await f.session.setModel(f.target);
+			f.session.setThinkingLevel(Effort.Low);
+
+			await f.session.prompt(TASK);
+
+			expect(f.requested).toEqual(["claude-opus-4-6", "claude-opus-4-6", f.target.id]);
+			expect(f.nudges[0]).toContain("prewalk-plan");
+			expect(f.nudges[2]).toContain("prewalk-checklist");
+		});
+
+		it.each(["different model", "same source", "different thinking", "same thinking"] as const)(
+			"preserves an explicit %s selection made after auto arming",
+			async selection => {
+				const hold = Promise.withResolvers<void>();
+				const requested = Promise.withResolvers<void>();
+				stubJudge([PREWALK], { hold: hold.promise, requested: requested.resolve, question: "level" });
+				const f = createFixture([done("never requested")], {
+					auto: "on",
+					autoSource: "anthropic/claude-opus-4-6",
+				});
+				f.session.setThinkingLevel(AUTO_THINKING);
+				const pending = f.session.prompt(TASK);
+				await requested.promise;
+				const source = f.session.model!;
+				if (selection === "different model") await f.session.setModel(f.target);
+				else if (selection === "same source") await f.session.setModel(source);
+				else f.session.setThinkingLevel(selection === "same thinking" ? AUTO_THINKING : Effort.Low);
+				const chosenModel = f.session.model;
+				const chosenThinking = f.session.configuredThinkingLevel();
+				await f.session.abort();
+				hold.resolve();
+				await pending.catch(() => {});
+
+				expect(f.requested).toEqual([]);
+				expect(source.id).toBe("claude-opus-4-6");
+				expect(f.session.model).toBe(chosenModel);
+				expect(f.session.configuredThinkingLevel()).toBe(chosenThinking);
+				expect(f.session.getPrewalkState()).toBeUndefined();
+			},
+		);
+
+		it.each(["takeover", "disarm", "replacement"] as const)(
+			"preserves manual pending-arm %s when preparation is aborted",
+			async action => {
+				const hold = Promise.withResolvers<void>();
+				const requested = Promise.withResolvers<void>();
+				stubJudge([PREWALK], { hold: hold.promise, requested: requested.resolve, question: "level" });
+				const f = createFixture([done("never requested")], {
+					auto: "on",
+					autoSource: "anthropic/claude-opus-4-6",
+				});
+				f.session.setThinkingLevel(AUTO_THINKING);
+				const pending = f.session.prompt(TASK);
+				await requested.promise;
+				const armedTarget = f.session.getPrewalkState()?.target.id;
+				let accepted = true;
+				if (action !== "takeover") f.session.disarmPrewalk();
+				if (action !== "disarm") {
+					accepted = f.session.armPrewalk(action === "takeover" ? f.target : f.primary, Effort.Low);
+				}
+				await f.session.abort();
+				hold.resolve();
+				await pending.catch(() => {});
+
+				expect(f.requested).toEqual([]);
+				expect(armedTarget).toBe(f.target.id);
+				expect(accepted).toBe(true);
+				expect(f.session.model).toBe(f.primary);
+				expect(f.session.getPrewalkState()?.target.id).toBe(
+					action === "disarm" ? undefined : action === "takeover" ? f.target.id : f.primary.id,
+				);
+				if (action === "takeover") {
+					await f.session.waitForIdle();
+					await f.session.prompt("continue the manually adopted plan");
+					expect(f.nudges[0]).toContain("prewalk-plan");
+					expect(f.session.getPrewalkState()?.target.id).toBe(f.target.id);
+				}
+			},
+		);
+
+		it("rolls back a stale generation after navigating history without aborting the prompt", async () => {
+			const hold = Promise.withResolvers<void>();
+			const requested = Promise.withResolvers<void>();
+			const calls = stubJudge([DIRECT, PREWALK, DIRECT], {
+				hold: hold.promise,
+				requested: requested.resolve,
+				question: "level",
+				skip: 1,
+			});
+			const f = createFixture([done("warmup"), done("next")], {
+				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6",
+			});
+			f.session.setThinkingLevel(AUTO_THINKING);
+			await f.session.prompt("warmup");
+			await f.session.waitForIdle();
+			const target = f.session.sessionManager
+				.getEntries()
+				.find(entry => entry.type === "message" && entry.message.role === "user");
+			expect(target).toBeDefined();
+			const boundary = f.requested.length;
+			const previousEffort = f.session.thinkingLevel;
+			const previousAutoResolved = f.session.autoResolvedThinkingLevel();
+			const pending = f.session.prompt(TASK);
+			await requested.promise;
+			const sourceId = f.session.model?.id;
+			const armedTarget = f.session.getPrewalkState()?.target.id;
+			try {
+				const navigation = await f.session.navigateTree(target!.id, { summarize: false });
+				expect(navigation.cancelled).toBe(false);
+			} finally {
+				hold.resolve();
+				await pending.catch(() => {});
+				await f.session.waitForIdle();
+			}
+
+			expect(f.requested).toHaveLength(boundary);
+			expect(sourceId).toBe("claude-opus-4-6");
+			expect(armedTarget).toBe(f.target.id);
+			expect(f.session.model).toBe(f.primary);
+			expect(f.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+			expect(f.session.thinkingLevel).toBe(previousEffort);
+			expect(f.session.autoResolvedThinkingLevel()).toBe(previousAutoResolved);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			await f.session.prompt("fresh task");
+			expect(asked(calls)).toHaveLength(3);
+			expect(f.requested.at(-1)).toBe(f.primary.id);
+		});
+
+		it("does not restore model or thinking for an aborted negative classification", async () => {
+			const hold = Promise.withResolvers<void>();
+			const requested = Promise.withResolvers<void>();
+			stubJudge([DIRECT], { hold: hold.promise, requested: requested.resolve, question: "level" });
+			const f = createFixture([done("never requested")], { auto: "on" });
+			f.session.setThinkingLevel(AUTO_THINKING);
+			const pending = f.session.prompt(TASK);
+			await requested.promise;
+			const setModel = vi.spyOn(f.session.agent, "setModel");
+			const setThinking = vi.spyOn(f.session.agent, "setThinkingLevel");
+			await f.session.abort();
+			hold.resolve();
+			await pending.catch(() => {});
+
+			expect(f.requested).toEqual([]);
+			expect(f.session.model).toBe(f.primary);
+			expect(setModel).not.toHaveBeenCalled();
+			expect(setThinking).not.toHaveBeenCalled();
+			expect(f.session.getPrewalkState()).toBeUndefined();
+		});
+
+		it.each(["manual", "configured", "task"] as const)("keeps an existing %s arm on cancellation", async kind => {
+			const hold = Promise.withResolvers<void>();
+			const requested = Promise.withResolvers<void>();
+			const calls = stubJudge([PREWALK], {
+				hold: hold.promise,
+				requested: requested.resolve,
+				question: "level",
+			});
+			const f = createFixture([done("never requested")], {
+				auto: "on",
+				startupArm: kind !== "manual",
+				agentKind: kind === "task" ? "sub" : "main",
+			});
+			if (kind === "manual") f.session.armPrewalk(f.target, Effort.Low);
+			f.session.setThinkingLevel(AUTO_THINKING);
+			const pending = f.session.prompt(TASK);
+			await requested.promise;
+			await f.session.abort();
+			hold.resolve();
+			await pending.catch(() => {});
+
+			expect(asked(calls)).toHaveLength(0);
+			expect(f.requested).toEqual([]);
+			expect(f.session.model).toBe(f.primary);
+			expect(f.session.getPrewalkState()?.target.id).toBe(f.target.id);
+		});
+
+		it("does not overwrite a manual selection made while rollback metadata is refreshing", async () => {
+			const hold = Promise.withResolvers<void>();
+			const requested = Promise.withResolvers<void>();
+			stubJudge([PREWALK], { hold: hold.promise, requested: requested.resolve, question: "level" });
+			const f = createFixture([done("never requested")], {
+				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6",
+			});
+			f.session.setThinkingLevel(AUTO_THINKING);
+			const pending = f.session.prompt(TASK);
+			await requested.promise;
+			const rollbackHold = Promise.withResolvers<void>();
+			const rollbackRequested = Promise.withResolvers<void>();
+			const refresh = f.modelRegistry.refreshSelectedModelMetadata.bind(f.modelRegistry);
+			vi.spyOn(f.modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+				if (model.id === f.primary.id) {
+					rollbackRequested.resolve();
+					await rollbackHold.promise;
+				}
+				return refresh(model);
+			});
+			const aborting = f.session.abort();
+			await rollbackRequested.promise;
+			try {
+				await f.session.setModel(f.target);
+				f.session.setThinkingLevel(Effort.Low);
+			} finally {
+				rollbackHold.resolve();
+			}
+			try {
+				await aborting;
+			} finally {
+				hold.resolve();
+			}
+			await pending.catch(() => {});
+
+			expect(f.requested).toEqual([]);
+			expect(f.session.model).toBe(f.target);
+			expect(f.session.configuredThinkingLevel()).toBe(Effort.Low);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+		});
+
+		it("rolls back source selection and its arm when later prompt compaction fails", async () => {
+			stubJudge([PREWALK]);
+			const f = createFixture([done("never requested")], {
+				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6:low",
+			});
+			f.session.setThinkingLevel(AUTO_THINKING);
+			const previousEffort = f.session.thinkingLevel;
+			const failure = new Error("pre-prompt compaction failed");
+			vi.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded").mockRejectedValueOnce(failure);
+
+			await expect(f.session.prompt(TASK)).rejects.toThrow(failure.message);
+
+			expect(f.requested).toEqual([]);
+			expect(f.session.model).toBe(f.primary);
+			expect(f.session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+			expect(f.session.thinkingLevel).toBe(previousEffort);
+			expect(f.session.autoResolvedThinkingLevel()).toBeUndefined();
+			expect(f.session.getPrewalkState()).toBeUndefined();
+		});
+
 		it("makes no judgment and no change without a native judge", async () => {
 			const calls = stubJudge([PREWALK]);
 			const f = createFixture(cycle(), { auto: "on", judge: false });
@@ -476,6 +909,334 @@ describe("AgentSession auto-prewalk", () => {
 			});
 			expect(f.session.model?.id).toBe(f.target.id);
 		});
+	});
+
+	describe("queued task delivery", () => {
+		it("keeps visible live steering on the old response until its source is selected at the next boundary", async () => {
+			const calls = stubJudge([DIRECT, PREWALK]);
+			const contexts: string[] = [];
+			let liveClaimSettled = false;
+			let liveWaitSettled = false;
+			const f = createFixture([done("first"), ...cycle()], {
+				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6:high",
+				rebuildBase: true,
+				beforeStream: async (context, options) => {
+					contexts.push(JSON.stringify(context.messages));
+					if (contexts.length !== 1) return;
+					const live = options?.liveSteering;
+					if (!live) throw new Error("Expected the streaming provider's live steering channel");
+					await f.session.steer(TASK);
+					const controller = new AbortController();
+					const waiting = live.wait(controller.signal).then(() => {
+						liveWaitSettled = true;
+					});
+					const claiming = live.claim(controller.signal).then(claim => {
+						liveClaimSettled = true;
+						return claim;
+					});
+					await Promise.resolve();
+					await Promise.resolve();
+					expect(liveWaitSettled).toBe(false);
+					expect(liveClaimSettled).toBe(false);
+					expect(asked(calls).map(call => call.state.request)).toEqual(["explain the sync engine"]);
+					expect(f.session.model?.id).toBe(f.primary.id);
+					expect(f.session.agent.peekSteeringQueue()).toHaveLength(1);
+					controller.abort();
+					await waiting;
+					expect(await claiming).toBeUndefined();
+				},
+			});
+
+			await f.session.prompt("explain the sync engine");
+			await f.session.waitForIdle();
+
+			expect(asked(calls).map(call => call.state.request)).toEqual(["explain the sync engine", TASK]);
+			expect(f.requested).toEqual([f.primary.id, "claude-opus-4-6", "claude-opus-4-6", f.target.id]);
+			expect(contexts[0]).not.toContain(TASK);
+			expect(contexts[1]).toContain(TASK);
+			expect(f.systemPrompts[1]).toContain("base for claude-opus-4-6");
+			expect(f.nudges[1]).toContain("prewalk-plan");
+		});
+
+		it("judges a queued follow-up separately in suggest mode without selecting a source", async () => {
+			const calls = stubJudge([DIRECT, PREWALK]);
+			const f = createFixture([done("first"), done("follow-up")], {
+				auto: "suggest",
+				autoSource: "anthropic/claude-opus-4-6:high",
+			});
+			const getApiKey = vi.spyOn(f.modelRegistry, "getApiKey");
+			let queued = false;
+			f.session.agent.setOnBeforeYield(async () => {
+				if (queued) return;
+				queued = true;
+				await f.session.followUp("fix the cursor next");
+			});
+
+			await f.session.prompt("explain the sync engine");
+			await f.session.waitForIdle();
+
+			expect(asked(calls).map(call => call.state.request)).toEqual([
+				"explain the sync engine",
+				"fix the cursor next",
+			]);
+			expect(f.notices).toEqual(["Auto-prewalk: direct (prewalk 0.05)", "Auto-prewalk: prewalk 0.90"]);
+			expect(getApiKey.mock.calls.some(([model]) => model.id === "claude-opus-4-6")).toBe(false);
+			expect(f.requested).toEqual([f.primary.id, f.primary.id]);
+			expect(f.nudges.flat()).toEqual([]);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+		});
+
+		it("prepares queued thinking, recall, and hooks on the selected source before handing off", async () => {
+			const calls = stubJudge([DIRECT, PREWALK]);
+			const recall = "<memories>queued source recall</memories>";
+			const recallModels: Array<string | undefined> = [];
+			const backend: MemoryBackend = {
+				id: "mnemopi",
+				async start() {},
+				async buildDeveloperInstructions() {
+					return undefined;
+				},
+				async clear() {},
+				async enqueue() {},
+				async beforeAgentStartPrompt() {
+					recallModels.push(session?.model?.id);
+					return { context: recall, commit: () => true };
+				},
+			};
+			vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+			const hookModels: Array<string | undefined> = [];
+			const extensionRunner = {
+				emitBeforeAgentStart: vi.fn(async () => {
+					hookModels.push(session?.model?.id);
+					return { messages: [{ customType: "queued-hook", content: "source hook", display: false }] };
+				}),
+				emit: vi.fn().mockResolvedValue(undefined),
+				hasHandlers: vi.fn().mockReturnValue(false),
+			} as unknown as ExtensionRunner;
+			const f = createFixture([done("first"), ...cycle()], {
+				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6",
+				rebuildBase: true,
+				extensionRunner,
+			});
+			f.session.setThinkingLevel(AUTO_THINKING);
+			let queued = false;
+			f.session.agent.setOnBeforeYield(async () => {
+				if (queued) return;
+				queued = true;
+				await f.session.followUp(TASK);
+			});
+
+			await f.session.prompt("explain the sync engine");
+			await f.session.waitForIdle();
+
+			expect(asked(calls).map(call => call.state.request)).toEqual(["explain the sync engine", TASK]);
+			expect(calls.filter(call => call.questions.includes("level")).map(call => call.model)).toEqual([
+				f.primary.id,
+				"claude-opus-4-6",
+			]);
+			expect(hookModels).toEqual([f.primary.id, "claude-opus-4-6"]);
+			expect(recallModels.at(-1)).toBe("claude-opus-4-6");
+			expect(f.requested).toEqual([f.primary.id, "claude-opus-4-6", "claude-opus-4-6", f.target.id]);
+			expect(f.systemPrompts[1]).toContain("base for claude-opus-4-6");
+			expect(f.systemPrompts[1]).toContain(recall);
+			expect(f.customs[1]).toContain("queued-hook");
+			expect(f.nudges[1]).toContain("prewalk-plan");
+			expect(f.nudges[3]).toContain("prewalk-checklist");
+			expect(f.efforts[1]).toBe(Effort.High);
+			expect(f.efforts[3]).toBe(Effort.Low);
+		});
+
+		it.each(["classification", "selection", "rebuild"] as const)(
+			"withdraws queued routing during %s without changing the running prompt generation",
+			async phase => {
+				const hold = Promise.withResolvers<void>();
+				const reached = Promise.withResolvers<void>();
+				const calls = stubJudge(
+					[DIRECT, PREWALK, DIRECT],
+					phase === "classification" ? { hold: hold.promise, requested: reached.resolve, skip: 1 } : undefined,
+				);
+				const f = createFixture([done("first"), done("replacement")], {
+					auto: "on",
+					autoSource: "anthropic/claude-opus-4-6:low",
+					rebuildBase: true,
+					...(phase === "rebuild"
+						? { renderGate: { model: "claude-opus-4-6", hold: hold.promise, requested: reached.resolve } }
+						: {}),
+				});
+				if (phase === "selection") {
+					const getApiKey = f.modelRegistry.getApiKey.bind(f.modelRegistry);
+					vi.spyOn(f.modelRegistry, "getApiKey").mockImplementation(async (model, ...rest) => {
+						if (model.id === "claude-opus-4-6") {
+							reached.resolve();
+							await hold.promise;
+						}
+						return getApiKey(model, ...rest);
+					});
+				}
+				const generations: number[] = [];
+				const applyAuto = PrewalkCoordinator.prototype.applyAuto;
+				vi.spyOn(PrewalkCoordinator.prototype, "applyAuto").mockImplementation(function (
+					this: PrewalkCoordinator,
+					...args: Parameters<PrewalkCoordinator["applyAuto"]>
+				) {
+					generations.push(args[1]);
+					return applyAuto.call(this, ...args);
+				});
+				let queued = false;
+				f.session.agent.setOnBeforeYield(async () => {
+					if (queued) return;
+					queued = true;
+					await f.session.followUp("withdraw this task");
+				});
+
+				const run = f.session.prompt("first task");
+				await reached.promise;
+				try {
+					expect(f.session.removeQueuedMessage("withdraw this task", "followUp")).toBe(true);
+					await f.session.followUp("replacement task");
+				} finally {
+					hold.resolve();
+				}
+				await run;
+				await f.session.waitForIdle();
+
+				expect(asked(calls).map(call => call.state.request)).toEqual([
+					"first task",
+					"withdraw this task",
+					"replacement task",
+				]);
+				expect(generations).toHaveLength(3);
+				expect(new Set(generations).size).toBe(1);
+				expect(f.requested).toEqual([f.primary.id, f.primary.id]);
+				expect(f.session.model).toBe(f.primary);
+				expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+				expect(f.session.getPrewalkState()).toBeUndefined();
+				expect(f.systemPrompts.at(-1)).not.toContain("base for claude-opus-4-6");
+				expect(
+					f.session.messages.some(
+						message => message.role === "user" && JSON.stringify(message.content).includes("withdraw this task"),
+					),
+				).toBe(false);
+			},
+		);
+
+		it.each([
+			["adoption", false],
+			["adoption", true],
+			["restart", false],
+			["restart", true],
+			["disarm", false],
+			["replacement", false],
+		] as const)("keeps queued plan nudge ownership after manual %s (withdrawn: %s)", async (action, withdrawn) => {
+			const hold = Promise.withResolvers<void>();
+			const reached = Promise.withResolvers<void>();
+			const calls = stubJudge([DIRECT, PREWALK], {
+				hold: hold.promise,
+				requested: reached.resolve,
+				question: "level",
+				skip: 1,
+			});
+			const f = createFixture([done("first"), done("queued")], {
+				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6",
+			});
+			f.session.setThinkingLevel(AUTO_THINKING);
+			let queued = false;
+			f.session.agent.setOnBeforeYield(async () => {
+				if (queued) return;
+				queued = true;
+				await f.session.followUp("queued plan");
+			});
+
+			const run = f.session.prompt("first task");
+			await reached.promise;
+			try {
+				expect(f.session.getPrewalkState()?.target.id).toBe(f.target.id);
+				if (action === "restart") {
+					expect(await f.session.restartPrewalk(f.session.model!, AUTO_THINKING, f.target, Effort.Low)).toBe(
+						"armed",
+					);
+				} else {
+					if (action === "disarm" || action === "replacement") f.session.disarmPrewalk();
+					if (action !== "disarm") {
+						expect(f.session.armPrewalk(action === "replacement" ? f.primary : f.target, Effort.Low)).toBe(true);
+					}
+				}
+				if (withdrawn) {
+					expect(f.session.removeQueuedMessage("queued plan", "followUp")).toBe(true);
+					await f.session.followUp("continue manual plan");
+				}
+			} finally {
+				hold.resolve();
+			}
+			await run;
+			await f.session.waitForIdle();
+
+			expect(asked(calls).map(call => call.state.request)).toEqual(["first task", "queued plan"]);
+			expect(f.nudges[0]).toEqual([]);
+			if (!withdrawn) expect(f.requested[1]).toBe("claude-opus-4-6");
+			expect(f.nudges[1].filter(customType => customType === "prewalk-plan")).toHaveLength(
+				action === "disarm" ? 0 : 1,
+			);
+			expect(f.session.getPrewalkState()?.target.id).toBe(
+				action === "disarm" ? undefined : action === "replacement" ? f.primary.id : f.target.id,
+			);
+			expect(
+				f.session.messages.some(
+					message =>
+						message.role === "user" &&
+						JSON.stringify(message.content).includes(withdrawn ? "continue manual plan" : "queued plan"),
+				),
+			).toBe(true);
+			if (withdrawn) {
+				expect(
+					f.session.messages.some(
+						message => message.role === "user" && JSON.stringify(message.content).includes("queued plan"),
+					),
+				).toBe(false);
+			}
+		});
+
+		it.each(["commit", "rollback"] as const)(
+			"does not let a stale %s finalize a replacement auto selection in the same generation",
+			async finalizer => {
+				stubJudge([DIRECT, PREWALK, PREWALK]);
+				const f = createFixture([done("first")], {
+					auto: "on",
+					autoSource: "anthropic/claude-opus-4-6:low",
+				});
+				let coordinator: PrewalkCoordinator | undefined;
+				let generation = -1;
+				const applyAuto = PrewalkCoordinator.prototype.applyAuto;
+				vi.spyOn(PrewalkCoordinator.prototype, "applyAuto").mockImplementation(function (
+					this: PrewalkCoordinator,
+					...args: Parameters<PrewalkCoordinator["applyAuto"]>
+				) {
+					coordinator = this;
+					generation = args[1];
+					return applyAuto.call(this, ...args);
+				});
+				await f.session.prompt("first task");
+				await f.session.waitForIdle();
+				if (!coordinator) throw new Error("Expected the session's prewalk coordinator");
+				const first = new AbortController();
+				const replacement = new AbortController();
+				expect(await coordinator.applyAuto("first selection", generation, first.signal)).toBe(true);
+				expect(await coordinator.applyAuto("replacement selection", generation, replacement.signal)).toBe(true);
+
+				if (finalizer === "commit") coordinator.commitAuto(generation, first.signal);
+				else await coordinator.rollbackAuto(generation, first.signal);
+
+				expect(f.session.model?.id).toBe("claude-opus-4-6");
+				expect(f.session.getPrewalkState()?.target.id).toBe(f.target.id);
+				await coordinator.rollbackAuto(generation, replacement.signal);
+				expect(f.session.model).toBe(f.primary);
+				expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+				expect(f.session.getPrewalkState()).toBeUndefined();
+			},
+		);
 	});
 
 	describe("one task at a time", () => {
@@ -687,18 +1448,44 @@ describe("AgentSession auto-prewalk", () => {
 			expect(f.session.getPrewalkState()).toBeUndefined();
 		});
 
-		it("restores the exact model and effort when the target cannot arm after the source switch", async () => {
+		it("preserves committed recall when an unarmable target rolls the rebuilt source prompt back", async () => {
 			stubJudge([PREWALK]);
+			const recall = "<memories>remember blue after rollback</memories>";
+			const commit = vi.fn(() => true);
+			const backend: MemoryBackend = {
+				id: "mnemopi",
+				async start() {},
+				async buildDeveloperInstructions() {
+					return undefined;
+				},
+				async clear() {},
+				async enqueue() {},
+				async beforeAgentStartPrompt() {
+					return { context: recall, commit };
+				},
+			};
+			vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
 			const selector = "anthropic/claude-opus-4-6:high";
-			const f = createFixture([done("one")], { auto: "on", autoSource: selector, autoTarget: selector });
+			const f = createFixture([done("one")], {
+				auto: "on",
+				autoSource: selector,
+				autoTarget: selector,
+				rebuildBase: true,
+			});
 			f.session.setThinkingLevel(AUTO_THINKING);
+			const applyAuto = vi.spyOn(PrewalkCoordinator.prototype, "applyAuto");
 
 			await f.session.prompt(TASK);
 
-			// Source and target are one model and effort, so nothing can arm: the session returns to where it was.
-			expect(f.session.model?.id).toBe(f.primary.id);
+			expect(f.session.model).toBe(f.primary);
 			expect(f.session.isAutoThinking).toBe(true);
 			expect(f.requested).toEqual([f.primary.id]);
+			expect(f.systemPrompts[0]).toContain(`base for ${f.primary.id}`);
+			expect(f.systemPrompts[0]).toContain(recall);
+			expect(commit).toHaveBeenCalledTimes(1);
+			expect(f.rebuiltModels).toContain("claude-opus-4-6");
+			expect(f.rebuiltModels.at(-1)).toBe(f.primary.id);
+			expect(await applyAuto.mock.results[0]!.value).toBe(false);
 			expect(f.session.getPrewalkState()).toBeUndefined();
 		});
 
@@ -784,6 +1571,7 @@ describe("AgentSession auto-prewalk", () => {
 			const calls = stubJudge([PREWALK, PRIMARY]);
 			const f = createFixture([{ content: ["plan only"] }, { content: ["still planning"] }, done("two")], {
 				auto: "on",
+				autoSource: "anthropic/claude-opus-4-6",
 			});
 
 			await f.session.prompt(TASK);
@@ -791,6 +1579,9 @@ describe("AgentSession auto-prewalk", () => {
 			await f.session.prompt("keep going");
 
 			expect(asked(calls)).toHaveLength(1);
+			expect(f.requested).toContain("claude-opus-4-6");
+			expect(f.requested.every(id => id === "claude-opus-4-6")).toBe(true);
+			expect(f.session.model?.id).toBe("claude-opus-4-6");
 			expect(f.session.getPrewalkState()?.target.id).toBe(f.target.id);
 		});
 

@@ -112,15 +112,15 @@ function buildState(input: AutoPrewalkInput): Record<string, string> {
 }
 
 function toDecision({ choice, probabilities, confidence }: ChoiceAnswer<PrewalkRoute>): AutoPrewalkDecision {
-	// The judge's wire shape is only checked for answer type upstream; a partial answer must never arm.
-	if (
-		!ROUTES.includes(choice) ||
-		typeof confidence !== "number" ||
-		!ROUTES.every(
-			route => typeof probabilities?.[route] === "number" && probabilities[route] >= 0 && probabilities[route] <= 1,
-		)
-	) {
+	// The judge's wire shape is only checked for answer type upstream; a malformed answer must never arm.
+	const valid = (value: unknown): value is number => typeof value === "number" && value >= 0 && value <= 1;
+	if (!ROUTES.includes(choice) || !valid(confidence) || !ROUTES.every(route => valid(probabilities?.[route]))) {
 		throw new Error("auto-prewalk: the judge returned a malformed route answer");
+	}
+	const total = ROUTES.reduce((sum, route) => sum + probabilities[route], 0);
+	// Tolerates wire rounding; a distribution that does not sum to 1 is not calibrated.
+	if (Math.abs(total - 1) > 1e-3 || ROUTES.some(route => probabilities[route] > probabilities[choice])) {
+		throw new Error("auto-prewalk: the judge returned an inconsistent route answer");
 	}
 	return {
 		route: choice,
@@ -140,7 +140,6 @@ export async function classifyAutoPrewalk(
 	deps: ClassifyAutoPrewalkDeps,
 ): Promise<AutoPrewalkDecision | undefined> {
 	if (!hasNativeJudge(deps.settings, deps.registry)) return undefined;
-	// Without a session fallback model the chain holds only native candidates, so no prompted model can answer.
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,
@@ -151,9 +150,11 @@ export async function classifyAutoPrewalk(
 		cache: sharedJudgmentCache(),
 	});
 	const timeout = AbortSignal.timeout(AUTO_PREWALK_TIMEOUT_MS);
-	const { answers } = await judge.judge(
-		{ state: buildState(input), questions: { route: ROUTE_QUESTION } },
-		{ signal: deps.signal ? AbortSignal.any([deps.signal, timeout]) : timeout },
-	);
+	const options = { signal: deps.signal ? AbortSignal.any([deps.signal, timeout]) : timeout };
+	// The cached execution chain can lag the fresh gate after credentials or discovery change.
+	const { answers } = await judge.withCandidate((candidate, kind) => {
+		if (kind !== "native") throw new Error("auto-prewalk: the judge role has no native backend");
+		return candidate.judge({ state: buildState(input), questions: { route: ROUTE_QUESTION } }, options);
+	}, options);
 	return toDecision(answers.route);
 }

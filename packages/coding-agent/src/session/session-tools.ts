@@ -861,14 +861,14 @@ export class SessionTools {
 		return `delegation-bias:${resolveDelegationBias(activeModel)}|inline-descriptors:${inlineDescriptors}`;
 	}
 
-	/** Rebuilds model-dependent tool prompts after a model change. */
-	async syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
+	/** Rebuilds model-dependent tool prompts after a model change; `isCurrent` discards a stale render. */
+	async syncAfterModelChange(previousEditMode: EditMode, isCurrent?: () => boolean): Promise<void> {
 		const currentEditMode = this.resolveActiveEditMode();
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
 		const modelChanged = this.#currentPromptModelKey() !== this.#promptModelKey;
 		if (editModeChanged || modelChanged) {
-			await this.refreshBaseSystemPrompt();
+			await this.refreshBaseSystemPrompt(isCurrent);
 		}
 	}
 

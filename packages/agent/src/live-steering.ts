@@ -15,6 +15,8 @@ import type { AgentMessage } from "./types";
 export interface LiveSteeringQueue {
 	/** Resolves once steering is queued or `signal` aborts; never consumes. */
 	wait(signal: AbortSignal): Promise<void>;
+	/** Whether the next complete batch may enter this in-flight call. */
+	canDeliver?(): boolean;
 	/** Dequeues the next steering batch. */
 	take(signal: AbortSignal): Promise<AgentMessage[]>;
 	/**
@@ -31,15 +33,23 @@ export class LiveSteeringChannel implements LiveSteering {
 	/** Steering taken from the queue but not delivered; always queued after {@link accepted}. */
 	readonly deferred: AgentMessage[] = [];
 	readonly #queue: LiveSteeringQueue;
+	#boundaryOnly = false;
 
 	constructor(queue: LiveSteeringQueue) {
 		this.#queue = queue;
 	}
 
-	wait(signal: AbortSignal): Promise<void> {
-		// Once input is deferred, later input must follow it at the boundary;
-		// delivering it live would reorder the user's messages.
-		if (this.deferred.length === 0) return this.#queue.wait(signal);
+	async wait(signal: AbortSignal): Promise<void> {
+		if (this.deferred.length === 0 && !this.#boundaryOnly) {
+			await this.#queue.wait(signal);
+			if (signal.aborted || this.#queue.canDeliver?.() !== false) return;
+			this.#boundaryOnly = true;
+		}
+		await this.#waitForCallEnd(signal);
+	}
+
+	#waitForCallEnd(signal: AbortSignal): Promise<void> {
+		// Once input is deferred, later input must follow it at the boundary.
 		if (signal.aborted) return Promise.resolve();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		signal.addEventListener("abort", () => resolve(), { once: true });
@@ -47,7 +57,12 @@ export class LiveSteeringChannel implements LiveSteering {
 	}
 
 	async claim(signal: AbortSignal): Promise<LiveSteerClaim | undefined> {
-		if (this.deferred.length > 0 || signal.aborted) return undefined;
+		if (signal.aborted) return undefined;
+		if (this.deferred.length > 0 || this.#boundaryOnly || this.#queue.canDeliver?.() === false) {
+			this.#boundaryOnly = true;
+			await this.#waitForCallEnd(signal);
+			return undefined;
+		}
 		let messages: AgentMessage[];
 		try {
 			messages = await this.#queue.take(signal);
@@ -58,7 +73,13 @@ export class LiveSteeringChannel implements LiveSteering {
 			});
 			return undefined;
 		}
-		if (messages.length === 0) return undefined;
+		if (messages.length === 0) {
+			if (this.#queue.canDeliver?.() === false) {
+				this.#boundaryOnly = true;
+				await this.#waitForCallEnd(signal);
+			}
+			return undefined;
+		}
 		let providerMessages: UserMessage[] | undefined;
 		try {
 			providerMessages = await this.#queue.toProvider(messages, signal);

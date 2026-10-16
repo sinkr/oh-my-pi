@@ -92,7 +92,7 @@ export const cfgPrewalkAuto = register({
 		group: "Prewalk",
 		label: "Auto Prewalk",
 		description:
-			"Ask the native System One judge (TypeSafe jev via the 'judge' role) whether each top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.",
+			"Ask the native judge resolved through the 'judge' role whether each top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.",
 		options: [
 			{ value: "off", label: "Off", description: "Never classify prompts for prewalk" },
 			{

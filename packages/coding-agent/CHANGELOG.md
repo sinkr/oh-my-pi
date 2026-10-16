@@ -6,6 +6,7 @@
 
 - Added `imageCountBudget` to custom models and `modelOverrides` in models.yml, so a custom gateway can state its host's image limit instead of the default of 5; past that limit the oldest images were dropped on every new image, which rewrote the provider's prompt cache ([#15002](https://github.com/can1357/oh-my-pi/issues/15002), [#15969](https://github.com/can1357/oh-my-pi/pull/15969) by [@aramalipoor](https://github.com/aramalipoor))
 - The status line names the active profile next to the `π` brand (`π-work`), so sessions from different profiles are distinguishable at a glance; the default profile is unchanged ([#15622](https://github.com/can1357/oh-my-pi/pull/15622) by [@matthewrball](https://github.com/matthewrball))
+- Added opt-in `prewalk.auto` (`off`, `suggest`, or `on`) with configurable planning source and handoff target models ([#16026](https://github.com/can1357/oh-my-pi/pull/16026) by [@taibenvenuti](https://github.com/taibenvenuti)).
 
 ### Changed
 
@@ -604,9 +605,6 @@
 ### Fixed
 
 - Fixed repeat opens of the model picker, model hub, or agents views stacking duplicates; the open one is brought forward instead ([#14846](https://github.com/can1357/oh-my-pi/pull/14846) by [@H4vC](https://github.com/H4vC))
-### Added
-
-- Added opt-in auto-prewalk (`prewalk.auto`: `off`, `suggest`, or `on`): the native `judge` model decides per task whether a prompt front-loads its hard reasoning. Classification alone never switches models; under `on`, a confident task switches to `prewalk.autoSource` (default `@slow`) and arms a handoff to `prewalk.autoTarget` (default `@smol`) once both resolve with usable credentials. Negative decisions, classifier errors, and `suggest` change nothing, and `/new` does not restore an auto-prewalk source.
 
 ## [18.8.2] - 2026-10-07
 

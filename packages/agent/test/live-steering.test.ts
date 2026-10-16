@@ -127,6 +127,155 @@ function userText(message: AgentMessage): string {
 }
 
 describe("agent loop live steering", () => {
+	it.each(["all", "one-at-a-time", "grouped"] as const)(
+		"parks live wait and claim before preparing boundary-only steering (%s)",
+		async mode => {
+			const task = createUserMessage("visible task");
+			const hidden = createUserMessage("hidden directive");
+			const mock = createMockModel({ handler: { content: ["done"] } });
+			const contexts: string[][] = [];
+			const batches: (readonly AgentMessage[])[] = [];
+			let hooks = 0;
+			let preparations = 0;
+			const agent = new Agent({
+				initialState: { model: mock.model },
+				streamFn: async (model, context, options) => {
+					contexts.push(context.messages.map(textOf));
+					if (contexts.length === 1) {
+						const live = options?.liveSteering;
+						if (!live) throw new Error("live steering was not offered");
+						agent.steer(task);
+						agent.steer(hidden);
+						const controller = new AbortController();
+						let waitSettled = false;
+						let claimSettled = false;
+						const waiting = live.wait(controller.signal).then(() => {
+							waitSettled = true;
+						});
+						const claiming = live.claim(controller.signal).then(claim => {
+							claimSettled = true;
+							return claim;
+						});
+						await Promise.resolve();
+						await Promise.resolve();
+						expect(waitSettled).toBe(false);
+						expect(claimSettled).toBe(false);
+						expect(agent.peekSteeringQueue()).toEqual([task, hidden]);
+						expect(batches.at(-1)).toEqual(mode === "one-at-a-time" ? [task] : [task, hidden]);
+						expect(hooks).toBe(0);
+						expect(preparations).toBe(0);
+						controller.abort();
+						await waiting;
+						expect(await claiming).toBeUndefined();
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+			agent.setSteeringMode(mode === "all" ? "all" : "one-at-a-time");
+			if (mode === "grouped") agent.setQueuedMessageGrouping(() => true);
+			agent.canDeliverLiveSteering = messages => {
+				batches.push(messages);
+				return !messages.includes(task);
+			};
+			agent.addBeforeQueuedMessageDequeueHook(() => {
+				hooks++;
+			});
+			agent.prepareQueuedMessages = () => {
+				preparations++;
+				return { commit: () => [] };
+			};
+
+			await agent.prompt("start");
+
+			expect(preparations).toBe(mode === "one-at-a-time" ? 2 : 1);
+			expect(contexts[1]).toContain("visible task");
+			expect(contexts.at(-1)).toContain("hidden directive");
+			expect(liveSteeredTexts(agent.state.messages)).toEqual([]);
+			expect(agent.peekSteeringQueue()).toEqual([]);
+		},
+	);
+
+	it("keeps admitted hidden steering live", async () => {
+		const hidden = createUserMessage("hidden directive");
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		let calls = 0;
+		const agent = new Agent({
+			initialState: { model: mock.model },
+			streamFn: async (model, context, options) => {
+				if (++calls === 1) {
+					const live = options?.liveSteering;
+					const signal = options?.signal;
+					if (!live || !signal) throw new Error("live steering was not offered");
+					agent.steer(hidden);
+					await live.wait(signal);
+					const claim = await live.claim(signal);
+					expect(claim).toBeDefined();
+					claim?.accept();
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		agent.canDeliverLiveSteering = messages => messages.every(message => message === hidden);
+
+		await agent.prompt("start");
+
+		expect(liveSteeredTexts(agent.state.messages)).toEqual(["hidden directive"]);
+		expect(agent.peekSteeringQueue()).toEqual([]);
+	});
+
+	it("rechecks live admission after dequeue hooks change the next delivery unit", async () => {
+		const hidden = createUserMessage("hidden directive");
+		const task = createUserMessage("visible task");
+		const blocked = Promise.withResolvers<void>();
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		let calls = 0;
+		let preparations = 0;
+		const agent = new Agent({
+			initialState: { model: mock.model },
+			streamFn: async (model, context, options) => {
+				if (++calls === 1) {
+					const live = options?.liveSteering;
+					if (!live) throw new Error("live steering was not offered");
+					agent.steer(hidden);
+					const controller = new AbortController();
+					let settled = false;
+					const claiming = live.claim(controller.signal).then(claim => {
+						settled = true;
+						return claim;
+					});
+					await blocked.promise;
+					expect(settled).toBe(false);
+					expect(preparations).toBe(0);
+					expect(agent.peekSteeringQueue()).toEqual([hidden, task]);
+					controller.abort();
+					expect(await claiming).toBeUndefined();
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		agent.setSteeringMode("all");
+		agent.canDeliverLiveSteering = messages => {
+			if (!messages.includes(task)) return true;
+			blocked.resolve();
+			return false;
+		};
+		let added = false;
+		agent.addBeforeQueuedMessageDequeueHook(() => {
+			if (added) return;
+			added = true;
+			agent.steer(task);
+		});
+		agent.prepareQueuedMessages = () => {
+			preparations++;
+			return { commit: () => [] };
+		};
+
+		await agent.prompt("start");
+
+		expect(preparations).toBe(1);
+		expect(liveSteeredTexts(agent.state.messages)).toEqual([]);
+	});
+
 	it("records accepted steering right after the steered response and holds later input for the next boundary", async () => {
 		let claimedView: string[] | undefined;
 		const { contexts, transcript } = await runSteered(async (live, queue) => {

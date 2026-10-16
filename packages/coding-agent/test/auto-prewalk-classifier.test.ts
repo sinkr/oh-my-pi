@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { hasNativeJudge, resolveJudge } from "@oh-my-pi/pi-coding-agent/judgment";
 import { MAX_TINY_MESSAGE_CHARS } from "@oh-my-pi/pi-coding-agent/tiny/message-preproc";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -119,6 +120,43 @@ describe("classifyAutoPrewalk decision", () => {
 		serveJudge({ type: "choice", choice: "prewalk" });
 
 		await expect(classify()).rejects.toThrow("malformed");
+	});
+
+	it.each([
+		["probabilities that do not sum to one", { ...answer(0.8, 0.9, 0.1), choice: "primary", confidence: 0.9 }],
+		["a selected route that is not the most probable", { ...answer(0.8, 0.1, 0.1), choice: "primary" }],
+		["a negative confidence", { ...answer(0.8, 0.1, 0.1), confidence: -0.8 }],
+		["a non-finite confidence", { ...answer(0.8, 0.1, 0.1), confidence: Number.POSITIVE_INFINITY }],
+		[
+			"a probability outside 0-1",
+			{ ...answer(0.8, 0.1, 0.1), probabilities: { prewalk: 1.2, primary: -0.1, direct: -0.1 } },
+		],
+	])("rejects %s instead of normalizing it into a decision", async (_label, reply) => {
+		serveJudge(reply);
+
+		await expect(classify()).rejects.toThrow("auto-prewalk");
+	});
+
+	it("never executes a prompted model when the cached chain predates a native login", async () => {
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		const { registry } = nativeJudgeDeps();
+		const stale = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${LOCAL.provider}/${LOCAL.id}`] },
+		});
+		const available = vi.spyOn(registry, "getAvailable").mockReturnValue([LOCAL]);
+		resolveJudge({ settings: stale, registry, purpose: "seed" }).primaryModel();
+		available.mockReturnValue([JEV_PREVIEW, LOCAL]);
+		const complete = vi.spyOn(tinyModelClient, "complete").mockResolvedValue("prewalk");
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+		expect(hasNativeJudge(stale, registry)).toBe(true);
+		await expect(
+			classifyAutoPrewalk({ request: REQUEST, history: [] }, { settings: stale, registry }),
+		).rejects.toThrow("native");
+
+		expect(complete).not.toHaveBeenCalled();
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it("never falls back to a prompted model when the judge role has no native backend", async () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.canDeliverLiveSteering` so hosts can reserve a complete steering batch for the next model-call boundary without disabling live steering for other input ([#16026](https://github.com/can1357/oh-my-pi/pull/16026) by [@taibenvenuti](https://github.com/taibenvenuti)).
+
 ## [18.11.2] - 2026-10-16
 
 ### Added
