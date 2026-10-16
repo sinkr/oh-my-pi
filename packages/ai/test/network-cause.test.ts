@@ -124,17 +124,37 @@ describe("classifyNetworkCause", () => {
 });
 
 describe("network failure classification flags", () => {
-	it("keeps offline failures transient and retryable", () => {
+	it("keeps every network-failure sentence transient and retryable", () => {
 		const id = AIError.classify(new AIError.AnthropicConnectionError(bunDnsFailure()));
 		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
 		expect(AIError.retriable(id)).toBe(true);
 
-		for (const message of [
-			OFFLINE_ANTHROPIC,
-			"Couldn't reach my-llm.lan (getaddrinfo ENOTFOUND). Check the URL, your network, or proxy.",
-			"getaddrinfo ENOTFOUND api.openai.com",
-			"FailedToOpenSocket",
-		]) {
+		const causes: Record<AIError.NetworkFailureKind, unknown> = {
+			offline: new TypeError("fetch failed", {
+				cause: Object.assign(new Error("connect ENETUNREACH 1.2.3.4:443"), { code: "ENETUNREACH" }),
+			}),
+			// Detail the errno alternatives do not list: coverage must come from the sentence.
+			unreachable: new Error("getaddrinfo EAI_NONAME api.anthropic.com"),
+			refused: new TypeError("fetch failed", {
+				cause: new AggregateError([
+					Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8080"), { code: "ECONNREFUSED" }),
+				]),
+			}),
+			tls: Object.assign(new Error("unable to verify the first certificate"), {
+				code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+			}),
+		};
+
+		for (const [kind, cause] of Object.entries(causes) as [AIError.NetworkFailureKind, unknown][]) {
+			const message = AIError.networkFailureMessage(cause, "https://api.anthropic.com/v1/messages");
+			expect(AIError.classifyNetworkCause(cause)?.kind).toBe(kind);
+			if (message === undefined) throw new Error(`Expected a ${kind} network-failure sentence`);
+			expect(AIError.isProviderRetryableError(new Error(message))).toBe(true);
+			expect(AIError.is(AIError.classify(new Error(message)), AIError.Flag.Transient)).toBe(true);
+		}
+
+		// Flattened runtime text (no sentence) must stay retryable too.
+		for (const message of [OFFLINE_ANTHROPIC, "getaddrinfo ENOTFOUND api.openai.com", "FailedToOpenSocket"]) {
 			expect(AIError.isProviderRetryableError(new Error(message))).toBe(true);
 			expect(AIError.is(AIError.classify(new Error(message)), AIError.Flag.Transient)).toBe(true);
 		}
@@ -165,5 +185,34 @@ describe("postOpenAIStream transport rejection", () => {
 			"No internet connection: couldn't reach api.openai.com (getaddrinfo ETIMEOUT). Check your network or proxy and try again.",
 		);
 		expect((error as Error).cause).toBe(networkError);
+	});
+
+	it("names a refused connection through fetchWithRetry's undici wrap", async () => {
+		// undici nests the errno under `fetch failed`, and fetchWithRetry flattens
+		// the text to `Network error: ` (the AggregateError has no message), so the
+		// errno survives only on the wrapped error's `cause`.
+		const errno = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8080"), { code: "ECONNREFUSED" });
+		const fetchFailed = new TypeError("fetch failed", { cause: new AggregateError([errno]) });
+		const fetchImpl: FetchImpl = async () => {
+			throw fetchFailed;
+		};
+
+		const error = await postOpenAIStream({
+			url: "http://127.0.0.1:8080/v1/chat/completions",
+			headers: {},
+			body: {},
+			signal: new AbortController().signal,
+			fetch: fetchImpl,
+			maxAttempts: 1,
+		}).then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+
+		if (!(error instanceof Error)) throw new Error(`Expected a rejected Error, got ${String(error)}`);
+		expect(error.message).toBe(
+			"Couldn't connect to 127.0.0.1:8080 (connection refused). Check that the server is running and reachable.",
+		);
+		expect(AIError.isProviderRetryableError(error)).toBe(true);
 	});
 });
