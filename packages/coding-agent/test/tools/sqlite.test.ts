@@ -277,6 +277,37 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("Alice");
 	});
 
+	it.each(["", "?limit=2", "?order=total:desc&limit=2"])(
+		"reads generated columns through the table selector %s",
+		async selector => {
+			const dbPath = path.join(tmpDir, `generated-${encodeURIComponent(selector)}.sqlite`);
+			const db = new Database(":memory:");
+			try {
+				db.run(`
+					CREATE TABLE products (
+						id INTEGER PRIMARY KEY,
+						price INTEGER,
+						quantity INTEGER,
+						total INTEGER GENERATED ALWAYS AS (price * quantity) STORED,
+						label TEXT GENERATED ALWAYS AS ('total-' || total) VIRTUAL
+					);
+					INSERT INTO products (id, price, quantity) VALUES (1, 5, 2), (2, 3, 5);
+				`);
+				await Bun.write(dbPath, db.serialize());
+			} finally {
+				db.close();
+			}
+
+			const result = await readTool.execute("sqlite-generated", { path: `${dbPath}:products${selector}` });
+			const text = getText(result);
+			expect(text).toMatch(/\|\s+10\s+\|\s+total-10\s+\|/);
+			expect(text).toMatch(/\|\s+15\s+\|\s+total-15\s+\|/);
+			if (selector.includes("order=")) {
+				expect(text.indexOf("total-15")).toBeLessThan(text.indexOf("total-10"));
+			}
+		},
+	);
+
 	it("returns a row by integer primary key", async () => {
 		const result = await readTool.execute("sqlite-row-int", { path: `${sqlitePath}:users:2` });
 		const text = getText(result);
