@@ -5,6 +5,7 @@
 ### Added
 
 - Added `parseCodeStatus` to check code syntax and its resolved language without generating a summary ([#15904](https://github.com/can1357/oh-my-pi/pull/15904) by [@iliaal](https://github.com/iliaal)).
+- Added `DesktopSession.holdDisplayUntilReleased()` and `releaseDisplayAwake()` to keep the display awake until the caller releases it, rather than for 5 minutes after the last request ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -39,11 +40,6 @@
 - Fixed Mermaid labels decoding legacy references such as `&#128;` or `#150;` to invisible C1 controls instead of the browser's `€` and `–` ([#15621](https://github.com/can1357/oh-my-pi/pull/15621))
 
 ## [18.11.0] - 2026-10-14
-
-### Added
-
-- Added `DesktopSession.holdDisplayUntilReleased()` and `releaseDisplayAwake()` to keep the display awake until the caller releases it, rather than for 5 minutes after the last request
-- Added `DesktopSession.holdDisplayUntilReleased()` and `releaseDisplayAwake()` to keep the display awake until the caller releases it, rather than for 5 minutes after the last request ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
