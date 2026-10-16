@@ -6,6 +6,7 @@ use std::{
 
 use super::{
 	backend::AxBackend,
+	control,
 	error::{CoreResult, DesktopError, ErrorCode},
 	types::{AxNode, AxQuery, AxSnapshot, AxSnapshotOptions, DesktopWindow},
 };
@@ -154,6 +155,15 @@ pub enum WalkBounds {
 	Skip,
 }
 
+/// A walk of a window: the window element it read and the limits it read
+/// within.
+#[derive(Clone)]
+struct WindowWalk {
+	root:      AxHandle,
+	max_nodes: u32,
+	max_depth: u32,
+}
+
 struct Registered {
 	handle:      AxHandle,
 	target_key:  String,
@@ -165,10 +175,10 @@ struct Registered {
 	/// with it shared it, so a `StaleRef` can name the one element left with
 	/// it.
 	identity:    Option<AxIdentity>,
-	/// The window element the walk that proved `identity` read: a window id
-	/// the system has since given to another window, of this process or
-	/// another, is not the window to search.
-	window:      Option<AxHandle>,
+	/// The walk that proved `identity`: a window id the system has since
+	/// given to another window, of this process or another, is not the window
+	/// to search, and a search reads as far as that walk did.
+	window:      Option<WindowWalk>,
 }
 
 pub struct AxRegistry {
@@ -178,8 +188,8 @@ pub struct AxRegistry {
 	/// Ref of each element registered under each target, so an element read
 	/// again keeps its ref.
 	refs:        HashMap<String, HashMap<AxHandle, u64>>,
-	/// The window element of each target as its last walk found it.
-	roots:       HashMap<String, AxHandle>,
+	/// Each target's last walk.
+	roots:       HashMap<String, WindowWalk>,
 }
 
 impl Default for AxRegistry {
@@ -202,10 +212,14 @@ impl AxRegistry {
 		*generation
 	}
 
-	/// Notes the window element `target`'s walk reads, for the identities it
-	/// proves.
-	pub(crate) fn note_window(&mut self, target: &str, root: &AxHandle) {
-		self.roots.insert(target.to_string(), root.clone());
+	/// Notes the walk of `target`'s window element `root`, for the identities
+	/// it proves.
+	fn note_window(&mut self, target: &str, root: &AxHandle, state: &WalkState) {
+		self.roots.insert(target.to_string(), WindowWalk {
+			root:      root.clone(),
+			max_nodes: state.max_nodes,
+			max_depth: state.max_depth,
+		});
 	}
 
 	/// Ends `target`'s snapshot `generation` once it has registered its
@@ -279,7 +293,7 @@ impl AxRegistry {
 				self
 					.roots
 					.get(target)
-					.filter(|root| root.identified())
+					.filter(|walk| walk.root.identified())
 					.cloned(),
 			),
 			Some(false) => (None, None),
@@ -378,17 +392,19 @@ struct WalkNode {
 }
 
 struct WalkState {
-	visited:   u32,
-	skipped:   u32,
+	visited:     u32,
+	skipped:     u32,
 	/// The skipped nodes the app destroyed before the walk read them, as
 	/// Activity Monitor does with its rows while the walk is under way.
-	vanished:  u32,
+	vanished:    u32,
 	/// Nodes read with [`AxProps::partial`] set.
-	partial:   u32,
-	max_nodes: u32,
-	max_depth: u32,
-	truncated: bool,
-	bounds:    WalkBounds,
+	partial:     u32,
+	max_nodes:   u32,
+	max_depth:   u32,
+	truncated:   bool,
+	bounds:      WalkBounds,
+	/// Whether the walk stops when the current operation is cancelled.
+	cancellable: bool,
 }
 
 impl WalkState {
@@ -402,7 +418,14 @@ impl WalkState {
 			max_depth,
 			truncated: false,
 			bounds,
+			cancellable: false,
 		}
+	}
+
+	/// Stops the walk between nodes once the current operation is cancelled.
+	const fn cancellable(mut self) -> Self {
+		self.cancellable = true;
+		self
 	}
 
 	/// Whether the walk read every element of the window that still exists, so
@@ -422,6 +445,9 @@ fn walk_raw(
 	if depth > state.max_depth || state.visited >= state.max_nodes {
 		state.truncated = true;
 		return Ok(None);
+	}
+	if state.cancellable {
+		control::check()?;
 	}
 	state.visited += 1;
 	let (props, child_handles) = match backend.walk_node(&handle, state.bounds) {
@@ -634,12 +660,12 @@ pub fn snapshot(
 	let target = &window.id;
 	let generation = registry.begin_snapshot(target);
 	let root = backend.window_root(window)?;
-	registry.note_window(target, &root);
 	let mut state = WalkState::new(
 		options.max_nodes.unwrap_or(800).max(1),
 		options.max_depth.unwrap_or(24),
 		WalkBounds::Skip,
 	);
+	registry.note_window(target, &root, &state);
 	let root = walk_raw(backend, root, 0, &mut state)?;
 	let identities = ReadIdentities::new(root.as_ref(), &state);
 	let root = root.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
@@ -684,8 +710,8 @@ pub fn query(
 	let target = &window.id;
 	let generation = registry.current_generation(target);
 	let root = backend.window_root(window)?;
-	registry.note_window(target, &root);
 	let mut state = WalkState::new(5_000, 24, WalkBounds::Read);
+	registry.note_window(target, &root, &state);
 	let Some(root) = walk_raw(backend, root, 0, &mut state)? else {
 		return Ok(Vec::new());
 	};
@@ -801,7 +827,9 @@ impl ReadIdentities {
 /// ref has no identity, or none unique in the read that registered it, the
 /// window id now names another window, the walk could not read the whole
 /// window, zero or several elements match, or the registry cap evicted the
-/// match as it was registered.
+/// match as it was registered. The walk reads as far as the one that proved
+/// the identity did, and at least as far as `find()` does; it stops with
+/// `Cancelled` once the current operation is cancelled.
 pub fn refind(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -814,11 +842,13 @@ pub fn refind(
 	};
 	let root = backend.window_root(window)?;
 	// The window id may now name another window, of this app or another.
-	if entry.window.as_ref() != Some(&root) {
+	let Some(proof) = entry.window.as_ref().filter(|walk| walk.root == root) else {
 		return Ok(None);
-	}
+	};
+	let mut state =
+		WalkState::new(proof.max_nodes.max(5_000), proof.max_depth.max(24), WalkBounds::Skip)
+			.cancellable();
 	let target = entry.target_key.clone();
-	let mut state = WalkState::new(5_000, 24, WalkBounds::Skip);
 	let Some(root) = walk_raw(backend, root, 0, &mut state)? else {
 		return Ok(None);
 	};
@@ -1379,6 +1409,31 @@ mod tests {
 			.unwrap()
 			.expect("the one copy");
 		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(4)));
+	}
+	#[test]
+	fn a_ref_from_a_read_deeper_than_find_reads_is_searched_as_deep() {
+		// A button 31 levels down, past the 24 `find()` reads.
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (100, p("button", Some("Go")))].into(),
+			..Default::default()
+		};
+		for group in 2..=31 {
+			m.props.insert(group, p("group", None));
+			m.children.insert(group - 1, vec![group]);
+		}
+		m.children.insert(31, vec![100]);
+		let mut registry = AxRegistry::default();
+		let options = AxSnapshotOptions { max_depth: Some(40), ..Default::default() };
+		let read = snapshot(&mut m, &mut registry, &window(), &options).unwrap();
+		assert!(!read.truncated && read.text.contains("\"Go\" [ref=e2]"), "{}", read.text);
+		// The app rebuilds the button.
+		m.destroyed.insert(100);
+		m.props.insert(101, p("button", Some("Go")));
+		m.children.insert(31, vec![101]);
+		let found = refind(&mut m, &mut registry, &window(), "e2")
+			.unwrap()
+			.expect("the one copy");
+		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(101)));
 	}
 	#[test]
 	fn a_read_that_missed_part_of_the_window_cannot_make_a_ref_refindable() {

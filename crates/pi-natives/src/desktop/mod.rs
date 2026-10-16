@@ -742,7 +742,7 @@ impl Worker {
 		}
 		token.check()?;
 		let _scope = token.enter();
-		let _lease = request
+		let lease = request
 			.is_mutation()
 			.then(|| InputLease::acquire(token))
 			.transpose()?;
@@ -769,7 +769,14 @@ impl Worker {
 				},
 			}
 		}
-		result
+		// A `StaleRef` search reads the whole window, which can take long
+		// enough to keep other sessions from input: it runs once the call has
+		// released it.
+		drop(lease);
+		match (result, request.reference()) {
+			(Err(error), Some(reference)) => Err(self.name_match(reference, error, token)),
+			(result, _) => result,
+		}
 	}
 
 	/// Names, in a `StaleRef` from `reference`'s element, the one element of
@@ -823,17 +830,7 @@ impl Worker {
 			.ok_or_else(DesktopError::ax_unsupported)
 	}
 
-	/// Runs `request`; a `StaleRef` from an element ref names the one element
-	/// left with its fields ([`Self::name_match`]).
 	fn process(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
-		let result = self.run(request, token);
-		match (result, request.reference()) {
-			(Err(error), Some(reference)) => Err(self.name_match(reference, error, token)),
-			(result, _) => result,
-		}
-	}
-
-	fn run(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
 		match request {
 			Request::Capabilities { .. } => {
 				let caps = match self.backend.as_mut() {
@@ -1971,7 +1968,7 @@ impl DesktopSession {
 
 #[cfg(test)]
 mod capture_tests {
-	use std::collections::HashSet;
+	use std::{collections::HashSet, sync::atomic::AtomicBool};
 
 	use image::RgbaImage;
 
@@ -2001,6 +1998,16 @@ mod capture_tests {
 		stale_presses:     bool,
 		/// Calls that asked whether an element was destroyed.
 		probes:            u32,
+		/// Calls that read an element's fields.
+		reads:             u32,
+		/// Runs as each press is delivered and as each probe asks.
+		on_call:           Option<Box<dyn Fn(Call) + Send>>,
+	}
+
+	#[derive(Clone, Copy, PartialEq, Eq)]
+	enum Call {
+		Press,
+		Probe,
 	}
 
 	impl FakeTree {
@@ -2115,7 +2122,8 @@ mod capture_tests {
 		fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
 			let (role, title) = match &self.tree {
 				Some(tree) => {
-					let tree = tree.lock();
+					let mut tree = tree.lock();
+					tree.reads += 1;
 					let id = tree.element(h)?;
 					if id == 1 {
 						("window", None)
@@ -2170,6 +2178,9 @@ mod capture_tests {
 			if action != "press" {
 				return Err(DesktopError::ax_failed(format!("no action {action}")));
 			}
+			if let Some(on_call) = &tree.on_call {
+				on_call(Call::Press);
+			}
 			tree.pressed.push(id);
 			if tree.stale_presses {
 				return Err(DesktopError::stale_ref("the element no longer exists"));
@@ -2222,6 +2233,9 @@ mod capture_tests {
 			self.tree.as_ref().is_some_and(|tree| {
 				let mut tree = tree.lock();
 				tree.probes += 1;
+				if let Some(on_call) = &tree.on_call {
+					on_call(Call::Probe);
+				}
 				tree.destroyed.contains(id)
 			})
 		}
@@ -2839,23 +2853,32 @@ mod capture_tests {
 		tree.children = buttons.iter().map(|(id, _)| *id).collect();
 	}
 
-	/// Sends the request `make` builds under a fresh token of `source`.
+	/// A source holding this process's input ownership as `acquireControl()`
+	/// grants it, without the Escape monitor a test host may refuse.
+	fn granted() -> CancellationSource {
+		let source = CancellationSource::default();
+		control::grant_for_test(&source);
+		source
+	}
+
+	/// Runs the request `make` builds under a fresh token of `source`, as the
+	/// worker serves it.
 	fn call(
 		worker: &mut Worker,
 		make: impl FnOnce(Reply) -> Request,
 		source: &CancellationSource,
 	) -> CoreResult<Response> {
 		let (reply, _rx) = flume::bounded(1);
-		worker.process(&make(reply), &source.token())
+		worker.execute(&make(reply), &source.token())
+	}
+
+	fn press_request(reference: &str) -> impl FnOnce(Reply) -> Request {
+		let reference = reference.to_string();
+		move |reply| Request::AxPerform { reference, action: "press".to_string(), reply }
 	}
 
 	fn press(worker: &mut Worker, reference: &str) -> CoreResult<()> {
-		let request = |reply| Request::AxPerform {
-			reference: reference.to_string(),
-			action: "press".to_string(),
-			reply,
-		};
-		call(worker, request, &CancellationSource::default()).map(drop)
+		call(worker, press_request(reference), &granted()).map(drop)
 	}
 
 	/// The ref a `StaleRef` from `reference` names as the one element left
@@ -2904,7 +2927,7 @@ mod capture_tests {
 			},
 		];
 		for make in requests {
-			let error = call(&mut worker, make, &CancellationSource::default())
+			let error = call(&mut worker, make, &granted())
 				.err()
 				.expect("the element is gone");
 			assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
@@ -2988,20 +3011,54 @@ mod capture_tests {
 		assert_eq!(named(&press(&mut worker, "e2").unwrap_err(), "e2"), None);
 		assert_eq!(tree.lock().probes, 1);
 		tree.lock().stale_presses = false;
-		// A cancelled call neither probes nor searches.
+		// A call cancelled while it ran neither probes nor searches.
+		let source = granted();
+		let canceller = source.clone();
+		{
+			let mut tree = tree.lock();
+			tree.press_rebuilds_as = Some(4);
+			tree.on_call = Some(Box::new(move |_| canceller.cancel()));
+		}
+		let error = call(&mut worker, press_request("e2"), &source)
+			.err()
+			.expect("the element is gone");
+		assert_eq!(named(&error, "e2"), None);
+		assert_eq!(tree.lock().pressed, [2, 2, 2]);
+		assert_eq!(tree.lock().probes, 1);
+	}
+
+	#[test]
+	fn a_stale_ref_search_runs_with_input_released() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
 		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
-		let source = CancellationSource::default();
-		let token = source.token();
-		source.cancel();
-		let (reply, _rx) = flume::bounded(1);
-		let request =
-			Request::AxPerform { reference: "e2".to_string(), action: "press".to_string(), reply };
-		let error = worker
-			.process(&request, &token)
+		let source = granted();
+		// Whether another call of the session could take input during the search.
+		let free = Arc::new(AtomicBool::new(false));
+		let (other, seen) = (source.clone(), Arc::clone(&free));
+		tree.lock().on_call = Some(Box::new(move |_| {
+			seen.store(InputLease::acquire(&other.token()).is_ok(), Ordering::SeqCst);
+		}));
+		let error = call(&mut worker, press_request("e2"), &source)
+			.err()
+			.expect("the element is gone");
+		assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
+		assert!(free.load(Ordering::SeqCst), "the search held the call's input lease");
+	}
+
+	#[test]
+	fn a_cancel_during_a_stale_ref_search_stops_its_walk() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop"), (5, "Next")]);
+		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop"), (5, "Next")]);
+		let source = granted();
+		let canceller = source.clone();
+		tree.lock().on_call = Some(Box::new(move |_| canceller.cancel()));
+		let reads = tree.lock().reads;
+		let error = call(&mut worker, press_request("e2"), &source)
 			.err()
 			.expect("the element is gone");
 		assert_eq!(named(&error, "e2"), None);
 		assert_eq!(tree.lock().probes, 1);
+		assert_eq!(tree.lock().reads, reads, "the walk read on after the cancel");
 	}
 
 	fn capture_request(target: Target) -> Request {
