@@ -7234,7 +7234,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
+		const sessionFile = this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined;
+		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), sessionFile)];
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
