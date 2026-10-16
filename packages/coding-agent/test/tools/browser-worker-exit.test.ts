@@ -10,6 +10,7 @@ import {
 	releaseTab,
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import type { WorkerInbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
@@ -37,10 +38,8 @@ async function open(name: string, body: string): Promise<void> {
 }
 
 async function run(name: string, code: string): Promise<unknown> {
-	const result = (await prelude.invoke({ action: "run", name, code, timeout: 20 }, context)) as {
-		details?: Record<string, unknown>;
-	};
-	return result.details?.value;
+	const { details } = await prelude.invoke({ action: "run", name, code, timeout: 20 }, context);
+	return details && typeof details === "object" && "value" in details ? details.value : undefined;
 }
 
 async function messageOf(promise: Promise<unknown>): Promise<string> {
@@ -100,12 +99,38 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.mark);")).toBe("kept");
 	}, 30_000);
 
+	it("does not name an earlier message error as the cause of a later exit", async () => {
+		const name = "worker-exit-stale-cause";
+		// Capture the tab's Bun worker to raise a `messageerror` on it, which leaves the worker running.
+		const RealWorker = globalThis.Worker;
+		let spawned: Worker | undefined;
+		globalThis.Worker = class extends RealWorker {
+			constructor(...args: ConstructorParameters<typeof Worker>) {
+				super(...args);
+				spawned = this;
+			}
+		};
+		try {
+			await open(name, "alive");
+		} finally {
+			globalThis.Worker = RealWorker;
+		}
+		if (!spawned) throw new Error("expected the tab's worker");
+		spawned.dispatchEvent(new MessageEvent("messageerror", { data: "stale" }));
+		expect(await run(name, "return 1;")).toBe(1);
+
+		const crash = await messageOf(run(name, "process.exit(3);"));
+		expect(crash).toContain("Browser tab worker exited unexpectedly (exit code 3)");
+		expect(crash).not.toContain("stale");
+	}, 30_000);
+
 	it("aborts the host tool calls a crashed run had in flight, on reattach and on the crash-loop close", async () => {
 		const name = "worker-exit-tool-call";
 		await open(name, "alive");
 		const signals: AbortSignal[] = [];
 		const callTool = spyOn(toolBridge, "callSessionTool").mockImplementation(async (_name, _args, options) => {
-			const signal = options.signal!;
+			const { signal } = options;
+			if (!signal) throw new Error("expected the tool call's abort signal");
 			signals.push(signal);
 			const aborted = Promise.withResolvers<void>();
 			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
@@ -227,7 +252,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		const tab = getTab(name);
 		if (tab?.backend !== "worker") throw new Error("expected a worker tab");
 		const oldWorker = tab.worker;
-		let lastRun: Extract<Parameters<typeof oldWorker.send>[0], { type: "run" }> | undefined;
+		let lastRun: Extract<WorkerInbound, { type: "run" }> | undefined;
 		const send = oldWorker.send.bind(oldWorker);
 		oldWorker.send = (msg, transferList) => {
 			if (msg.type === "run") lastRun = msg;

@@ -269,6 +269,8 @@ const WORKER_EXIT_REATTACH_TIMEOUT_MS = 10_000;
 // A replacement worker that exits on its own this soon after the previous exit closes the tab instead of looping.
 const WORKER_EXIT_RETRY_WINDOW_MS = 10_000;
 class RecoverableWorkerError extends ToolError {}
+/** A message from a tab worker failed to deserialize; the worker keeps running. */
+class WorkerMessageError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
 /** The page's renderer crashed; the run that reports it recycles the worker. */
@@ -402,19 +404,8 @@ async function acquireTabImpl(
 	let tempHold = false;
 	// A tab whose worker exited is being reattached: the open reuses the tab the reattach leaves, or opens a fresh
 	// one if the reattach closed it, instead of reporting a tab whose worker is gone.
-	const recovering = tabs.get(name);
-	if (recovering?.backend === "worker" && recovering.workerRecovery) {
-		try {
-			await raceWithTimeout(
-				untilAborted(opts.signal, recovering.workerRecovery),
-				opts.timeoutMs,
-				`Tab ${JSON.stringify(name)}'s worker was still being reattached after ${opts.timeoutMs}ms`,
-			);
-		} catch (error) {
-			if (opts.signal?.aborted) throw new ToolAbortError("Browser tab open aborted");
-			throw error;
-		}
-	}
+	const reattaching = awaitWorkerRecovery(name, opts, "Browser tab open aborted");
+	if (reattaching) await reattaching;
 	const existing = tabs.get(name);
 	if (existing) {
 		if (existing.browser === browser && existing.state === "alive") {
@@ -883,23 +874,12 @@ async function runInTabWithSnapshot(
 ): Promise<RunResultOk> {
 	// A worker that exited on its own is being replaced: wait for that within this call's budget, and run only on the
 	// same tab. A tab closed and reopened under this name meanwhile is not the one this call was meant for.
-	const recovering = tabs.get(name);
-	if (recovering?.backend === "worker" && recovering.workerRecovery) {
-		if (opts.signal?.aborted) throw new ToolAbortError();
-		recovering.lastActivityAt = Date.now();
-		const waitStartedAt = performance.now();
-		try {
-			await raceWithTimeout(
-				untilAborted(opts.signal, recovering.workerRecovery),
-				opts.timeoutMs,
-				`Tab ${JSON.stringify(name)}'s worker was still being reattached after ${opts.timeoutMs}ms`,
-			);
-		} catch (error) {
-			if (opts.signal?.aborted) throw new ToolAbortError();
-			throw error;
-		}
+	const waitStartedAt = performance.now();
+	const reattaching = awaitWorkerRecovery(name, opts);
+	if (reattaching) {
+		const recovered = await reattaching;
 		const current = tabs.get(name);
-		if (current && current !== recovering) {
+		if (current && current !== recovered) {
 			throw new ToolError(`Tab ${JSON.stringify(name)} was closed while its worker was being reattached.`);
 		}
 		opts = { ...opts, timeoutMs: Math.max(1, opts.timeoutMs - Math.round(performance.now() - waitStartedAt)) };
@@ -1890,6 +1870,32 @@ async function dispatchToolCall(
 	}
 }
 
+/**
+ * The wait, within `opts`' timeout and abort signal, for the reattach of the tab `name` whose worker exited on its
+ * own; it resolves to the tab waited on. `undefined` when none is being reattached, so a caller with nothing to wait
+ * for goes on in the same tick.
+ */
+function awaitWorkerRecovery(
+	name: string,
+	opts: { timeoutMs: number; signal?: AbortSignal },
+	abortMessage?: string,
+): Promise<WorkerTabSession> | undefined {
+	const recovering = tabs.get(name);
+	if (recovering?.backend !== "worker" || !recovering.workerRecovery) return undefined;
+	recovering.lastActivityAt = Date.now();
+	return raceWithTimeout(
+		untilAborted(opts.signal, recovering.workerRecovery),
+		opts.timeoutMs,
+		`Tab ${JSON.stringify(name)}'s worker was still being reattached after ${opts.timeoutMs}ms`,
+	).then(
+		() => recovering,
+		error => {
+			if (opts.signal?.aborted) throw new ToolAbortError(abortMessage);
+			throw error;
+		},
+	);
+}
+
 function safeSend(tab: WorkerTabSession, msg: WorkerInbound): void {
 	if (tab.state !== "alive") return;
 	try {
@@ -1909,7 +1915,8 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 	worker.onMessage(msg => handleTabMessage(tab, msg));
 	let lastError: Error | undefined;
 	worker.onError(error => {
-		lastError = error;
+		// A message that failed to deserialize leaves the worker running, so it is no exit's cause.
+		if (!(error instanceof WorkerMessageError)) lastError = error;
 	});
 	worker.onExit(exitCode => {
 		// A release or recycle owns a worker it replaced or is tearing down.
@@ -2286,7 +2293,7 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 		onError(handler) {
 			const onError = (event: ErrorEvent): void => handler(errorFromWorkerEvent(event));
 			const onMessageError = (event: MessageEvent): void =>
-				handler(new ToolError(`Tab worker message error: ${String(event.data)}`));
+				handler(new WorkerMessageError(`Tab worker message error: ${String(event.data)}`));
 			worker.addEventListener("error", onError);
 			worker.addEventListener("messageerror", onMessageError);
 			return () => {
