@@ -2264,6 +2264,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					}
 					details = {
 						displayContent: { text: renderedSummary.displayText, startLine: 1 },
+						rowPrefixes: renderedSummary.rowPrefixes,
 						summary: {
 							lines: countTextLines(renderedSummary.text),
 							elidedSpans: renderedSummary.elidedRanges.length,
