@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- With an Anthropic-API model selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup
+
 ## [18.11.3] - 2026-10-16
 
 ### Breaking Changes

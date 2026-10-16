@@ -14,5 +14,18 @@ export function asGlobalFetch(fn: FetchHandler): typeof fetch {
 	});
 }
 
+/**
+ * Decode a captured request body to text, undoing the transport gzip the
+ * Anthropic provider applies to large bodies sent to the official API.
+ */
+export function requestBodyText(init: RequestInit | undefined): string {
+	const raw = init?.body;
+	if (raw == null) return "{}";
+	if (typeof raw === "string") return raw;
+	if (!(raw instanceof Uint8Array)) return String(raw);
+	const gzipped = new Headers(init?.headers).get("content-encoding") === "gzip";
+	return new TextDecoder().decode(gzipped ? Bun.gunzipSync(raw as Uint8Array<ArrayBuffer>) : raw);
+}
+
 /** `RequestInfo` alias for test fetch handlers (DOM lib name). */
 export type FetchInput = string | URL | Request;
