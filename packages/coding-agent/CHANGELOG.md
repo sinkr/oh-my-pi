@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.11.3] - 2026-10-16
+
 ### Breaking Changes
 
 - Extension `ui.approve()` hosts receive an optional `session` choice label and answer `"once"`, `"session"`, or `"deny"` instead of a boolean
@@ -168,8 +170,6 @@
 - Fixed `read` ignoring JSON and JSONL `?q=` filters and pagination for `local://` and `artifact://` files ([#15767](https://github.com/can1357/oh-my-pi/issues/15767)).
 - Agents can now read saved context notes without accidentally clearing them ([#15748](https://github.com/can1357/oh-my-pi/pull/15748) by [@Komzpa](https://github.com/Komzpa))
 - Fixed startup without an explicit model picking an unrelated authenticated provider instead of the first available model in the configured default fallback chain ([#15781](https://github.com/can1357/oh-my-pi/pull/15781) by [@mvid](https://github.com/mvid))
-### Fixed
-
 
 ## [18.11.0] - 2026-10-14
 
@@ -1742,86 +1742,4 @@
 - Fixed memory recall blocks carrying a minute-resolution `Current time` stamp that dirtied the cached system prompt on every refresh; recall rows already carry dates, so the stamp is removed.
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
 
-## [18.2.5] - 2026-09-17
-
-### Breaking Changes
-
-- Moved terminal UI modules—including themes, tool renderers, chat, overlay, status-line, composer, setup wizard, and Git/PS/debug apps—to `@oh-my-pi/pi-tui`. The corresponding `@oh-my-pi/pi-coding-agent` subpaths no longer exist; names re-exported from the package root remain unchanged.
-
-### Added
-
-- Added `omp stream` for livestreaming terminal sessions at `live.omp.sh/<your Stencil username>`, with viewer chat, pane-per-session display for sessions in the same directory, screen redaction, and configurable `stream.serverUrl` and `stream.redactPatterns` settings. Use `--server` to override the stream server, `--title` to set a title, and `--no-tui` to retain the line-based log interface.
-- Added Stencil account support to `/login`. `omp stream` uses a signed-in Stencil account or `STENCIL_API_KEY` for channel ownership and authentication. Sensitive environment, dotenv, `secrets.yml`, credential-shaped, and configured pattern-matching values are redacted before screen data is transmitted.
-- Added faster keyless web search fallback by prioritizing the default keyless Parallel provider ahead of Perplexity.
-
-### Changed
-
-- Improved parent IRC message prompts to make interruption handling more reliable.
-- Improved subagent task labels and plan filenames to use concise, action-oriented descriptions.
-- Updated CLI byte sizes to use decimal KB units and made duration displays coarser and easier to read.
-
-### Fixed
-
-- Fixed `edit` auto-repair waiting up to 60 seconds when the `smol` model does not respond; it now times out after 20 seconds and reports repair start and timeout details.
-- Fixed subagents leaving queued parent messages behind after tool interruptions.
-- Fixed a subagent burning its whole run on `yield` calls that never finish it: an incremental-only `yield` turn no longer bypasses the request budget, and the forced final `yield` ends the run ([#12351](https://github.com/can1357/oh-my-pi/pull/12351) by [@pedropaulovc](https://github.com/pedropaulovc)).
-- Fixed `browser.open({ app: { relay: true } })` waiting for the full tool timeout when no relay extension is installed or reachable; it now fails promptly with an actionable error while preserving the wait for a connected extension to recover.
-- Fixed `edit` handling of ellipsis markers, inline closing tags, copy-ready corrections, and retries, including cases that could insert literal markers, misreport matches, omit the file target, or panic.
-- Enabled `edit.enforceSeenLines` by default to reject hashline edits anchored to content that was not displayed, and prevented stale-tag recovery from applying edits to a structurally different duplicate construct ([#12369](https://github.com/can1357/oh-my-pi/pull/12369) by [@pedropaulovc](https://github.com/pedropaulovc)).
-- Fixed startup failures when the plugins directory or its manifest cannot be read; inaccessible plugin roots are now skipped with a warning.
-- Fixed generation token-rate displays for subagents and restored the main session's reading after switching focus.
-- Fixed subagent HUD labels and plan filenames being populated with example prompt text on smaller models.
-- Improved shell, file, session, and persistence operations to avoid unnecessary repeated work, improving responsiveness and resource usage.
-
-## [18.2.4] - 2026-09-17
-
-### Added
-
-- Added an optional live generation speed readout via `composer.tokenRate`, showing smoothed tokens-per-second output in the working row and keeping the rate visible between turns.
-- Added TypeSafe provider support through `/login typesafe` or `TYPESAFE_API_KEY`. TypeSafe can power thinking-level detection, unexpected-stop detection, and AI-assisted git staging with calibrated judgment probabilities; configure `providers.judgmentProvider` as `auto`, `typesafe`, or `llm` to select the judgment backend.
-- Added the `judge(state, questions)` evaluation helper for Python and JavaScript cell code, supporting typed choice, boolean, and score judgments. It returns a handle whose `.wait()` method provides answers and probabilities, using TypeSafe when configured and available or a fallback chat model otherwise.
-
-### Changed
-
-- Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
-
-## [18.2.3] - 2026-09-17
-
-### Breaking Changes
-
-- Config-backed headers now resolve asynchronously through `ModelRegistry.getProviderHeaders()` or `resolveModelHeaders()`; removed the synchronous `config/model-config-values` module.
-- Removed the unused `ConfigFile.getMtimeMsAsync()`, `tryLoadAsync()`, `loadAsync()`, and `loadOrDefaultAsync()` methods.
-- Custom SQL session clients must support transactions for atomic renames.
-
-### Added
-
-- Type `^` to tag a model for delegation, with atomic display-name chips and session-persisted `m1`, `m2`, … agents available to task and eval.
-- Provider login and setup support masked secret prompts; RPC rejects secret prompts rather than requesting ordinary input.
-
-### Changed
-
-- Shell-backed API keys and headers resolve asynchronously without freezing terminal input or running during catalog construction.
-
-### Fixed
-
-- macOS process discovery now retains the complete PID list when locating executables and descendants. ([#12290](https://github.com/can1357/oh-my-pi/pull/12290) by [@iliaal](https://github.com/iliaal))
-- Reduced snapshot-recording stalls when a session retains large file histories. ([#12279](https://github.com/can1357/oh-my-pi/pull/12279) by [@iliaal](https://github.com/iliaal))
-- Cancelled background jobs remain tracked until execution finishes, so cleanup cannot report completion prematurely after retention expires. ([#12278](https://github.com/can1357/oh-my-pi/pull/12278) by [@iliaal](https://github.com/iliaal))
-- Fixed localized edits rewriting unrelated bytes in files with invalid UTF-8; these edits now fail without modifying the file. ([#12277](https://github.com/can1357/oh-my-pi/pull/12277) by [@iliaal](https://github.com/iliaal))
-- Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
-- Fixed retry timing reliability in agent sessions by ensuring sleep durations are monotonic
-- Fixed data stability issues when processing streamed lines
-- Resolved same-path move failures in indexed session storage
-- Restricted and revived subagents retain parent-loaded extension hooks without enabling extension-contributed tools.
-- Revived subagents honor the owning session's extension-discovery restrictions.
-- Secret login answers stay hidden in later prompts and cannot be recovered through undo or yank.
-- SQL session renames preserve data on same-path moves, missing sources, and failed overwrites.
-- MySQL session writes no longer use deprecated upsert value references.
-- MCP SSE requests honor one response deadline and report timeouts correctly without replaying accepted tool calls.
-- Legacy extension package-import patterns follow native prefix precedence.
-- Bundled extensions observe theme initialization and changes through the existing live `theme` export.
-- Configured discovery models retain request-time credentials after offline cache reloads and failed refreshes.
-- Runtime API-key overrides retain precedence over configured credentials.
-- Element handles returned by `tab.waitForSelector`, `tab.$`, and related selector helpers can now be passed as arguments to `tab.evaluate` inside `tab.run` instead of failing with "JSHandles can be evaluated only in the context they were created".
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@447469057c2b](https://github.com/can1357/oh-my-pi/blob/447469057c2bd6b4b6c6192c4737fa874e4b4bd6/packages/coding-agent/CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@2a4691429ee6](https://github.com/can1357/oh-my-pi/blob/2a4691429ee6cc22be24b566e2f5e0ad96b208f1/packages/coding-agent/CHANGELOG.md).

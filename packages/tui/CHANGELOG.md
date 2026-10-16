@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.11.3] - 2026-10-16
+
 ### Added
 
 - Added selection-only session and model picker actions for `/seance`, so choosing a source or model leaves the active session and model unchanged ([#15036](https://github.com/can1357/oh-my-pi/pull/15036) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
@@ -2581,21 +2583,4 @@
 - Fixed visible tail line updates when appending new content during viewport overflow conditions
 - Fixed cursor positioning instability when appending content under external cursor relocation by using absolute screen addressing instead of relative cursor movement
 
-## [13.5.2] - 2026-03-01
-
-### Breaking Changes
-
-- Removed `getMermaidImage` callback from MarkdownTheme; replaced with `getMermaidAscii` that accepts ASCII string instead of image data
-- Removed mermaid module exports (`renderMermaidToPng`, `extractMermaidBlocks`, `prerenderMermaidBlocks`, `MermaidImage` interface)
-
-### Changed
-
-- Mermaid diagrams now render as ASCII text instead of terminal graphics protocol images
-
-## [13.5.1] - 2026-03-01
-
-### Fixed
-
-- Fixed viewport shift handling to prevent stale content when mixed updates remap screen rows
-
-Older entries are archived in [packages/tui/CHANGELOG.md@9748d65121ba](https://github.com/can1357/oh-my-pi/blob/9748d65121bac9589d3b136a6d839d76ec52dc2e/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@20c388be2131](https://github.com/can1357/oh-my-pi/blob/20c388be2131e06f731a8759ec3ab6121d6ada1c/packages/tui/CHANGELOG.md).

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.11.3] - 2026-10-16
+
 ### Fixed
 
 - Fixed Markdown fence info-string parsing to keep backtick-containing backtick openers as paragraph text while accepting backticks in tilde info strings and Unicode line separators in either fence's info string ([#15928](https://github.com/can1357/oh-my-pi/pull/15928) by [@jchanghong023](https://github.com/jchanghong023)).
