@@ -137,6 +137,10 @@ interface PageGlobals {
 	File: new (parts: Uint8Array[], name: string, options: { type: string; lastModified?: number }) => unknown;
 	DataTransfer: new () => { items: { add(file: unknown): void }; files: unknown };
 	DragEvent: new (type: string, options: { bubbles: boolean; cancelable: boolean; dataTransfer: unknown }) => unknown;
+	MessageChannel: new () => {
+		port1: { onmessage: (() => void) | null; close(): void };
+		port2: { postMessage(message: null): void; close(): void };
+	};
 }
 
 /** A click aborted while its element was still refused; `refusal` names the last failed check. */
@@ -919,17 +923,43 @@ function assignInputFiles(el: unknown, files: unknown[]): string | null {
 	return null;
 }
 
-/** Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world. */
-function dropUploadFiles(el: unknown, files: unknown[], watch: string): void {
+/**
+ * Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world.
+ *
+ * A user's drop runs the page's microtasks after each listener, so a drop handler may read the files after an `await`.
+ * A script's `dispatchEvent` runs them only once the script yields, so each event is followed by a yield to a task
+ * (a message, which background tabs do not throttle as they do timers) that lets everything the event queued settle.
+ */
+async function dropUploadFiles(el: unknown, files: unknown[], watch: string): Promise<void> {
 	const element = el as PageElement;
 	const page = globalThis as unknown as PageGlobals;
 	const transfer = new page.DataTransfer();
 	for (const file of files) transfer.items.add(file);
-	// `watch`, private to this drop, opens the count of reads for {@link watchDropRead} right before `drop` and closes it
-	// right after, so only reads made while `drop` is dispatched count.
-	for (const type of ["dragenter", "dragover", watch, "drop", watch]) {
+	const settle = async (): Promise<void> => {
+		const channel = new page.MessageChannel();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		channel.port1.onmessage = () => resolve();
+		channel.port2.postMessage(null);
+		try {
+			await promise;
+		} finally {
+			channel.port1.close();
+			channel.port2.close();
+		}
+	};
+	const fire = (type: string) =>
 		element.dispatchEvent(new page.DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer }));
-	}
+	fire("dragenter");
+	await settle();
+	fire("dragover");
+	await settle();
+	// `watch`, private to this drop, opens the count of reads for {@link watchDropRead} right before `drop` and closes it
+	// once what `drop` queued has settled, so reads made in `drop` or in the microtasks it queued count, and reads
+	// deferred from dragenter or dragover do not.
+	fire(watch);
+	fire("drop");
+	await settle();
+	fire(watch);
 }
 
 /** A watch for a page reading a drop's files; see {@link watchDropRead}. */
@@ -941,10 +971,11 @@ interface DropReadWatch {
 
 /**
  * Watch for the page reading the files of the drop on an element: getting the drop's `files` or `items` while `drop` is
- * dispatched. {@link dropUploadFiles} fires the private `type` event right before `drop`, which wraps the getters and
- * opens the count, and again right after, which closes it. No page listener can run before the first, as one
- * registered for `drop` itself could; reads during dragenter and dragover, or deferred from them or from `drop` to a
- * microtask, stay uncounted. Runs in the main world, where the page's listeners get the wrapper whose reads it watches.
+ * dispatched or in what it queued before the next task. {@link dropUploadFiles} fires the private `type` event right
+ * before `drop`, which wraps the getters and opens the count, and again once `drop` has settled, which closes it. No
+ * page listener can run before the first, as one registered for `drop` itself could; reads during dragenter and
+ * dragover, or deferred from them, stay uncounted. Runs in the main world, where the page's listeners get the wrapper
+ * whose reads it watches.
  */
 function watchDropRead(el: unknown, type: string): DropReadWatch {
 	interface DropEvent {

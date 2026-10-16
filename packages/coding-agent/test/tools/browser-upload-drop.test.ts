@@ -14,15 +14,17 @@ import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
-// Drop zones that read `files`, read only `items`, are delegated from one document listener (React 16 and older,
-// jQuery `.on("drop", selector)`), or are taken by a document capture listener the page registered before the upload
-// ran, which stops the drop there; and a plain element that neither opens a chooser nor takes a drop, though it reads
-// `items` on dragenter, and again deferred to a microtask on dragover, as zones do to style themselves. Like
-// react-dropzone, the page cancels dragover and drop everywhere so a file dropped outside a zone does not navigate away.
+// Drop zones that read `files`, read only `items`, read them after awaiting in an async drop handler, are delegated
+// from one document listener (React 16 and older, jQuery `.on("drop", selector)`), or are taken by a document capture
+// listener the page registered before the upload ran, which stops the drop there; and a plain element that neither
+// opens a chooser nor takes a drop, though it reads `items` on dragenter, and again deferred to a microtask on
+// dragover, as zones do to style themselves. Like react-dropzone, the page cancels dragover and drop everywhere so a
+// file dropped outside a zone does not navigate away.
 const html = `<!doctype html>
 <style>div { display: block; margin: 8px; padding: 8px; }</style>
 <div id="drop">Drop files here</div>
 <div id="items">Drop files here too</div>
+<div id="awaited">Async drop zone</div>
 <div id="delegated"><span>Delegated drop zone</span></div>
 <div id="captured">Captured drop zone</div>
 <div id="inert">Not a drop zone</div>
@@ -43,6 +45,12 @@ drop.addEventListener("drop", event => {
 document.getElementById("items").addEventListener("drop", event => {
   event.preventDefault();
   log.push({ id: "items", names: Array.from(event.dataTransfer.items, item => item.getAsFile().name) });
+});
+document.getElementById("awaited").addEventListener("drop", async event => {
+  event.preventDefault();
+  await null;
+  await Promise.resolve();
+  log.push({ id: "awaited", names: [...event.dataTransfer.files].map(file => file.name) });
 });
 const inert = document.getElementById("inert");
 inert.addEventListener("dragenter", event => log.push({ id: "inert-dragenter", items: event.dataTransfer.items.length }));
@@ -110,7 +118,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile", () => {
 					name,
 					timeout: 15,
 					code: `const errors = [];
-for (const selector of ["#drop", "#items", "#delegated", "#captured", "#inert"]) {
+for (const selector of ["#drop", "#items", "#awaited", "#delegated", "#captured", "#inert"]) {
 	try { await tab.uploadFile(selector, "alpha.txt"); errors.push(null); }
 	catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
 }
@@ -127,18 +135,20 @@ return { errors, log: await tab.evaluate(() => window.log) };`,
 				null,
 				null,
 				null,
+				null,
 				expect.stringContaining("nothing on the page took the dropped files"),
 			]);
 			// The inert element and the document saw the drag events but did not take the drop's files; the inert
-			// element's deferred dragover read lands after the drop.
+			// element's deferred dragover read settles before the drop.
 			expect(log).toEqual([
 				{ id: "drop", names: ["alpha.txt"] },
 				{ id: "items", names: ["alpha.txt"] },
+				{ id: "awaited", names: ["alpha.txt"] },
 				{ id: "delegated", names: ["alpha.txt"] },
 				{ id: "captured", names: ["alpha.txt"] },
 				{ id: "inert-dragenter", items: 1 },
-				{ id: "inert", names: [] },
 				{ id: "inert-dragover", items: 1 },
+				{ id: "inert", names: [] },
 			]);
 		} finally {
 			await prelude.invoke({ action: "close", name, kill: true }, context).catch(() => undefined);
