@@ -13,6 +13,11 @@ provider "google-antigravity" {
 	// target stay near 41 MB. Gemini counts images only against its context.
 	image-count-budget 60
 
+	// Prompt-cache entry lifetimes in seconds; feeds the coding agent's cache warmer.
+	prompt-cache {
+		short 300
+	}
+
 	seed api="google-gemini-cli" base-url="https://daily-cloudcode-pa.googleapis.com" bundle="always" {
 		model "gemini-3-pro-image" name="Gemini 3 Pro Image" {
 			reasoning #false
