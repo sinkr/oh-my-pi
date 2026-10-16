@@ -135,16 +135,20 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile", () => {
 		}
 	}, 60_000);
 
-	test.skipIf(!MODE_BITS_ENFORCED)("cancels the chooser when delivering the files fails", async () => {
-		const { attempt, close } = await openFixture();
-		try {
-			const failed = await attempt(`await tab.uploadFile("#trigger", "locked.txt");`);
-			expect(failed.error).toBeDefined();
-			expect(failed.log).toEqual([{ id: "trigger-input", event: "cancel", names: [] }]);
-		} finally {
-			await close();
-		}
-	}, 60_000);
+	test.skipIf(!MODE_BITS_ENFORCED)(
+		"cancels the chooser when delivering the files fails",
+		async () => {
+			const { attempt, close } = await openFixture();
+			try {
+				const failed = await attempt(`await tab.uploadFile("#trigger", "locked.txt");`);
+				expect(failed.error).toBeDefined();
+				expect(failed.log).toEqual([{ id: "trigger-input", event: "cancel", names: [] }]);
+			} finally {
+				await close();
+			}
+		},
+		60_000,
+	);
 
 	test("rejects a File System Access picker without killing the tab", async () => {
 		const { attempt, close } = await openFixture();
