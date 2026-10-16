@@ -9,6 +9,7 @@ import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } fro
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { $which, ptree } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
+import type { Element } from "@oh-my-pi/pi-utils/dom";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
@@ -466,6 +467,11 @@ function cleanFeedText(text: string): string {
 		.trim();
 }
 
+/** Cleaned text of the first `selector` match under `parent`; empty when absent. */
+function feedField(parent: Element, selector: string): string {
+	return cleanFeedText(parent.querySelector(selector)?.textContent ?? "");
+}
+
 /**
  * Parse RSS/Atom feed to markdown
  */
@@ -477,15 +483,15 @@ async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<stri
 		// Try RSS
 		const channel = doc.querySelector("channel");
 		if (channel) {
-			const title = cleanFeedText(channel.querySelector("title")?.text || "RSS Feed");
+			const title = feedField(channel, "title") || "RSS Feed";
 			const items = channel.querySelectorAll("item").slice(0, maxItems);
 
 			let md = `# ${title}\n\n`;
 			for (const item of items) {
-				const itemTitle = cleanFeedText(item.querySelector("title")?.text || "Untitled");
-				const link = cleanFeedText(item.querySelector("link")?.text || "");
-				const pubDate = cleanFeedText(item.querySelector("pubDate")?.text || "");
-				const desc = cleanFeedText(item.querySelector("description")?.text || "");
+				const itemTitle = feedField(item, "title") || "Untitled";
+				const link = feedField(item, "link");
+				const pubDate = feedField(item, "pubDate");
+				const desc = feedField(item, "description");
 
 				md += `## ${itemTitle}\n`;
 				if (pubDate) md += `*${pubDate}*\n\n`;
@@ -499,17 +505,15 @@ async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<stri
 		// Try Atom
 		const feed = doc.querySelector("feed");
 		if (feed) {
-			const title = cleanFeedText(feed.querySelector("title")?.text || "Atom Feed");
+			const title = feedField(feed, "title") || "Atom Feed";
 			const entries = feed.querySelectorAll("entry").slice(0, maxItems);
 
 			let md = `# ${title}\n\n`;
 			for (const entry of entries) {
-				const entryTitle = cleanFeedText(entry.querySelector("title")?.text || "Untitled");
+				const entryTitle = feedField(entry, "title") || "Untitled";
 				const link = entry.querySelector("link")?.getAttribute("href") || "";
-				const updated = cleanFeedText(entry.querySelector("updated")?.text || "");
-				const summary = cleanFeedText(
-					entry.querySelector("summary")?.text || entry.querySelector("content")?.text || "",
-				);
+				const updated = feedField(entry, "updated");
+				const summary = feedField(entry, "summary") || feedField(entry, "content");
 
 				md += `## ${entryTitle}\n`;
 				if (updated) md += `*${updated}*\n\n`;
