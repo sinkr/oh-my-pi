@@ -56,6 +56,53 @@ describe("mcp oauth discovery", () => {
 		},
 	);
 
+	it.each([
+		["/oauth/metadata", "standard"],
+		["/oauth/metadata", "oauth"],
+		["/oauth/metadata", "authorization"],
+		["/oauth/metadata", "auth"],
+		["/.mcp/auth", "standard"],
+		["/.mcp/auth", "oauth"],
+		["/.mcp/auth", "authorization"],
+		["/.mcp/auth", "auth"],
+	] as const)("keeps resource scopes but not issuer catalogues at %s (%s)", async (metadataPath, format) => {
+		const authorizationUrl = "https://issuer.example.com/authorize";
+		const tokenUrl = "https://issuer.example.com/token";
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			if (String(input) !== `https://legacy.example.com${metadataPath}`) {
+				return new Response("not found", { status: 404 });
+			}
+			return Response.json(
+				format === "standard"
+					? {
+							authorization_endpoint: authorizationUrl,
+							token_endpoint: tokenUrl,
+							scopes_supported: ["mcp.read"],
+						}
+					: {
+							[format]: {
+								authorization_url: authorizationUrl,
+								token_url: tokenUrl,
+								scopes_supported: ["mcp.read"],
+							},
+						},
+			);
+		});
+
+		const resource = await discoverOAuthEndpoints("https://legacy.example.com/mcp", undefined, undefined, {
+			fetch: fetchImpl,
+		});
+		expect(resource?.scopes).toBe("mcp.read");
+
+		const issuer = await discoverOAuthEndpoints(
+			"https://other-resource.example.com/mcp",
+			"https://legacy.example.com",
+			undefined,
+			{ fetch: fetchImpl },
+		);
+		expect(issuer).toMatchObject({ authorizationUrl, tokenUrl, scopes: undefined });
+	});
+
 	it.each(["standard", "nested"])("does not request the %s authorization server's scope catalogue", async format => {
 		const calls: string[] = [];
 		const fetchImpl = mockFetch((input: FetchInput) => {

@@ -49,8 +49,8 @@ export interface AuthDetectionResult {
 	 * OAuth scopes advertised by the challenge (RFC 6750 `scope=` on
 	 * `WWW-Authenticate`) or by protected-resource metadata. Passed through
 	 * `discoverOAuthEndpoints` as `protectedScopes` so the eventual
-	 * authorization request carries them even when the auth-server metadata
-	 * document itself omits `scopes_supported`.
+	 * authorization request retains the resource/challenge requirement rather
+	 * than adopting the authorization server's supported-scope catalogue.
 	 */
 	scopes?: string;
 	message?: string;
@@ -373,13 +373,15 @@ export function rfc9728ProtectedResourceMetadataUrl(serverUrl: string | undefine
 }
 
 /**
- * Read space-separated OAuth scopes off a metadata document. Accepts either
- * an array (RFC 8414 `scopes_supported`) or a space-separated string
- * (`scopes` / `scope`), matching what MCP gateways emit under
- * `/.well-known/oauth-*`.
+ * Read resource scopes from `scopes_supported` or explicit legacy `scopes` / `scope`.
+ * Disable supported-scope arrays for authorization-server metadata: those arrays
+ * describe its catalogue, not the scopes required by this resource.
  */
-function readMetadataScopes(metadata: Record<string, unknown>, includeSupportedScopes = true): string | undefined {
-	if (includeSupportedScopes && Array.isArray(metadata.scopes_supported)) {
+function readMetadataScopes(
+	metadata: Record<string, unknown>,
+	options?: { includeSupportedScopes: boolean },
+): string | undefined {
+	if (options?.includeSupportedScopes !== false && Array.isArray(metadata.scopes_supported)) {
 		const joined = metadata.scopes_supported.filter((scope): scope is string => typeof scope === "string").join(" ");
 		if (joined) return joined;
 	}
@@ -492,8 +494,11 @@ export async function discoverOAuthEndpoints(
 	addDiscoveryBase(authServerUrl, true);
 	addDiscoveryBase(serverUrl, false);
 
-	const findEndpoints = (metadata: Record<string, unknown>, isProtectedResource: boolean): OAuthEndpoints | null => {
-		const resourceScopes = isProtectedResource ? readMetadataScopes(metadata) : undefined;
+	const findEndpoints = (
+		metadata: Record<string, unknown>,
+		scopeOptions: { includeSupportedScopes: boolean },
+	): OAuthEndpoints | null => {
+		const metadataScopes = readMetadataScopes(metadata, scopeOptions);
 		if (metadata.authorization_endpoint && metadata.token_endpoint) {
 			const resource = typeof metadata.resource === "string" ? metadata.resource : protectedResource;
 
@@ -513,7 +518,7 @@ export async function discoverOAuthEndpoints(
 									? metadata.public_client_id
 									: undefined,
 				// An authorization server's supported scopes are a catalogue, not a grant request.
-				scopes: protectedScopes ?? resourceScopes ?? readMetadataScopes(metadata, false),
+				scopes: protectedScopes ?? metadataScopes,
 				resource,
 			};
 		}
@@ -538,7 +543,7 @@ export async function discoverOAuthEndpoints(
 									: typeof oauthData.public_client_id === "string"
 										? oauthData.public_client_id
 										: undefined,
-					scopes: protectedScopes ?? resourceScopes ?? readMetadataScopes(oauthData, isProtectedResource),
+					scopes: protectedScopes ?? metadataScopes ?? readMetadataScopes(oauthData, scopeOptions),
 					resource,
 				};
 			}
@@ -573,8 +578,11 @@ export async function discoverOAuthEndpoints(
 							(path === "/.well-known/oauth-authorization-server" ||
 								path === "/.well-known/openid-configuration");
 						const issuerOk = requireIssuerMatch ? issuerMatchesBase(metadata.issuer, base.url) : true;
+						const isResourceMetadata =
+							path === "/.well-known/oauth-protected-resource" ||
+							(!base.issuerCandidate && (path === "/oauth/metadata" || path === "/.mcp/auth"));
 						const endpoints = issuerOk
-							? findEndpoints(metadata, path === "/.well-known/oauth-protected-resource")
+							? findEndpoints(metadata, { includeSupportedScopes: isResourceMetadata })
 							: null;
 						if (endpoints) return endpoints;
 
