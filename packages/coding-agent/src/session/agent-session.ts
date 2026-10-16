@@ -1101,6 +1101,7 @@ export class AgentSession implements SettingsScope {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	#inFlightEpoch = 0;
 	#abortInProgress = false;
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
 	 *  yet dispatched a turn, queued, or bailed. Preprocessing (manual-compaction wait, slash
@@ -1199,14 +1200,17 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	#beginInFlight(): void {
+	#beginInFlight(): number {
 		this.#promptInFlightCount++;
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
 		}
+		return this.#inFlightEpoch;
 	}
 
-	#endInFlight(onSettled?: () => void | Promise<void>): void {
+	#endInFlight(epoch: number, onSettled?: () => void | Promise<void>): void {
+		// Abort has already released this bracket; its late finalizer cannot settle a newer turn.
+		if (epoch !== this.#inFlightEpoch) return;
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
@@ -1383,7 +1387,7 @@ export class AgentSession implements SettingsScope {
 		// delaying the observation's finish and mis-attributing the successor's RPC
 		// progress to this now-dead wake monitor.
 		const generation = this.#promptGeneration;
-		this.#beginInFlight();
+		const inFlightEpoch = this.#beginInFlight();
 		let turnError: unknown;
 		// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
 		// in flight when the wake lands. Starting the turn on the stale prompt would
@@ -1445,7 +1449,7 @@ export class AgentSession implements SettingsScope {
 					this.#queuedMessageDrainBlocked ||= parkedQueueDrainBlocked;
 				}
 				// Release the in-flight bracket BEFORE settling owned async work.
-				this.#endInFlight();
+				this.#endInFlight(inFlightEpoch);
 				await this.#finishTurnObservation(observation, turnError);
 			});
 	}
@@ -1554,6 +1558,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#resetInFlight(): void {
+		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
@@ -1987,11 +1992,11 @@ export class AgentSession implements SettingsScope {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-				this.#beginInFlight();
+				const inFlightEpoch = this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
 				} finally {
-					this.#endInFlight();
+					this.#endInFlight(inFlightEpoch);
 				}
 			},
 			scheduleIdleFlush: run => {
@@ -4838,7 +4843,7 @@ export class AgentSession implements SettingsScope {
 					}
 				}
 
-				this.#beginInFlight();
+				const inFlightEpoch = this.#beginInFlight();
 				const coalescedSources = new Set([options.source]);
 				const promise = this.#runAgentContinue(signal, request, coalescedSources);
 				const attempt: ActiveAgentContinue = {
@@ -4860,7 +4865,7 @@ export class AgentSession implements SettingsScope {
 						this.#activeAgentContinue = undefined;
 					}
 					this.#usagePreflightReadyForNextModelCall = false;
-					this.#endInFlight();
+					this.#endInFlight(inFlightEpoch);
 				}
 			},
 			{
@@ -7939,7 +7944,7 @@ export class AgentSession implements SettingsScope {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
-		this.#beginInFlight();
+		const inFlightEpoch = this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
@@ -8157,7 +8162,7 @@ export class AgentSession implements SettingsScope {
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
-			this.#endInFlight();
+			this.#endInFlight(inFlightEpoch);
 			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
 		}
 	}
@@ -8718,7 +8723,7 @@ export class AgentSession implements SettingsScope {
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
-		this.#beginInFlight();
+		const inFlightEpoch = this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
@@ -8732,7 +8737,7 @@ export class AgentSession implements SettingsScope {
 		} finally {
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
-			this.#endInFlight();
+			this.#endInFlight(inFlightEpoch);
 		}
 	}
 
