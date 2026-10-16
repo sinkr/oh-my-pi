@@ -2723,6 +2723,23 @@ describe("display hold follows the agent turn", () => {
 		expect(native.displayHolds).toEqual(["turn", "release", "turn"]);
 	});
 
+	it("carries a turn resumed while a cold run starts into that run's hold", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		const created = Promise.withResolvers<void>();
+		new ComputerWorkerCore(transport, async () => {
+			await created.promise;
+			return native;
+		});
+		transport.inbound({ type: "run", id: "cold", code: "return 1;", timeoutMs: 2_000, session: snapshot(false, 1) });
+		// A dialog opens and is answered while the native session is still being created.
+		transport.inbound({ type: "release-display", turn: 1 });
+		transport.inbound({ type: "resume-display", from: 1, turn: 2 });
+		created.resolve();
+		await transport.waitFor(message => message.type === "result" && message.id === "cold");
+		expect(native.displayHolds).toEqual(["turn"]);
+	});
+
 	it("numbers runs by the owner's turn and releases the owner's sessions once when it ends", async () => {
 		const owner = `computer-turn-${crypto.randomUUID()}`;
 		const snapshots: ComputerSessionSnapshot[] = [];

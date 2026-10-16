@@ -132,7 +132,7 @@ interface ActiveRun {
 	ac: AbortController;
 	signal: AbortSignal;
 	pendingTools: Map<string, PendingTool>;
-	/** The agent turn this run holds the display for, if any. */
+	/** The agent turn the run belongs to, if any; a resume while it starts carries it into the turn that went on. */
 	displayTurn?: number;
 }
 
@@ -872,7 +872,13 @@ export class ComputerWorkerCore {
 		const ac = new AbortController();
 		const runAc = new AbortController();
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
-		const active: ActiveRun = { id: message.id, ac, signal, pendingTools: new Map() };
+		const active: ActiveRun = {
+			id: message.id,
+			ac,
+			signal,
+			pendingTools: new Map(),
+			displayTurn: message.session.displayTurn,
+		};
 		this.#active = active;
 		// Cancel synchronously while this run owns the native session, including
 		// fire-and-forget operations still pending when the script returns.
@@ -901,11 +907,8 @@ export class ComputerWorkerCore {
 			throwIfAborted(signal);
 			const session = await this.#ensureSession(message.session);
 			throwIfAborted(signal);
-			const { displayTurn } = message.session;
-			if (displayTurn !== undefined && displayTurn > this.#releasedTurn) {
-				active.displayTurn = displayTurn;
-				session.holdDisplayUntilReleased();
-			}
+			const { displayTurn } = active;
+			if (displayTurn !== undefined && displayTurn > this.#releasedTurn) session.holdDisplayUntilReleased();
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);
