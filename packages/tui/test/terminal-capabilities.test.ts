@@ -162,7 +162,7 @@ describe("detectTerminalId", () => {
 describe("tmux client terminal resolution", () => {
 	const CLIENT_QUERY = "display-message -p #{client_termtype}\t#{client_termname}";
 
-	async function resolveInsideFakeTmux(clientReport: string): Promise<string> {
+	async function resolveInsideFakeTmux(clientReport: string, replyDelayMs?: number): Promise<string> {
 		return withFakeTmux({ [CLIENT_QUERY]: clientReport }, async binDir => {
 			const proc = Bun.spawn({
 				cmd: [
@@ -195,11 +195,20 @@ console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyPro
 			expect(stderr).toBe("");
 			expect(exitCode).toBe(0);
 			return stdout;
-		});
+		}, { replyDelayMs });
 	}
 
 	it.skipIf(process.platform === "win32")("uses the attached client's terminal profile", async () => {
 		const stdout = await resolveInsideFakeTmux("WezTerm 20260905-175422-0f4b5596\ttmux-256color");
+		expect(JSON.parse(stdout)).toMatchObject({ id: "wezterm", notifyProtocol: "\u001b]9;" });
+	});
+
+	it.skipIf(process.platform === "win32")("keeps the client profile when the probe is slower than 500ms", async () => {
+		// A loaded machine can push one `tmux display-message` round trip past
+		// 500ms (fork/exec of the tmux client alone can exceed it on a saturated
+		// box), and a lost race is indistinguishable from "not tmux": the session
+		// then silently falls back to the true-color profile for its whole life.
+		const stdout = await resolveInsideFakeTmux("WezTerm 20260905-175422-0f4b5596\ttmux-256color", 600);
 		expect(JSON.parse(stdout)).toMatchObject({ id: "wezterm", notifyProtocol: "\u001b]9;" });
 	});
 
