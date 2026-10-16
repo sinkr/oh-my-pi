@@ -111,12 +111,14 @@ function isNumberedRead(header: string, rest: string, rowPrefixes: boolean | und
 const COUNT_BRACKET = "\\[(?:0|(?:[»·]\\d+)+)\\]";
 /**
  * A row's leading indentation, after an optional line-number prefix; or, on an
- * unindented row, text that itself opens with a count bracket, which gets the
- * `[0]` marker so only the first bracket after the prefix reads as indentation.
- * Anchored on `\n` only: a `m`-flag `^` would also match after `\r` and U+2028
- * inside a row.
+ * unindented row, text that itself opens with a count bracket, bare or behind a
+ * prefix-shaped run (`200|[·4]`, which reads like an encoded numbered row). That
+ * text gets the `[0]` marker, so only the first bracket after the prefix reads
+ * as indentation. Anchored on `\n` only: a `m`-flag `^` would also match after
+ * `\r` and U+2028 inside a row.
  */
-const rowIndent = (prefix: string) => new RegExp(`(^|\\n)(${prefix})?(?:([ \\t]+)|(?=${COUNT_BRACKET}))`, "g");
+const rowIndent = (prefix: string) =>
+	new RegExp(`(^|\\n)(${prefix})?(?:([ \\t]+)|(?=(?:${READ_ROW_PREFIX})?${COUNT_BRACKET}))`, "g");
 /** Numbered rows: `N:`, `N|`, or a collapsed block's `N-M:`. */
 const READ_ROW_INDENT = rowIndent(READ_ROW_PREFIX);
 /** Unnumbered reads (`:raw`, line numbers off): a leading `12:` is file content, not a prefix. */

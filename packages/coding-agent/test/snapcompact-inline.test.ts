@@ -266,9 +266,11 @@ describe("SnapcompactInlineTransformer", () => {
 	it("treats a leading `N:` as content, not a line number, in a read without line numbers", async () => {
 		// A `:raw` YAML read opening with status keys: `200:`/`404:` look like row
 		// prefixes but do not count up, so the spaces after them are content;
-		// indented rows still get a bracket at line start.
+		// indented rows still get a bracket at line start, and a prefix-shaped row
+		// followed by a count bracket is marked `[0]` so it cannot read as encoded.
 		const rows = ["200:  OK", "404:  Not found", "responses:"];
 		while (rows.join("\n").length < DEFAULT_CAPACITY * 2) rows.push(`  ${denseText(2)}`);
+		rows.push("500|[·4]literal");
 		const context: Context = {
 			systemPrompt: ["system"],
 			messages: [userMessage("go"), toolResult("read-raw", rows.join("\n"), "read")],
@@ -280,6 +282,7 @@ describe("SnapcompactInlineTransformer", () => {
 			).transform(context, makeModel({ id: "claude-opus-5-5" }));
 			const rendered = spy.mock.calls[0][0];
 			expect(rendered.startsWith("200:  OK\n404:  Not found\nresponses:\n[·2]w")).toBe(true);
+			expect(rendered.endsWith("\n[0]500|[·4]literal")).toBe(true);
 		} finally {
 			spy.mockRestore();
 		}
