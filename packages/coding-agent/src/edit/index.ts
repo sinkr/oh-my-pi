@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type {
@@ -300,7 +300,7 @@ function capPerFileSnapshots(entries: EditToolPerFileResult[]): EditToolPerFileR
 
 async function mkdirAllowingFallback(directory: string): Promise<void> {
 	try {
-		await mkdir(directory, { recursive: true });
+		await fs.mkdir(directory, { recursive: true });
 	} catch (error) {
 		if (!hasFileWriteFallback() || !isPermissionDeniedError(error)) throw error;
 	}
@@ -673,8 +673,10 @@ export class EditTool implements AgentTool<TInput> {
 			if (!request.moveTo) {
 				throw new ToolError("Native edit move request omitted destination", { path: request.path });
 			}
+			const mode = process.platform === "win32" ? undefined : (await fs.stat(request.path)).mode & 0o777;
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
 			await writeFileWithFallback(request.moveTo, request.content);
+			if (mode !== undefined) await fs.chmod(request.moveTo, mode);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
