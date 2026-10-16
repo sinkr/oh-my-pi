@@ -249,8 +249,9 @@ where
 	tag:          &'static str,
 	cancel_token: CancelToken,
 	work:         Option<MappedWork<T, E>>,
-	/// Domain error stashed by `compute` for `reject` to convert with `Env`.
-	error:        Option<E>,
+	/// Domain error stashed by `compute` for `reject` to convert with `Env`;
+	/// it can own large captured output, so it settles like a result.
+	error:        Option<Settled<E>>,
 	reject_hook:  fn(Env, E) -> Error,
 	cancel_hook:  fn(Env, AbortReason) -> Error,
 }
@@ -279,7 +280,7 @@ where
 			Ok(Err(domain)) => {
 				// Stash the typed error; the placeholder reason is replaced in
 				// `reject`, which has the `Env` needed to build the rich error.
-				self.error = Some(domain);
+				self.error = Some(Settled::new(domain));
 				Err(Error::from_reason("BlockingMapped: pending domain error"))
 			},
 			Err(error) => Err(error),
@@ -288,7 +289,7 @@ where
 
 	fn reject(&mut self, env: Env, err: Error) -> Result<Self::JsValue> {
 		match self.error.take() {
-			Some(domain) => Err((self.reject_hook)(env, domain)),
+			Some(domain) => Err((self.reject_hook)(env, domain.into_inner())),
 			None => Err(err),
 		}
 	}

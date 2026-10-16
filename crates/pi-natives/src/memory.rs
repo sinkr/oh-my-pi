@@ -19,6 +19,12 @@
 //! trimming for its duration; a trim overlapping them only costs brief arena
 //! lock contention. Synchronous exports on the JS thread are not counted
 //! either; the next trim covers their arena too.
+//!
+//! Memory can also be freed after its job's guard dropped, possibly after the
+//! trim that guard scheduled: a result converted or dropped on the JS thread,
+//! an external `Buffer` collected by the JS GC, or edit session buffers
+//! released on close. Each of those calls [`released`], which counts as
+//! finished work, so the freed pages are trimmed in turn.
 
 /// Marks one blocking native job as running for the idle trimmer.
 #[must_use = "work counts as running only while the guard is alive"]
@@ -40,14 +46,20 @@ impl Drop for NativeWork {
 	}
 }
 
-/// Owns a job result until it leaves Rust, then counts that as finished work.
+/// Report memory freed outside a running job, so the trimmer returns its pages
+/// after the next quiet period.
+#[inline]
+pub fn released() {
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	allocator::settled();
+}
+
+/// Owns a job result until it leaves Rust, then reports it [`released`].
 ///
-/// A result outlives its job's [`NativeWork`] guard: it waits for the JS
-/// thread, which may be busy past the trim that guard scheduled. Whichever way
-/// the result goes — converted for JavaScript, unwrapped for conversion, or
-/// dropped on an abort or error path — the trimmer then schedules another
-/// trim, so the pages it frees are returned in turn. `Settled<()>` marks a
-/// result handed off elsewhere, such as through a threadsafe function call.
+/// Whichever way the result goes — converted for JavaScript, unwrapped for a
+/// conversion that follows immediately, or dropped on an abort or error path —
+/// the trimmer schedules another trim. `Settled<()>` marks a result handed off
+/// elsewhere, such as through a threadsafe function call.
 pub struct Settled<T>(Option<T>);
 
 impl<T> Settled<T> {
@@ -65,8 +77,7 @@ impl<T> Settled<T> {
 impl<T> Drop for Settled<T> {
 	#[inline]
 	fn drop(&mut self) {
-		#[cfg(all(target_os = "linux", target_env = "gnu"))]
-		allocator::settled();
+		released();
 	}
 }
 
@@ -194,6 +205,7 @@ mod allocator {
 				.name("pi-heap-trim".into())
 				.stack_size(64 * 1024)
 				.spawn(|| TRIMMER.run(QUIET_PERIOD, release_unused_pages));
+			napi::bindgen_prelude::set_external_release_hook(super::released);
 		});
 		TRIMMER.begin();
 	}
