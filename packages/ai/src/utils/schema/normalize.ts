@@ -10,6 +10,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import { dereferenceJsonSchema } from "./dereference";
 import { upgradeJsonSchemaTo202012 } from "./draft";
+import { parseLocalRefPointer } from "./local-ref";
 import { areJsonValuesEqual, mergeCompatibleEnumSchemas, mergePropertySchemas } from "./equality";
 import {
 	ALL_CCA_TYPE_SPECIFIC_KEYS,
@@ -2498,20 +2499,11 @@ export function tryEnforceStrictSchema(schema: Record<string, unknown>): {
  * must dereference to a dictionary, as in the OpenAI SDK's `resolve_ref` helper.
  */
 function resolveStrictRef(root: Record<string, unknown>, ref: string): Record<string, unknown> | undefined {
-	if (!ref.startsWith("#")) return undefined;
-	let pointer: string;
-	try {
-		pointer = decodeURIComponent(ref.slice(1));
-	} catch {
-		return undefined;
-	}
-	if (!pointer.startsWith("/")) return undefined;
-	const segments = pointer.slice(1).split("/");
+	const pointer = parseLocalRefPointer(ref);
+	if (pointer === undefined || pointer.length === 0) return undefined;
 	let cursor: unknown = root;
-	for (const raw of segments) {
+	for (const segment of pointer) {
 		if (!isJsonObject(cursor)) return undefined;
-		// JSON Pointer unescape: ~1 → "/", ~0 → "~" (must run in that order).
-		const segment = raw.replace(/~1/g, "/").replace(/~0/g, "~");
 		cursor = cursor[segment];
 	}
 	return isJsonObject(cursor) ? cursor : undefined;

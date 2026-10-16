@@ -54,6 +54,42 @@ describe("URI-fragment definition references", () => {
 		}
 	});
 
+	it("rewrites fully encoded draft-07 definition fragments during the upgrade", () => {
+		const schema = {
+			$schema: "http://json-schema.org/draft-07/schema#",
+			type: "object",
+			definitions: { value: { type: "string" } },
+			properties: { value: { $ref: "#%2Fdefinitions%2Fvalue" } },
+			required: ["value"],
+		};
+		const strict = tryEnforceStrictSchema(schema);
+		expect(strict.strict).toBe(true);
+		// The map rename must come with the encoded ref being rewritten to the
+		// renamed `$defs` target; a bare `$ref` stays as-is in strict output.
+		expect(strict.schema.$defs).toEqual({ value: { type: "string" } });
+		expect(strict.schema.properties).toEqual({ value: { $ref: "#/$defs/value" } });
+	});
+
+	it("normalizes enum whitespace through percent-encoded refs in tool arguments", () => {
+		const tool: Tool = {
+			name: "demo",
+			description: "",
+			parameters: {
+				type: "object",
+				$defs: { "a b": { type: "string", enum: ["x y"] } },
+				properties: { v: { $ref: "#/$defs/a%20b" } },
+				required: ["v"],
+			},
+		};
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-encoded-ref",
+			name: "demo",
+			arguments: { v: "x y\n" },
+		}) as { v: string };
+		expect(result.v).toBe("x y");
+	});
+
 	it("preserves malformed and external refs for sanitizers but rejects unresolved values", () => {
 		for (const ref of [
 			"#/$defs/%",
