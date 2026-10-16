@@ -3928,6 +3928,40 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(restored?.headers).toEqual(bundledBase.headers);
 	});
 
+	test("repeated Copilot cache hydration keeps the cached catalog with two signed-in accounts", async () => {
+		// Startup hydrates credential-scoped caches twice (CLI, then session
+		// creation). Discovery keys the Copilot cache on the account it peeks; a
+		// rotating pick read account A's row first, then account B's empty
+		// namespace, whose bundled fallback replaced A's cached `-1m` variants.
+		const bundledBase = getBundledModel("github-copilot", "gpt-5.6-sol");
+		if (!bundledBase?.headers) {
+			throw new Error("Expected bundled Copilot base to carry transport headers");
+		}
+		const cachedVariant = buildModel({
+			...(bundledBase as ModelSpec<"openai-responses">),
+			id: "gpt-5.6-sol-1m",
+			name: "GPT-5.6 Sol (1M)",
+			requestModelId: "gpt-5.6-sol",
+			contextWindow: 1_050_000,
+		});
+		const expires = Date.now() + 3_600_000;
+		await authStorage.credentials.set("github-copilot", [
+			{ type: "oauth", access: "gho_account_a", refresh: "refresh-a", expires },
+			{ type: "oauth", access: "gho_account_b", refresh: "refresh-b", expires },
+		]);
+		// Discovery's Copilot key is the structured peek of account A.
+		const accountACacheId = resolveModelCacheProviderId("github-copilot", {
+			apiKey: JSON.stringify({ token: "gho_account_a" }),
+		});
+		writeModelCache(accountACacheId, Date.now(), [cachedVariant], true, "", cacheDbPath, [bundledBase]);
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		await registry.hydrateCredentialScopedModelCaches();
+		await registry.hydrateCredentialScopedModelCaches();
+
+		expect(registry.find("github-copilot", "gpt-5.6-sol-1m")?.headers).toEqual(bundledBase.headers);
+	});
+
 	test("startup drops a current Copilot alias whose headers differ from its bundled base", () => {
 		const bundledBase = getBundledModel("github-copilot", "gpt-5.6-sol");
 		if (!bundledBase?.headers) {

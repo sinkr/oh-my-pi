@@ -939,7 +939,8 @@ export interface KeysApi {
 	 * Peek at API key for a provider without refreshing OAuth tokens.
 	 * Used for model discovery where we only need to know if credentials exist
 	 * and get a best-effort token. For GitHub Copilot we preserve enterprise
-	 * routing metadata so discovery can hit the correct host.
+	 * routing metadata so discovery can hit the correct host. Repeated peeks
+	 * return the same stored credential; they never rotate accounts.
 	 */
 	peek(provider: string): Promise<string | undefined>;
 	/** Resolve the first active auth source by precedence without refreshing credentials. */

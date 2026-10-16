@@ -250,7 +250,9 @@ export class KeyCascade implements KeysApi {
 	 * Used for model discovery where we only need to know if credentials exist
 	 * and get a best-effort token. GitHub Copilot's peek must preserve
 	 * enterprise routing metadata because discovery needs a structured
-	 * credential to reach the correct host.
+	 * credential to reach the correct host. With several stored accounts every
+	 * peek returns the same one, so credential-scoped discovery caches stay on
+	 * one namespace.
 	 */
 	async peek(provider: string): Promise<string | undefined> {
 		const runtimeKey = this.#deps.overrides.runtimeKey(provider);
@@ -267,19 +269,23 @@ export class KeyCascade implements KeysApi {
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
-		const oauthSelection = this.#deps.selector.selectByType(provider, "oauth");
+		// Peek never refreshes, so only an unexpired OAuth access token is usable.
+		const now = Date.now();
+		const oauthSelection = this.#deps.selector.selectByType(
+			provider,
+			"oauth",
+			undefined,
+			credential => credential.type === "oauth" && Number.isFinite(credential.expires) && credential.expires > now,
+		);
 		if (oauthSelection) {
-			const expiresAt = oauthSelection.credential.expires;
-			if (Number.isFinite(expiresAt) && expiresAt > Date.now()) {
-				if (provider === "github-copilot") {
-					return JSON.stringify({
-						token: oauthSelection.credential.access,
-						enterpriseUrl: oauthSelection.credential.enterpriseUrl,
-						apiEndpoint: oauthSelection.credential.apiEndpoint,
-					});
-				}
-				return oauthSelection.credential.access;
+			if (provider === "github-copilot") {
+				return JSON.stringify({
+					token: oauthSelection.credential.access,
+					enterpriseUrl: oauthSelection.credential.enterpriseUrl,
+					apiEndpoint: oauthSelection.credential.apiEndpoint,
+				});
 			}
+			return oauthSelection.credential.access;
 		}
 
 		const loginApiKeySelection = this.#deps.selector.selectByType(
