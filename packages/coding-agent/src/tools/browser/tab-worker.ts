@@ -185,7 +185,6 @@ import {
 	setElementChecked,
 	type PreparedUpload,
 	prepareElementUpload,
-	prepareInputUpload,
 	type ScrollOptions,
 	wheel,
 } from "./interactions";
@@ -624,9 +623,15 @@ async function runGuardedHandleAction<T>(
 	}
 }
 
-/** How an actionable handle uploads files: `prepare` runs under the action deadline, delivery under `deliverGuard`. */
+/**
+ * How an actionable handle uploads files: the route check and `prepare` each run under their own action deadline,
+ * delivery under `deliverGuard`.
+ */
 export interface HandleUploads {
-	prepare(filePaths: string[], signal: AbortSignal): Promise<PreparedUpload>;
+	/** How the browser takes files; see {@link UploadStaging.route}. */
+	route(signal: AbortSignal): Promise<UploadRoute>;
+	/** Find what takes the files through the handle: its file input, the chooser its click opens, or a drop zone. */
+	prepare(filePaths: string[], label: string, route: UploadRoute, signal: AbortSignal): Promise<PreparedUpload>;
 	/** A guard with a deadline long enough to stream a large file. */
 	deliverGuard: HandleOpGuard;
 }
@@ -640,8 +645,17 @@ async function uploadThroughHandle(
 	invalidate?: () => Promise<void>,
 ): Promise<void> {
 	const label = "handle.uploadFile()";
+	// Its own deadline, as for `tab.uploadFile`: the first upload's check must not eat into the action's.
+	const route = await guard(`${label} checking how the browser takes files`, signal => uploads.route(signal));
 	const prepared = await guard(label, signal =>
-		runGuardedHandleAction(handle, state, label, signal, () => uploads.prepare(filePaths, signal), invalidate),
+		runGuardedHandleAction(
+			handle,
+			state,
+			label,
+			signal,
+			() => uploads.prepare(filePaths, label, route, signal),
+			invalidate,
+		),
 	);
 	try {
 		await uploads.deliverGuard(`${label} sending ${formatBytes(prepared.bytes)}`, signal => prepared.deliver(signal));
@@ -2235,16 +2249,17 @@ export class WorkerCore {
 					await this.#stopLoading();
 				},
 				{
-					prepare: async (filePaths, sig) => {
-						const uploads = this.#requireUploads();
-						return prepareInputUpload(
+					route: sig => this.#requireUploads().route(page, sig),
+					prepare: (filePaths, label, route, sig) =>
+						prepareElementUpload(
+							page,
 							handle,
 							filePaths.map(filePath => resolveToCwd(filePath, session.cwd)),
-							await uploads.route(page, sig),
-							uploads,
+							label,
+							route,
+							this.#requireUploads(),
 							sig,
-						);
-					},
+						),
 					deliverGuard: (label, fn) => op(label, budgetBound, fn),
 				},
 			);
