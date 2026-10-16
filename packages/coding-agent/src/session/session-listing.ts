@@ -662,11 +662,7 @@ export async function listAllSessions(
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
 	try {
-		const files = await dedupeRealPaths(
-			await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan({ cwd: sessionsRoot, followSymlinks: true }), name =>
-				path.join(sessionsRoot, name),
-			),
-		);
+		const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, "*.jsonl"));
 		return await collectSessionsFromFiles(files, storage, true);
 	} catch {
 		return [];
@@ -731,13 +727,13 @@ function sessionIdFromSessionPath(file: string): string | undefined {
  * The files with each physical file kept once, in first-seen order.
  *
  * A scan that follows symlinks reaches one transcript by more than one name
- * when a project bucket is itself a symlink to another (`-alias-proj` ->
- * `-real-proj`, a layout people build after renaming a project, #5385): the
- * file is listed under both buckets, so it would be counted twice and an
- * id-prefix lookup would report an ambiguous match. `realpath` resolves the
- * buckets away and leaves the transcript, while a symlinked transcript keeps
- * its own entry. A name that cannot be resolved (removed between the scan and
- * this call) is kept as it is: it was listed a moment ago.
+ * when a symlink and the file it points at both sit inside the sessions root,
+ * under one bucket or two: each name is a match, so the session would be
+ * counted twice and an id-prefix lookup would report an ambiguous match.
+ * `realpath` collapses the aliases onto the transcript, while a second,
+ * genuinely distinct copy keeps its own entry. A name that cannot be resolved
+ * (removed between the scan and this call) is kept as it is: it was listed a
+ * moment ago.
  */
 async function dedupeRealPaths(files: readonly string[]): Promise<string[]> {
 	const seen = new Set<string>();
@@ -752,6 +748,36 @@ async function dedupeRealPaths(files: readonly string[]): Promise<string[]> {
 		if (seen.has(key)) continue;
 		seen.add(key);
 		out.push(file);
+	}
+	return out;
+}
+
+/**
+ * Session files matching `pattern` (a leaf pattern such as `*.jsonl`) under
+ * every project bucket of `root`.
+ *
+ * A bucket that is itself a symlink is skipped rather than followed. Following
+ * it does two things the fix must not: it lets a scan leave the sessions root
+ * through a directory alias (`sessionsRoot/alias -> ../outside` would list
+ * `outside/escaped.jsonl`), and it lists every session inside the real bucket
+ * twice when one bucket aliases another (#5385). The leaf scan inside a real
+ * bucket does follow symlinks, which is what #15878 asks for: a transcript
+ * staged in as a symlink is a transcript.
+ */
+async function scanBucketFiles(root: string, pattern: string): Promise<string[]> {
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(root, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const out: string[] = [];
+	for (const entry of entries) {
+		if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+		const dir = path.join(root, entry.name);
+		for await (const name of new Bun.Glob(pattern).scan({ cwd: dir, followSymlinks: true })) {
+			out.push(path.join(dir, name));
+		}
 	}
 	return out;
 }
@@ -775,13 +801,16 @@ async function newestSessionFiles(
 	let files: string[];
 	try {
 		if (storage instanceof FileSessionStorage) {
-			const scanned = await Array.fromAsync(new Bun.Glob(pattern).scan({ cwd: root, followSymlinks: true }), name =>
-				path.join(root, name),
-			);
-			// A pattern that crosses buckets (`*/*.jsonl`) can reach one
-			// transcript by two names when a bucket is a symlink; a pattern
-			// within one directory cannot.
-			files = pattern.includes("/") ? await dedupeRealPaths(scanned) : scanned;
+			// A pattern that crosses buckets (`*/*.jsonl`) is scanned bucket by
+			// bucket, so a symlinked bucket is skipped rather than followed; a
+			// pattern within one directory has no bucket level to bound.
+			const slash = pattern.lastIndexOf("/");
+			files =
+				slash >= 0
+					? await dedupeRealPaths(await scanBucketFiles(root, pattern.slice(slash + 1)))
+					: await Array.fromAsync(new Bun.Glob(pattern).scan({ cwd: root, followSymlinks: true }), name =>
+							path.join(root, name),
+						);
 		} else {
 			files = storage.listFilesSync(root, pattern);
 		}
@@ -903,12 +932,7 @@ export async function listRecentProjects(
 export async function findSessionFiles(idPrefix: string, sessionsRoot: string = getSessionsDir()): Promise<string[]> {
 	if (!/^[\w-]+$/.test(idPrefix)) return [];
 	try {
-		const files = await dedupeRealPaths(
-			await Array.fromAsync(
-				new Bun.Glob(`*/*_${idPrefix}*.jsonl`).scan({ cwd: sessionsRoot, followSymlinks: true }),
-				name => path.join(sessionsRoot, name),
-			),
-		);
+		const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, `*_${idPrefix}*.jsonl`));
 		// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
 		return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
 	} catch {

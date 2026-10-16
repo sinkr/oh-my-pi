@@ -124,10 +124,10 @@
 - Fixed browser `uploadFile` in Chrome reporting success with no file attached when the element opens no file chooser and nothing on the page reads the dropped files; it now fails and says what to target ([#15919](https://github.com/can1357/oh-my-pi/pull/15919) by [@will-bogusz](https://github.com/will-bogusz))
 - Relay mode: when Chrome detaches omp from a tab it drives (a password manager's inline menu loading in the page), the call fails at once saying why and omp reattaches to the same tab, instead of every later call timing out and reopening failing with `No page targets available` ([#15920](https://github.com/can1357/oh-my-pi/pull/15920) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the macOS `computer` tool letting the display sleep and lock in a turn that went 5 minutes without a desktop action; it now keeps the display awake until the turn ends or asks for your answer, then lets it sleep ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
-- Fixed `--session-dir <dir> --resume <id>` not finding a transcript that is a symlink in that directory, and the session lists and id-prefix lookups skipping symlinked transcripts the same way ([#15878](https://github.com/can1357/oh-my-pi/issues/15878)).
-- Fixed `--session-dir <dir> --resume <id>` not finding a transcript that is a symlink in that directory, and the session lists and id-prefix lookups skipping symlinked transcripts the same way ([#15878](https://github.com/can1357/oh-my-pi/issues/15878)); a project bucket that is itself a symlink to another no longer lists every session in it twice, nor reports an ambiguous id-prefix match.
+- Fixed `--session-dir <dir> --resume <id>` not finding a transcript that is a symlink in that directory, the session lists and id-prefix lookups skipping symlinked transcripts the same way, and a resume that must rewrite such a transcript replacing the link instead of updating the file it points at; a project bucket that is itself a symlink is no longer traversed, so a scan cannot leave the sessions root and no session is listed twice ([#15878](https://github.com/can1357/oh-my-pi/issues/15878), [#15882](https://github.com/can1357/oh-my-pi/pull/15882) by [@AnxForever](https://github.com/AnxForever))
 
 ## [18.11.1] - 2026-10-15
 

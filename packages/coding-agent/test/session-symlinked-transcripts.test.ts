@@ -108,4 +108,81 @@ describe("a transcript that is a symlink", () => {
 		]);
 		expect((await listRecentSessions({ limit: 10, sessionsRoot: sessionsDir })).map(s => s.id)).toEqual([SESSION_ID]);
 	});
+
+	it.skipIf(!symlinksAvailable)("does not follow a bucket symlink out of the sessions root", async () => {
+		// A bucket that is a symlink is not traversed, so a scan stays inside
+		// the sessions root instead of listing whatever the alias points at.
+		const outside = path.join(path.dirname(sessionsDir), `${path.basename(sessionsDir)}-outside`);
+		await fs.promises.mkdir(outside, { recursive: true });
+		await fs.promises.copyFile(real, path.join(outside, SESSION_NAME));
+		await fs.promises.symlink(outside, path.join(sessionsDir, "alias"));
+
+		const storage = new FileSessionStorage();
+		expect(await listAllSessions(storage, sessionsDir)).toEqual([]);
+		expect(await findSessionFiles(SESSION_ID.slice(0, 8), sessionsDir)).toEqual([]);
+		expect(await listRecentSessions({ limit: 10, sessionsRoot: sessionsDir })).toEqual([]);
+	});
+});
+
+describe("resuming through a symlinked transcript", () => {
+	let sessionsDir = "";
+	let staged = "";
+	let real = "";
+	let link = "";
+
+	beforeEach(async () => {
+		sessionsDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-session-symlink-"));
+		staged = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-session-symlink-src-"));
+		real = path.join(staged, "transcript.jsonl");
+		link = path.join(sessionsDir, SESSION_NAME);
+		await fs.promises.writeFile(
+			real,
+			[
+				JSON.stringify({
+					type: "session",
+					version: CURRENT_SESSION_VERSION,
+					id: SESSION_ID,
+					timestamp: "2026-10-15T00:00:00.000Z",
+					cwd: "/tmp",
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "u0",
+					parentId: null,
+					timestamp: "2026-10-15T00:00:00.000Z",
+					message: { role: "user", content: "ping", timestamp: 0 },
+				}),
+			].join("\n") + "\n",
+		);
+		await fs.promises.symlink(real, link);
+	});
+
+	afterEach(async () => {
+		if (sessionsDir) await fs.promises.rm(sessionsDir, { recursive: true, force: true });
+		if (staged) await fs.promises.rm(staged, { recursive: true, force: true });
+	});
+
+	// A full rewrite renames a staged file over the path. Left alone, that
+	// replaces the link: the staged transcript keeps every turn before it and a
+	// new regular file beside it takes the rest (#15878).
+	it.skipIf(!symlinksAvailable)("rewrites the referent and keeps the link", async () => {
+		const storage = new FileSessionStorage();
+		const before = await fs.promises.readFile(link, "utf8");
+		storage.writeTextSync(link, `${before}${JSON.stringify({ type: "message", id: "a1" })}\n`);
+
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await fs.promises.readFile(real, "utf8")).toContain(`"id":"a1"`);
+	});
+
+	it.skipIf(!symlinksAvailable)("appends through the link to the referent", async () => {
+		const storage = new FileSessionStorage();
+		const writer = storage.openWriter(link);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		appendSync(`${JSON.stringify({ type: "message", id: "a2" })}\n`);
+		await writer.flush();
+
+		expect(await fs.promises.readFile(real, "utf8")).toContain(`"id":"a2"`);
+		expect((await fs.promises.lstat(link)).isSymbolicLink()).toBe(true);
+	});
 });
