@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Suppressed typo highlighting for the word currently being typed to avoid distracting inline markers while composing
+
 ### Fixed
 
 - Fixed double-clicking an extension switched off in `/extensions` in Tern not switching it back on
