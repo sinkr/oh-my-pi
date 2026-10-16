@@ -38,6 +38,7 @@ import {
 	type BeforeToolCallResult,
 	EventLoopKeepalive,
 	type QueuedMessagePreparation,
+	type QueuedMessageQueue,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -112,6 +113,7 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
+import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
@@ -487,7 +489,7 @@ function jobSnapshotItem(job: AsyncJob): AsyncJobSnapshotItem {
 }
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
-import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
@@ -500,6 +502,7 @@ import {
 	cfgDefaultThinkingLevel,
 	cfgExternalThinking,
 	cfgPowerSleepPrevention,
+	cfgPrewalkAutoTarget,
 	cfgPrewalkEnabled,
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
@@ -1658,9 +1661,13 @@ export class AgentSession implements SettingsScope {
 		return this.#prewalk.arm(target, thinkingLevel);
 	}
 
-	/** Cancel only this session's pending prewalk without changing the active model or settings. */
+	/**
+	 * Cancel only this session's pending prewalk without changing the active model or settings, and keep
+	 * `prewalk.auto` from arming again until `/new`.
+	 */
 	disarmPrewalk(): void {
 		this.#prewalk.disarm();
+		this.#prewalk.suppressAuto();
 	}
 
 	/** Restore a planning model and re-arm prewalk without partially applying a rejected restart. */
@@ -1783,6 +1790,19 @@ export class AgentSession implements SettingsScope {
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
 			restoreThinkingLevel: level => this.#models.restoreThinkingLevel(level),
 			resolveDefaultPrewalk: () => this.#resolveDefaultPrewalk(),
+			resolveAutoPrewalkTarget: () => this.#resolveAutoPrewalkTarget(),
+			classifyAutoPrewalk: (request, signal) =>
+				classifyAutoPrewalk(
+					{ request, history: this.agent.state.messages },
+					{
+						settings: this.settings,
+						registry: this.#modelRegistry,
+						sessionId: this.sessionId,
+						signal,
+						onUsage: journalJudgmentUsage(this.sessionManager),
+						telemetry: this.agent.telemetry,
+					},
+				),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
@@ -1803,6 +1823,7 @@ export class AgentSession implements SettingsScope {
 		this.#prewalk = new PrewalkCoordinator(prewalkHost, {
 			prewalk: config.prewalk,
 			planYolo: config.planYolo,
+			suppressAutoPrewalk: config.suppressAutoPrewalk,
 		});
 		const todoHost: TodoTrackerHost = {
 			agent: this.agent,
@@ -2625,29 +2646,39 @@ export class AgentSession implements SettingsScope {
 		});
 	}
 
-	/** Resolve the configured startup/new-session handoff using the settings-change selection path. */
-	#resolveDefaultPrewalk(): Prewalk | undefined {
+	/** Resolves a prewalk target selector like `--prewalk-into`: role aliases, scoped models, match preferences. */
+	#resolvePrewalkTarget(selector: string): Prewalk | string {
 		const scoped = this.scopedModels.map(entry => entry.model);
 		const resolved = resolveCliModel({
-			cliModel: DEFAULT_PREWALK_TARGET,
+			cliModel: selector,
 			modelRegistry: this.#modelRegistry,
 			availableModels: scoped.length > 0 ? scoped : undefined,
 			settings: this.settings,
 			preferences: getModelMatchPreferences(this.settings),
 		});
 		const target = resolved.model;
-		const problem = !target
-			? (resolved.error ?? `model "${DEFAULT_PREWALK_TARGET}" not found`)
-			: cfgDisabledProviders.get(this.settings).includes(target.provider)
-				? `provider "${target.provider}" is disabled`
-				: !this.#modelRegistry.hasConfiguredAuth(target)
-					? `no API key for ${target.provider}/${target.id}`
-					: undefined;
-		if (!target || problem) {
-			this.emitNotice("warning", `Prewalk not armed: ${problem}.`, "prewalk");
-			return undefined;
+		if (!target) return resolved.error ?? `model "${selector}" not found`;
+		if (cfgDisabledProviders.get(this.settings).includes(target.provider)) {
+			return `provider "${target.provider}" is disabled`;
 		}
+		if (!this.#modelRegistry.hasConfiguredAuth(target)) return `no API key for ${target.provider}/${target.id}`;
 		return { target, thinkingLevel: resolved.thinkingLevel };
+	}
+
+	/** Resolve the configured startup/new-session handoff using the settings-change selection path. */
+	#resolveDefaultPrewalk(): Prewalk | undefined {
+		const resolved = this.#resolvePrewalkTarget(DEFAULT_PREWALK_TARGET);
+		if (typeof resolved !== "string") return resolved;
+		this.emitNotice("warning", `Prewalk not armed: ${resolved}.`, "prewalk");
+		return undefined;
+	}
+
+	#resolveAutoPrewalkTarget(): Prewalk | undefined {
+		const selector = cfgPrewalkAutoTarget.get(this.settings);
+		const resolved = this.#resolvePrewalkTarget(selector);
+		if (typeof resolved !== "string") return resolved;
+		this.emitNotice("warning", `Auto-prewalk not armed: target "${selector}": ${resolved}.`, "prewalk");
+		return undefined;
 	}
 
 	/**
@@ -7835,6 +7866,7 @@ export class AgentSession implements SettingsScope {
 	#prepareQueuedUserMessages = (
 		messages: readonly AgentMessage[],
 		signal: AbortSignal,
+		queue: QueuedMessageQueue,
 	): Promise<QueuedMessagePreparation> | undefined => {
 		const userMessages = messages.filter(isUserAuthoredQueuedMessage);
 		const first = userMessages[0];
@@ -7854,15 +7886,46 @@ export class AgentSession implements SettingsScope {
 			}
 			text.push(parts.join(""));
 		}
-		return this.#prepareAgentStart(
-			first,
-			text.join("\n\n"),
-			images.length > 0 ? images : undefined,
-			this.#promptGeneration,
-			signal,
-			"queued",
-		);
+		const promptText = text.join("\n\n");
+		const preparationImages = images.length > 0 ? images : undefined;
+		// Steering amends the running task; only a follow-up starts a new one worth routing.
+		if (queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))) {
+			return this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal);
+		}
+		return this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
 	};
+
+	/**
+	 * A queued follow-up starts a new task: leave the previous task's auto handoff, judge this one alongside its
+	 * preparation, and arm in the synchronous commit so the plan nudge is delivered with the task it belongs to.
+	 */
+	async #prepareQueuedAutoPrewalkTask(
+		message: AgentMessage,
+		prompt: string,
+		images: ImageContent[] | undefined,
+		signal: AbortSignal,
+	): Promise<QueuedMessagePreparation> {
+		const generation = this.#promptGeneration;
+		await this.#prewalk.beginAutoTask();
+		const autoPrewalk = this.#prewalk.classifyAuto(prompt, signal);
+		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
+		const decision = await autoPrewalk;
+		return {
+			commit: () => {
+				const additional = preparation.commit();
+				if (additional === undefined) return undefined;
+				const planMessage = this.#prewalk.applyAuto(decision);
+				return planMessage ? [...additional, planMessage] : additional;
+			},
+		};
+	}
+
+	/** A new top-level task the user authored: a typed prompt or a user-invoked skill, never injected or delegated. */
+	#isAutoPrewalkTask(message: AgentMessage): boolean {
+		if (this.#agentKind !== "main") return false;
+		if (message.role === "user") return !message.synthetic && message.attribution !== "agent";
+		return message.role === "custom" && isUserInvokedSkillPrompt(message);
+	}
 
 	/**
 	 * Stage extension results; committing them must remain synchronous with delivery validation.
@@ -8004,6 +8067,11 @@ export class AgentSession implements SettingsScope {
 		try {
 			options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
+			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
+			const autoPrewalkTask = this.#isAutoPrewalkTask(message);
+			if (autoPrewalkTask) await this.#prewalk.beginAutoTask();
+			const autoPrewalk = autoPrewalkTask ? this.#prewalk.classifyAuto(expandedText, setupAbort.signal) : undefined;
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
@@ -8146,6 +8214,24 @@ export class AgentSession implements SettingsScope {
 			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages);
 			if (this.#promptGeneration !== generation) {
 				return false;
+			}
+			if (autoPrewalk) {
+				const decision = await autoPrewalk;
+				if (this.#promptGeneration !== generation) {
+					return false;
+				}
+				// Synchronous from here to dispatch, so the arm and its plan nudge travel with this task.
+				const planMessage = this.#prewalk.applyAuto(decision);
+				if (planMessage) {
+					messages.push(planMessage);
+					// The first-turn eager todo reminder was built before this task armed. Like a configured
+					// prewalk (#10510), the plan nudge owns todo creation, so the reminder would contradict it.
+					this.#toolChoiceQueue.removeByLabel("eager-todo");
+					const eager = messages.findIndex(
+						candidate => candidate.role === "custom" && candidate.customType === EAGER_TODO_PRELUDE_MESSAGE_TYPE,
+					);
+					if (eager >= 0) messages.splice(eager, 1);
+				}
 			}
 			// Consume the xd:// notice only when its previewed revision still holds.
 			// A mount delta or catalog rebuild during the await invalidates it: any
