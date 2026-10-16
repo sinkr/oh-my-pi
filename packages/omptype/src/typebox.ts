@@ -135,6 +135,8 @@ interface RuntimeType<T> extends OmpType<T> {
 	atMostLength(bound: number): RuntimeType<T>;
 	atLeast(bound: number): RuntimeType<T>;
 	atMost(bound: number): RuntimeType<T>;
+	moreThan(bound: number): RuntimeType<T>;
+	lessThan(bound: number): RuntimeType<T>;
 	narrow<N extends T>(predicate: (value: T, ctx: NarrowContext) => value is N): RuntimeType<N>;
 	narrow(predicate: (value: T, ctx: NarrowContext) => boolean): RuntimeType<T>;
 }
@@ -271,45 +273,19 @@ function tNumber(opts?: NumberOpts, integer = false): TNumber {
 		upper = { value: opts.exclusiveMaximum, exclusive: true };
 	}
 	const keyword = integer ? "number.integer" : "number";
-	// The `LO <= TYPE <= HI` range spelling requires both bounds; a min-only
-	// bound must use the postfix `TYPE >= LO` form (see parseBounded in ir.ts).
-	// Exponent-form bounds cannot be represented by the DSL's decimal literals.
-	const canonicalNumber = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
-	const dslSafe =
-		(!lower || canonicalNumber.test(String(lower.value))) && (!upper || canonicalNumber.test(String(upper.value)));
-	let src: string;
-	if (dslSafe) {
-		if (lower && upper) {
-			src = `${lower.value} ${lower.exclusive ? "<" : "<="} ${keyword} ${upper.exclusive ? "<" : "<="} ${upper.value}`;
-		} else if (lower) {
-			src = `${keyword} ${lower.exclusive ? ">" : ">="} ${lower.value}`;
-		} else if (upper) {
-			src = `${keyword} ${upper.exclusive ? "<" : "<="} ${upper.value}`;
-		} else {
-			src = keyword;
-		}
-	} else {
-		src = keyword;
+	if (
+		lower &&
+		upper &&
+		(lower.value > upper.value || (lower.value === upper.value && (lower.exclusive || upper.exclusive)))
+	) {
+		throw new OmpTypeError("numeric range is unsatisfiable");
 	}
-	let schema = asRuntime<number>(type.raw(src));
-	if (!dslSafe && (lower || upper)) {
-		if (
-			lower &&
-			upper &&
-			(lower.value > upper.value || (lower.value === upper.value && (lower.exclusive || upper.exclusive)))
-		) {
-			throw new OmpTypeError("numeric range is unsatisfiable");
-		}
-		schema = schema.narrow((value, ctx) => {
-			if (lower && (value < lower.value || (lower.exclusive && value === lower.value))) {
-				return ctx.mustBe(`${lower.exclusive ? "greater than" : "at least"} ${lower.value}`);
-			}
-			if (upper && (value > upper.value || (upper.exclusive && value === upper.value))) {
-				return ctx.mustBe(`${upper.exclusive ? "less than" : "at most"} ${upper.value}`);
-			}
-			return true;
-		});
-	}
+	// Fluent bounds write min/max straight into the IR, so decimal and
+	// exponent-form bounds share one path that renders the same structured
+	// errors; the DSL's decimal-only literals cannot spell the exponent form.
+	let schema = asRuntime<number>(type.raw(keyword));
+	if (lower) schema = lower.exclusive ? schema.moreThan(lower.value) : schema.atLeast(lower.value);
+	if (upper) schema = upper.exclusive ? schema.lessThan(upper.value) : schema.atMost(upper.value);
 	if (opts?.multipleOf !== undefined) {
 		const divisor = opts.multipleOf;
 		schema = schema.narrow((value, ctx) => {
@@ -320,18 +296,8 @@ function tNumber(opts?: NumberOpts, integer = false): TNumber {
 			);
 		});
 	}
-	if (!dslSafe) {
-		// Runtime narrows do not add bounds to the emitted JSON Schema.
-		const json: Record<string, unknown> = { type: integer ? "integer" : "number" };
-		if (lower) json[lower.exclusive ? "exclusiveMinimum" : "minimum"] = lower.value;
-		if (upper) json[upper.exclusive ? "exclusiveMaximum" : "maximum"] = upper.value;
-		if (opts?.multipleOf !== undefined) json.multipleOf = opts.multipleOf;
-		schema = asRuntime<number>(type.withJsonSchema(schema, json));
-	}
 	const result = applyMeta(schema, opts);
-	return opts?.multipleOf !== undefined && dslSafe
-		? withJsonSchemaKeywords(result, { multipleOf: opts.multipleOf })
-		: result;
+	return opts?.multipleOf !== undefined ? withJsonSchemaKeywords(result, { multipleOf: opts.multipleOf }) : result;
 }
 
 function tLiteral<const V extends string | number | boolean | null>(value: V, opts?: Meta): TLiteral<V> {

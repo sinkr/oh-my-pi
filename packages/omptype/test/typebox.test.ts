@@ -114,16 +114,32 @@ describe("TypeBox adapter", () => {
 		expect(valid(integer, 0)).toBe(true);
 		expect(valid(integer, 0.5)).toBe(false);
 		expect(valid(integer, 2)).toBe(true);
+		// `multipleOf` rides the top-level emitter override like upstream's
+		// string `pattern`/`format`; nested emission carries the IR bounds only.
 		expect(Type.Object({ mixed, integer }).toJsonSchema()).toEqual({
 			type: "object",
 			properties: {
-				mixed: json,
+				mixed: { type: "number", minimum: -1e-7, maximum: 2 },
 				integer: { type: "integer", minimum: -1e-7, maximum: 2 },
 			},
 			required: ["mixed", "integer"],
 		});
 		expect(() => Type.Number({ minimum: 1e21, maximum: 1 })).toThrow();
 		expect(() => Type.Number({ minimum: 1e-7, exclusiveMaximum: 1e-7 })).toThrow();
+	});
+
+	test("exponent-form bounds keep structured union errors", () => {
+		const union = Type.Union([Type.Number({ minimum: 1e21 }), Type.String()]);
+		const failures = union(true);
+		expect(failures instanceof type.errors).toBe(true);
+		expect(`${failures}`).toContain("at least 1e+21");
+	});
+
+	test("fluent bounds keep composing after exponent-form construction", () => {
+		const schema = type.raw("number").atLeast(1e21).atMost(1e22);
+		expect(valid(schema, 1e21)).toBe(true);
+		expect(valid(schema, 2e22)).toBe(false);
+		expect(schema.toJsonSchema()).toEqual({ type: "number", minimum: 1e21, maximum: 1e22 });
 	});
 
 	test("arrays, tuples, objects, records and intersections validate", () => {
