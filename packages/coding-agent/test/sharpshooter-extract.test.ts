@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	buildSharpshooterEnvelope,
+	flushSharpshooterExtraction,
 	maybeStartSharpshooterExtraction,
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
@@ -143,34 +144,33 @@ describe("maybeStartSharpshooterExtraction", () => {
 		await Promise.resolve();
 	});
 
-	it("gates short prompts on sharpshooter.minPromptLength", async () => {
+	it("gates short prompts on sharpshooter.minPromptLength, counting user-perceived characters", async () => {
 		const cwd = path.join(os.tmpdir(), "sharpshooter-min-length-project");
 		const agentDir = path.join(os.tmpdir(), "sharpshooter-min-length-agent");
-		const messages = [message("user", [{ type: "text", text: "用方案二" }])];
 		const completion = vi
 			.spyOn(ai, "completeSimple")
 			.mockResolvedValue(assistantResponse([{ type: "text", text: "No tool call." }]));
 
-		const defaults = extractionDependencies(cwd, messages, "session-min-default");
-		maybeStartSharpshooterExtraction({ agentDir, ...defaults });
-		expect(completion).not.toHaveBeenCalled();
+		// Await the session's in-flight extraction (none when the gate drops the prompt) before counting calls.
+		const extractionStarts = async (text: string, overrides: Record<string, unknown> = {}): Promise<boolean> => {
+			completion.mockClear();
+			const deps = extractionDependencies(
+				cwd,
+				[message("user", [{ type: "text", text }])],
+				`session-${text}`,
+				overrides,
+			);
+			maybeStartSharpshooterExtraction({ agentDir, ...deps });
+			await flushSharpshooterExtraction(deps.session);
+			return completion.mock.calls.length === 1;
+		};
 
-		const zeroed = extractionDependencies(
-			cwd,
-			[message("user", [{ type: "text", text: "好" }])],
-			"session-min-zero",
-			{
-				"sharpshooter.minPromptLength": 0,
-			},
-		);
-		maybeStartSharpshooterExtraction({ agentDir, ...zeroed });
-		expect(completion).not.toHaveBeenCalled();
-
-		const lowered = extractionDependencies(cwd, messages, "session-min-lowered", {
-			"sharpshooter.minPromptLength": 4,
-		});
-		maybeStartSharpshooterExtraction({ agentDir, ...lowered });
-		await waitFor(() => completion.mock.calls.length === 1, "lowered threshold did not start extraction");
+		expect(await extractionStarts("用方案二")).toBe(false);
+		expect(await extractionStarts("用方案二", { "sharpshooter.minPromptLength": 4 })).toBe(true);
+		// Values below the floor of 2 still drop one-character acks.
+		expect(await extractionStarts("好", { "sharpshooter.minPromptLength": 0 })).toBe(false);
+		// "👍" is one character even though its UTF-16 length is 2.
+		expect(await extractionStarts("👍", { "sharpshooter.minPromptLength": 2 })).toBe(false);
 	});
 
 	it("queues only deltas whose evidence is a verbatim prompt substring", async () => {

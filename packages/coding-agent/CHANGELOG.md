@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `sharpshooter.minPromptLength` (default 16, minimum 2) to set how many characters a prompt needs before Sharpshooter extracts decisions from it; 16 characters is only a few English words but a full sentence in Chinese, so Chinese users can lower it to capture short complete decisions such as "用方案二" (4 characters) that were always skipped ([#16043](https://github.com/can1357/oh-my-pi/pull/16043) by [@bigHippoZz](https://github.com/bigHippoZz))
+- Added `sharpshooter.minPromptLength` (default 16, minimum 2) to control the shortest prompt Sharpshooter extracts decisions from ([#16043](https://github.com/can1357/oh-my-pi/pull/16043) by [@bigHippoZz](https://github.com/bigHippoZz))
 
 ## [18.11.3] - 2026-10-16
 
