@@ -326,6 +326,26 @@ describe("SQLite tool support", () => {
 		expect(text).not.toContain("Bob");
 	});
 
+	it.each([
+		["where=status='active'", ["Eve", "Frank"]],
+		["order=created:desc", ["Dave", "Carol"]],
+		["where=status='active'&order=created:desc", ["Carol", "Alice"]],
+		[
+			`where=${encodeURIComponent("status='active' AND 'a&b+c%20'='a&b+c%20'")}&order=created:desc`,
+			["Carol", "Alice"],
+		],
+	] as const)("follows SQLite continuation with %s", async (query, expectedNames) => {
+		const first = await readTool.execute("sqlite-filtered-page", {
+			path: `${sqlitePath}:users?${query}&limit=2`,
+		});
+		const suffix = getText(first).match(/append (:[^\n]+?) to the database path to continue/)?.[1];
+		expect(suffix).toBeDefined();
+
+		const next = await readTool.execute("sqlite-filtered-next", { path: `${sqlitePath}${suffix}` });
+		const names = getText(next).match(/\b(?:Alice|Bob|Carol|Dave|Eve|Frank)\b/g);
+		expect(names).toEqual<readonly string[]>(expectedNames);
+	});
+
 	it("rejects where= clauses that try to bypass pagination", () => {
 		expect(() => parseSqliteSelector("users", "where=1=1 LIMIT 1000000 --&limit=2&offset=0")).toThrow(
 			/comments or statement terminators/i,
