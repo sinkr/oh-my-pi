@@ -1,7 +1,8 @@
 /**
  * Contract: computer runs keep the display awake for the whole agent turn (the `power.sleepPrevention` in-flight
  * bracket), however long its non-computer steps take, and the turn's end lets the display sleep at once; the next
- * turn holds it again. A subagent marks no turns, so its runs keep the native grace period.
+ * turn holds it again. A dialog waiting for the user's answer ends the turn's hold until it settles, and a subagent
+ * marks no turns, so its runs keep the native grace period.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
@@ -62,10 +63,29 @@ describe("AgentSession computer display hold per turn", () => {
 			return { content: [{ type: "text", text: "stepped" }], details: undefined };
 		},
 	};
+	let asked = Promise.withResolvers<void>();
+	let answered = Promise.withResolvers<string>();
+	const questionSchema = type({});
+	/** A tool that waits for the user's answer, as `ask` and approvals do. */
+	const questionTool: AgentTool<typeof questionSchema, undefined> = {
+		name: "question",
+		label: "Question",
+		description: "Question",
+		parameters: questionSchema,
+		async execute() {
+			const answer = await session!.waitForUser(() => {
+				asked.resolve();
+				return answered.promise;
+			});
+			return { content: [{ type: "text", text: answer }], details: undefined };
+		},
+	};
 	let streaming = Promise.withResolvers<void>();
 
 	function createSession(responses: MockResponse[], agentKind: "main" | "sub" = "main"): AgentSession {
 		streaming = Promise.withResolvers<void>();
+		asked = Promise.withResolvers<void>();
+		answered = Promise.withResolvers<string>();
 		releases.length = 0;
 		steps.length = 0;
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -73,7 +93,12 @@ describe("AgentSession computer display hold per turn", () => {
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [stepTool as AgentTool], messages: [] },
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [stepTool as AgentTool, questionTool as AgentTool],
+				messages: [],
+			},
 			convertToLlm,
 			streamFn: (model, context, options) => {
 				streaming.resolve();
@@ -85,7 +110,10 @@ describe("AgentSession computer display hold per turn", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
-			toolRegistry: new Map([[stepTool.name, stepTool as AgentTool]]),
+			toolRegistry: new Map([
+				[stepTool.name, stepTool as AgentTool],
+				[questionTool.name, questionTool as AgentTool],
+			]),
 			agentKind,
 		});
 		owner = session.getEvalKernelOwnerId();
@@ -105,6 +133,10 @@ describe("AgentSession computer display hold per turn", () => {
 	}
 
 	const step: MockResponse = { content: [{ type: "toolCall", name: "step", arguments: {} }], stopReason: "toolUse" };
+	const question: MockResponse = {
+		content: [{ type: "toolCall", name: "question", arguments: {} }],
+		stopReason: "toolUse",
+	};
 
 	it("keeps the hold through every step of a turn, releases at its end, and holds again next turn", async () => {
 		const target = createSession([step, step, { content: ["done"] }, step, { content: ["done again"] }]);
@@ -157,6 +189,48 @@ describe("AgentSession computer display hold per turn", () => {
 		} finally {
 			getApiKey.mockRestore();
 		}
+	});
+
+	it("lets the display sleep while the user is asked, and holds again once they answer", async () => {
+		const target = createSession([question, step, { content: ["done"] }]);
+		const running = target.prompt("go");
+		await asked.promise;
+		expect(computerTurnInFlight(owner)).toBeUndefined();
+		expect(releases).toEqual([1]);
+
+		answered.resolve("yes");
+		await running;
+		expect(steps).toEqual([{ turn: 2, releases: 1 }]);
+		expect(releases).toEqual([1, 2]);
+		expect(computerTurnInFlight(owner)).toBeUndefined();
+	});
+
+	it("holds again only once the last open dialog settles, and not after the turn is over", async () => {
+		const target = createSession([{ content: ["slow"], delayMs: 5_000 }]);
+		const running = target.prompt("go").catch(() => undefined);
+		await streaming.promise;
+		const first = Promise.withResolvers<void>();
+		const second = Promise.withResolvers<void>();
+		const firstWait = target.waitForUser(() => first.promise);
+		const secondWait = target.waitForUser(() => second.promise);
+		expect(releases).toEqual([1]);
+		first.resolve();
+		await firstWait;
+		expect(computerTurnInFlight(owner)).toBeUndefined();
+		second.resolve();
+		await secondWait;
+		expect(computerTurnInFlight(owner)).toBe(2);
+
+		// A dialog still open when the user interrupts the turn settles with no prompt in flight.
+		const third = Promise.withResolvers<void>();
+		const thirdWait = target.waitForUser(() => third.promise);
+		expect(releases).toEqual([1, 2]);
+		await target.abort();
+		await running;
+		third.resolve();
+		await thirdWait;
+		expect(computerTurnInFlight(owner)).toBeUndefined();
+		expect(releases).toEqual([1, 2]);
 	});
 
 	it("marks no turn in a subagent, so its runs keep the grace period", async () => {

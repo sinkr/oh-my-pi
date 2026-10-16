@@ -1106,6 +1106,8 @@ export class AgentSession implements SettingsScope {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
+	#userWaitCount = 0;
 	#abortInProgress = false;
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
 	 *  yet dispatched a turn, queued, or bailed. Preprocessing (manual-compaction wait, slash
@@ -1228,11 +1230,25 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Runs `dialog`, which waits for the user's answer (`ask`, a tool approval, an extension prompt), with the
+	 * computer turn ended, so an unattended Mac sleeps and locks on its own timer rather than showing the pending
+	 * question. The turn begins again when the last open dialog settles, if a prompt is still in flight.
+	 */
+	async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
+		if (this.#userWaitCount++ === 0) this.#endComputerTurn();
+		try {
+			return await dialog();
+		} finally {
+			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) this.#beginComputerTurn();
+		}
+	}
+
+	/**
 	 * Computer runs keep the display awake until {@link #endComputerTurn}. Only a top-level session marks turns: a
 	 * subagent's turn can end mid-way through its parent's, so its runs keep the native grace period instead.
 	 */
 	#beginComputerTurn(): void {
-		if (this.#agentKind !== "main") return;
+		if (this.#agentKind !== "main" || this.#userWaitCount > 0) return;
 		beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
 	}
 
@@ -2109,6 +2125,7 @@ export class AgentSession implements SettingsScope {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
+			waitForUser: dialog => this.waitForUser(dialog),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,

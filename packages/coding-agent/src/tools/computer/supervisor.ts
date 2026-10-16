@@ -484,7 +484,10 @@ export async function revokeComputerControlForOwner(ownerId: string | undefined)
 	);
 }
 
-/** An agent session's turn began: computer runs keep the display awake until {@link endComputerTurnForOwner}. */
+/**
+ * An agent session's turn began, or went on after the user answered a dialog: computer runs keep the display awake
+ * until {@link endComputerTurnForOwner}.
+ */
 export function beginComputerTurnForOwner(ownerId: string | undefined): void {
 	if (!ownerId) return;
 	const state = ownerTurns.get(ownerId);
@@ -492,8 +495,9 @@ export function beginComputerTurnForOwner(ownerId: string | undefined): void {
 }
 
 /**
- * The turn ended: let the display sleep now instead of a grace period later. Nothing else ends with the turn; the
- * next turn's first computer request holds the display again.
+ * The turn ended or stopped to wait for the user's answer: let the display sleep now instead of a grace period later.
+ * Nothing else ends with the turn; its next computer request after the answer, or the next turn's first, holds the
+ * display again.
  */
 export function endComputerTurnForOwner(ownerId: string | undefined): void {
 	const state = ownerId ? ownerTurns.get(ownerId) : undefined;
@@ -503,8 +507,8 @@ export function endComputerTurnForOwner(ownerId: string | undefined): void {
 }
 
 /**
- * The owner's agent turn in flight, if any. Without one (between turns, in a subagent, or SDK and eval use with no
- * agent session), a computer run keeps the native grace period.
+ * The owner's agent turn in flight, if any. Without one (between turns, while a dialog waits for the user, in a
+ * subagent, or SDK and eval use with no agent session), a computer run keeps the native grace period.
  */
 export function computerTurnInFlight(ownerId: string | undefined): number | undefined {
 	const state = ownerId ? ownerTurns.get(ownerId) : undefined;
