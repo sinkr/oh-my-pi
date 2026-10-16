@@ -70,7 +70,7 @@ export async function handleSystemOne(
 	}
 	// Model capability and dialect caps are known locally: reject before credential lookup or refresh.
 	try {
-		checkNativeJudgmentImages(model, parsed.request.images ?? [], parsed.imageAssets);
+		checkNativeJudgmentImages(model, parsed.request, parsed.imageAssets);
 	} catch (error) {
 		return systemOne.formatError(
 			422,

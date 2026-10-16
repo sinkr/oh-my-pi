@@ -153,19 +153,17 @@ OpenAI Decisions forwards embedded `ImageContent.detail` when supplied. Native i
 
 Image inputs are validated before any candidate runs; malformed images fail as caller errors rather than exhausting the chain. Providers may enforce additional limits. Workers AI Clef accepts at most 4 PNG, JPEG, or WebP images of up to 4 MiB and 16 MP each, 8 MiB in total. Valid padded and unpadded base64, and MIME case variants, share one cache identity.
 
-After image-capability filtering, the same native-only tail policy used for text judgments applies: a failed native judge may fall through to another compatible native, never to a prompted chat model. When no compatible native remains, eligible prompted candidates and a vision-capable session-model fallback remain available.
+After image filtering, the same native-only tail policy used for text judgments applies: a failed native judge may fall through to another compatible native, never to a prompted chat model. Filtering removes natives without image support and natives whose documented image bounds the request's images fall outside, so when no compatible native remains, eligible prompted candidates and a vision-capable session-model fallback can still answer.
 
 #### Jev images (experimental)
 
 Native image judgments for Jev are experimental. Direct TypeSafe Jev supports `jev-latest`, `jev-preview`, `jev-1.13.0`, and `jev-1.14.0` (for example, select `typesafe/jev-latest` for the `judge` role). OpenRouter supports `typesafe/jev-1.13`, `typesafe/jev-1.14`, and `~typesafe/jev-latest`.
 
-Direct TypeSafe requests send TypeSafe image assets referenced from `state` under collision-safe `__omp_judgment_images` (using a numeric suffix if the key is occupied). Non-object states, including strings and arrays, become `{ __omp_state: original, __omp_judgment_images: refs }`. This is an adapter convention, not a TypeSafe schema requirement. The `TypeSafe-Danger-Zone-Images: true` header is set only when images are attached.
-
-OpenRouter Decisions encodes each image as an `image_url` data URL in `state`: object roots keep their fields and receive image parts under the collision-safe field, arrays append image parts, and scalar roots wrap as `[original, ...imageParts]`. OpenRouter requests use neither the TypeSafe header nor a top-level `images` field.
+Images join `state` without replacing it: an object root keeps its fields and gains them under a collision-safe `__omp_judgment_images` key (with a numeric suffix if the key is taken), an array root gains them at the end, and a string root becomes `[original, ...images]`. Direct TypeSafe requests add each image as a referenced `assets` entry and put its reference in `state`, setting `TypeSafe-Danger-Zone-Images: true` only when images are attached; caller-supplied assets (auth gateway) must each be referenced in `state`, `instructions`, or `criteria`, and each split request carries only the assets it references. OpenRouter encodes each image as an `image_url` data URL part and uses neither the TypeSafe header nor a top-level `images` field.
 
 Text-only requests retain their original request shape and bytes. Image support is limited to the listed TypeSafe Jev and OpenRouter Jev models; it does not imply support for other System One-compatible servers or OpenRouter Decisions models.
 
-Both paths accept PNG and JPEG and preserve their original bytes without resizing. TypeSafe Jev has no image-detail equivalent, so `ImageContent.detail` is ignored on direct TypeSafe requests.
+Both paths accept PNG and JPEG of 280–1568 pixels per side and 78,400–2,458,624 pixels in total, and send their original bytes without resizing. TypeSafe Jev has no image-detail equivalent, so `ImageContent.detail` is ignored on direct TypeSafe requests.
 
 See TypeSafe's [image documentation](https://docs.typesafe.ai/images) and OpenRouter's [multimodal Decisions guide](https://openrouter.ai/docs/guides/community/multimodal-decisions) for their image constraints.
 

@@ -11,8 +11,8 @@
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "../error";
 import { isEmbeddedImageContent } from "../images/shared";
-import type { JudgmentImageAssets } from "../judgment/wire";
 import type { JudgmentRequest, JudgmentResult } from "../judgment/types";
+import type { JudgmentImageAssets } from "../judgment/wire";
 import type { ImageContent } from "../types";
 
 /** Image shape only; the shared embedded-image guard validates data, MIME type, and detail. */
@@ -23,10 +23,12 @@ const systemOneImageSchema = type({
 	"detail?": "unknown",
 });
 
+/** Inline JSON assets only: multipart `part` assets need a multipart body this ingress does not parse. */
 const systemOneAssetSchema = type({
 	"type?": "'image'",
 	format: "'png' | 'jpg' | 'jpeg'",
 	data_base64: "string > 0",
+	"part?": "never",
 });
 
 const systemOneAssetsSchema = type({ "[string]": systemOneAssetSchema }).narrow(
@@ -52,19 +54,6 @@ export interface SystemOneParsedRequest {
 	imageAssets?: JudgmentImageAssets;
 }
 
-function rejectMultipartAssets(body: unknown): void {
-	if (typeof body !== "object" || body === null || Array.isArray(body) || !("assets" in body)) return;
-	const assets = body.assets;
-	if (typeof assets !== "object" || assets === null || Array.isArray(assets)) return;
-	for (const [reference, asset] of Object.entries(assets)) {
-		if (typeof asset === "object" && asset !== null && Object.hasOwn(asset, "part")) {
-			throw new AIError.ValidationError(
-				`systemone: assets[${JSON.stringify(reference)}].part is unsupported for JSON ingress`,
-			);
-		}
-	}
-}
-
 /** `POST /v1/systemone` response body; `cost` (USD) appears only when the route billed one. */
 export interface SystemOneResponseBody {
 	model: string;
@@ -77,11 +66,10 @@ export interface SystemOneResponseBody {
  * top-level embedded images and inline TypeSafe image assets.
  *
  * @throws {AIError.ValidationError} when required routing fields are missing
- * or malformed, or supplied image data is invalid. Multipart asset parts are
- * unsupported by this JSON ingress.
+ * or malformed, supplied image data is invalid, or an asset uses multipart
+ * `part`, which this JSON ingress cannot read.
  */
 export function parseRequest(body: unknown): SystemOneParsedRequest {
-	rejectMultipartAssets(body);
 	const parsed = systemOneRequestSchema(body);
 	if (parsed instanceof type.errors) throw new AIError.ValidationError(`systemone: ${parsed.summary}`);
 

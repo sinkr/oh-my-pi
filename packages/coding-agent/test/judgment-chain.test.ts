@@ -29,10 +29,21 @@ const JEV_PREVIEW = {
 	maxTokens: 4096,
 } as Model<Api>;
 
-const OPENROUTER_JEV = getBundledModel("openrouter", "~typesafe/jev-latest");
-const OPENROUTER_TEXT_ONLY = getBundledModel("openrouter", "inception/mercury-decide");
-if (!OPENROUTER_JEV || !OPENROUTER_TEXT_ONLY) throw new Error("Expected bundled OpenRouter decision models");
-const OPENROUTER_DECISIONS_URL = `${OPENROUTER_JEV.baseUrl}/decisions`;
+const OPENROUTER_DECISIONS_URL = "https://decisions.example.test/decisions";
+const OPENROUTER_JEV = {
+	...JEV_PREVIEW,
+	id: "~typesafe/jev-latest",
+	api: "openrouter-decisions",
+	provider: "openrouter",
+	baseUrl: "https://decisions.example.test",
+	input: ["text", "image"],
+} as Model<Api>;
+const OPENROUTER_TEXT_ONLY = {
+	...OPENROUTER_JEV,
+	id: "text-only-openrouter",
+	name: "Text-only native",
+	input: ["text"],
+} as Model<Api>;
 
 const LOCAL = getBundledModel("local", "qwen2.5-1.5b");
 const ONLINE = getBundledModel("anthropic", "claude-sonnet-4-6");
@@ -74,6 +85,12 @@ const IMAGE_ONE: ImageContent = {
 const IMAGE_TWO: ImageContent = {
 	type: "image",
 	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+	mimeType: "image/png",
+};
+/** 320x320 grayscale PNG: inside Jev's 280–1568 px per-side bounds, unlike the 1x1 fixtures above. */
+const JEV_IMAGE: ImageContent = {
+	type: "image",
+	data: "iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAAAAADo+/p2AAAAeklEQVR42u3BgQAAAADDoPlTH+ECVQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMA3kU8AAamZiz8AAAAASUVORK5CYII=",
 	mimeType: "image/png",
 };
 
@@ -352,8 +369,6 @@ describe("ChainJudge", () => {
 	});
 
 	it("selects OpenRouter Jev after filtering the text-only native candidate", async () => {
-		expect(OPENROUTER_JEV.input).toContain("image");
-		expect(OPENROUTER_TEXT_ONLY.input).toEqual(["text"]);
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${OPENROUTER_TEXT_ONLY.provider}/${OPENROUTER_TEXT_ONLY.id}` },
 			"retry.fallbackChains": {
@@ -380,13 +395,41 @@ describe("ChainJudge", () => {
 		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
 			state: "look at this",
 			questions: { visible: { type: "noul", instructions: "Is an object visible?" } },
-			images: [IMAGE_ONE],
+			images: [JEV_IMAGE],
 		});
 
 		expect(result.answers.visible.noul).toBe(0.75);
 		expect(native).toHaveBeenCalledTimes(1);
 		expect(nativeUrl).toBe(OPENROUTER_DECISIONS_URL);
 		expect(chat).not.toHaveBeenCalled();
+	});
+
+	it("uses vision chat when the image falls outside the native judge's size bounds", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}` },
+			"retry.fallbackChains": { judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`] },
+		});
+		const registry = makeRegistry([OPENROUTER_JEV, VISION_CHAT], {
+			openrouter: "or-key",
+			[VISION_CHAT.provider]: "vision-key",
+		});
+		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));
+		const chat = vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {
+			const response = reply(model, "visible: yes");
+			options?.onAttempt?.(response);
+			return response;
+		});
+
+		// IMAGE_ONE is 1x1, below Jev's 280 px minimum side, which Jev rejects rather than resizes.
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "look at this",
+			questions: { visible: { type: "noul", instructions: "Is an object visible?" } },
+			images: [IMAGE_ONE],
+		});
+
+		expect(result.answers.visible.noul).toBe(1);
+		expect(native).not.toHaveBeenCalled();
+		expect(chat).toHaveBeenCalledTimes(1);
 	});
 
 	it("reports an explicit error when no candidate supports image judgments", async () => {

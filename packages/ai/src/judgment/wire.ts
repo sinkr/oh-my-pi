@@ -5,6 +5,7 @@
  */
 import type { ImageContent, Usage } from "../types";
 import type { JudgmentRequest } from "./types";
+
 /** Where one attempt posts and which bearer token it sends. */
 export interface JudgmentTarget {
 	url: string;
@@ -37,13 +38,21 @@ export interface JudgmentImageInput {
 	maxTotalBytes?: number;
 	/** Pixels per image, when the image header reports dimensions. */
 	maxPixels?: number;
+	/** Minimum pixels per image, when the image header reports dimensions. */
+	minPixels?: number;
+	/** Inclusive bounds on each side, when the image header reports dimensions. */
+	minSide?: number;
+	maxSide?: number;
 }
 
-/** Shared TypeSafe Jev/OpenRouter image limits. */
+/** Shared TypeSafe Jev/OpenRouter image limits (https://docs.typesafe.ai/images#limits); out-of-range images are rejected upstream, never resized. */
 export const JEV_IMAGE_INPUT = {
 	mimeTypes: ["image/png", "image/jpeg"],
 	maxBytes: 16 * 1024 * 1024,
+	minPixels: 78_400,
 	maxPixels: 2_458_624,
+	minSide: 280,
+	maxSide: 1568,
 } as const satisfies JudgmentImageInput;
 
 /** Image assets kept separately from judgment state for asset-aware native wires. */
@@ -58,11 +67,8 @@ export interface JudgmentWire {
 	target(baseUrl: string, model: string, key: string): JudgmentTarget;
 	/** Request body for `model`, with optional asset context for dialects that preserve references. */
 	encode(request: JudgmentRequest, model: string, imageAssets?: JudgmentImageAssets): unknown;
-	/** Extra request headers derived by this dialect; NativeJudge calls this only for effective images. */
-	requestHeaders?(
-		request: JudgmentRequest,
-		imageAssets?: JudgmentImageAssets,
-	): Readonly<Record<string, string>> | undefined;
+	/** Headers this dialect adds to requests that carry images. */
+	imageHeaders?: Readonly<Record<string, string>>;
 	/** Image input this dialect accepts; absent means text-only. */
 	images?: JudgmentImageInput;
 	/** Whether raw asset maps can be transported without loss by this dialect. */

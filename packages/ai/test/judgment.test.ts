@@ -1,5 +1,3 @@
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import { describe, expect, it, spyOn } from "bun:test";
@@ -28,6 +26,23 @@ const IMAGE_REFS: readonly ImageContent[] = [
 	{ type: "image", data: "AQID", mimeType: "image/png" },
 	{ type: "image", data: "BAUG", mimeType: "image/jpeg" },
 ];
+
+/** 320x320 grayscale PNG: inside Jev's 280–1568 px per-side bounds. */
+const JEV_PNG =
+	"iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAAAAADo+/p2AAAAeklEQVR42u3BgQAAAADDoPlTH+ECVQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMA3kU8AAamZiz8AAAAASUVORK5CYII=";
+
+/** A PNG signature and IHDR declaring `width`x`height`; enough for header-based dimension checks. */
+function pngHeader(width: number, height: number): ImageContent {
+	const header = Buffer.alloc(33);
+	Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header, 0);
+	header.writeUInt32BE(13, 8);
+	header.write("IHDR", 12);
+	header.writeUInt32BE(width, 16);
+	header.writeUInt32BE(height, 20);
+	header[24] = 8;
+	header[25] = 6;
+	return { type: "image", data: header.toString("base64"), mimeType: "image/png" };
+}
 
 function backend(reply: string | ((prompt: { system: string; user: string }) => string)): TextBackend {
 	return {
@@ -373,11 +388,8 @@ describe("NativeJudge", () => {
 		const stringReferences = Object.keys(bodies[1].assets);
 		const arrayReferences = Object.keys(bodies[2].assets);
 		expect(bodies[0].state).toEqual({ ...objectState, __omp_judgment_images_2: objectReferences });
-		expect(bodies[1].state).toEqual({ __omp_state: "plain state", __omp_judgment_images: stringReferences });
-		expect(bodies[2].state).toEqual({
-			__omp_state: ["array state", { detail: "preserved" }],
-			__omp_judgment_images: arrayReferences,
-		});
+		expect(bodies[1].state).toEqual(["plain state", ...stringReferences]);
+		expect(bodies[2].state).toEqual(["array state", { detail: "preserved" }, ...arrayReferences]);
 		expect(objectState).toEqual(originalObjectState);
 	});
 
@@ -395,11 +407,11 @@ describe("NativeJudge", () => {
 			maxQuestions: 1,
 			fetch: async (_url, init) => {
 				const body = JSON.parse(String(init?.body)) as {
-					state: Record<string, unknown>;
+					state: unknown[];
 					questions: Record<string, unknown>;
 				};
 				const question = Object.keys(body.questions)[0];
-				const reference = (body.state.__omp_judgment_images as string[])[0];
+				const reference = body.state.at(-1) as string;
 				const count = attempts.get(question) ?? 0;
 				attempts.set(question, count + 1);
 				calls.push({
@@ -490,6 +502,68 @@ describe("NativeJudge", () => {
 		expect(state).toEqual(originalState);
 	});
 
+	it("sends each question chunk only the TypeSafe assets its questions or state reference", async () => {
+		const imageAssets = { "badge-ref": IMAGE_REFS[0], "thumb-ref": IMAGE_REFS[1] };
+		const questions = {
+			badge: { type: "noul", instructions: "Is this the person in badge-ref?" },
+			thumb: {
+				type: "noul",
+				instructions: "Is the hand giving a thumbs up?",
+				criteria: { true: "Matches thumb-ref.", false: "Anything else." },
+			},
+			plain: { type: "noul", instructions: "Is anyone present?" },
+		} as const;
+		const calls: Array<{ question: string; assets: string[]; header: string | null }> = [];
+		const judge = new NativeJudge({
+			apiKey: "ts-key",
+			supportsImages: true,
+			maxQuestions: 1,
+			fetch: async (_url, init) => {
+				const body = JSON.parse(String(init?.body)) as {
+					questions: Record<string, unknown>;
+					assets?: Record<string, unknown>;
+				};
+				const question = Object.keys(body.questions)[0];
+				calls.push({
+					question,
+					assets: Object.keys(body.assets ?? {}),
+					header: new Headers(init?.headers).get("TypeSafe-Danger-Zone-Images"),
+				});
+				return Response.json({ answers: { [question]: { type: "noul", noul: 0.5 } }, usage: {} });
+			},
+		});
+
+		await judge.judge({ state: "A door camera frame.", questions }, { imageAssets });
+
+		const byQuestion = Object.fromEntries(calls.map(call => [call.question, call]));
+		expect(byQuestion.badge).toEqual({ question: "badge", assets: ["badge-ref"], header: "true" });
+		expect(byQuestion.thumb).toEqual({ question: "thumb", assets: ["thumb-ref"], header: "true" });
+		expect(byQuestion.plain).toEqual({ question: "plain", assets: [], header: null });
+	});
+
+	it("rejects a TypeSafe asset the request never references before fetching", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			apiKey: "ts-key",
+			supportsImages: true,
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+
+		const error = await judge
+			.judge(
+				{ ...request, state: { photo: "used-ref" } },
+				{ imageAssets: { "used-ref": IMAGE_REFS[0], orphan: IMAGE_REFS[1] } },
+			)
+			.catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toContain('image asset "orphan" is not referenced');
+		expect(calls).toBe(0);
+	});
+
 	it("combines referenced TypeSafe assets with ordinary image attachments", async () => {
 		const reference = "existing-photo-ref";
 		const imageAssets = { [reference]: IMAGE_REFS[0] };
@@ -532,7 +606,10 @@ describe("NativeJudge", () => {
 			mimeType: "image/png",
 		};
 		const error = await judge
-			.judge({ ...request, images: [IMAGE_REFS[0]] }, { imageAssets: { additional: oversized } })
+			.judge(
+				{ ...request, state: { photo: "additional" }, images: [IMAGE_REFS[0]] },
+				{ imageAssets: { additional: oversized } },
+			)
 			.catch((caught: unknown) => caught);
 
 		expect(error).toBeInstanceOf(ValidationError);
@@ -558,6 +635,29 @@ describe("NativeJudge", () => {
 			.catch((caught: unknown) => caught);
 
 		expect(error).toBeInstanceOf(ValidationError);
+		expect(calls).toBe(0);
+	});
+
+	it("rejects images outside Jev's per-side bounds before fetching", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			apiKey: "ts-key",
+			supportsImages: true,
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+		// A 1080p screenshot fits the 2,458,624 px total but not the 1568 px side; 250x400 clears 78,400 px but not 280 px.
+		const cases: Array<[ImageContent, RegExp]> = [
+			[pngHeader(1920, 1080), /up to 1568 pixels per side; images\[0\] is 1920x1080/],
+			[pngHeader(250, 400), /at least 280 pixels per side; images\[0\] is 250x400/],
+		];
+		for (const [image, message] of cases) {
+			const error = await judge.judge({ ...request, images: [image] }).catch((caught: unknown) => caught);
+			expect(error).toBeInstanceOf(ValidationError);
+			expect(String(error)).toMatch(message);
+		}
 		expect(calls).toBe(0);
 	});
 
@@ -683,8 +783,8 @@ describe("NativeJudge", () => {
 	});
 
 	it("preserves OpenRouter object roots and appends validated image data URLs to state", async () => {
-		const imageBytes = await fs.readFile(path.join(import.meta.dir, "data", "red-circle.png"));
-		const imageData = imageBytes.toString("base64");
+		const imageBytes = Buffer.from(JEV_PNG, "base64");
+		const imageData = JEV_PNG;
 		const details = ["auto", "low", "high", "original"] as const;
 		const images = details.map(detail => ({
 			type: "image" as const,
@@ -1391,21 +1491,13 @@ describe("NativeJudge Workers AI dialect", () => {
 			data: Buffer.alloc(bytes).toString("base64"),
 			mimeType: "image/png",
 		});
-		// A PNG header declaring 5000x4000 = 20 MP, over the 16 MP cap.
-		const header = Buffer.alloc(33);
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header, 0);
-		header.writeUInt32BE(13, 8);
-		header.write("IHDR", 12);
-		header.writeUInt32BE(5000, 16);
-		header.writeUInt32BE(4000, 20);
-		header[24] = 8;
-		header[25] = 6;
 		const cases: Array<[readonly ImageContent[], RegExp]> = [
 			[Array.from({ length: 5 }, () => IMAGE_REFS[0]), /at most 4 images, got 5/],
 			[[{ type: "image", data: "R0lGODlh", mimeType: "image/gif" }], /does not accept image\/gif/],
 			[[png(4 * 1024 * 1024 + 1)], /up to 4194304 bytes; images\[0\] is 4194305 bytes/],
 			[[png(3 * 1024 * 1024), png(3 * 1024 * 1024), png(3 * 1024 * 1024)], /at most 8388608 image bytes/],
-			[[{ type: "image", data: header.toString("base64"), mimeType: "image/png" }], /5000x4000/],
+			// 5000x4000 = 20 MP, over the 16 MP cap.
+			[[pngHeader(5000, 4000)], /5000x4000/],
 		];
 		for (const [images, message] of cases) {
 			const error = await judge.judge({ ...request, images }).catch((caught: unknown) => caught);

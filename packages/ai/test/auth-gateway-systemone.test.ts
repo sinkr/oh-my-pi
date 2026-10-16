@@ -23,6 +23,9 @@ const UPSTREAM_ANSWER = {
 };
 
 const PNG_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+/** 320x320 grayscale PNG: inside Jev's 280–1568 px per-side bounds, unlike the 1x1 `PNG_DATA`. */
+const JEV_PNG =
+	"iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAAAAADo+/p2AAAAeklEQVR42u3BgQAAAADDoPlTH+ECVQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMA3kU8AAamZiz8AAAAASUVORK5CYII=";
 
 const OPENAI_ANSWER = {
 	model: "gpt-6-luna",
@@ -195,7 +198,7 @@ describe("auth-gateway POST /v1/systemone", () => {
 		};
 		const request = { state, questions } as unknown as JudgmentRequest;
 		const imageAssets: Record<string, ImageContent> = {
-			[reference]: { type: "image", data: PNG_DATA, mimeType: "image/png" },
+			[reference]: { type: "image", data: JEV_PNG, mimeType: "image/png" },
 		};
 		let gatewayResponse: CapturedGatewayResponse | undefined;
 		let clientHeaders: Headers | undefined;
@@ -246,11 +249,9 @@ describe("auth-gateway POST /v1/systemone", () => {
 		expect(upstreamBody.state).toEqual(state);
 		expect(upstreamBody.questions).toEqual(questions);
 		expect(upstreamBody.assets).toEqual({
-			[reference]: { type: "image", format: "png", data_base64: PNG_DATA },
+			[reference]: { type: "image", format: "png", data_base64: JEV_PNG },
 		});
-		expect(Buffer.from(upstreamBody.assets[reference].data_base64, "base64")).toEqual(
-			Buffer.from(PNG_DATA, "base64"),
-		);
+		expect(Buffer.from(upstreamBody.assets[reference].data_base64, "base64")).toEqual(Buffer.from(JEV_PNG, "base64"));
 	});
 
 	it("rejects malformed inline assets before credential lookup", async () => {
@@ -275,6 +276,15 @@ describe("auth-gateway POST /v1/systemone", () => {
 			assets: [{ format: "png", data_base64: PNG_DATA }],
 		});
 		expect(invalidMap.status).toBe(422);
+		const unreferenced = await post(harness.url, "/v1/systemone", {
+			model: "typesafe/jev-latest",
+			...REQUEST,
+			assets: { attachment: { format: "png", data_base64: JEV_PNG } },
+		});
+		expect(unreferenced.status).toBe(422);
+		expect(await unreferenced.json()).toMatchObject({
+			error: { message: expect.stringContaining('image asset "attachment" is not referenced') },
+		});
 		expect(credentialLookup).not.toHaveBeenCalled();
 		expect(harness.upstream).toHaveLength(0);
 	});
@@ -286,7 +296,8 @@ describe("auth-gateway POST /v1/systemone", () => {
 		const oversized = Buffer.alloc(16 * 1024 * 1024 + 1).toString("base64");
 		const response = await post(harness.url, "/v1/systemone", {
 			model: "typesafe/jev-latest",
-			...REQUEST,
+			state: { evidence: "attachment" },
+			questions: REQUEST.questions,
 			assets: { attachment: { format: "png", data_base64: oversized } },
 		});
 
@@ -321,13 +332,13 @@ describe("auth-gateway POST /v1/systemone", () => {
 		const questions = REQUEST.questions;
 		const imagePart = {
 			type: "image_url",
-			image_url: { url: `data:image/png;base64,${PNG_DATA}` },
+			image_url: { url: `data:image/png;base64,${JEV_PNG}` },
 		};
 		const response = await post(harness.url, "/v1/systemone", {
 			model: OPENROUTER_JEV.id,
 			state,
 			questions,
-			images: [{ type: "image", data: PNG_DATA, mimeType: "image/png" }],
+			images: [{ type: "image", data: JEV_PNG, mimeType: "image/png" }],
 		});
 
 		expect(response.status).toBe(200);
@@ -352,7 +363,7 @@ describe("auth-gateway POST /v1/systemone", () => {
 		expect(upstreamBody.state.__omp_judgment_images_1).toEqual(state.__omp_judgment_images_1);
 		const sentImages = upstreamBody.state.__omp_judgment_images_2 as (typeof imagePart)[];
 		expect(Buffer.from(sentImages[0].image_url.url.slice("data:image/png;base64,".length), "base64")).toEqual(
-			Buffer.from(PNG_DATA, "base64"),
+			Buffer.from(JEV_PNG, "base64"),
 		);
 		expect(state).toEqual(originalState);
 	});

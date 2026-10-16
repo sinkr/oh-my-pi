@@ -1,8 +1,8 @@
 /**
- * TypeSafe and OpenRouter use the `{ model, state, questions }` body. TypeSafe
- * adds image assets and stores their references in state, while OpenRouter
- * places image data URL parts in state without replacing object roots. Cloudflare
- * optionally accepts image data URLs in its envelope.
+ * TypeSafe and OpenRouter use the `{ model, state, questions }` body. Images
+ * join `state` without replacing it (see {@link stateWithImages}): TypeSafe as
+ * references to a top-level `assets` map, OpenRouter as `image_url` data URL
+ * parts. Cloudflare optionally accepts image data URLs in its envelope.
  *
  * - `typesafe`: `POST {baseUrl}/v1/systemone` — TypeSafe and every System One
  *   server (OpenJEV, Kev, self-hosted Clef, OpenCode Zen, Command Code).
@@ -17,11 +17,17 @@
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
-import { embeddedImageDataUrl } from "../images/shared";
 import * as AIError from "../error";
+import { embeddedImageDataUrl } from "../images/shared";
 import type { ImageContent } from "../types";
 import { type JsonValue, type JudgmentRequest, tokenUsage } from "./types";
-import { JEV_IMAGE_INPUT, type DecodedJudgment, finiteNumber, type JudgmentWire } from "./wire";
+import {
+	type DecodedJudgment,
+	finiteNumber,
+	JEV_IMAGE_INPUT,
+	type JudgmentImageAssets,
+	type JudgmentWire,
+} from "./wire";
 
 function decodeSystemOne(payload: unknown): DecodedJudgment | undefined {
 	if (!isRecord(payload) || !isRecord(payload.answers)) return undefined;
@@ -34,16 +40,46 @@ function decodeSystemOne(payload: unknown): DecodedJudgment | undefined {
 	};
 }
 
-function stateWithImageReferences(
-	state: JudgmentRequest["state"],
-	references: readonly JsonValue[],
-): JudgmentRequest["state"] {
-	if (!isRecord(state)) return { __omp_state: state, __omp_judgment_images: references };
-
+/**
+ * `state` with `items` added and every original value kept: arrays gain them at the end, objects
+ * under the first free `__omp_judgment_images[_N]` key, and a string root becomes `[state, ...items]`.
+ */
+function stateWithImages(state: JudgmentRequest["state"], items: readonly JsonValue[]): JudgmentRequest["state"] {
+	if (Array.isArray(state)) return [...state, ...items];
+	if (!isRecord(state)) return [state, ...items];
 	const baseKey = "__omp_judgment_images";
 	let key = baseKey;
 	for (let suffix = 1; Object.hasOwn(state, key); suffix++) key = `${baseKey}_${suffix}`;
-	return { ...state, [key]: references };
+	return { ...state, [key]: items };
+}
+
+function* jsonStrings(value: unknown): Generator<string> {
+	if (typeof value === "string") yield value;
+	else if (Array.isArray(value)) for (const item of value) yield* jsonStrings(item);
+	else if (isRecord(value)) for (const key in value) yield* jsonStrings(value[key]);
+}
+
+/**
+ * The subset of `assets` that `request` references. TypeSafe substitutes a reference wherever it
+ * occurs as text in a string of `state`, a question's `instructions`, or its `criteria` (never in
+ * object keys) and rejects a request carrying an unreferenced asset.
+ */
+export function referencedImageAssets(request: JudgmentRequest, assets: JudgmentImageAssets): JudgmentImageAssets {
+	const pending = new Set(Object.keys(assets));
+	const visit = (value: unknown): void => {
+		for (const text of jsonStrings(value)) {
+			if (pending.size === 0) return;
+			for (const reference of pending) if (text.includes(reference)) pending.delete(reference);
+		}
+	};
+	visit(request.state);
+	for (const id in request.questions) {
+		const question = request.questions[id];
+		visit(question.instructions);
+		visit(question.criteria);
+	}
+	// `fromEntries` defines own properties, so a `__proto__` reference stays an ordinary key.
+	return Object.fromEntries(Object.entries(assets).filter(([reference]) => !pending.has(reference)));
 }
 
 interface SystemOneImageAsset {
@@ -76,10 +112,7 @@ export const typesafeWire: JudgmentWire = {
 	images: JEV_IMAGE_INPUT,
 	supportsImageAssets: true,
 	imagesRequireOptIn: true,
-	requestHeaders: (request, imageAssets) =>
-		(request.images?.length ?? 0) > 0 || Object.keys(imageAssets ?? {}).length > 0
-			? { "TypeSafe-Danger-Zone-Images": "true" }
-			: undefined,
+	imageHeaders: { "TypeSafe-Danger-Zone-Images": "true" },
 	encode(request, model, imageAssets) {
 		const suppliedAssets = Object.entries(imageAssets ?? {});
 		const images = request.images ?? [];
@@ -99,7 +132,7 @@ export const typesafeWire: JudgmentWire = {
 		}
 
 		return {
-			state: references.length ? stateWithImageReferences(request.state, references) : request.state,
+			state: references.length ? stateWithImages(request.state, references) : request.state,
 			model,
 			questions: request.questions,
 			assets,
@@ -120,15 +153,8 @@ export const openrouterDecisionsWire: JudgmentWire = {
 				...(image.detail !== undefined ? { detail: image.detail === "original" ? "auto" : image.detail } : {}),
 			},
 		}));
-		const state = request.state;
 		return {
-			state: imageParts.length
-				? Array.isArray(state)
-					? [...state, ...imageParts]
-					: isRecord(state)
-						? stateWithImageReferences(state, imageParts)
-						: [state, ...imageParts]
-				: state,
+			state: imageParts.length ? stateWithImages(request.state, imageParts) : request.state,
 			model,
 			questions: request.questions,
 		};
