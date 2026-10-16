@@ -42,7 +42,7 @@ fn require_capture_permission() -> CoreResult<()> {
 	if capture_permission() {
 		Ok(())
 	} else {
-		Err(permission::denied("Screen Recording"))
+		Err(permission::denied(permission::screen_recording_pane()))
 	}
 }
 

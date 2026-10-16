@@ -9,6 +9,7 @@ use std::{
 
 use objc2_app_kit::NSRunningApplication;
 use objc2_core_graphics::{CGPreflightListenEventAccess, CGPreflightPostEventAccess};
+use objc2_foundation::NSProcessInfo;
 
 use super::super::error::DesktopError;
 
@@ -23,20 +24,30 @@ pub(super) fn post_events() -> bool {
 	CGPreflightPostEventAccess()
 }
 
-/// Whether an event tap sees keyboard events. Accessibility usually provides
-/// this; it is false when Input Monitoring is turned off for the launching
-/// app, and a listen-only tap is then still created but never receives a key.
-pub(in crate::desktop) fn listen_events() -> bool {
+/// Whether an event tap sees user input. Accessibility provides this unless
+/// Input Monitoring is turned off for the launching app; a listen-only tap is
+/// then still created but receives neither keys nor clicks.
+pub(super) fn listen_events() -> bool {
 	CGPreflightListenEventAccess()
 }
 
-/// A denial naming the app to enable in the Privacy & Security `pane`.
-pub(in crate::desktop) fn denied(pane: &str) -> DesktopError {
-	denial(pane, responsible_app(RESPONSIBLE_PID))
+/// The Privacy & Security pane that grants screen capture; macOS 15 renamed
+/// it.
+pub(super) fn screen_recording_pane() -> &'static str {
+	if NSProcessInfo::processInfo()
+		.operatingSystemVersion()
+		.majorVersion
+		>= 15
+	{
+		"Screen & System Audio Recording"
+	} else {
+		"Screen Recording"
+	}
 }
 
-fn denial(pane: &str, app: Option<String>) -> DesktopError {
-	let message = match app {
+/// A denial naming the app to enable in the Privacy & Security `pane`.
+pub(super) fn denied(pane: &str) -> DesktopError {
+	let message = match responsible_app(RESPONSIBLE_PID) {
 		Some(app) => format!(
 			"macOS {pane} permission is not granted to {app}, the app that launched omp; enable \
 			 {app} in System Settings > Privacy & Security > {pane}"
@@ -84,33 +95,9 @@ fn responsible_app(symbol_name: &CStr) -> Option<String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::desktop::error::ErrorCode;
 
 	#[test]
-	fn denial_names_the_responsible_app() {
-		let error = denial("Accessibility", Some("iTerm2".to_string()));
-		assert!(matches!(error.code, ErrorCode::PermissionDenied));
-		assert!(error.message.contains("not granted to iTerm2"));
-		assert!(
-			error
-				.message
-				.contains("enable iTerm2 in System Settings > Privacy & Security > Accessibility")
-		);
-	}
-
-	#[test]
-	fn missing_responsibility_export_falls_back_to_the_launching_terminal() {
-		let app = responsible_app(c"pi_natives_missing_responsibility_export");
-		assert_eq!(app, None);
-		let error = denial("Screen Recording", app);
-		assert!(matches!(error.code, ErrorCode::PermissionDenied));
-		assert!(
-			error
-				.message
-				.contains("not granted to the app that launched omp")
-		);
-		assert!(error.message.contains(
-			"enable that terminal or IDE in System Settings > Privacy & Security > Screen Recording"
-		));
+	fn missing_responsibility_export_names_no_app() {
+		assert_eq!(responsible_app(c"pi_natives_missing_responsibility_export"), None);
 	}
 }

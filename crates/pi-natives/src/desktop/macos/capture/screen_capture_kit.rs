@@ -322,7 +322,7 @@ fn frame_bytes(width: u32, height: u32) -> CoreResult<usize> {
 pub(super) fn capture(requests: Vec<CaptureRequest>) -> CoreResult<Vec<Captured>> {
 	control::check()?;
 	if !super::capture_permission() {
-		return Err(permission::denied("Screen Recording"));
+		return Err(permission::denied(permission::screen_recording_pane()));
 	}
 	if !*MODERN_CAPTURE {
 		return requests
