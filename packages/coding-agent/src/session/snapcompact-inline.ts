@@ -119,7 +119,7 @@ const COUNT_BRACKET = "\\[(?:0|(?:[»·]\\d+)+)\\]";
  */
 const rowIndent = (prefix: string) =>
 	new RegExp(`(^|\\n)(${prefix})?(?:([ \\t]+)|(?=(?:${READ_ROW_PREFIX})?${COUNT_BRACKET}))`, "g");
-/** Numbered rows: `N:`, `N|`, or a collapsed block's `N-M:`. */
+/** Numbered rows: `N:`, `N|`, or a collapsed block's `N-M:` / `N-M|`. */
 const READ_ROW_INDENT = rowIndent(READ_ROW_PREFIX);
 /** Unnumbered reads (`:raw`, line numbers off): a leading `12:` is file content, not a prefix. */
 const READ_LINE_INDENT = rowIndent("");

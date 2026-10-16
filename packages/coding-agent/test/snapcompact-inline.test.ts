@@ -292,8 +292,10 @@ describe("SnapcompactInlineTransformer", () => {
 		// Line-number mode (`N|`, hashlines off) has no header to lift the notice with.
 		const notice = "[Path 'a.ts' not found; resolved to 'src/a.ts' via suffix match]";
 		const rows = [notice];
-		for (let line = 1; rows.join("\n").length < DEFAULT_CAPACITY * 2; line++)
-			rows.push(`${line}|\t\t${denseText(2)}`);
+		let line = 1;
+		for (; rows.join("\n").length < DEFAULT_CAPACITY * 2; line++) rows.push(`${line}|\t\t${denseText(2)}`);
+		// A structural summary's collapsed block uses `N-M|` in this mode.
+		rows.push(`${line}-${line + 30}|\tcollapsed() { … }`);
 		const context: Context = {
 			systemPrompt: ["system"],
 			messages: [userMessage("go"), toolResult("read-numbered", rows.join("\n"), "read")],
@@ -305,7 +307,8 @@ describe("SnapcompactInlineTransformer", () => {
 			).transform(context, makeModel({ id: "claude-opus-5-5" }));
 			const rendered = spy.mock.calls[0][0];
 			expect(rendered.startsWith(`${notice}\n1|[»2]w`)).toBe(true);
-			expect(rendered).not.toMatch(/\n\d+\|\t/);
+			expect(rendered).toContain(`\n${line}-${line + 30}|[»1]collapsed() { … }`);
+			expect(rendered).not.toMatch(/\n[\d-]+\|\t/);
 		} finally {
 			spy.mockRestore();
 		}
