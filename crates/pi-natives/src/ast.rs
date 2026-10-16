@@ -519,8 +519,30 @@ fn compile_pattern(
 /// issue instead of letting an empty result read as absence.
 fn error_node_warning(pattern: &str, compiled: &Pattern, language: SupportLang) -> Option<String> {
 	compiled.has_error().then(|| {
+		// Keep the pattern diagnostic on one bounded display line; the
+		// original pattern is still used for matching.
+		let mut preview = String::new();
+		let mut width = 0;
+		for ch in pattern.chars() {
+			let escaped = ch.is_control() || (ch.is_whitespace() && ch != ' ');
+			let char_width = if escaped {
+				ch.escape_unicode().count()
+			} else {
+				xutf::width_char(ch).max(1)
+			};
+			if width + char_width > 48 {
+				preview.push('…');
+				break;
+			}
+			if escaped {
+				preview.extend(ch.escape_unicode());
+			} else {
+				preview.push(ch);
+			}
+			width += char_width;
+		}
 		format!(
-			"{pattern}: pattern is not valid {} on its own (contains an ERROR node); matches may be \
+			"{preview}: pattern is not valid {} on its own (contains an ERROR node); matches may be \
 			 missing or unexpected",
 			language.canonical_name()
 		)
@@ -1129,6 +1151,9 @@ fn ast_edit_blocking(
 			compile_errors_by_lang,
 		});
 	}
+	// Compile diagnostics precede file diagnostics; language discovery is
+	// hash-ordered, so sort this prefix before any file is processed.
+	parse_errors.sort();
 	if compiled_rules.is_empty() {
 		return Ok(AstReplaceResult {
 			file_changes: vec![],
@@ -1408,6 +1433,24 @@ mod tests {
 		assert!(warnings[0].contains("ERROR node"), "{warnings:?}");
 	}
 
+	#[test]
+	fn error_node_warning_bounds_and_escapes_untrusted_pattern() {
+		let language = SupportLang::TypeScript;
+		let compiled = compile_pattern("123+", None, &MatchStrictness::Smart, language)
+			.expect("ERROR-rooted pattern compiles");
+		let warning =
+			error_node_warning(&format!("123+\t\n{}", "x".repeat(100)), &compiled, language)
+				.expect("ERROR-rooted pattern warns");
+		assert!(warning.starts_with("123+\\u{9}\\u{a}"));
+		assert!(warning.contains("…: pattern is not valid typescript"));
+		assert!(!warning.contains('\t'));
+		assert!(!warning.contains('\n'));
+		assert!(!warning.contains(&"x".repeat(100)));
+		let combining = error_node_warning(&"\u{0301}".repeat(100), &compiled, language)
+			.expect("ERROR-rooted pattern warns");
+		assert!(combining.starts_with(&format!("{}…: ", "\u{0301}".repeat(48))));
+	}
+
 	fn edit_python_tree(
 		tree: &TempTree,
 		dry_run: bool,
@@ -1656,6 +1699,32 @@ mod tests {
 			"fn main() {}\n",
 			"the Rust file must be untouched",
 		);
+	}
+
+	#[test]
+	fn ast_edit_orders_mixed_language_pattern_warnings() {
+		let tree = make_temp_tree();
+		fs::write(tree.root.join("a.js"), "const x = 1;\n").expect("JavaScript fixture");
+		fs::write(tree.root.join("b.ts"), "const y = 2;\n").expect("TypeScript fixture");
+		let result = ast_edit_blocking(
+			task::CancelToken::default(),
+			&BlockingFs::native(),
+			Some(HashMap::from([("123+".to_string(), "ignored".to_string())])),
+			None,
+			Some(tree.root.to_string_lossy().into_owned()),
+			None,
+			None,
+			None,
+			Some(true),
+			None,
+			None,
+			None,
+		)
+		.expect("mixed-language tree should report parse issues");
+		let errors = result.parse_errors.expect("pattern should warn");
+		assert_eq!(errors.len(), 2, "expected both languages to warn: {errors:?}");
+		assert!(errors[0].contains("javascript"), "{errors:?}");
+		assert!(errors[1].contains("typescript"), "{errors:?}");
 	}
 
 	#[test]
