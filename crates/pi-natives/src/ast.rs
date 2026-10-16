@@ -513,6 +513,20 @@ fn compile_pattern(
 		.map_err(|err| Error::from_reason(err.to_string()))
 }
 
+/// The ast-grep CLI's "Pattern contains an ERROR node" warning for a pattern
+/// that compiled although its own parse tree is rooted at an ERROR node. Such
+/// a pattern matches loosely or not at all, so callers report it as a parse
+/// issue instead of letting an empty result read as absence.
+fn error_node_warning(pattern: &str, compiled: &Pattern, language: SupportLang) -> Option<String> {
+	compiled.has_error().then(|| {
+		format!(
+			"{pattern}: pattern is not valid {} on its own (contains an ERROR node); matches may be \
+			 missing or unexpected",
+			language.canonical_name()
+		)
+	})
+}
+
 fn apply_edits<'e>(
 	content: &str,
 	edits: impl IntoIterator<Item = &'e Edit<String>>,
@@ -653,14 +667,19 @@ fn resolve_candidates_for_find(
 	Ok(ResolvedCandidates { candidates: resolved, languages, missing_grammars })
 }
 
+/// Compile every pattern for every discovered language. Per-language compile
+/// failures stay on the pattern (reported per skipped file); ERROR-node
+/// warnings are appended to `warnings` once per pattern and language.
 fn compile_find_patterns(
 	patterns: &[String],
 	languages: &HashMap<String, SupportLang>,
 	selector: Option<&str>,
 	strictness: &MatchStrictness,
+	warnings: &mut Vec<String>,
 	ct: &task::CancelToken,
 ) -> Result<Vec<CompiledFindPattern>> {
 	let mut compiled = Vec::with_capacity(patterns.len());
+	let first_warning = warnings.len();
 
 	for pattern in patterns {
 		ct.heartbeat()?;
@@ -671,6 +690,7 @@ fn compile_find_patterns(
 			ct.heartbeat()?;
 			match compile_pattern(pattern, selector, strictness, language) {
 				Ok(compiled_pattern) => {
+					warnings.extend(error_node_warning(pattern, &compiled_pattern, language));
 					compiled_by_lang.insert(lang_key.clone(), compiled_pattern);
 				},
 				Err(err) => {
@@ -685,7 +705,8 @@ fn compile_find_patterns(
 			compile_errors_by_lang,
 		});
 	}
-
+	// `languages` iterates in hash order; keep the reported warnings stable.
+	warnings[first_warning..].sort();
 	Ok(compiled)
 }
 /// Search source files with ast-grep patterns; returns a promise resolved on a
@@ -729,13 +750,19 @@ pub fn ast_grep<'env>(
 		let resolved = resolve_candidates_for_find(candidates, lang_str, &ct)?;
 		let missing_grammars = resolved.missing_grammars();
 		let ResolvedCandidates { candidates: resolved_candidates, languages, .. } = resolved;
-		let compiled_patterns =
-			compile_find_patterns(&patterns, &languages, selector.as_deref(), &strictness, &ct)?;
+		let mut parse_errors = Vec::new();
+		let compiled_patterns = compile_find_patterns(
+			&patterns,
+			&languages,
+			selector.as_deref(),
+			&strictness,
+			&mut parse_errors,
+			&ct,
+		)?;
 		let files_searched = to_u32(resolved_candidates.len());
 
 		let retained_capacity = retained_find_capacity(normalized_offset, normalized_limit);
 		let mut retained_matches = BinaryHeap::new();
-		let mut parse_errors = Vec::new();
 		let mut total_matches = 0u32;
 		let mut match_sequence = 0u64;
 		let mut files_with_matches = BTreeSet::new();
@@ -898,7 +925,10 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 		for pattern in &patterns {
 			ct.heartbeat()?;
 			match compile_pattern(pattern, selector.as_deref(), &strictness, language) {
-				Ok(compiled) => compiled_patterns.push(compiled),
+				Ok(compiled) => {
+					parse_errors.extend(error_node_warning(pattern, &compiled, language));
+					compiled_patterns.push(compiled);
+				},
 				Err(err) => parse_errors.push(format!("{pattern}: {err}")),
 			}
 		}
@@ -1063,6 +1093,7 @@ fn ast_edit_blocking(
 			ct.heartbeat()?;
 			match compile_pattern(&pattern, selector.as_deref(), &strictness, language) {
 				Ok(compiled) => {
+					parse_errors.extend(error_node_warning(&pattern, &compiled, language));
 					compiled_by_lang.insert(lang_key.clone(), compiled);
 				},
 				Err(err) => {
@@ -1349,6 +1380,32 @@ mod tests {
 		let ast = SupportLang::TypeScript.ast_grep("export function broken( { return 1; }");
 		assert!(ast.root().dfs().any(|node| node.is_error()));
 		assert!(has_parse_error(&ast));
+	}
+
+	/// Regression for #15950: a pattern that only parses as an ERROR node
+	/// compiles, so it must surface a warning instead of a silent zero-match.
+	#[test]
+	fn error_node_patterns_are_reported_valid_ones_are_not() {
+		let languages = HashMap::from([("typescript".to_string(), SupportLang::TypeScript)]);
+		let patterns = ["123+".to_string(), "foo($A)".to_string()];
+		let mut warnings = Vec::new();
+		let compiled = compile_find_patterns(
+			&patterns,
+			&languages,
+			None,
+			&MatchStrictness::Smart,
+			&mut warnings,
+			&task::CancelToken::default(),
+		)
+		.expect("both patterns compile");
+		assert!(
+			compiled
+				.iter()
+				.all(|pattern| pattern.compiled_by_lang.contains_key("typescript"))
+		);
+		assert_eq!(warnings.len(), 1, "{warnings:?}");
+		assert!(warnings[0].starts_with("123+: "), "{warnings:?}");
+		assert!(warnings[0].contains("ERROR node"), "{warnings:?}");
 	}
 
 	fn edit_python_tree(
