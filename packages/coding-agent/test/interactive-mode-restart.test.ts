@@ -122,6 +122,30 @@ describe("InteractiveMode restart", () => {
 		}
 	});
 
+	it("resumes a journal created in a flag-looking relative directory", async () => {
+		using relativeDir = TempDir.createSync("-omp-restart-");
+		await sessionManager.close();
+		sessionManager = SessionManager.create(tempDir.path(), relativeDir.path());
+		sessionManager.appendMessage({ role: "user", content: "saved request", timestamp: 1 });
+		await sessionManager.ensureOnDisk();
+		const file = sessionManager.getSessionFile();
+		if (!file) throw new Error("expected persisted journal");
+		const id = sessionManager.getSessionId();
+		const command = await restart(["--model", "anthropic/claude-sonnet-4-5", `--session-dir=${relativeDir.path()}`]);
+		const parsed = parseArgs(command.slice(command.indexOf("--model")));
+		const resumed = await createSessionManager(parsed, tempDir.path(), Settings.isolated());
+		if (!resumed) throw new Error("expected resumed journal");
+		try {
+			expect(resumed.getSessionFile()).toBe(path.resolve(file));
+			expect(resumed.getSessionId()).toBe(id);
+			expect(resumed.buildSessionContext().messages).toEqual([
+				{ role: "user", content: "saved request", timestamp: 1 },
+			]);
+		} finally {
+			await resumed.close();
+		}
+	});
+
 	it("does not resume a journal that has never materialized", async () => {
 		const file = sessionManager.getSessionFile();
 		const command = await restart(["--model", "anthropic/claude-sonnet-4-5", "initial request"]);
