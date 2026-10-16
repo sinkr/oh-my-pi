@@ -33,6 +33,11 @@ export type ComputerWorkerInbound =
 	| { type: "revoke-control"; id: string }
 	/** Agent turn `turn` ended: let the display sleep now, keeping every other piece of session state. */
 	| { type: "release-display"; turn: number }
+	/**
+	 * Turn `from` stopped for a dialog and went on as turn `turn`: the run of turn `from` still active holds the display
+	 * again, until turn `turn` ends.
+	 */
+	| { type: "resume-display"; from: number; turn: number }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 

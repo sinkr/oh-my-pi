@@ -132,6 +132,8 @@ interface ActiveRun {
 	ac: AbortController;
 	signal: AbortSignal;
 	pendingTools: Map<string, PendingTool>;
+	/** The agent turn this run holds the display for, if any. */
+	displayTurn?: number;
 }
 
 interface ComputerRunContext {
@@ -802,6 +804,11 @@ export class ComputerWorkerCore {
 				this.#releasedTurn = Math.max(this.#releasedTurn, message.turn);
 				this.#session?.releaseDisplayAwake();
 				return;
+			case "resume-display":
+				if (this.#active?.displayTurn !== message.from) return;
+				this.#active.displayTurn = message.turn;
+				this.#session?.holdDisplayUntilReleased();
+				return;
 			case "tool-reply":
 				this.#deliverToolReply(message.id, message.reply);
 				return;
@@ -895,7 +902,10 @@ export class ComputerWorkerCore {
 			const session = await this.#ensureSession(message.session);
 			throwIfAborted(signal);
 			const { displayTurn } = message.session;
-			if (displayTurn !== undefined && displayTurn > this.#releasedTurn) session.holdDisplayUntilReleased();
+			if (displayTurn !== undefined && displayTurn > this.#releasedTurn) {
+				active.displayTurn = displayTurn;
+				session.holdDisplayUntilReleased();
+			}
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);

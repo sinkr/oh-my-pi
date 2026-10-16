@@ -38,6 +38,8 @@ export interface ComputerController {
 	revokeControl?(): Promise<void>;
 	/** The owner's agent turn `turn` ended: let the display sleep now, keeping control, refs and the worker. */
 	releaseDisplay?(turn: number): void;
+	/** Turn `from` stopped for a dialog and went on as `turn`: a run of `from` still active holds the display again. */
+	resumeDisplay?(from: number, turn: number): void;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
 	close(): Promise<void>;
 }
@@ -349,6 +351,10 @@ export class ComputerSupervisor implements ComputerController {
 		this.#safeSend({ type: "release-display", turn });
 	}
 
+	resumeDisplay(from: number, turn: number): void {
+		this.#safeSend({ type: "resume-display", from, turn });
+	}
+
 	async #dispatchToolCall(message: Extract<ComputerWorkerOutbound, { type: "tool-call" }>): Promise<void> {
 		const pending = this.#pending.get(message.runId);
 		if (!pending) {
@@ -504,6 +510,19 @@ export function endComputerTurnForOwner(ownerId: string | undefined): void {
 	if (!ownerId || !state?.inFlight) return;
 	state.inFlight = false;
 	for (const controller of ownedSupervisors.get(ownerId) ?? []) controller.releaseDisplay?.(state.turn);
+}
+
+/**
+ * The turn went on after the dialog that ended it settled: later runs hold the display until the turn ends, and so
+ * does a run of the turn that is still active, such as one whose control confirmation the dialog was.
+ */
+export function resumeComputerTurnForOwner(ownerId: string | undefined): void {
+	const state = ownerId ? ownerTurns.get(ownerId) : undefined;
+	if (!ownerId || !state || state.inFlight) return;
+	const from = state.turn;
+	state.turn = from + 1;
+	state.inFlight = true;
+	for (const controller of ownedSupervisors.get(ownerId) ?? []) controller.resumeDisplay?.(from, state.turn);
 }
 
 /**

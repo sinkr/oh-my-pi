@@ -2693,6 +2693,36 @@ describe("display hold follows the agent turn", () => {
 		expect(native.displayHolds).toEqual([]);
 	});
 
+	it("holds the display again for a run whose turn goes on after a dialog", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		transport.inbound({
+			type: "run",
+			id: "confirming",
+			code: 'await desktop.control.acquire({ reason: "Edit" }); return 1;',
+			timeoutMs: 2_000,
+			session: snapshot(false, 1),
+		});
+		const confirm = await transport.waitFor(
+			message => message.type === "control-request" && message.runId === "confirming",
+		);
+		if (confirm.type !== "control-request") throw new Error("Expected the run's control confirmation");
+		expect(native.displayHolds).toEqual(["turn"]);
+		// The confirmation dialog ends turn 1; the answer resumes it as turn 2.
+		transport.inbound({ type: "release-display", turn: 1 });
+		transport.inbound({ type: "resume-display", from: 5, turn: 6 });
+		expect(native.displayHolds).toEqual(["turn", "release"]);
+		transport.inbound({ type: "resume-display", from: 1, turn: 2 });
+		expect(native.displayHolds).toEqual(["turn", "release", "turn"]);
+		transport.inbound({ type: "tool-reply", id: confirm.id, reply: { ok: true, value: true } });
+		await transport.waitFor(message => message.type === "result" && message.id === "confirming");
+
+		// With no run of that turn active, a resume holds nothing.
+		transport.inbound({ type: "resume-display", from: 2, turn: 3 });
+		expect(native.displayHolds).toEqual(["turn", "release", "turn"]);
+	});
+
 	it("numbers runs by the owner's turn and releases the owner's sessions once when it ends", async () => {
 		const owner = `computer-turn-${crypto.randomUUID()}`;
 		const snapshots: ComputerSessionSnapshot[] = [];

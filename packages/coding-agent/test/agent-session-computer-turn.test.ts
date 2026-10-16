@@ -48,6 +48,8 @@ describe("AgentSession computer display hold per turn", () => {
 
 	/** Turns whose end released the display on the session's computer controller. */
 	const releases: number[] = [];
+	/** Turns that went on after a dialog, as `from->turn`, sent so a run still active in them holds again. */
+	const resumes: string[] = [];
 	/** Per non-computer step: the turn computer runs would hold the display for, and the releases so far. */
 	const steps: Array<{ turn: number | undefined; releases: number }> = [];
 	let owner = "";
@@ -87,6 +89,7 @@ describe("AgentSession computer display hold per turn", () => {
 		asked = Promise.withResolvers<void>();
 		answered = Promise.withResolvers<string>();
 		releases.length = 0;
+		resumes.length = 0;
 		steps.length = 0;
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model claude-sonnet-4-5");
@@ -126,6 +129,9 @@ describe("AgentSession computer display hold per turn", () => {
 			},
 			releaseDisplay(turn) {
 				releases.push(turn);
+			},
+			resumeDisplay(from, turn) {
+				resumes.push(`${from}->${turn}`);
 			},
 			async close() {},
 		});
@@ -201,6 +207,7 @@ describe("AgentSession computer display hold per turn", () => {
 		answered.resolve("yes");
 		await running;
 		expect(steps).toEqual([{ turn: 2, releases: 1 }]);
+		expect(resumes).toEqual(["1->2"]);
 		expect(releases).toEqual([1, 2]);
 		expect(computerTurnInFlight(owner)).toBeUndefined();
 	});
@@ -220,6 +227,7 @@ describe("AgentSession computer display hold per turn", () => {
 		second.resolve();
 		await secondWait;
 		expect(computerTurnInFlight(owner)).toBe(2);
+		expect(resumes).toEqual(["1->2"]);
 
 		// A dialog still open when the user interrupts the turn settles with no prompt in flight.
 		const third = Promise.withResolvers<void>();
@@ -231,6 +239,41 @@ describe("AgentSession computer display hold per turn", () => {
 		await thirdWait;
 		expect(computerTurnInFlight(owner)).toBeUndefined();
 		expect(releases).toEqual([1, 2]);
+		expect(resumes).toEqual(["1->2"]);
+	});
+
+	it("begins a fresh turn, resuming no run, when a prompt starts while a dialog is already open", async () => {
+		const target = createSession([{ content: ["done"] }, { content: ["slow"], delayMs: 5_000 }]);
+		await target.prompt("first");
+		const open = Promise.withResolvers<void>();
+		const wait = target.waitForUser(() => open.promise);
+		streaming = Promise.withResolvers<void>();
+		const running = target.prompt("go").catch(() => undefined);
+		await streaming.promise;
+		expect(computerTurnInFlight(owner)).toBeUndefined();
+		open.resolve();
+		await wait;
+		// Turn 1's runs ended with turn 1: the new turn holds for its own runs only.
+		expect(computerTurnInFlight(owner)).toBe(2);
+		expect(resumes).toEqual([]);
+		await target.abort();
+		await running;
+	});
+
+	it("runs a plan proposal handler as a wait for the user", async () => {
+		const target = createSession([{ content: ["slow"], delayMs: 5_000 }]);
+		const running = target.prompt("go").catch(() => undefined);
+		await streaming.promise;
+		let during: number | undefined = -1;
+		target.setPlanProposalHandler(async () => {
+			during = computerTurnInFlight(owner);
+			return { content: [{ type: "text", text: "approved" }] };
+		});
+		await target.peekPlanProposalHandler()!("plan");
+		expect(during).toBeUndefined();
+		expect(computerTurnInFlight(owner)).toBe(2);
+		await target.abort();
+		await running;
 	});
 
 	it("marks no turn in a subagent, so its runs keep the grace period", async () => {
