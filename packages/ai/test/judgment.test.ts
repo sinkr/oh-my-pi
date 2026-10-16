@@ -448,6 +448,13 @@ describe("NativeJudge", () => {
 		expect(nativeJudgmentAcceptsImages(unlistedOpenRouter, [TINY_PNG])).toBe(true);
 	});
 
+	it("filters OpenRouter Jev candidates at the inclusive 280-pixel side boundary", () => {
+		const openrouterJev = openrouterVisionModel("typesafe/jev-1.14");
+
+		expect(nativeJudgmentAcceptsImages(openrouterJev, [pngHeader(270, 300)])).toBe(false);
+		expect(nativeJudgmentAcceptsImages(openrouterJev, [pngHeader(280, 300)])).toBe(true);
+	});
+
 	it("rejects tiny PNGs for TypeSafe and OpenRouter catalog Jev models before fetching", async () => {
 		let calls = 0;
 		const models = [

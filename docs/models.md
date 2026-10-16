@@ -169,6 +169,8 @@ Both paths accept PNG and JPEG of 280–1568 pixels per side and 78,400–2,458,
 
 See TypeSafe's [image documentation](https://docs.typesafe.ai/images) and OpenRouter's [multimodal Decisions guide](https://openrouter.ai/docs/guides/community/multimodal-decisions) for their image constraints.
 
+OpenRouter's guide lists a 256 px minimum side, but a [report of a live Jev 1.14 request](https://github.com/can1357/oh-my-pi/pull/15887#issuecomment-6218295982) says a 270×300 PNG received HTTP 400; the 280 px minimum side is intentional and remains in effect.
+
 For example, configure TypeSafe Jev as the judge and attach an image in JavaScript or Python:
 
 ```yaml
