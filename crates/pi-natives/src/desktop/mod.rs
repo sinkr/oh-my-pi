@@ -2410,16 +2410,7 @@ mod capture_tests {
 		let (tx, rx) = flume::unbounded();
 		let serving = thread::spawn({
 			let display_awake = Arc::clone(&display_awake);
-			move || {
-				let worker = Worker {
-					backend: Ok(Box::new(backend)),
-					registry: AxRegistry::default(),
-					frames: HashMap::new(),
-					capabilities: Arc::default(),
-					display_awake,
-				};
-				worker.serve(&rx, grace);
-			}
+			move || Worker { display_awake, ..unlocked_worker(backend) }.serve(&rx, grace)
 		});
 		(display_awake, tx, serving)
 	}
