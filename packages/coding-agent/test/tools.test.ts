@@ -2809,6 +2809,30 @@ function b() {
 			expect(output).toMatch(/\*2\|match line/);
 		});
 
+		it("does not report absence when a named file's late content was not searched", async () => {
+			const testFile = path.join(testDir, "manual.txt");
+			await Bun.write(
+				testFile,
+				`${"x".repeat(2 * 1024 * 1024)}\nEARLYNEEDLE\n${"x".repeat(5 * 1024 * 1024)}\nLATENEEDLE\n`,
+			);
+
+			const early = await searchTool.execute("grep-large-early", {
+				pattern: "EARLYNEEDLE|LATENEEDLE",
+				path: testFile,
+			});
+			expect(getTextOutput(early)).toContain("EARLYNEEDLE");
+			expect(getTextOutput(early)).not.toContain("LATENEEDLE");
+
+			const late = await searchTool.execute("grep-large-late", {
+				pattern: "LATENEEDLE",
+				path: `${testFile}:3-`,
+			});
+			const output = getTextOutput(late);
+			expect(output).not.toContain("No matches found");
+			expect(output).toMatch(/^No matches in searched content \(large files limited to first 4MB\)/);
+			expect(output).toContain("manual.txt");
+		});
+
 		it("flags a zero-match search as contextually useless", async () => {
 			fs.writeFileSync(path.join(testDir, "plain.txt"), "nothing interesting here\n");
 

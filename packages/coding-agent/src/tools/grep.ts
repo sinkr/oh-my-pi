@@ -842,6 +842,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					: "";
 				const { record: recordFile, list: fileList } = createFileRecorder();
 				const fileMatchCounts = new Map<string, number>();
+				const limitMb = Math.floor(NATIVE_GREP_MAX_FILE_BYTES / (1024 * 1024));
 				// Detect explicit file targets that exceed the native grep size cap.
 				// Native searches only their first NATIVE_GREP_MAX_FILE_BYTES; without
 				// this note the caller might miss that matches beyond the window
@@ -868,7 +869,6 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						}),
 					);
 					if (oversized.length === 0) return undefined;
-					const limitMb = Math.floor(NATIVE_GREP_MAX_FILE_BYTES / (1024 * 1024));
 					return `Searched only the first ${limitMb}MB of large files (matches past the ${limitMb}MB window are not shown; use \`read\` for the rest): ${oversized.join(", ")}`;
 				})();
 				// Directory/multi-target scopes: native counts files it could not map
@@ -905,7 +905,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const skipPastEnd = canPaginate && normalizedSkip > 0 && totalFiles > 0 && skipFiles >= totalFiles;
 					const noMatchText = skipPastEnd
 						? `No more results (${totalFilesLabel} files total; skip=${normalizedSkip} is past the end)`
-						: "No matches found";
+						: oversizedNote
+							? `No matches in searched content (large files limited to first ${limitMb}MB)`
+							: "No matches found";
 					const text = warningNote ? `${noMatchText}\n${warningNote}` : noMatchText;
 					// Zero matches is useless regardless of warnings: by the time
 					// compaction runs, the follow-up call has already corrected course.
