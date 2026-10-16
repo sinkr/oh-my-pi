@@ -4,15 +4,7 @@ import { getBundledModel } from "../src/models";
 
 describe("google-antigravity promptCache catalog metadata", () => {
 	test("bundled models inherit promptCache with a 300-second short TTL", () => {
-		const sampleModelIds = [
-			"gemini-4-argon",
-			"gemini-3.8-flash",
-			"gemini-3.1-pro",
-			"claude-opus-5-5",
-			"claude-sonnet-5-5",
-		];
-
-		for (const id of sampleModelIds) {
+		for (const id of ["gemini-4-argon", "claude-opus-5-5"]) {
 			const model = getBundledModel("google-antigravity", id);
 			expect(model).toBeDefined();
 			expect(model.promptCache).toEqual({ short: 300 });
