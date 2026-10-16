@@ -1,28 +1,27 @@
 /**
- * Per-prompt prewalk-suitability classifier for `prewalk.auto`.
+ * Per-task prewalk-suitability classifier for `prewalk.auto`.
  *
- * Asks the native System One judge one {@link ChoiceQuestion} about where a
- * request's expensive reasoning belongs: up front (`prewalk`: the strong model
+ * Asks the native System One judge one choice question about where a request's
+ * expensive reasoning belongs: up front (`prewalk`: the active model
  * investigates and plans, the cheap target finishes), throughout (`primary`:
- * stay on the strong model), or nowhere (`direct`: nothing worth handing off
+ * stay on the active model), or nowhere (`direct`: nothing worth handing off
  * from). This is not a difficulty classifier (see `auto-thinking/classifier.ts`)
  * and it trusts only the calibrated native probabilities, so a prompted chat or
  * on-device model never stands in for the native judge.
  *
- * Resolves `undefined` when the `judge` role has no native backend. Throws on
- * every other failure (no key, malformed answer, abort, timeout); the caller
- * treats both outcomes as "do not arm".
+ * Resolves `undefined` when there is nothing to judge: no native backend, or a
+ * low-signal request ("ok", "thanks"). Throws on every other failure (no key,
+ * malformed answer, abort, timeout); the caller treats both as "do not arm".
  */
 import type { AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import type { ChoiceAnswer, ChoiceQuestion } from "@oh-my-pi/pi-ai";
+import { type ChoiceAnswer, judgeQuestions } from "@oh-my-pi/pi-ai";
 import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { assistantText } from "@oh-my-pi/pi-tui/overlays/copy-targets";
-import { prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { hasNativeJudge, type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
-import routeQuestionInstructions from "../prompts/system/auto-prewalk-route-question.md" with { type: "text" };
+import questionFile from "../prompts/judge/auto-prewalk.json" with { type: "json" };
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 import { isLowSignalTitleInput } from "../tiny/text";
 
@@ -36,20 +35,7 @@ export const AUTO_PREWALK_TIMEOUT_MS = 4000;
 
 const ROUTES: readonly PrewalkRoute[] = ["prewalk", "primary", "direct"];
 
-const ROUTE_CRITERIA: Record<PrewalkRoute, string> = {
-	prewalk:
-		"Both hold: starting correctly needs real up-front investigation, repository understanding, diagnosis, design, or planning; and once that fixes the approach, the implementation and verification left are bounded enough for a faster model. Tracing an unfamiliar subsystem before a localized change; reading several interacting files before implementing a clear design; diagnosing a bug down to a concrete fix whose implementation is straightforward; a migration or refactor whose hard part is finding the right transformation and everything it touches.",
-	primary:
-		"Strong reasoning stays needed while implementing, debugging, or validating, so handing off at the first edit would be premature. Unresolved races, concurrency, or invariant problems; subtle state-machine or lifecycle changes; a bug whose cause is likely still uncertain after a first look; high-risk changes that need iterative reasoning while editing and testing; difficult algorithms; work where the first edit is only the start of the hard thinking.",
-	direct:
-		"No up-front phase worth handing off from: explanations and read-only questions; trivial or mechanical edits; fully specified changes with an obvious implementation; tiny localized fixes; requests that involve no implementation.",
-};
-
-const ROUTE_QUESTION: ChoiceQuestion<PrewalkRoute> = {
-	type: "choice",
-	instructions: prompt.render(routeQuestionInstructions),
-	criteria: ROUTE_CRITERIA,
-};
+const QUESTIONS = judgeQuestions(questionFile);
 
 /** The turn to classify. */
 export interface AutoPrewalkInput {
@@ -132,14 +118,15 @@ function toDecision({ choice, probabilities, confidence }: ChoiceAnswer<PrewalkR
 
 /**
  * Classify where `input.request`'s reasoning belongs.
- * @returns `undefined` when the `judge` role does not resolve first to a native System One backend.
+ * @returns `undefined` when the request is low-signal or the `judge` role does not resolve first to a native
+ * System One backend.
  * @throws when the judge cannot produce a usable answer within {@link AUTO_PREWALK_TIMEOUT_MS}.
  */
 export async function classifyAutoPrewalk(
 	input: AutoPrewalkInput,
 	deps: ClassifyAutoPrewalkDeps,
 ): Promise<AutoPrewalkDecision | undefined> {
-	if (!hasNativeJudge(deps.settings, deps.registry)) return undefined;
+	if (isLowSignalTitleInput(input.request) || !hasNativeJudge(deps.settings, deps.registry)) return undefined;
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,
@@ -154,7 +141,7 @@ export async function classifyAutoPrewalk(
 	// The cached execution chain can lag the fresh gate after credentials or discovery change.
 	const { answers } = await judge.withCandidate((candidate, kind) => {
 		if (kind !== "native") throw new Error("auto-prewalk: the judge role has no native backend");
-		return candidate.judge({ state: buildState(input), questions: { route: ROUTE_QUESTION } }, options);
+		return candidate.judge({ state: buildState(input), questions: QUESTIONS }, options);
 	}, options);
 	return toDecision(answers.route);
 }

@@ -43,8 +43,6 @@ import {
 	cfgDefaultThinkingLevel,
 	cfgInlineToolDescriptors,
 	cfgRetryModelFallback,
-	cfgPrewalkAutoSource,
-	cfgPrewalkAutoTarget,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
 	cfgToolsXdev,
@@ -1396,21 +1394,6 @@ describe("Settings", () => {
 			expect(cfgInlineToolDescriptors.get(Settings.isolated({ inlineToolDescriptors: true }))).toBe("on");
 			expect(cfgInlineToolDescriptors.get(Settings.isolated({ inlineToolDescriptors: false }))).toBe("off");
 			expect(cfgInlineToolDescriptors.get(Settings.isolated())).toBe("auto");
-		});
-
-		it("loads and persists nested prewalk auto selectors, defaulting to @slow and @smol", async () => {
-			const defaults = Settings.isolated();
-			expect(cfgPrewalkAutoSource.get(defaults)).toBe("@slow");
-			expect(cfgPrewalkAutoTarget.get(defaults)).toBe("@smol");
-
-			await writeSettings({ prewalk: { autoSource: "openai/gpt-5", autoTarget: "@fast" } });
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(cfgPrewalkAutoSource.get(settings)).toBe("openai/gpt-5");
-			expect(cfgPrewalkAutoTarget.get(settings)).toBe("@fast");
-
-			cfgPrewalkAutoTarget.set(settings, "@smol:low");
-			await settings.flush();
-			expect(await readSettings()).toEqual({ prewalk: { autoSource: "openai/gpt-5", autoTarget: "@smol:low" } });
 		});
 	});
 

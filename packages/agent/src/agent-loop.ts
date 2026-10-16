@@ -1898,9 +1898,8 @@ function openLiveSteering(
 	const bound = (signal: AbortSignal): AbortSignal => (loopSignal ? AbortSignal.any([signal, loopSignal]) : signal);
 	return new LiveSteeringChannel({
 		wait: signal => waitForSteeringMessages(bound(signal)),
-		canDeliver: config.canDeliverLiveSteering,
 		take: async signal => {
-			const messages = await getSteeringMessages(bound(signal), true);
+			const messages = await getSteeringMessages(bound(signal));
 			if (messages.length > 0) config.onLiveSteeringTaken?.(messages);
 			return messages;
 		},

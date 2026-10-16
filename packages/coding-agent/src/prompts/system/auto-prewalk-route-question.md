@@ -1,5 +1,0 @@
-The state is a request to a coding agent. Decide where the strong model's reasoning has to be spent: before the first edit, or after it. Prewalk lets a strong model investigate and plan, then hands the work to a faster, cheaper model; it pays off only when the hard reasoning is front-loaded and the work left after planning is bounded.
-
-`request` is the task to classify and is authoritative. `previous_request` and `previous_response`, when present, are the user's earlier request and the agent's last reply. Use them only to resolve what a short or referential request points at ("do that", "continue", "fix what you found"). A request that stands on its own is classified on its own words, whatever came before it.
-
-Judge where the reasoning is needed, not how large or hard the task is. Volume of work never makes a task a prewalk candidate, and neither does difficulty alone. Needing a plan is not enough: the hard part must be settled by the time the first edit is made. A wrong prewalk costs more than a missed one. If torn between prewalk and primary, choose primary. If torn on whether a small task is worth any hand-off, choose direct.

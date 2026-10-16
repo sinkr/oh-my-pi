@@ -60,6 +60,7 @@ import type {
 	AgentTurnEndContext,
 	AsideMessage,
 	PrepareQueuedMessages,
+	QueuedMessageQueue,
 	SpeculativeToolExecutionConfig,
 	StreamFn,
 	ToolCallContext,
@@ -385,8 +386,6 @@ interface CursorToolResultEntry {
 	additionalContext?: string;
 }
 
-type QueuedMessageQueue = "steering" | "followUp";
-
 interface LiveSteeredEntry {
 	message: AgentMessage;
 	controller: AbortController | undefined;
@@ -514,8 +513,6 @@ export class Agent {
 	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
 	/** Prepare actual queue deliveries after dequeue gates; commit runs only while ownership remains valid. */
 	prepareQueuedMessages?: PrepareQueuedMessages;
-	/** Synchronous, side-effect-free admission of the next complete steering delivery unit into an in-flight call. */
-	canDeliverLiveSteering?: (messages: readonly AgentMessage[]) => boolean;
 	/**
 	 * Hook invoked after tool arguments are validated and before execution.
 	 * Reassign at any time to swap the implementation (e.g. on extension reload).
@@ -984,12 +981,10 @@ export class Agent {
 		for (const hook of this.#beforeQueuedMessageDequeueHooks) await hook(signal);
 	}
 
-	async #dequeueSteeringMessagesAfterHooks(signal: AbortSignal, live = false): Promise<AgentMessage[]> {
-		if (signal.aborted || this.#steeringQueue.length === 0 || (live && !this.#canDeliverLiveSteering())) return [];
+	async #dequeueSteeringMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
+		if (signal.aborted || this.#steeringQueue.length === 0) return [];
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return signal.aborted || (live && !this.#canDeliverLiveSteering())
-			? []
-			: this.#prepareQueuedMessageBatch("steering", signal);
+		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("steering", signal);
 	}
 
 	async #dequeueFollowUpMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
@@ -1013,7 +1008,7 @@ export class Agent {
 		this.#queuedMessageClaims[queue] = claim;
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
 		try {
-			const preparation = await prepare(messages, preparationSignal);
+			const preparation = await prepare(messages, preparationSignal, queue);
 			signal.throwIfAborted();
 			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
 			const additional = preparation?.commit();
@@ -1515,10 +1510,6 @@ export class Agent {
 		return queue.slice(0, count);
 	}
 
-	#canDeliverLiveSteering(): boolean {
-		return this.canDeliverLiveSteering?.(this.#dequeueMessages(this.#steeringQueue, this.#steeringMode)) !== false;
-	}
-
 	#dequeueSteeringMessages(): AgentMessage[] {
 		const messages = this.#dequeueMessages(this.#steeringQueue, this.#steeringMode);
 		this.#steeringQueue = this.#steeringQueue.slice(messages.length);
@@ -1970,12 +1961,12 @@ export class Agent {
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
-			getSteeringMessages: async (signal, live) => {
+			getSteeringMessages: async signal => {
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
-				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal, live);
+				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
 			hasSteeringMessages: () =>
 				steeringQueueState(
@@ -1985,7 +1976,6 @@ export class Agent {
 						: this.#steeringQueue.length,
 				),
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
-			canDeliverLiveSteering: () => this.#canDeliverLiveSteering(),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,

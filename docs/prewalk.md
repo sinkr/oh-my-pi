@@ -77,25 +77,24 @@ If prewalk is already armed, `/prewalk` leaves the existing target in place. `/p
 
 ## Auto-prewalk
 
-`prewalk.enabled` and `/prewalk` unconditionally arm a one-shot handoff. Auto-prewalk asks OMP's native judge, per task, whether prewalk is worthwhile. Classifying alone never switches models: only a qualifying task under `on` switches from the configured source to the configured target. It is a prewalk-suitability check, not a difficulty rating or a general model router.
+`prewalk.enabled` and `/prewalk` unconditionally arm a one-shot handoff. Auto-prewalk asks OMP's native judge, per task, whether prewalk is worthwhile, and arms the same handoff from the active model when it is. It is a prewalk-suitability check, not a difficulty rating or a general model router: it never picks a different planning model.
 
 ```yaml
 prewalk:
   enabled: false
   auto: on
-  autoSource: "@slow"
   autoTarget: "@smol"
 ```
 
-`prewalk.autoSource` (default `@slow`) and `prewalk.autoTarget` (default `@smol`) take a model pattern or role, resolved with the normal role and model-matching rules, including authentication.
+`prewalk.autoTarget` (default `@smol`) takes a model pattern or role, resolved with the normal role and model-matching rules, including authentication.
 
 | `prewalk.auto` | Behavior |
 | --- | --- |
 | `off` (default) | No classification; nothing changes. |
-| `suggest` | Classifies each eligible prompt and reports the decision only. Never resolves or switches models, arms prewalk, or injects the plan or checklist. |
-| `on` | Classifies each eligible prompt. When the judge is confident the task fits, and both source and target resolve with usable credentials, switches to the source and arms a handoff to the target; otherwise nothing changes. |
+| `suggest` | Classifies each new task and reports the decision only. Never arms prewalk or switches models. |
+| `on` | Classifies each new task. When the judge is confident the task fits and the target resolves with a usable credential, arms a handoff from the active model to the target; otherwise nothing changes. |
 
-Run `suggest` for a while to see how it judges your prompts, then set `auto: on`.
+Run `suggest` for a while to see how it judges your prompts, then set `auto: on`. To plan on a stronger model, make it your active (`@default`) model; auto-prewalk hands off from whatever you are on.
 
 `prewalk.enabled` keeps its meaning: unconditional prewalk, independent of `prewalk.auto`.
 
@@ -115,7 +114,7 @@ The judge sorts each task by where its expensive reasoning belongs, not by how h
 
 Volume of work alone and difficulty alone never make a task a prewalk candidate, and a wrong handoff costs more than a missed one: between `prewalk` and `primary` the judge is told to choose `primary`, and for a small task to choose `direct`. OMP arms only when `prewalk` wins **and** its probability is at least 0.70. That threshold is fixed, and a `prewalk` winner below it counts as a "no".
 
-`suggest`, and negative decisions under `on`, report one line per prompt:
+`suggest` reports one line per judged task:
 
 ```text
 Auto-prewalk: prewalk 0.84
@@ -124,27 +123,31 @@ Auto-prewalk: direct (prewalk 0.06)
 Auto-prewalk: prewalk 0.55 (below threshold)
 ```
 
-Under `on`, a confident decision shows the usual `Prewalk: armed for …` notice instead, after the session has switched to the source. Thinking effort is then chosen for the source model. The existing handoff does the switching to the target, with its todo gate and first `edit`/`write` trigger unchanged. Like a configured prewalk, an armed turn skips the `todo.eager` reminder, since the plan nudge owns todo creation.
+Under `on`, a confident decision shows the usual `Prewalk: armed for …` notice; other decisions are only logged. The plan nudge travels with the task's first request, and the existing handoff does the switching, with its todo gate and first `edit`/`write` trigger unchanged. Like a configured prewalk, an armed task skips the `todo.eager` reminder, since the plan nudge owns todo creation.
+
+### One task at a time
+
+An automatic handoff belongs to the task that armed it. When the next task starts, OMP returns to the model and thinking level that task planned on, then judges the new task, so a `primary` task is never left on the handoff target. `/new` does the same. An auto arm that its task never used is dropped at the next task, which is judged on its own.
+
+An explicit model or thinking-level selection after the handoff takes ownership: the session stays where you put it. Handoffs made by `/prewalk`, `--prewalk`, or `prewalk.enabled` are never restored by auto-prewalk.
 
 ### What is classified
 
-Only real user-authored turns in the top-level session: typed prompts and user-invoked `/skill:` prompts. Synthetic continuation turns, hidden steering, agent-attributed messages, subagents, plan mode, and turns where prewalk is already armed are skipped. Classification runs after the prompt is expanded and before auto thinking and the model request, so thinking effort is judged for the model that will actually answer.
+Only new, user-authored tasks in the top-level session: typed prompts, user-invoked `/skill:` prompts, and queued follow-ups when they are delivered. Steering is never classified, since it amends the task already running. Acknowledgements such as `ok` or `thanks`, synthetic continuation turns, agent-attributed messages, subagents, plan mode, and tasks where prewalk is already armed are skipped.
 
-Queued follow-ups and visible user steering are classified when they are delivered, not when they are enqueued. If a steering batch needs auto-prewalk routing, it waits for the next model-call boundary instead of entering an already-streaming response on the old model. Hidden or otherwise ineligible steering keeps its existing live-delivery behavior. Withdrawing queued input cancels its preparation and rolls back only the model, thinking, and pending handoff it still owns.
+The judge runs alongside the rest of prompt setup (memory recall, hooks, auto thinking), and its decision is applied just before the request is sent, so it adds latency only when it is the slowest setup step.
 
 A follow-up such as `do that` or `continue` cannot be judged alone, so the judge also sees the previous substantive user request and the agent's last reply, each truncated like other small-model input. The current request stays authoritative: the context only resolves what it points at.
 
 ### Manual controls win
 
-A negative, direct, or sub-threshold decision, or a classifier error, leaves the model, thinking level, and prewalk exactly as they were. If either selector cannot be resolved or authenticated, or arming or the switch cannot proceed, OMP rolls back to the exact prior state and the turn runs as if auto-prewalk were off. Auto-prewalk does not restore the source model later; handoffs are not undone before the next task, and `/new` follows the usual rules above.
+A negative, direct, or sub-threshold decision, or a classifier error, leaves the model, thinking level, and prewalk exactly as they were.
 
-An explicit model or thinking-level selection made while prompt setup is waiting takes ownership of that turn, including during memory recall, classification, or credential checks. Auto-prewalk does not overwrite it when the awaited work finishes. Selections made before submitting the prompt do not disable automatic routing for the new task.
-
-A pending prewalk, whether from `/prewalk`, `prewalk.enabled`, `--prewalk`, or an earlier auto arm that has not handed off yet, is never replaced, retargeted, or reclassified. `/prewalk off` and `--no-prewalk` keep auto-prewalk out of the session (for `--no-prewalk`, the startup session) until `/new`, and neither switches models. An explicit `/prewalk` or `/prewalk restart` still arms normally and takes over a pending auto arm.
+A pending prewalk from `/prewalk`, `prewalk.enabled`, or `--prewalk` is never replaced, retargeted, or reclassified. `/prewalk off` and `--no-prewalk` keep auto-prewalk out of the session (for `--no-prewalk`, the startup session) until `/new`, and neither switches models. An explicit `/prewalk` or `/prewalk restart` takes over a pending auto arm, which then behaves like a manual one.
 
 ### Failure behavior
 
-Auto-prewalk is an optimization and fails open. A missing native judge, a judge error or malformed answer, the 4-second timeout, an abort, a prompt superseded while the judge ran, or an unusable source or target all leave the turn exactly as it would be without auto-prewalk. Answers with invalid probabilities, an inconsistent winning route, or invalid confidence are rejected. Judge failures are logged rather than shown; an unusable selector reports an `Auto-prewalk skipped: source/target …` warning. Judgments are journaled as model usage under the purpose `auto-prewalk`.
+Auto-prewalk is an optimization and fails open. A missing native judge, a judge error or malformed answer, the 4-second timeout, an abort, or a prompt superseded while the judge ran all leave the task exactly as it would be without auto-prewalk. Answers with invalid probabilities, an inconsistent winning route, or invalid confidence are rejected. Judge failures are logged rather than shown; an unusable target reports an `Auto-prewalk not armed: target …` warning. Judgments are journaled as model usage under the purpose `auto-prewalk`.
 
 ## Subagent prewalk
 

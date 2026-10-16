@@ -92,33 +92,21 @@ export const cfgPrewalkAuto = register({
 		group: "Prewalk",
 		label: "Auto Prewalk",
 		description:
-			"Ask the native judge resolved through the 'judge' role whether each top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.",
+			"Ask the native judge resolved through the 'judge' role whether each new top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.",
 		options: [
 			{ value: "off", label: "Off", description: "Never classify prompts for prewalk" },
 			{
 				value: "suggest",
 				label: "Suggest",
-				description: "Classify each task and report the decision without arming prewalk or switching models",
+				description: "Classify each task and report the decision without arming prewalk",
 			},
 			{
 				value: "on",
 				label: "On",
 				description:
-					"For confidently front-loaded tasks, switch to the auto source and arm a handoff to the auto target; otherwise change nothing",
+					"For confidently front-loaded tasks, arm a handoff from the active model to the auto target; the next task starts back on the planning model",
 			},
 		],
-	},
-});
-
-export const cfgPrewalkAutoSource = register({
-	id: "prewalk.autoSource",
-	type: "string",
-	default: "@slow",
-	ui: {
-		tab: "model",
-		group: "Prewalk",
-		label: "Auto-prewalk source",
-		description: "Model or role (default '@slow') auto-prewalk switches to before arming a qualifying task.",
 	},
 });
 
