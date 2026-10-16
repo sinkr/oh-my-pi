@@ -138,6 +138,8 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	workerRecovery?: Promise<boolean>;
 	/** `Date.now()` of the last unexpected worker exit; a second one soon after closes the tab instead. */
 	workerExitedAt?: number;
+	/** Set when a worker exited with no run in flight and the tab was reattached; the next call reports it. */
+	workerExitNotice?: string;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -441,6 +443,13 @@ async function acquireTabImpl(
 						`Tab ${JSON.stringify(name)} is frozen and could not be resumed. Close and reopen it.`,
 					);
 				}
+				// The worker may have exited while the resume awaited Chrome: once its reattach settles, start over, so
+				// the open reuses the reattached tab or opens a fresh one, as an open arriving during a reattach does.
+				const reattachingMeanwhile = awaitWorkerRecovery(name, opts, "Browser tab open aborted");
+				if (reattachingMeanwhile) await reattachingMeanwhile;
+				if (tabs.get(name) !== existing || existing.state !== "alive") {
+					return await acquireTabImpl(name, browser, { ...opts, deadlineStartMs: startedAt });
+				}
 				// The creator may opt out later: an explicit `persist` on
 				// reuse by the owning session updates the tab (omitted
 				// leaves it). Reuse by any other session never changes it.
@@ -474,7 +483,12 @@ async function acquireTabImpl(
 					}
 					if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt);
 				};
+				// A worker that exited with no run in flight left the reset unreported; this open reports it.
 				let note: string | undefined;
+				if (existing.backend === "worker" && existing.workerExitNotice) {
+					note = existing.workerExitNotice;
+					existing.workerExitNotice = undefined;
+				}
 				try {
 					await reuse();
 				} catch (error) {
@@ -484,7 +498,7 @@ async function acquireTabImpl(
 						!(error instanceof RendererCrashedError && tabs.get(name) === existing && existing.state === "alive")
 					)
 						throw error;
-					note = RENDERER_RELOADED_NOTE;
+					note = note ? `${note} ${RENDERER_RELOADED_NOTE}` : RENDERER_RELOADED_NOTE;
 					await reuse();
 				}
 				// The user may have navigated or switched tabs since: the result reports where the page is now.
@@ -1044,6 +1058,10 @@ async function runInTabWithSnapshot(
 						? `Browser request interception could not be reset after this run; the tab was reattached to a new worker. ${RECYCLE_RESETS}`
 						: "Browser request interception could not be reset after this run; the tab was closed.",
 				});
+			}
+			if (tab.workerExitNotice) {
+				result.displays.unshift({ type: "text", text: tab.workerExitNotice });
+				tab.workerExitNotice = undefined;
 			}
 			return result;
 		} catch (error) {
@@ -1941,6 +1959,7 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 			: `${exited}; the tab is being reattached to a new worker on the same page. ${WORKER_RESETS}.`;
 		const error = postmortem.markExpectedCleanupError(new ToolError(reason));
 		// Host tool calls the dead run started would otherwise keep running, and reply to a replacement worker.
+		const idle = tab.pending.size === 0;
 		for (const pending of tab.pending.values()) {
 			for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);
 			pending.reject(error);
@@ -1954,6 +1973,13 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 			recover: false,
 			failedReason: `${exited}; it could not be reattached to a new worker, so the tab was closed`,
 		})
+			.then(reattached => {
+				// No run was in flight to report the reset, so the next call on the tab does.
+				if (reattached && idle) {
+					tab.workerExitNotice = `${exited} since the last call; omp reattached the tab to a new worker on the same page, without reloading it. ${WORKER_RESETS}.`;
+				}
+				return reattached;
+			})
 			.catch(logCleanupFailure)
 			.finally(() => {
 				if (tab.workerRecovery === recovery) tab.workerRecovery = undefined;

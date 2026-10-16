@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -76,6 +77,37 @@ async function crashAndHoldRecovery(name: string): Promise<{ crash: string; rele
 	const crash = await messageOf(run(name, UNOWNED_REJECTION));
 	await entered.promise;
 	return { crash, release: () => gate.resolve() };
+}
+
+function textOf(parts: ReadonlyArray<TextContent | ImageContent>): string {
+	return parts.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
+}
+
+/** End `name`'s worker while no run is in flight, as a late Puppeteer event rejection would, and wait out the reattach. */
+async function crashWhileIdle(name: string): Promise<void> {
+	const tab = getTab(name);
+	if (tab?.backend !== "worker") throw new Error("expected a worker tab");
+	const worker = tab.worker;
+	let lastRun: Extract<WorkerInbound, { type: "run" }> | undefined;
+	const send = worker.send.bind(worker);
+	worker.send = (msg, transferList) => {
+		if (msg.type === "run") lastRun = msg;
+		send(msg, transferList);
+	};
+	expect(await run(name, "return 1;")).toBe(1);
+	if (!lastRun) throw new Error("expected a recorded run");
+	// The reattach starts by terminating the exited worker.
+	const replacing = Promise.withResolvers<void>();
+	const terminate = worker.terminate.bind(worker);
+	worker.terminate = async () => {
+		replacing.resolve();
+		await terminate();
+	};
+	// A run the supervisor never registered: its rejection ends the worker with nothing pending.
+	send({ ...lastRun, id: `${lastRun.id}-idle-crash`, code: UNOWNED_REJECTION });
+	await replacing.promise;
+	await tab.workerRecovery;
+	expect(tab.state).toBe("alive");
 }
 
 afterAll(async () => {
@@ -284,5 +316,77 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		expect(failed).toContain("Browser tab worker exited unexpectedly");
 		expect(tab.worker).not.toBe(oldWorker);
 		expect(await run(name, "return await tab.evaluate(() => document.body.dataset.ran ?? null);")).toBeNull();
+	}, 30_000);
+
+	it("reports a worker exit with no run in flight on the next call, once", async () => {
+		const name = "worker-exit-idle";
+		await open(name, "idle");
+		await crashWhileIdle(name);
+		const text = textOf((await runInTab(name, { code: "return 1;", timeoutMs: 20_000, session })).displays);
+		expect(text).toContain("since the last call; omp reattached the tab to a new worker on the same page");
+		expect(text).toContain("library-internal");
+		expect(text).toContain("init scripts");
+		const next = await runInTab(name, { code: "return 2;", timeoutMs: 20_000, session });
+		expect(textOf(next.displays)).not.toContain("since the last call");
+	}, 30_000);
+
+	it("reports a worker exit with no run in flight on the next open of the tab", async () => {
+		const name = "worker-exit-idle-open";
+		await open(name, "idle");
+		await crashWhileIdle(name);
+		const result = await prelude.invoke({ action: "open", name }, context);
+		expect(textOf(result.content)).toContain("since the last call; omp reattached the tab");
+	}, 30_000);
+
+	it("waits for a reattach that starts while an open resumes the tab", async () => {
+		const name = "worker-exit-open-resume";
+		await open(name, "open-resume-target");
+		const tab = getTab(name);
+		if (tab?.backend !== "worker") throw new Error("expected a worker tab");
+		const oldWorker = tab.worker;
+		let lastRun: Extract<WorkerInbound, { type: "run" }> | undefined;
+		const send = oldWorker.send.bind(oldWorker);
+		oldWorker.send = (msg, transferList) => {
+			if (msg.type === "run") lastRun = msg;
+			send(msg, transferList);
+		};
+		await run(name, "return 1;");
+		// The reattach starts by terminating the exited worker; parking it there keeps the reattach in flight.
+		const entered = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const terminate = oldWorker.terminate.bind(oldWorker);
+		oldWorker.terminate = async () => {
+			entered.resolve();
+			await gate.promise;
+			await terminate();
+		};
+		const target = tab.browser.browser
+			.targets()
+			.find(t => t.type() === "page" && t.url().includes("open-resume-target"));
+		if (!target) throw new Error("expected the tab's target");
+		const createCDPSession = target.createCDPSession.bind(target);
+		// The resume's first CDP roundtrip crashes the worker and returns while its reattach is still held.
+		target.createCDPSession = async () => {
+			target.createCDPSession = createCDPSession;
+			if (!lastRun) throw new Error("expected a recorded run");
+			send({ ...lastRun, id: `${lastRun.id}-crash`, code: UNOWNED_REJECTION });
+			await entered.promise;
+			return await createCDPSession();
+		};
+		tab.frozen = true;
+
+		let settled = false;
+		const reopened = prelude.invoke({ action: "open", name }, context).finally(() => {
+			settled = true;
+		});
+		// No event marks an open that wrongly returned early, so give it real time to do so.
+		await Bun.sleep(500);
+		expect(settled).toBe(false);
+		gate.resolve();
+		const text = textOf((await reopened).content);
+		expect(text).toContain("since the last call; omp reattached the tab");
+		expect(getTab(name)).toBe(tab);
+		expect(tab.worker).not.toBe(oldWorker);
+		expect(await run(name, "return 4;")).toBe(4);
 	}, 30_000);
 });
