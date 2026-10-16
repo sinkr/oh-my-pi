@@ -84,6 +84,13 @@ const URL: usize = 12;
 const POSITION: usize = 13;
 const SIZE: usize = 14;
 
+/// The [`NODE_ATTRIBUTES`] read only to tell an element apart in its window
+/// ([`read_identity`]). A batch that fails as a whole skips them, so a hung
+/// app costs no more lone reads, each with its own timeout, than the
+/// element's role, labels, state and children; the element then has no
+/// identity.
+const IDENTITY_ONLY: Range<usize> = SUBROLE..POSITION;
+
 /// Which slice of [`NODE_ATTRIBUTES`] one element read requests.
 #[derive(Clone, Copy)]
 enum NodeRead {
@@ -164,20 +171,30 @@ impl NodeValues {
 		})
 	}
 
-	/// The batch's values, or `lone` reads of each attribute when the batch
-	/// failed as a whole for a live element: a messaging timeout gives the
-	/// batch one deadline for every attribute, and one slow attribute must
-	/// not lose the element's role and children.
+	/// The batch's values, or `lone` reads of each attribute outside
+	/// [`IDENTITY_ONLY`] when the batch failed as a whole for a live element:
+	/// a messaging timeout gives the batch one deadline for every attribute,
+	/// and one slow attribute must not lose the element's role and children.
 	fn from_batch(
 		batch: Result<CFRetained<CFArray<CFType>>, AXError>,
 		attributes: Range<usize>,
-		lone: impl FnMut(usize) -> Result<Option<CFRetained<CFType>>, AXError>,
+		mut lone: impl FnMut(usize) -> Result<Option<CFRetained<CFType>>, AXError>,
 	) -> Self {
 		let first = attributes.start;
 		let values = match batch {
 			Ok(values) => NodeBatch::Read(values),
 			Err(error) if error == AXError::InvalidUIElement => NodeBatch::Gone(error),
-			Err(_) => NodeBatch::Lone(attributes.map(lone).collect()),
+			Err(_) => NodeBatch::Lone(
+				attributes
+					.map(|index| {
+						if IDENTITY_ONLY.contains(&index) {
+							Err(AXError::CannotComplete)
+						} else {
+							lone(index)
+						}
+					})
+					.collect(),
+			),
 		};
 		Self { values, first }
 	}
@@ -1807,7 +1824,10 @@ mod tests {
 				}
 			},
 		);
-		assert_eq!(asked, NodeRead::Walk.attributes().collect::<Vec<_>>());
+		let mut expected: Vec<_> = NodeRead::Walk.attributes().collect();
+		expected.retain(|index| !super::IDENTITY_ONLY.contains(index));
+		assert_eq!(asked, expected);
+		assert_eq!(asked.len(), 7);
 		assert_eq!(required_string(values.get(ROLE), "AXRole").unwrap(), "AXTextArea");
 		assert_eq!(values.get(VALUE).unwrap_err(), AXError::CannotComplete);
 		assert!(values.get(TITLE).unwrap().is_none());
@@ -1875,13 +1895,15 @@ mod tests {
 		// One the app was too busy to answer is unknown.
 		assert!(read_identity(&walk(&busy), "AXButton").is_none());
 
+		// A batch that fails as a whole falls back to lone reads without the
+		// identity-only attributes, so the element has no identity.
 		let role: &CFType = &role;
 		let lone = NodeValues::from_batch(
 			Err(AXError::CannotComplete),
 			NodeRead::Walk.attributes(),
 			|index| match index {
 				ROLE => Ok(Some(role.retain())),
-				HELP => Err(AXError::CannotComplete),
+				HELP => unreachable!("the fallback skips identity-only attributes"),
 				CHILDREN => Err(AXError::Failure),
 				_ => Err(AXError::NoValue),
 			},
