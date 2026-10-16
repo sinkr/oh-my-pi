@@ -84,7 +84,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **vLLM** (OpenAI-compatible server; `VLLM_API_KEY` for secured deployments)
 - **GitHub Copilot** (requires OAuth, see below)
 - **Google Gemini CLI** (requires OAuth, see below)
-- **Antigravity** (requires OAuth, see below)
+- **Google Antigravity** (requires OAuth, see below)
 - **Any OpenAI-compatible API**: LM Studio, custom proxies, etc.
 
 ## Installation
