@@ -800,7 +800,8 @@ impl ReadIdentities {
 /// equal fields do not prove the match is the same control. `None` when the
 /// ref has no identity, or none unique in the read that registered it, the
 /// window id now names another window, the walk could not read the whole
-/// window, or zero or several elements match.
+/// window, zero or several elements match, or the registry cap evicted the
+/// match as it was registered.
 pub fn refind(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -843,7 +844,10 @@ pub fn refind(
 		return Ok(None);
 	};
 	let generation = registry.current_generation(&target);
-	Ok(Some(registry.register(backend, &target, generation, handle, &props, Some(true))))
+	let found = registry.register(backend, &target, generation, handle, &props, Some(true));
+	// At the registry cap, registering it can evict its own generation: name
+	// no ref that already expired.
+	Ok(registry.resolve(&found).is_ok().then_some(found))
 }
 
 pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()> {
@@ -1431,6 +1435,30 @@ mod tests {
 		m.children.insert(4, vec![3]);
 		assert!(
 			refind(&mut m, &mut registry, &window(), "e1")
+				.unwrap()
+				.is_none()
+		);
+	}
+	#[test]
+	fn a_match_the_registry_cap_evicts_is_not_named() {
+		// `find({limit: 5000})` on a window of exactly 5,000 elements fills the
+		// registry with one generation.
+		let mut m = Mock { props: [(1, p("window", Some("Title")))].into(), ..Default::default() };
+		for id in 2..=5_000 {
+			m.props.insert(id, p("button", Some(&format!("b{id}"))));
+		}
+		m.children.insert(1, (2..=5_000).collect());
+		let mut registry = AxRegistry::default();
+		let all = AxQuery { limit: Some(5_000), ..Default::default() };
+		let found = query(&mut m, &mut registry, &window(), &all).unwrap();
+		assert_eq!((found.len(), found[1].ref_.as_str()), (5_000, "e2"));
+		// The app rebuilds node 2 as node 5001.
+		m.destroyed.insert(2);
+		m.props.insert(5_001, p("button", Some("b2")));
+		m.children
+			.insert(1, std::iter::once(5_001).chain(3..=5_000).collect());
+		assert!(
+			refind(&mut m, &mut registry, &window(), "e2")
 				.unwrap()
 				.is_none()
 		);
