@@ -6,6 +6,7 @@ import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CfgProtocolHandler, setCfgApprovalHost } from "@oh-my-pi/pi-coding-agent/internal-urls/cfg-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { type MCPAuthHandler, MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -66,7 +67,10 @@ describe("cfg:// approval prompt wiring", () => {
 		await fs.rm(tmp, { recursive: true, force: true });
 	});
 
-	async function startMode(askTimeout: number | undefined, mcpManager?: unknown): Promise<Array<number | undefined>> {
+	async function startMode(
+		askTimeout: number | undefined,
+		mcpManager?: MCPManager,
+	): Promise<Array<number | undefined>> {
 		testSession = await createTestSession(
 			askTimeout === undefined ? {} : { settingsOverrides: { "ask.timeout": askTimeout } },
 		);
@@ -81,7 +85,7 @@ describe("cfg:// approval prompt wiring", () => {
 			undefined,
 			undefined,
 			undefined,
-			mcpManager as never,
+			mcpManager,
 			undefined,
 			new Composer({ terminal: new VirtualTerminal(200, 60) }),
 		);
@@ -176,8 +180,10 @@ describe("cfg:// approval prompt wiring", () => {
 	}, 60_000);
 
 	it("runs the cfg://, auto-QA and MCP sign-in prompts as waits for the user", async () => {
-		let authHandler: ((name: string, challenge: never) => Promise<unknown>) | undefined;
-		await startMode(undefined, { setAuthHandler: (handler: typeof authHandler) => (authHandler = handler) });
+		const manager = new MCPManager(tmp, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		const setAuthHandler = spyOn(manager, "setAuthHandler");
+		await startMode(undefined, manager);
+		const authHandler: MCPAuthHandler | undefined = setAuthHandler.mock.calls[0]?.[0];
 		const waits = spyOn(testSession!.session, "waitForUser");
 		spyOn(MCPCommandController.prototype, "handleMCPAuthChallenge").mockResolvedValue(undefined);
 
@@ -185,7 +191,7 @@ describe("cfg:// approval prompt wiring", () => {
 		expect(waits).toHaveBeenCalledTimes(1);
 		await resolveAutoQaConsent(undefined);
 		expect(waits).toHaveBeenCalledTimes(2);
-		await authHandler!("server", {} as never);
+		await authHandler!("server", { wwwAuthenticate: [] });
 		expect(waits).toHaveBeenCalledTimes(3);
 		__resetAutoQaConsentForTests();
 	}, 60_000);
