@@ -382,14 +382,12 @@ function extractHeadHtml(html: string): string {
 	return html.slice(headStart, headTagEnd + 1 + relativeEnd + 7);
 }
 
-/**
- * Parse alternate links from HTML head
- */
-function parseAlternateLinks(html: string, pageUrl: string): string[] {
-	const links: string[] = [];
+/** Alternate representations must describe the requested page, not a site-wide index. */
+function parseAlternateLinks(html: string, pageUrl: string): Array<{ href: string; kind: "markdown" | "feed" }> {
+	const links: Array<{ href: string; kind: "markdown" | "feed" }> = [];
 
 	try {
-		const pagePath = new URL(pageUrl).pathname;
+		const pagePath = new URL(pageUrl).pathname.replace(/\/$/, "");
 		const headHtml = extractHeadHtml(html);
 		const linkTags = headHtml.match(/<link\b[^>]*>/gi) ?? [];
 
@@ -412,13 +410,16 @@ function parseAlternateLinks(html: string, pageUrl: string): string[] {
 				continue;
 			}
 
+			const altPath = new URL(href, pageUrl).pathname;
+			const pageSpecific =
+				altPath === pagePath ||
+				(pagePath !== "" && (altPath.startsWith(`${pagePath}/`) || altPath.startsWith(`${pagePath}.`)));
+			if (!pageSpecific) continue;
+
 			if (type.includes("markdown")) {
-				links.push(href);
-			} else if (
-				(type.includes("rss") || type.includes("atom") || type.includes("feed")) &&
-				(href.includes(pagePath) || href.includes("comments"))
-			) {
-				links.push(href);
+				links.push({ href, kind: "markdown" });
+			} else if (pagePath !== "" && (type.includes("rss") || type.includes("atom") || type.includes("feed"))) {
+				links.push({ href, kind: "feed" });
 			}
 		}
 	} catch {}
@@ -1405,9 +1406,9 @@ async function renderUrl(
 	if (isHtml && !raw) {
 		// 5A: Check for page-specific markdown alternate
 		const alternates = parseAlternateLinks(rawContent, finalUrl);
-		const markdownAlt = alternates.find(alt => alt.endsWith(".md") || alt.includes("markdown"));
+		const markdownAlt = alternates.find(alt => alt.kind === "markdown");
 		if (markdownAlt) {
-			const resolved = markdownAlt.startsWith("http") ? markdownAlt : new URL(markdownAlt, finalUrl).href;
+			const resolved = new URL(markdownAlt.href, finalUrl).href;
 			const altResult = await loadPage(resolved, { timeout, signal });
 			if (altResult.ok && altResult.content.trim().length > 100 && !looksLikeHtml(altResult.content)) {
 				notes.push(`Used markdown alternate: ${resolved}`);
@@ -1460,9 +1461,9 @@ async function renderUrl(
 		}
 
 		// 5D: Check for feed alternates
-		const feedAlternates = alternates.filter(alt => !alt.endsWith(".md") && !alt.includes("markdown"));
-		for (const altUrl of feedAlternates.slice(0, 2)) {
-			const resolved = altUrl.startsWith("http") ? altUrl : new URL(altUrl, finalUrl).href;
+		const feedAlternates = alternates.filter(alt => alt.kind === "feed");
+		for (const alt of feedAlternates.slice(0, 2)) {
+			const resolved = new URL(alt.href, finalUrl).href;
 			const altResult = await loadPage(resolved, { timeout, signal });
 			if (altResult.ok && altResult.content.trim().length > 200) {
 				notes.push(`Used feed alternate: ${resolved}`);
