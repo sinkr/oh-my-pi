@@ -93,13 +93,13 @@ const READ_FIRST_ROWS = new RegExp(
 );
 
 /**
- * Whether `rest` carries line-number prefixes: a hashline read opens with its
- * header, and the read tool records the mode as `rowPrefixes` (one-row reads
- * included); otherwise the first two rows must count up.
+ * Whether `rest` carries line-number prefixes. The read tool records the mode
+ * as `rowPrefixes` (one-row reads included); without it, a hashline read opens
+ * with its header, or the first two rows must count up.
  */
 function isNumberedRead(header: string, rest: string, rowPrefixes: boolean | undefined): boolean {
-	if (header) return true;
 	if (rowPrefixes !== undefined) return rowPrefixes;
+	if (header) return true;
 	const rows = READ_FIRST_ROWS.exec(rest);
 	if (!rows) return false;
 	const last = Number(rows[2] ?? rows[1]);
@@ -107,11 +107,16 @@ function isNumberedRead(header: string, rest: string, rowPrefixes: boolean | und
 	return rows[3] ? next > last + 1 : next === last + 1;
 }
 
+/** A count bracket as the encoding draws it, or its `[0]` no-indentation marker. */
+const COUNT_BRACKET = "\\[(?:0|(?:[»·]\\d+)+)\\]";
 /**
- * A row's leading indentation, after an optional line-number prefix. Anchored on
- * `\n` only: a `m`-flag `^` would also match after `\r` and U+2028 inside a row.
+ * A row's leading indentation, after an optional line-number prefix; or, on an
+ * unindented row, text that itself opens with a count bracket, which gets the
+ * `[0]` marker so only the first bracket after the prefix reads as indentation.
+ * Anchored on `\n` only: a `m`-flag `^` would also match after `\r` and U+2028
+ * inside a row.
  */
-const rowIndent = (prefix: string) => new RegExp(`(^|\\n)(${prefix})?([ \\t]+)`, "g");
+const rowIndent = (prefix: string) => new RegExp(`(^|\\n)(${prefix})?(?:([ \\t]+)|(?=${COUNT_BRACKET}))`, "g");
 /** Numbered rows: `N:`, `N|`, or a collapsed block's `N-M:`. */
 const READ_ROW_INDENT = rowIndent(READ_ROW_PREFIX);
 /** Unnumbered reads (`:raw`, line numbers off): a leading `12:` is file content, not a prefix. */
@@ -129,13 +134,16 @@ interface ReadFramePayload {
 /**
  * Frames collapse whitespace, so draw each row's leading indentation as a count
  * bracket and lift the snapshot header out to text (see snapcompact-read-note.md).
+ * A read recorded without row prefixes (`:raw`, plain) has no header to lift:
+ * a leading `[path#TAG]`-shaped line is content.
  */
 function encodeReadForFrames(text: string, rowPrefixes: boolean | undefined): ReadFramePayload {
-	const header = READ_HEADER.exec(text)?.[0] ?? "";
+	const header = rowPrefixes === false ? "" : (READ_HEADER.exec(text)?.[0] ?? "");
 	const rest = text.slice(header.length);
 	const body = rest.replace(
 		isNumberedRead(header, rest, rowPrefixes) ? READ_ROW_INDENT : READ_LINE_INDENT,
-		(_, lineStart: string, prefix = "", indent: string) => `${lineStart}${prefix}${indentBracket(indent)}`,
+		(_, lineStart: string, prefix = "", indent: string | undefined) =>
+			`${lineStart}${prefix}${indent ? indentBracket(indent) : "[0]"}`,
 	);
 	const note = prompt.render(readNoteTemplate, {
 		note: TOOL_RESULT_NOTE,
@@ -484,11 +492,16 @@ function buildInlineToolResultCandidate(
 	const text = textBlocks.join("\n");
 	const textTokens = text.length > 0 ? tokenizer.countTokens(text) : 0;
 	const isError = messageIsError === true;
-	const eligible = !isError && textTokens >= MIN_TOOL_RESULT_TOKENS;
+	const readDetails = details as Pick<ReadToolDetails, "rowPrefixes" | "displayReadTargets"> | null | undefined;
+	// A delimited multi-path read nests several headers and row modes under one
+	// notice; no single encoding fits it, so it stays text.
+	const composite = toolName === "read" && (readDetails?.displayReadTargets?.length ?? 0) > 0;
+	const eligible = !isError && !composite && textTokens >= MIN_TOOL_RESULT_TOKENS;
 	// The planner keeps `read` as text for a reader that has not opted in; skip encoding it.
-	const rowPrefixes = (details as Pick<ReadToolDetails, "rowPrefixes"> | undefined)?.rowPrefixes;
 	const read =
-		eligible && toolName === "read" && imageReadResults ? encodeReadForFrames(text, rowPrefixes) : undefined;
+		eligible && toolName === "read" && imageReadResults
+			? encodeReadForFrames(text, readDetails?.rowPrefixes)
+			: undefined;
 	const frameText = read?.body ?? text;
 	// An imaged `read` keeps its header and legend beside the frames: not saved.
 	const keptTokens = read ? Math.max(0, tokenizer.countTokens(read.note) - tokenizer.countTokens(toolResultNote)) : 0;

@@ -87,7 +87,10 @@ export interface ReadToolDetails {
 	summary?: { lines: number; elidedSpans: number; elidedLines: number };
 	/** Number of unresolved git conflicts surfaced by this read (TUI uses for inline `⚠ N` badge). */
 	conflictCount?: number;
-	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
+	/**
+	 * Paths recovered from a delimited read argument. The TUI renders one call as multiple read rows; snapcompact
+	 * keeps such a composite result as text.
+	 */
 	displayReadTargets?: string[];
 	/**
 	 * Resolved filesystem link target for each {@link displayReadTargets} entry, aligned by index; `null` when a

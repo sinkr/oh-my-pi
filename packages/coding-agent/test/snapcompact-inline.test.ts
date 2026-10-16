@@ -18,6 +18,7 @@ import {
 	type SnapcompactInlineOptions,
 	SnapcompactInlineTransformer,
 } from "@oh-my-pi/pi-coding-agent/session/snapcompact-inline";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -203,9 +204,15 @@ describe("SnapcompactInlineTransformer", () => {
 			rows.push(`${line}:${indents[line % indents.length]}${denseText(2)}`);
 		}
 		// A summary's collapsed block keeps its head's indentation after an `N-M:`
-		// prefix; whitespace after an in-row U+2028 is not a line start.
+		// prefix; whitespace after an in-row U+2028 is not a line start; a row whose
+		// own text opens with a count bracket gets `[0]` (or its indentation) first.
 		const last = rows.length;
-		rows.push(`${last + 1}-${last + 30}:\tcollapsed() { … }`, `${last + 31}:x\u2028  y`);
+		rows.push(
+			`${last + 1}-${last + 30}:\tcollapsed() { … }`,
+			`${last + 31}:x\u2028  y`,
+			`${last + 32}:[·4]literal`,
+			`${last + 33}:\t[0]literal`,
+		);
 		const header = "[src/indented.ts#1F2E]";
 		const raw = `${header}\n${rows.join("\n")}`;
 		const context: Context = {
@@ -231,6 +238,8 @@ describe("SnapcompactInlineTransformer", () => {
 			expect(rendered).toContain("\n4:[»2]w");
 			expect(rendered).toContain(`\n${last + 1}-${last + 30}:[»1]collapsed() { … }`);
 			expect(rendered).toContain(`\n${last + 31}:x\u2028  y`);
+			expect(rendered).toContain(`\n${last + 32}:[0][·4]literal`);
+			expect(rendered).toContain(`\n${last + 33}:[»1][0]literal`);
 			expect(rendered).not.toMatch(/^[\d-]+:[ \t]/m);
 
 			// The brackets cost cells: planning counts frames on the encoded body,
@@ -299,31 +308,39 @@ describe("SnapcompactInlineTransformer", () => {
 		}
 	});
 
-	it("trusts the read's recorded row-prefix mode over the row shape", async () => {
+	it("trusts the read's recorded metadata over the text's shape", async () => {
 		// One huge line (output columns uncapped): no second row proves numbering.
 		const row = `42|    ${denseText(Math.ceil((DEFAULT_CAPACITY * 2) / 7))}`;
-		// Raw content whose rows count up like `N:` prefixes.
-		const raw = Array.from(
-			{ length: Math.ceil((DEFAULT_CAPACITY * 2) / 20) },
-			(_, i) => `${i + 1}:  ${denseText(2)}`,
-		);
-		const read = (id: string, text: string, rowPrefixes: boolean): ToolResultMessage => ({
+		// Raw content opening with a header-shaped line, whose rows count up like `N:` prefixes.
+		const raw = [
+			"[file.ts#ABCD]",
+			...Array.from({ length: Math.ceil((DEFAULT_CAPACITY * 2) / 20) }, (_, i) => `${i + 1}:  ${denseText(2)}`),
+		];
+		const read = (id: string, text: string, details: ReadToolDetails): ToolResultMessage => ({
 			...toolResult(id, text, "read"),
-			details: { rowPrefixes },
+			details,
 		});
 		const context: Context = {
 			systemPrompt: ["system"],
-			messages: [userMessage("go"), read("one-row", row, true), read("raw", raw.join("\n"), false)],
+			messages: [
+				userMessage("go"),
+				read("one-row", row, { rowPrefixes: true }),
+				read("raw", raw.join("\n"), { rowPrefixes: false }),
+				// A delimited multi-path read nests several headers and row modes: it stays text.
+				read("delimited", row, { displayReadTargets: ["a.ts", "b.ts"] }),
+			],
 		};
 		const spy = spyOn(snapcompact, "renderMany");
 		try {
-			await new SnapcompactInlineTransformer(
+			const result = await new SnapcompactInlineTransformer(
 				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
 			).transform(context, makeModel({ id: "claude-opus-5-5" }));
-			const [oneRow, rawRows] = spy.mock.calls.map(call => call[0]);
+			const [oneRow, rawRows, ...rest] = spy.mock.calls.map(call => call[0]);
 			expect(oneRow.startsWith("42|[·4]w")).toBe(true);
-			expect(rawRows.startsWith("1:  w")).toBe(true);
+			expect(rawRows.startsWith("[file.ts#ABCD]\n1:  w")).toBe(true);
 			expect(rawRows).not.toContain("[·");
+			expect(rest).toEqual([]);
+			expect(result.messages[3]).toBe(context.messages[3]);
 		} finally {
 			spy.mockRestore();
 		}
