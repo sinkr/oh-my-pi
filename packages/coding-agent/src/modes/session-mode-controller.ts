@@ -112,6 +112,9 @@ export class SessionModeController implements ExtensionModeControls {
 			// Full snapshot-busy predicate (TUI parity): covers streaming, bash/eval,
 			// compaction, handoff, and retry — not just streaming.
 			this.#session.isBusyForSnapshot ||
+			// goal_updated handlers run inside the accounting lock; a nested
+			// mutation would wait on the same tail and deadlock.
+			this.#session.goalRuntime.mutationInFlight ||
 			// An admitted submission about to start a turn is busy — except when the
 			// admitted work IS this extension's command handler, which legitimately
 			// runs `ctx.modes.set()` before its own turn (`/mission` pattern).
@@ -233,8 +236,16 @@ export class SessionModeController implements ExtensionModeControls {
 			reentry: this.#planDraft !== undefined,
 		});
 		try {
+			// Filter `write` out of the prior set and re-add it only when the live
+			// entry is the built-in tool: a shadowing extension `write` has no
+			// `xd://` proposal transport and would bypass plan read-only (TUI parity).
 			await session.setActiveToolPresentation(
-				[...new Set([...previous.tools, ...(session.hasBuiltInTool("write") ? ["write"] : [])])],
+				[
+					...new Set([
+						...previous.tools.filter(name => name !== "write"),
+						...(session.hasBuiltInTool("write") ? ["write"] : []),
+					]),
+				],
 				previous.mounted,
 			);
 			if (!restored && this.#host.usePlanRole !== false) {

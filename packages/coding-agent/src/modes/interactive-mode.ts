@@ -2911,8 +2911,17 @@ export class InteractiveMode implements InteractiveModeContext {
 					: this.planModePaused
 						? ("paused" as const)
 						: ("inactive" as const),
-				...(plan?.planFilePath ? { planFilePath: plan.planFilePath } : {}),
-				...(plan?.workflow ? { workflow: plan.workflow } : {}),
+				...(this.planModePaused
+					? {
+							// While paused, getPlanModeState() is cleared; the retained
+							// draft path/workflow are what resume will use — report them.
+							...(this.planModePlanFilePath ? { planFilePath: this.planModePlanFilePath } : {}),
+							...(this.planModeWorkflow ? { workflow: this.planModeWorkflow } : {}),
+						}
+					: {
+							...(plan?.planFilePath ? { planFilePath: plan.planFilePath } : {}),
+							...(plan?.workflow ? { workflow: plan.workflow } : {}),
+						}),
 			},
 			vibe: { status: this.vibeModeEnabled ? ("active" as const) : ("inactive" as const) },
 			goal: {
@@ -3051,6 +3060,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.session.isBusyForSnapshot ||
 				this.session.isSessionTransitioning ||
 				this.session.isDisposed ||
+				// goal_updated handlers run inside the accounting lock; letting a
+				// nested goal mutation wait on the same tail deadlocks it.
+				this.session.goalRuntime.mutationInFlight ||
 				// A prompt admitted but still in setup (image normalization, vision
 				// preflight) is busy: mode changes must not swap model/tools out from
 				// under it. Exempt the admitted submission that IS this extension's
@@ -5303,7 +5315,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.planModeEnabled = false;
 				this.planModePaused = false;
 				this.planModePlanFilePath = undefined;
-				this.#planModePreviousToolPresentation = undefined;
+				this.planModeWorkflow = undefined;
 				this.#planModePreviousModelState = undefined;
 				this.#pendingModelSwitch = undefined;
 				this.#pendingPlanModelSwitch = false;

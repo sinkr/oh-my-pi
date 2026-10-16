@@ -156,6 +156,10 @@ export class RpcGoalController {
 			// (`--provider-session-id`) does not change when the transcript does.
 			this.#sessionBeforeChange = this.#session.sessionManager.getSessionId();
 			this.#heldDuringChange = this.#continuationScheduled || this.#continuationWanted();
+			// A change may keep the transcript id (reload, tree navigation) while
+			// the mode controller's beforeSessionChange tears the live goal down —
+			// the next reconcile must restore it rather than skip on a stale mark.
+			this.#reconciledSessionId = undefined;
 		}
 		if (this.#reconcilesPending > 0) this.#changeOverlappedReconcile = true;
 		this.#continuationScheduled = false;

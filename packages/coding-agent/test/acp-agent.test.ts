@@ -164,6 +164,7 @@ class FakeAgentSession {
 		return "main";
 	}
 
+	goalRuntime = { mutationInFlight: false };
 	getGoalModeState(): undefined {
 		return undefined;
 	}
