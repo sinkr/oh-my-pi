@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -221,6 +221,47 @@ describe.skipIf(process.platform === "win32")("EditTool move permissions", () =>
 		expect(await Bun.file(source).exists()).toBe(false);
 		expect((await fs.stat(destination)).mode & 0o777).toBe(0o700);
 		expect(await $`${destination}`.quiet().text()).toBe("moved\n");
+	});
+
+	test("hashline MV keeps the setuid bit of the source", async () => {
+		const source = path.join(tempDir, "run.sh");
+		const destination = path.join(tempDir, "renamed.sh");
+		await Bun.write(source, "#!/bin/sh\nprintf 'moved\\n'\n");
+		await fs.chmod(source, 0o4750);
+		const session = makeSession(tempDir);
+		const read = await new ReadTool(session).execute("read-script", { path: "run.sh" });
+		const header = read.content.find(c => c.type === "text")?.text.split("\n")[0];
+
+		const result = await new EditTool(session, "hashline").execute("move-script", {
+			input: `${header}\nMV renamed.sh`,
+		});
+		expect(result.isError).not.toBe(true);
+		expect((await fs.stat(destination)).mode & 0o7777).toBe(0o4750);
+	});
+
+	test("hashline MV completes when the destination denies mode changes", async () => {
+		const source = path.join(tempDir, "run.sh");
+		const destination = path.join(tempDir, "renamed.sh");
+		await Bun.write(source, "#!/bin/sh\nprintf 'moved\\n'\n");
+		await fs.chmod(source, 0o750);
+		const session = makeSession(tempDir);
+		const read = await new ReadTool(session).execute("read-script", { path: "run.sh" });
+		const header = read.content.find(c => c.type === "text")?.text.split("\n")[0];
+		const chmod = vi
+			.spyOn(fs, "chmod")
+			.mockRejectedValueOnce(Object.assign(new Error("EPERM: operation not permitted, chmod"), { code: "EPERM" }));
+
+		try {
+			const result = await new EditTool(session, "hashline").execute("move-script", {
+				input: `${header}\nMV renamed.sh`,
+			});
+			expect(result.isError).not.toBe(true);
+			expect(chmod).toHaveBeenCalledTimes(1);
+			expect(await Bun.file(source).exists()).toBe(false);
+			expect(await Bun.file(destination).text()).toBe("#!/bin/sh\nprintf 'moved\\n'\n");
+		} finally {
+			chmod.mockRestore();
+		}
 	});
 });
 

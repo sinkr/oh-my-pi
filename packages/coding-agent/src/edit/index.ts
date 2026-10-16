@@ -306,6 +306,19 @@ async function mkdirAllowingFallback(directory: string): Promise<void> {
 	}
 }
 
+/**
+ * Give a moved file its source's mode. The content is already at the destination, possibly
+ * written by a privileged fallback writer, so a destination that denies mode changes keeps
+ * its own mode instead of failing the move halfway with both files left behind.
+ */
+async function chmodMovedFile(filePath: string, mode: number): Promise<void> {
+	try {
+		await fs.chmod(filePath, mode);
+	} catch (error) {
+		if (!isPermissionDeniedError(error)) throw error;
+	}
+}
+
 /** Memoized native inspection, tagged onto the streamed args object it describes. */
 const kInspection = Symbol("edit.inspection");
 
@@ -673,10 +686,10 @@ export class EditTool implements AgentTool<TInput> {
 			if (!request.moveTo) {
 				throw new ToolError("Native edit move request omitted destination", { path: request.path });
 			}
-			const mode = process.platform === "win32" ? undefined : (await fs.stat(request.path)).mode & 0o777;
+			const mode = process.platform === "win32" ? undefined : (await fs.stat(request.path)).mode & 0o7777;
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
 			await writeFileWithFallback(request.moveTo, request.content);
-			if (mode !== undefined) await fs.chmod(request.moveTo, mode);
+			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
