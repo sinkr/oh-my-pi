@@ -1,16 +1,7 @@
 import type { Protocol } from "devtools-protocol";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type {
-	ElementHandle,
-	FileChooser,
-	JSHandle,
-	KeyInput,
-	KeyPressOptions,
-	MouseButton,
-	Page,
-	Realm,
-} from "puppeteer-core";
+import type { ElementHandle, JSHandle, KeyInput, KeyPressOptions, MouseButton, Page, Realm } from "puppeteer-core";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { splitKeyCombo, ternKey } from "./tern/keys";
 import { devtoolsFrameId } from "./frames";
@@ -1031,6 +1022,12 @@ function assignInputFiles(el: unknown, files: unknown[]): string | null {
 	return null;
 }
 
+/** Tell a page its chooser closed without a pick, as the browser does. Runs in the isolated world. */
+function cancelChooser(el: unknown): void {
+	const page = globalThis as unknown as PageGlobals;
+	(el as PageElement).dispatchEvent(new page.Event("cancel", { bubbles: true }));
+}
+
 /** Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world. */
 function dropUploadFiles(el: unknown, files: unknown[]): void {
 	const element = el as PageElement;
@@ -1100,17 +1097,24 @@ async function pickFiles(realm: Realm, paths: string[], signal: AbortSignal | un
 	}
 }
 
-/** Hand a file input the files: staged copies' paths, or contents streamed into the isolated world. */
+/**
+ * Hand a file input the files: staged copies' paths, or contents streamed into the isolated world. `filling` runs once
+ * the files are being set, after staging or streaming has succeeded.
+ */
 async function deliverToInput(
 	input: ElementHandle,
 	sources: UploadSource[],
 	route: UploadRoute,
 	staging: UploadStaging,
 	signal: AbortSignal | undefined,
+	filling?: () => void,
 ): Promise<void> {
 	if (route === "paths") {
 		const staged = await staging.stage(sources, signal);
-		await untilAborted(signal, () => setFileInputPaths(input, staged));
+		await untilAborted(signal, () => {
+			filling?.();
+			return setFileInputPaths(input, staged);
+		});
 		return;
 	}
 	const realm = input.frame.isolatedRealm();
@@ -1118,7 +1122,10 @@ async function deliverToInput(
 	try {
 		const files = await streamUploadFiles(realm, sources, signal);
 		try {
-			const refusal = await untilAborted(signal, () => realm.evaluate(assignInputFiles, target, files));
+			const refusal = await untilAborted(signal, () => {
+				filling?.();
+				return realm.evaluate(assignInputFiles, target, files);
+			});
 			if (refusal) throw new ToolError(refusal);
 		} finally {
 			await files.dispose().catch(() => undefined);
@@ -1161,7 +1168,7 @@ export interface PreparedUpload {
 	/** Bytes `deliver` hands over. */
 	readonly bytes: number;
 	deliver(signal: AbortSignal): Promise<void>;
-	/** Release what finding the target held: an unfilled chooser is cancelled. */
+	/** Release what finding the target held: a caught chooser's input, cancelled when it was never filled. */
 	dispose(): Promise<void>;
 }
 
@@ -1193,8 +1200,9 @@ const pagesAwaitingChooser = new WeakSet<Page>();
 
 /**
  * Click `handle` and return the file input of the chooser it opens, adopted into the isolated world; null when no
- * chooser opened. Puppeteer's FileChooser accepts only paths and hides its input, so the chooser is caught on a CDP
- * session of our own, which lets go of the interception as soon as the input is adopted.
+ * chooser opened. The chooser is caught on a CDP session of our own, which lets go of the interception as soon as the
+ * input is adopted: Puppeteer's `waitForFileChooser` leaves it on, which swallows every later chooser on the page, and
+ * its listener throws on a File System Access picker's event.
  */
 async function catchChooserInput(
 	page: Page,
@@ -1242,18 +1250,6 @@ async function catchChooserInput(
 	}
 }
 
-/** Click `handle` and return the chooser it opens through Puppeteer, which fills it with paths; null when none opened. */
-async function catchChooser(
-	page: Page,
-	handle: ElementHandle,
-	label: string,
-	signal: AbortSignal | undefined,
-): Promise<FileChooser | null> {
-	const chooserPromise = page.waitForFileChooser({ timeout: FILE_CHOOSER_WAIT_MS }).catch(() => null);
-	await clickElement(handle, label, signal);
-	return await untilAborted(signal, () => chooserPromise);
-}
-
 /**
  * Find what takes an upload through `handle`: the file input itself, the chooser its click opens, or else the element
  * as a drop zone. `route` is how the browser gets the files; see {@link UploadStaging.route}.
@@ -1284,41 +1280,30 @@ export async function prepareElementUpload(
 	}
 	pagesAwaitingChooser.add(page);
 	try {
-		if (route === "paths") {
-			const chooser = await catchChooser(page, handle, label, signal);
-			if (chooser) {
-				let handled = false;
-				return preparedUpload(
-					sources,
-					async sig => {
-						const staged = await staging.stage(sources, sig);
-						// Handled only once accept starts: a cancel during staging leaves the chooser to `dispose`.
-						await untilAborted(sig, () => {
-							handled = true;
-							return chooser.accept(staged);
-						});
-					},
-					async () => {
-						if (!handled) await chooser.cancel().catch(() => undefined);
-					},
-				);
+		const input = await catchChooserInput(page, handle, label, signal);
+		if (input) {
+			// A page learns a chooser closed from `change` or `cancel`; one that got neither would wait on a pick
+			// forever, so a refused or failed upload cancels the chooser as the browser would.
+			let filled = false;
+			const release = async (): Promise<void> => {
+				if (!filled) await input.evaluate(cancelChooser).catch(() => undefined);
+				await input.dispose().catch(() => undefined);
+			};
+			try {
+				const refusal = await untilAborted(signal, () => input.evaluate(fileInputRefusal, sources.length));
+				if (refusal) throw new ToolError(refusal);
+			} catch (error) {
+				await release();
+				throw error;
 			}
-		} else {
-			const input = await catchChooserInput(page, handle, label, signal);
-			if (input) {
-				try {
-					const refusal = await untilAborted(signal, () => input.evaluate(fileInputRefusal, sources.length));
-					if (refusal) throw new ToolError(refusal);
-				} catch (error) {
-					await input.dispose().catch(() => undefined);
-					throw error;
-				}
-				return preparedUpload(
-					sources,
-					sig => deliverToInput(input, sources, route, staging, sig),
-					() => input.dispose().catch(() => undefined),
-				);
-			}
+			return preparedUpload(
+				sources,
+				sig =>
+					deliverToInput(input, sources, route, staging, sig, () => {
+						filled = true;
+					}),
+				release,
+			);
 		}
 	} finally {
 		pagesAwaitingChooser.delete(page);

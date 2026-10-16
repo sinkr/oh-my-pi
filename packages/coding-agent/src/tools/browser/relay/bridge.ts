@@ -64,6 +64,8 @@ interface SessionRef {
 	runtimeEpoch: number;
 	/** Sent `Target.setAutoAttach`; only such a session is told about real child targets. */
 	autoAttach: boolean;
+	/** Asked for `Page.setInterceptFileChooserDialog`; the tab keeps it on while any of its sessions does. */
+	interceptsFileChooser: boolean;
 }
 
 interface TargetInfo {
@@ -259,6 +261,8 @@ export class RelayBridge {
 	#groupQueue: TabState[] = [];
 	/** True while {@link #drainGroupQueue} runs — group RPCs must never overlap. */
 	#groupDraining = false;
+	/** Each tab's last file chooser interception transition; see {@link #serializeInterception}. */
+	#interceptionTransitions = new Map<string, Promise<void>>();
 
 	constructor(
 		opts: {
@@ -525,8 +529,13 @@ export class RelayBridge {
 		if (!conn) return;
 		this.#conns.delete(connId);
 		const touched = new Set<string>();
-		for (const ref of conn.sessions.values()) touched.add(ref.tabKey);
+		const intercepting = new Set<string>();
+		for (const ref of conn.sessions.values()) {
+			touched.add(ref.tabKey);
+			if (ref.interceptsFileChooser) intercepting.add(ref.tabKey);
+		}
 		conn.sessions.clear();
+		for (const tabKey of intercepting) this.#releaseFileChooserInterception(tabKey);
 		// Tabs this client claimed leave the omp group unless another claimant
 		// remains — session holders don't count: the long-lived registry
 		// connection holds sessions on every tab without driving any of them.
@@ -614,6 +623,19 @@ export class RelayBridge {
 				if (!(await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref.autoAttach ? announce : undefined))) {
 					ref.autoAttach = previous;
 				}
+				return;
+			}
+			if (msg.method === "Page.setInterceptFileChooserDialog") {
+				// Every session of a tab shares one debugger attachment, so interception is tab-wide here: one
+				// session switching it off must not cancel another session's chooser wait.
+				await this.#serializeInterception(ref.tabKey, async () => {
+					const previous = ref.interceptsFileChooser;
+					ref.interceptsFileChooser = msg.params?.enabled === true;
+					const params = { ...msg.params, enabled: this.#interceptsFileChooser(ref.tabKey) };
+					if (!(await this.#forwardToTab(conn, { ...msg, params }, ref.tabKey, undefined))) {
+						ref.interceptsFileChooser = previous;
+					}
+				});
 				return;
 			}
 			await this.#forwardToTab(conn, msg, ref.tabKey, undefined);
@@ -1370,6 +1392,7 @@ export class RelayBridge {
 			runtimeEnabling: null,
 			runtimeEpoch: 0,
 			autoAttach: false,
+			interceptsFileChooser: false,
 		});
 		return sessionId;
 	}
@@ -1378,6 +1401,7 @@ export class RelayBridge {
 		const ref = conn.sessions.get(sessionId);
 		if (!ref) return;
 		conn.sessions.delete(sessionId);
+		if (ref.interceptsFileChooser) this.#releaseFileChooserInterception(ref.tabKey);
 		const targetId = ref.kind === "tab" ? tabTargetIdFromKey(ref.tabKey) : pageTargetIdFromKey(ref.tabKey);
 		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
 		// An explicit release of the last session must drop the attachment too,
@@ -1438,6 +1462,50 @@ export class RelayBridge {
 			if (conn.sessionsForTab(tabKey).length > 0) out.push(conn);
 		}
 		return out;
+	}
+
+	/** Whether any live session on a tab, across connections, has file chooser interception on. */
+	#interceptsFileChooser(tabKey: string): boolean {
+		for (const conn of this.#conns.values()) {
+			for (const ref of conn.sessions.values()) {
+				if (ref.tabKey === tabKey && ref.interceptsFileChooser) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Switch interception off once no live session of the tab asks for it: a session that went away without disabling
+	 * it (a worker killed mid-upload) would otherwise leave the shared attachment swallowing every chooser.
+	 */
+	#releaseFileChooserInterception(tabKey: string): void {
+		void this.#serializeInterception(tabKey, async () => {
+			if (this.#interceptsFileChooser(tabKey)) return;
+			const tab = this.#tabs.get(tabKey);
+			const inst = tab?.attached ? this.#instances.get(tab.instanceId) : undefined;
+			if (!tab || !inst) return;
+			const params = { enabled: false };
+			await this.#rpc(
+				{ op: "send", tabId: tab.tabId, method: "Page.setInterceptFileChooserDialog", params },
+				inst,
+			).catch(() => {});
+		});
+	}
+
+	/**
+	 * Run a tab's interception transitions one at a time, each sending the tab-wide state as it stands when it runs.
+	 * The extension starts RPCs independently, so overlapping transitions could settle out of order; a failed one's
+	 * rollback would then restore a state another transition had already changed on the tab.
+	 */
+	#serializeInterception(tabKey: string, run: () => Promise<void>): Promise<void> {
+		const pending = this.#interceptionTransitions.get(tabKey);
+		const result = pending ? pending.then(run) : run();
+		const tail = result.catch(() => {});
+		this.#interceptionTransitions.set(tabKey, tail);
+		void tail.then(() => {
+			if (this.#interceptionTransitions.get(tabKey) === tail) this.#interceptionTransitions.delete(tabKey);
+		});
+		return result;
 	}
 
 	#emitTabAttached(conn: CdpConnection, tab: TabState): void {
