@@ -503,8 +503,8 @@ export function endComputerTurnForOwner(ownerId: string | undefined): void {
 }
 
 /**
- * The owner's agent turn in flight, if any. Without one (between turns, or SDK and eval use with no agent session),
- * a computer run keeps the native grace period.
+ * The owner's agent turn in flight, if any. Without one (between turns, in a subagent, or SDK and eval use with no
+ * agent session), a computer run keeps the native grace period.
  */
 export function computerTurnInFlight(ownerId: string | undefined): number | undefined {
 	const state = ownerId ? ownerTurns.get(ownerId) : undefined;

@@ -1,7 +1,7 @@
 /**
  * Contract: computer runs keep the display awake for the whole agent turn (the `power.sleepPrevention` in-flight
  * bracket), however long its non-computer steps take, and the turn's end lets the display sleep at once; the next
- * turn holds it again.
+ * turn holds it again. A subagent marks no turns, so its runs keep the native grace period.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
@@ -64,7 +64,7 @@ describe("AgentSession computer display hold per turn", () => {
 	};
 	let streaming = Promise.withResolvers<void>();
 
-	function createSession(responses: MockResponse[]): AgentSession {
+	function createSession(responses: MockResponse[], agentKind: "main" | "sub" = "main"): AgentSession {
 		streaming = Promise.withResolvers<void>();
 		releases.length = 0;
 		steps.length = 0;
@@ -86,6 +86,7 @@ describe("AgentSession computer display hold per turn", () => {
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 			toolRegistry: new Map([[stepTool.name, stepTool as AgentTool]]),
+			agentKind,
 		});
 		owner = session.getEvalKernelOwnerId();
 		unregister = registerComputerController(owner, {
@@ -156,5 +157,12 @@ describe("AgentSession computer display hold per turn", () => {
 		} finally {
 			getApiKey.mockRestore();
 		}
+	});
+
+	it("marks no turn in a subagent, so its runs keep the grace period", async () => {
+		const target = createSession([step, { content: ["done"] }], "sub");
+		await target.prompt("go");
+		expect(steps).toEqual([{ turn: undefined, releases: 0 }]);
+		expect(releases).toEqual([]);
 	});
 });

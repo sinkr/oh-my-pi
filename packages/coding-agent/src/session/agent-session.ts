@@ -1208,7 +1208,7 @@ export class AgentSession implements SettingsScope {
 		this.#promptInFlightCount++;
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
-			beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
+			this.#beginComputerTurn();
 		}
 	}
 
@@ -1218,13 +1218,27 @@ export class AgentSession implements SettingsScope {
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
-		endComputerTurnForOwner(this.#eval.getKernelOwnerId());
+		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();
 			return;
 		}
 		void this.#flushInFlightSettledCallbacks().finally(() => this.#drainStrandedQueuedMessages());
+	}
+
+	/**
+	 * Computer runs keep the display awake until {@link #endComputerTurn}. Only a top-level session marks turns: a
+	 * subagent's turn can end mid-way through its parent's, so its runs keep the native grace period instead.
+	 */
+	#beginComputerTurn(): void {
+		if (this.#agentKind !== "main") return;
+		beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
+	}
+
+	#endComputerTurn(): void {
+		if (this.#agentKind !== "main") return;
+		endComputerTurnForOwner(this.#eval.getKernelOwnerId());
 	}
 
 	async #flushInFlightSettledCallbacks(): Promise<void> {
@@ -1564,7 +1578,7 @@ export class AgentSession implements SettingsScope {
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
-		endComputerTurnForOwner(this.#eval.getKernelOwnerId());
+		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();
