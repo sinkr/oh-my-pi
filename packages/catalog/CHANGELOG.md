@@ -10,6 +10,7 @@
 ### Changed
 
 - GPT Image models (`gpt-image-*`, `chatgpt-image-*`) now classify as their own `gpt-image` family instead of `gpt` or `chatgpt`, so GPT chat-model rules no longer apply to them ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
+- Renamed the built-in `google-antigravity` login option to "Google Antigravity (Gemini, Claude, GPT-OSS)" so it is distinguishable from similarly named third-party plugins and no longer implies support stops at Gemini 3 ([#15998](https://github.com/can1357/oh-my-pi/pull/15998) by [@savanne-kham](https://github.com/savanne-kham)).
 
 ### Fixed
 
