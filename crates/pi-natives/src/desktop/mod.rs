@@ -31,7 +31,7 @@ pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery};
 use ax::{AxRegistry, register_node};
 use backend::{Backend, DeliveryMode, DisplayAwakeHold, MouseButton, PointerEvent};
 use control::{CancellationSource, InputLease, OperationToken};
-use error::{CoreResult, DesktopError};
+use error::{CoreResult, DesktopError, ErrorCode};
 use frame::{FrameGeometry, apply_capture_caps, encode_png};
 use keys::{parse_keys, parse_modifiers};
 pub use menus::DesktopMenuItem;
@@ -375,6 +375,22 @@ impl Request {
 			| Self::AxSnapshot { target, .. }
 			| Self::AxQuery { target, .. }
 			| Self::AxElementAt { target, .. } => Some(target),
+			_ => None,
+		}
+	}
+
+	/// The element ref the request acts on or reads, for requests that name
+	/// one.
+	fn reference(&self) -> Option<&str> {
+		match self {
+			Self::AxNode { reference, .. }
+			| Self::AxAttributes { reference, .. }
+			| Self::AxChildren { reference, .. }
+			| Self::AxParent { reference, .. }
+			| Self::AxPerform { reference, .. }
+			| Self::AxSetValue { reference, .. }
+			| Self::AxFocus { reference, .. }
+			| Self::AxClick { reference, .. } => Some(reference),
 			_ => None,
 		}
 	}
@@ -756,6 +772,50 @@ impl Worker {
 		result
 	}
 
+	/// Names, in a `StaleRef` from `reference`'s element, the one element of
+	/// its window with the fields the ref was read with ([`ax::refind`]),
+	/// registered as a new ref. Nothing is sent to that element: equal fields
+	/// do not prove it is the same control, so the caller decides. Searches
+	/// only for a ref read with such fields, and only once its element is
+	/// provably destroyed.
+	fn name_match(
+		&mut self,
+		reference: &str,
+		error: DesktopError,
+		token: &OperationToken,
+	) -> DesktopError {
+		if error.code != ErrorCode::StaleRef
+			|| !self.registry.has_identity(reference)
+			|| token.check().is_err()
+		{
+			return error;
+		}
+		let Ok(handle) = self.registry.resolve(reference) else {
+			return error;
+		};
+		let Ok(target) = self.registry.target(reference) else {
+			return error;
+		};
+		let Ok(window) = self.window(&Target::Window(target)) else {
+			return error;
+		};
+		let (backend, registry) = (&mut self.backend, &mut self.registry);
+		let Some(ax) = backend.as_mut().ok().and_then(|backend| backend.ax()) else {
+			return error;
+		};
+		if !ax.destroyed(&handle) {
+			return error;
+		}
+		match ax::refind(ax, registry, &window, reference) {
+			Ok(Some(found)) => DesktopError::stale_ref(format!(
+				"{reference} destroyed; {found} is the one element in the window with the role, \
+				 labels and value {reference} was read with. Equal fields do not prove it is the same \
+				 control: check {found} before acting on it, or re-run ax()/find()"
+			)),
+			_ => error,
+		}
+	}
+
 	fn ax(&mut self) -> CoreResult<&mut dyn backend::AxBackend> {
 		self
 			.backend()?
@@ -763,7 +823,17 @@ impl Worker {
 			.ok_or_else(DesktopError::ax_unsupported)
 	}
 
+	/// Runs `request`; a `StaleRef` from an element ref names the one element
+	/// left with its fields ([`Self::name_match`]).
 	fn process(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
+		let result = self.run(request, token);
+		match (result, request.reference()) {
+			(Err(error), Some(reference)) => Err(self.name_match(reference, error, token)),
+			(result, _) => result,
+		}
+	}
+
+	fn run(&mut self, request: &Request, token: &OperationToken) -> CoreResult<Response> {
 		match request {
 			Request::Capabilities { .. } => {
 				let caps = match self.backend.as_mut() {
@@ -1901,6 +1971,8 @@ impl DesktopSession {
 
 #[cfg(test)]
 mod capture_tests {
+	use std::collections::HashSet;
+
 	use image::RgbaImage;
 
 	use super::*;
@@ -1913,12 +1985,46 @@ mod capture_tests {
 
 	const WAYLAND_ID: &str = "atspi::1.31:/org/a11y/atspi/accessible/1";
 
+	/// Elements by test id under the window root, id 1. A destroyed element
+	/// answers every request as gone.
+	#[derive(Default)]
+	struct FakeTree {
+		titles:            HashMap<u64, &'static str>,
+		children:          Vec<u64>,
+		destroyed:         HashSet<u64>,
+		pressed:           Vec<u64>,
+		/// A press is delivered, then the app replaces the pressed element with
+		/// an identical one under this id and the press answers as stale.
+		press_rebuilds_as: Option<u64>,
+		/// A press answers as stale while its element stays, as one that met
+		/// another element the app destroyed would.
+		stale_presses:     bool,
+		/// Calls that asked whether an element was destroyed.
+		probes:            u32,
+	}
+
+	impl FakeTree {
+		fn element(&self, h: &AxHandle) -> CoreResult<u64> {
+			let AxHandle::Test(id) = h else {
+				unreachable!("test handles only")
+			};
+			if self.destroyed.contains(id) {
+				Err(DesktopError::stale_ref("the element no longer exists"))
+			} else {
+				Ok(*id)
+			}
+		}
+	}
+
 	/// Backend that mints a composite AT-SPI window id, mirroring the Wayland
 	/// `AtSpiAx` path. Exists to exercise `Worker::process` without a display.
 	struct FakeWaylandBackend {
 		window:                 DesktopWindow,
 		overlap:                Option<DesktopWindow>,
 		window_present:         bool,
+		/// An AX tree the app can rebuild; `None` answers every element as one
+		/// button.
+		tree:                   Option<Arc<Mutex<FakeTree>>>,
 		clicks:                 Arc<Mutex<Vec<String>>>,
 		layout:                 Arc<Mutex<Vec<DesktopDisplay>>>,
 		active_display:         Arc<Mutex<String>>,
@@ -1955,6 +2061,7 @@ mod capture_tests {
 				},
 				overlap:                None,
 				window_present:         true,
+				tree:                   None,
 				clicks:                 Arc::new(Mutex::new(Vec::new())),
 				layout:                 Arc::new(Mutex::new(vec![DesktopDisplay {
 					id:           "screen-1".to_string(),
@@ -2005,38 +2112,93 @@ mod capture_tests {
 				.ok_or_else(|| DesktopError::window_not_found("the element's window closed"))
 		}
 
-		fn props(&mut self, _: &AxHandle) -> CoreResult<AxProps> {
+		fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
+			let (role, title) = match &self.tree {
+				Some(tree) => {
+					let tree = tree.lock();
+					let id = tree.element(h)?;
+					if id == 1 {
+						("window", None)
+					} else {
+						("button", tree.titles.get(&id).map(|title| (*title).to_string()))
+					}
+				},
+				None => ("button", None),
+			};
 			Ok(AxProps {
-				role:        "button".to_string(),
-				native_role: "button".to_string(),
-				title:       None,
-				value:       None,
+				role: role.to_string(),
+				native_role: role.to_string(),
+				identity: Some(Box::new([Some(role.to_string()), title.clone()])),
+				partial: false,
+				title,
+				value: None,
 				description: None,
-				enabled:     true,
-				focused:     false,
-				bounds:      Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
-				actions:     Vec::new(),
+				enabled: true,
+				focused: false,
+				bounds: Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
+				actions: Vec::new(),
 				child_count: 0,
 			})
 		}
 
-		fn children(&mut self, _: &AxHandle) -> CoreResult<Vec<AxHandle>> {
-			Ok(Vec::new())
+		fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
+			let Some(tree) = &self.tree else {
+				return Ok(Vec::new());
+			};
+			let tree = tree.lock();
+			Ok(if tree.element(h)? == 1 {
+				tree.children.iter().map(|id| AxHandle::Test(*id)).collect()
+			} else {
+				Vec::new()
+			})
 		}
 
-		fn parent(&mut self, _: &AxHandle) -> CoreResult<Option<AxHandle>> {
+		fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>> {
+			if let Some(tree) = &self.tree {
+				tree.lock().element(h)?;
+			}
 			unreachable!("tree traversal not exercised")
 		}
 
-		fn perform(&mut self, _: &AxHandle, _: &str) -> CoreResult<()> {
-			unreachable!("semantic actions not exercised")
+		fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
+			let mut tree = self
+				.tree
+				.as_ref()
+				.expect("semantic actions need a tree")
+				.lock();
+			let id = tree.element(h)?;
+			if action != "press" {
+				return Err(DesktopError::ax_failed(format!("no action {action}")));
+			}
+			tree.pressed.push(id);
+			if tree.stale_presses {
+				return Err(DesktopError::stale_ref("the element no longer exists"));
+			}
+			let Some(copy) = tree.press_rebuilds_as else {
+				return Ok(());
+			};
+			tree.destroyed.insert(id);
+			let title = tree.titles[&id];
+			tree.titles.insert(copy, title);
+			for child in &mut tree.children {
+				if *child == id {
+					*child = copy;
+				}
+			}
+			Err(DesktopError::stale_ref("the element no longer exists"))
 		}
 
-		fn set_value(&mut self, _: &AxHandle, _: &str) -> CoreResult<()> {
+		fn set_value(&mut self, h: &AxHandle, _: &str) -> CoreResult<()> {
+			if let Some(tree) = &self.tree {
+				tree.lock().element(h)?;
+			}
 			unreachable!("text input not exercised")
 		}
 
-		fn focus(&mut self, _: &AxHandle) -> CoreResult<()> {
+		fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
+			if let Some(tree) = &self.tree {
+				tree.lock().element(h)?;
+			}
 			unreachable!("focus not exercised")
 		}
 
@@ -2048,8 +2210,20 @@ mod capture_tests {
 			unreachable!("focus not exercised")
 		}
 
-		fn attributes(&mut self, _: &AxHandle) -> CoreResult<Vec<(String, String)>> {
-			unreachable!("attributes not exercised")
+		fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>> {
+			let tree = self.tree.as_ref().expect("attributes need a tree").lock();
+			let id = tree.element(h)?;
+			let title = tree.titles.get(&id).copied().unwrap_or_default();
+			Ok(vec![("AXTitle".to_string(), title.to_string())])
+		}
+
+		fn destroyed(&mut self, h: &AxHandle) -> bool {
+			let AxHandle::Test(id) = h else { return false };
+			self.tree.as_ref().is_some_and(|tree| {
+				let mut tree = tree.lock();
+				tree.probes += 1;
+				tree.destroyed.contains(id)
+			})
 		}
 	}
 
@@ -2637,6 +2811,197 @@ mod capture_tests {
 		};
 		assert_eq!(error.code, ErrorCode::WindowNotFound);
 		assert!(clicks.lock().is_empty(), "no input may reach the overlapping window");
+	}
+
+	/// A worker whose window holds one button per `(id, title)`, read once by
+	/// `ax()`: the window is `e1` and the buttons `e2`, `e3`, … in order.
+	fn read_buttons(buttons: &[(u64, &'static str)]) -> (TestWorker, Arc<Mutex<FakeTree>>) {
+		let tree = Arc::new(Mutex::new(FakeTree {
+			titles: buttons.iter().copied().collect(),
+			children: buttons.iter().map(|(id, _)| *id).collect(),
+			..FakeTree::default()
+		}));
+		let mut backend = FakeWaylandBackend::new();
+		backend.tree = Some(Arc::clone(&tree));
+		let mut worker = worker_with(backend);
+		let target = Target::Window(WAYLAND_ID.to_string());
+		worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		(worker, tree)
+	}
+
+	/// The app destroys `old` and puts `buttons` in the window instead.
+	fn rebuild(tree: &Mutex<FakeTree>, old: u64, buttons: &[(u64, &'static str)]) {
+		let mut tree = tree.lock();
+		tree.destroyed.insert(old);
+		tree.titles.extend(buttons.iter().copied());
+		tree.children = buttons.iter().map(|(id, _)| *id).collect();
+	}
+
+	/// Sends the request `make` builds under a fresh token of `source`.
+	fn call(
+		worker: &mut Worker,
+		make: impl FnOnce(Reply) -> Request,
+		source: &CancellationSource,
+	) -> CoreResult<Response> {
+		let (reply, _rx) = flume::bounded(1);
+		worker.process(&make(reply), &source.token())
+	}
+
+	fn press(worker: &mut Worker, reference: &str) -> CoreResult<()> {
+		let request = |reply| Request::AxPerform {
+			reference: reference.to_string(),
+			action: "press".to_string(),
+			reply,
+		};
+		call(worker, request, &CancellationSource::default()).map(drop)
+	}
+
+	/// The ref a `StaleRef` from `reference` names as the one element left
+	/// with the fields `reference` was read with, if any.
+	fn named(error: &DesktopError, reference: &str) -> Option<String> {
+		assert_eq!(error.code, ErrorCode::StaleRef, "{}", error.message);
+		let rest = error
+			.message
+			.strip_prefix(&format!("{reference} destroyed; "))?;
+		rest.split_whitespace().next().map(str::to_string)
+	}
+
+	#[test]
+	fn a_press_on_a_rebuilt_element_names_its_one_copy_and_presses_nothing() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
+		assert!(tree.lock().pressed.is_empty());
+		// The named ref works, and `e2` still names the destroyed element.
+		press(&mut worker, "e4").unwrap();
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
+		assert_eq!(tree.lock().pressed, [4]);
+	}
+
+	#[test]
+	fn every_call_on_a_rebuilt_element_names_its_copy() {
+		fn e2() -> String {
+			"e2".to_string()
+		}
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
+		let requests: [fn(Reply) -> Request; 8] = [
+			|reply| Request::AxNode { reference: e2(), reply },
+			|reply| Request::AxAttributes { reference: e2(), reply },
+			|reply| Request::AxChildren { reference: e2(), reply },
+			|reply| Request::AxParent { reference: e2(), reply },
+			|reply| Request::AxPerform { reference: e2(), action: "press".to_string(), reply },
+			|reply| Request::AxSetValue { reference: e2(), value: "Stop".to_string(), reply },
+			|reply| Request::AxFocus { reference: e2(), reply },
+			|reply| Request::AxClick {
+				reference: e2(),
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply,
+			},
+		];
+		for make in requests {
+			let error = call(&mut worker, make, &CancellationSource::default())
+				.err()
+				.expect("the element is gone");
+			assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
+		}
+		assert!(tree.lock().pressed.is_empty());
+	}
+
+	#[test]
+	fn a_rebuilt_element_with_two_identical_copies_names_neither() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		rebuild(&tree, 2, &[(4, "Go"), (5, "Go"), (3, "Stop")]);
+		assert_eq!(named(&press(&mut worker, "e2").unwrap_err(), "e2"), None);
+		assert!(tree.lock().pressed.is_empty());
+	}
+
+	#[test]
+	fn an_element_that_had_a_twin_when_read_names_nothing() {
+		// The other "Go" may be the one left, not a copy of the destroyed one.
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Go")]);
+		rebuild(&tree, 2, &[(3, "Go")]);
+		assert_eq!(named(&press(&mut worker, "e2").unwrap_err(), "e2"), None);
+		assert!(tree.lock().pressed.is_empty());
+		// Its ref has no fields that tell it apart, so nothing probed it.
+		assert_eq!(tree.lock().probes, 0);
+	}
+
+	#[test]
+	fn a_changed_or_removed_element_names_nothing() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		rebuild(&tree, 2, &[(4, "Going"), (3, "Stop")]);
+		assert_eq!(named(&press(&mut worker, "e2").unwrap_err(), "e2"), None);
+		rebuild(&tree, 4, &[(3, "Stop")]);
+		assert_eq!(named(&press(&mut worker, "e2").unwrap_err(), "e2"), None);
+		assert!(tree.lock().pressed.is_empty());
+	}
+
+	#[test]
+	fn a_ref_to_an_earlier_version_of_a_relabelled_control_names_its_match_and_presses_nothing() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
+		worker
+			.snapshot(&Target::Window(WAYLAND_ID.to_string()), &AxSnapshotOptions::default())
+			.unwrap();
+		press(&mut worker, "e4").unwrap();
+		// The press relabels the button and the app adds a new "Go".
+		{
+			let mut tree = tree.lock();
+			tree.titles.insert(4, "Done");
+			tree.titles.insert(5, "Go");
+			tree.children = vec![4, 5, 3];
+		}
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert!(
+			error
+				.message
+				.contains("e2 destroyed; e5 is the one element"),
+			"{}",
+			error.message
+		);
+		assert_eq!(tree.lock().pressed, [4]);
+	}
+
+	#[test]
+	fn a_press_that_destroys_its_element_is_sent_once() {
+		// The press may have acted before the app rebuilt the button.
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		tree.lock().press_rebuilds_as = Some(4);
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
+		assert_eq!(tree.lock().pressed, [2]);
+	}
+
+	#[test]
+	fn only_a_stale_ref_read_with_telling_fields_probes_its_element() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		// A call that succeeds never probes.
+		press(&mut worker, "e2").unwrap();
+		assert_eq!(tree.lock().probes, 0);
+		// A stale answer for an element still there names nothing.
+		tree.lock().stale_presses = true;
+		assert_eq!(named(&press(&mut worker, "e2").unwrap_err(), "e2"), None);
+		assert_eq!(tree.lock().probes, 1);
+		tree.lock().stale_presses = false;
+		// A cancelled call neither probes nor searches.
+		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
+		let source = CancellationSource::default();
+		let token = source.token();
+		source.cancel();
+		let (reply, _rx) = flume::bounded(1);
+		let request =
+			Request::AxPerform { reference: "e2".to_string(), action: "press".to_string(), reply };
+		let error = worker
+			.process(&request, &token)
+			.err()
+			.expect("the element is gone");
+		assert_eq!(named(&error, "e2"), None);
+		assert_eq!(tree.lock().probes, 1);
 	}
 
 	fn capture_request(target: Target) -> Request {
