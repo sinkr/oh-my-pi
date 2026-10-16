@@ -231,7 +231,13 @@ import {
 	releaseTabsForOwner,
 } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
-import { releaseComputerSessionsForOwner, revokeComputerControlForOwner } from "../tools/computer/supervisor";
+import {
+	beginComputerTurnForOwner,
+	endComputerTurnForOwner,
+	releaseComputerSessionsForOwner,
+	resumeComputerTurnForOwner,
+	revokeComputerControlForOwner,
+} from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import {
 	buildResolveReminderMessage,
@@ -1101,6 +1107,11 @@ export class AgentSession implements SettingsScope {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
+	#userWaitCount = 0;
+	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
+	#userWaitEndedTurn = false;
+	#inFlightEpoch = 0;
 	#abortInProgress = false;
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
 	 *  yet dispatched a turn, queued, or bailed. Preprocessing (manual-compaction wait, slash
@@ -1199,25 +1210,65 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	#beginInFlight(): void {
+	#beginInFlight(): number {
 		this.#promptInFlightCount++;
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
+			this.#beginComputerTurn();
 		}
+		return this.#inFlightEpoch;
 	}
 
-	#endInFlight(onSettled?: () => void | Promise<void>): void {
+	#endInFlight(epoch: number, onSettled?: () => void | Promise<void>): void {
+		// Abort has already released this bracket; its late finalizer cannot settle a newer turn.
+		if (epoch !== this.#inFlightEpoch) return;
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
+		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();
 			return;
 		}
 		void this.#flushInFlightSettledCallbacks().finally(() => this.#drainStrandedQueuedMessages());
+	}
+
+	/**
+	 * Runs `dialog`, which waits for the user's answer (`ask`, a tool approval, an extension prompt), with the
+	 * computer turn ended, so an unattended Mac sleeps and locks on its own timer rather than showing the pending
+	 * question. Once the last open dialog settles, if a prompt is still in flight, the turn goes on: the run still active
+	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again.
+	 */
+	async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
+		if (this.#userWaitCount++ === 0) {
+			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
+			this.#endComputerTurn();
+		}
+		try {
+			return await dialog();
+		} finally {
+			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
+				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
+				else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+			}
+		}
+	}
+
+	/**
+	 * Computer runs keep the display awake until {@link #endComputerTurn}. Only a top-level session marks turns: a
+	 * subagent's turn can end mid-way through its parent's, so its runs keep the native grace period instead.
+	 */
+	#beginComputerTurn(): void {
+		if (this.#agentKind !== "main" || this.#userWaitCount > 0) return;
+		beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
+	}
+
+	#endComputerTurn(): void {
+		if (this.#agentKind !== "main") return;
+		endComputerTurnForOwner(this.#eval.getKernelOwnerId());
 	}
 
 	async #flushInFlightSettledCallbacks(): Promise<void> {
@@ -1383,7 +1434,7 @@ export class AgentSession implements SettingsScope {
 		// delaying the observation's finish and mis-attributing the successor's RPC
 		// progress to this now-dead wake monitor.
 		const generation = this.#promptGeneration;
-		this.#beginInFlight();
+		const inFlightEpoch = this.#beginInFlight();
 		let turnError: unknown;
 		// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
 		// in flight when the wake lands. Starting the turn on the stale prompt would
@@ -1445,7 +1496,7 @@ export class AgentSession implements SettingsScope {
 					this.#queuedMessageDrainBlocked ||= parkedQueueDrainBlocked;
 				}
 				// Release the in-flight bracket BEFORE settling owned async work.
-				this.#endInFlight();
+				this.#endInFlight(inFlightEpoch);
 				await this.#finishTurnObservation(observation, turnError);
 			});
 	}
@@ -1554,9 +1605,11 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#resetInFlight(): void {
+		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
+		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();
@@ -1987,11 +2040,11 @@ export class AgentSession implements SettingsScope {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-				this.#beginInFlight();
+				const inFlightEpoch = this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
 				} finally {
-					this.#endInFlight();
+					this.#endInFlight(inFlightEpoch);
 				}
 			},
 			scheduleIdleFlush: run => {
@@ -2087,6 +2140,7 @@ export class AgentSession implements SettingsScope {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
+			waitForUser: dialog => this.waitForUser(dialog),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -2785,8 +2839,9 @@ export class AgentSession implements SettingsScope {
 		return this.#planProposalHandler;
 	}
 
+	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
-		this.#planProposalHandler = handler ?? undefined;
+		this.#planProposalHandler = handler ? title => this.waitForUser(() => handler(title)) : undefined;
 	}
 
 	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
@@ -4838,7 +4893,7 @@ export class AgentSession implements SettingsScope {
 					}
 				}
 
-				this.#beginInFlight();
+				const inFlightEpoch = this.#beginInFlight();
 				const coalescedSources = new Set([options.source]);
 				const promise = this.#runAgentContinue(signal, request, coalescedSources);
 				const attempt: ActiveAgentContinue = {
@@ -4860,7 +4915,7 @@ export class AgentSession implements SettingsScope {
 						this.#activeAgentContinue = undefined;
 					}
 					this.#usagePreflightReadyForNextModelCall = false;
-					this.#endInFlight();
+					this.#endInFlight(inFlightEpoch);
 				}
 			},
 			{
@@ -6118,9 +6173,11 @@ export class AgentSession implements SettingsScope {
 		return this.#recovery.servingModel;
 	}
 
-	/** Install the interactive decision surface for reserve-triggered model changes. */
+	/** Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn. */
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
-		this.#usageFallbackConfirmer = confirmer;
+		this.#usageFallbackConfirmer = confirmer
+			? (confirmation, signal) => this.waitForUser(() => confirmer(confirmation, signal))
+			: undefined;
 	}
 
 	#allowQueuedMessageDrainRetry(): void {
@@ -7939,7 +7996,7 @@ export class AgentSession implements SettingsScope {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
-		this.#beginInFlight();
+		const inFlightEpoch = this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
@@ -8157,7 +8214,7 @@ export class AgentSession implements SettingsScope {
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
-			this.#endInFlight();
+			this.#endInFlight(inFlightEpoch);
 			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
 		}
 	}
@@ -8718,7 +8775,7 @@ export class AgentSession implements SettingsScope {
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
-		this.#beginInFlight();
+		const inFlightEpoch = this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
@@ -8732,7 +8789,7 @@ export class AgentSession implements SettingsScope {
 		} finally {
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
-			this.#endInFlight();
+			this.#endInFlight(inFlightEpoch);
 		}
 	}
 

@@ -2737,9 +2737,9 @@ interface FinalizeRunArgs {
 	/**
 	 * This finalize is a revival/wake or explicit follow-up turn, not the initial
 	 * run. Structured turns only republish a real `yield`; message-result turns
-	 * republish successful, non-empty reports only when requested by the parent.
-	 * These follow-up message results exclude peer replies and cancelled turns;
-	 * the initial run is unaffected.
+	 * republish successful, non-empty reports only when the parent or the user
+	 * requested the turn. These follow-up message results exclude peer replies
+	 * and cancelled turns; the initial run is unaffected.
 	 */
 	followUpTurn?: boolean;
 	publishMessageResult?: boolean;
@@ -2813,8 +2813,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	//
 	// Structured follow-ups need a real yield so conversational wakes cannot
 	// replace the accepted artifact with a missing-yield warning (issue #9518).
-	// Message-result agents publish successful parent-requested reports, not
-	// conversational replies to peers or cancelled follow-ups.
+	// Message-result agents publish successful reports the parent or the user
+	// asked for, not conversational replies to peers or cancelled follow-ups.
 	let outputMeta: { lineCount: number; charCount: number } | undefined;
 	let outputPath: string | undefined;
 	const hasMessageResult =
@@ -3156,7 +3156,8 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * settle (see {@link AgentSession.setIrcWakeTurnObserver}).
  *
  * The turn's output reaches the parent as an async job when the parent's
- * message woke the turn or the turn yielded, and the other waking peers via
+ * message woke the turn, the turn yielded, or a user prompt completed a
+ * message result, and the other waking peers via
  * {@link relayWakeTurnOutput}; the relay is registered as a pending reply on
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
@@ -3263,6 +3264,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const unsubscribeTurn = turnMonitor.attach(session);
 		const ownerWoken = wakeSources(records, id).some(source => source.from === ownerId);
 		if (ownerWoken) registerWakeJob();
+		// A focused-session user prompt is the operator driving this agent (#14428):
+		// like a parent follow-up, its message-result reply is the agent's new result.
+		const userPrompted = records.some(record =>
+			record.role === "user" ? record.attribution === "user" : record.role === "developer" && record.userInitiated,
+		);
 		return async turnError => {
 			unsubscribeTurn();
 			const activeSession = turnMonitor.takeActiveSession();
@@ -3329,7 +3335,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					parentToolCallId: options.parentToolCallId,
 					detached: true,
 					followUpTurn: true,
-					publishMessageResult: ownerWoken,
+					publishMessageResult: ownerWoken || userPrompted,
 					// A cancelled wake job must not replace the accepted result.
 					signal: jobCancel.signal,
 					sessionFile,
@@ -3342,11 +3348,25 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					error: caught instanceof Error ? caught.message : String(caught),
 				});
 			} finally {
+				// A user-driven message result is already complete: enqueue its
+				// delivery without reserving an execution slot (which may be full).
+				const messageResult = userPrompted && options.structured === false && result?.outputPath !== undefined;
+				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
+					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					try {
+						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+					} catch (error) {
+						logger.warn("User-resumed subagent result delivery failed", {
+							id,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
 				// Once registered, the wake job carries this turn's outcome to the
 				// parent whatever it is: the yield result, the failure that
 				// superseded it, or, for a turn that never yielded, the answer a
 				// relay would have carried.
-				if (wakeJob && yielded && result) {
+				if (wakeJob && (yielded || messageResult) && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structured = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
