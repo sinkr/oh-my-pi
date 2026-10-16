@@ -615,7 +615,11 @@ export class ModelRegistry {
 		if (this.#backgroundRefresh) {
 			return;
 		}
-		const refreshPromise = this.refresh(strategy)
+		// `refresh()` synchronously reloads static config, which can reset startup
+		// discovery states. Start it on a microtask so a caller can validate
+		// against the hydrated startup catalog right after kicking the refresh off.
+		const refreshPromise = Promise.resolve()
+			.then(() => this.refresh(strategy))
 			.catch(error => {
 				logger.warn("background model refresh failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -3158,14 +3162,22 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Whether a config-declared discovery provider has not yet produced a
-	 * catalog in this process. A cold discovery cache (e.g. after `omp update`
-	 * bumps the cache namespace) leaves the provider in its initial `idle`
-	 * state with no models, so a selector the provider will supply looks
-	 * unknown until background discovery lands (#10048).
+	 * Whether an unresolved selector on `provider` may still be supplied by
+	 * discovery this process has not finished. Two states qualify:
+	 * - `idle`: a config-declared provider with a cold cache has no catalog yet
+	 *   (e.g. after `omp update` bumps the cache namespace, #10048).
+	 * - `cached`/`unavailable` while the initial background refresh is in
+	 *   flight: startup replayed a cache row or fell back to the bundled
+	 *   catalog, and that refresh may still add ids (a cold namespace after an
+	 *   upgrade, or a cache row keyed to another credential). With no refresh
+	 *   running (an embedder that manages discovery itself) these states are
+	 *   final, so unresolved selectors warn immediately.
 	 */
 	isProviderDiscoveryPending(provider: string): boolean {
-		return this.#providerDiscoveryStates.get(provider)?.status === "idle";
+		const status = this.#providerDiscoveryStates.get(provider)?.status;
+		if (status === "idle") return true;
+		if (status !== "cached" && status !== "unavailable") return false;
+		return this.#backgroundRefresh !== undefined && !this.#initialRefreshSettled;
 	}
 
 	/**
