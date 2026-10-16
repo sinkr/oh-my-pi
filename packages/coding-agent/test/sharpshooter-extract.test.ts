@@ -39,10 +39,15 @@ function assistantResponse(content: AssistantMessage["content"]): AssistantMessa
 	};
 }
 
-function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId = "session-extract") {
+function extractionDependencies(
+	cwd: string,
+	messages: AgentMessage[],
+	sessionId = "session-extract",
+	overrides: Record<string, unknown> = {},
+) {
 	const model = getBundledModel("anthropic", "claude-haiku-4-5");
 	if (!model) throw new Error("Expected bundled Claude Haiku model");
-	const settings = Settings.isolated({ "sharpshooter.model": `${model.provider}/${model.id}` });
+	const settings = Settings.isolated({ "sharpshooter.model": `${model.provider}/${model.id}`, ...overrides });
 	const modelRegistry = {
 		getAll: () => [model],
 		getAvailable: () => [model],
@@ -136,6 +141,36 @@ describe("maybeStartSharpshooterExtraction", () => {
 		await pending.promise;
 		await Promise.resolve();
 		await Promise.resolve();
+	});
+
+	it("gates short prompts on sharpshooter.minPromptLength", async () => {
+		const cwd = path.join(os.tmpdir(), "sharpshooter-min-length-project");
+		const agentDir = path.join(os.tmpdir(), "sharpshooter-min-length-agent");
+		const messages = [message("user", [{ type: "text", text: "用方案二" }])];
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(assistantResponse([{ type: "text", text: "No tool call." }]));
+
+		const defaults = extractionDependencies(cwd, messages, "session-min-default");
+		maybeStartSharpshooterExtraction({ agentDir, ...defaults });
+		expect(completion).not.toHaveBeenCalled();
+
+		const zeroed = extractionDependencies(
+			cwd,
+			[message("user", [{ type: "text", text: "好" }])],
+			"session-min-zero",
+			{
+				"sharpshooter.minPromptLength": 0,
+			},
+		);
+		maybeStartSharpshooterExtraction({ agentDir, ...zeroed });
+		expect(completion).not.toHaveBeenCalled();
+
+		const lowered = extractionDependencies(cwd, messages, "session-min-lowered", {
+			"sharpshooter.minPromptLength": 4,
+		});
+		maybeStartSharpshooterExtraction({ agentDir, ...lowered });
+		await waitFor(() => completion.mock.calls.length === 1, "lowered threshold did not start extraction");
 	});
 
 	it("queues only deltas whose evidence is a verbatim prompt substring", async () => {
