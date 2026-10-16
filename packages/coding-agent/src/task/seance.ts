@@ -16,6 +16,8 @@ import { loadSessionFile } from "../session/session-loader";
 import type { ModelRegistry } from "../config/model-registry";
 import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
+import { resolveToCwd } from "../tools/path-utils";
+import { getBundledAgent } from "./agents";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
 import type { AgentDefinition } from "./types";
 
@@ -100,13 +102,18 @@ async function validateSourceFile(file: string, storage: SessionStorage): Promis
 	return { file, id: header.id, modelSelectors: savedModelSelectors(entries) };
 }
 
-/** Resolve an explicit session path or an unambiguous stored session id without opening its writer. */
+/**
+ * Resolve an explicit session path or an unambiguous stored session id without opening its writer.
+ * Ids search the caller's artifact tree, then the current project; `includeGlobal` (user-typed
+ * `/seance` ids) also searches every project's sessions.
+ */
 export async function resolveSeanceSource(
 	selector: string,
 	options: {
 		cwd: string;
 		sessionDirHint?: string;
 		artifactsDirHint?: string;
+		includeGlobal?: boolean;
 		storage?: SessionStorage;
 	},
 ): Promise<ResolvedSeanceSource> {
@@ -114,7 +121,7 @@ export async function resolveSeanceSource(
 	if (!source) throw new Error("A source session is required.");
 	const storage = options.storage ?? new FileSessionStorage();
 	if (source.includes("/") || source.includes("\\") || source.endsWith(".jsonl")) {
-		const file = path.resolve(options.cwd, source);
+		const file = resolveToCwd(source, options.cwd);
 		try {
 			const stat = await fs.stat(file);
 			if (!stat.isFile()) throw new Error("The selected path is not a session file.");
@@ -143,9 +150,10 @@ export async function resolveSeanceSource(
 	const local = await listSessionsReadOnly(sessionDir, storage);
 	const localMatch = chooseId(local, source);
 	if (localMatch) return validateSourceFile(localMatch.path, storage);
-	const global = await SessionManager.listAll(storage);
-	const matchGlobal = chooseId(global, source);
-	if (matchGlobal) return validateSourceFile(matchGlobal.path, storage);
+	if (options.includeGlobal) {
+		const matchGlobal = chooseId(await SessionManager.listAll(storage), source);
+		if (matchGlobal) return validateSourceFile(matchGlobal.path, storage);
+	}
 	throw new Error(`Session "${label}" was not found.`);
 }
 const modelSelectorInputSchema = type("string | string[]");
@@ -276,7 +284,7 @@ export async function prepareSeance(context: {
 			},
 			promptSuffix: resolvedModel =>
 				prompt.render(seanceAssignmentTemplate, {
-					sourceSession: source.id,
+					sourceSession: safeSourceLabel(source.id),
 					model: resolvedModel ?? "",
 				}),
 		},
@@ -289,6 +297,7 @@ export async function restoreSeanceSession(context: {
 	modelRegistry: ModelRegistry;
 }): Promise<RestoredSeanceSession | undefined> {
 	const { init, cwd, modelRegistry } = context;
+	const readOnlyTools = new Set([...(getBundledAgent(SEANCE_AGENT_NAME)?.tools ?? []), "yield"]);
 	if (
 		!init ||
 		typeof init !== "object" ||
@@ -304,19 +313,19 @@ export async function restoreSeanceSession(context: {
 		init.resolvedModel.trim().length === 0 ||
 		!Array.isArray(init.tools) ||
 		!init.tools.every(tool => typeof tool === "string") ||
-		!["read", "grep", "glob"].every(name => init.tools.includes(name)) ||
+		// `grep.enabled`/`glob.enabled` may have trimmed the spawn's list; `read` is the minimum.
+		!init.tools.includes("read") ||
 		typeof cwd !== "string" ||
 		cwd.trim().length === 0
 	) {
 		return undefined;
 	}
 	const modelPattern = init.resolvedModel.trim();
-	const tools = init.tools;
 	await modelRegistry.awaitBackgroundRefresh().catch(() => {});
 	if (!resolveSessionModelSelector(modelRegistry, modelPattern)) return undefined;
 	return {
 		cwd,
 		modelPattern,
-		toolNames: ["read", "grep", "glob", "yield"].filter(name => tools.includes(name)),
+		toolNames: init.tools.filter(name => readOnlyTools.has(name)),
 	};
 }

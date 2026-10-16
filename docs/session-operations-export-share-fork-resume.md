@@ -32,6 +32,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/fork`                                 | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)         | Copies artifact directory to new session namespace when present                     |
 | `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command  | No (parent session retained)                   | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Orca tab, or CMUX workspace) | Child receives a separate forked session                                            |
 | `--fork <id\|path>`                     | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir           | Copies source artifacts recursively by default                                      |
+| `/seance [id\|path] [--model sel]`      | Interactive slash command    | No (active session and model unchanged)       | Forks the source transcript into a read-only consultant subagent under the current session  | None; the consultant reads the source's artifacts in place                          |
 | `/resume [id\|@claude\|@codex]`         | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session              | None                                                                                |
 | `--resume`                              | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                |
 | `--resume <id\|path>`                   | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory | None                                                                                |
@@ -403,19 +404,17 @@ Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explici
 
 ## Seance
 
-`/seance [id|path] [--model selector]` opens a source picker when no source is supplied; an id or path selects directly. Each consult forks the source JSONL and recursively copies artifacts, leaving the source unchanged.
+`/seance [id|path] [--model selector]` opens a source picker when no source is supplied; an id or path (`~` expands) selects directly. Typed ids search the current project, then every project. The source is read without opening a writer and is never modified.
 
-Source resolution reads the transcript without opening a writer. For task-spawned consults, an id first searches the caller's artifact tree: a direct child transcript wins over a same-ID deeper copy, and ambiguous copied matches fail. Other IDs resolve in current-scope then global sessions. If the destination is inside the source artifact tree, copying uses a snapshot; a failed copy aborts the consult and removes the incomplete fork.
+Each consult forks only the source transcript, into `<current session artifacts>/<ConsultId>.jsonl`, with `seanceSource` in its header. Artifacts are not copied: the consultant's `history://`, `artifact://`, and `agent://` read the source's artifacts directory in place, and its own new artifact ids are allocated past the source's so inherited `artifact://<n>` references keep naming the source artifact. Consulting the current session repeatedly adds one transcript per consult, not a copy of the tree.
 
-The `/seance` adapter routes into the task tool; [`src/task/seance.ts`](../packages/coding-agent/src/task/seance.ts) owns source/model selection, consult preparation, and restoration, with [`src/task/seance-policy.ts`](../packages/coding-agent/src/task/seance-policy.ts) defining the restricted child-session options. Shared task code supplies the policy seam; `history://` uses generic session-scoped visibility.
+The model comes from the source's active branch when restorable; `--model selector` overrides it. When the source has no saved model, the model picker opens directly.
 
-The model comes from the source's active branch when restorable; `--model selector` overrides it. If no saved model can be restored, choose one explicitly.
+The consult excludes additional workspace roots, the workspace tree, context files, skills, rules, inherited agents, extensions, MCP, IRC, and LSP; the source's `session_init` contracts become inert `source_session_init` entries. Tools are limited to `read`, `grep`, and `glob` (as enabled); `task.structured` adds `yield`. Cold revival requires the `seanceSource` header and restores the persisted prompt with the same read-only tools.
 
-The consult excludes configured or inherited additional workspace roots, the source workspace tree, inherited agents, extension discovery, and parent startup contracts. It is limited to `read`, `grep`, and `glob`; `task.structured` (default off) adds hidden `yield`, otherwise the final assistant message completes the report. Cold revival preserves this contract. `history://` lists and opens copied child/grandchild transcripts only; use it for nested history, not the source session UUID. An empty listing means no nested histories, not missing source context. Archive is unnecessary, Eval remains unavailable, and historical children are not revived.
+Inherited source charges are zeroed; new consultation turns use existing task/Agent Hub usage tracking.
 
-Warm or revived IRC follow-ups preserve this completion contract and fork-scoped `history://` lookup/completion. A yielded follow-up republishes canonical `agent://<id>` output; successful, nonempty unstructured follow-ups also republish their final report when parent-woken or explicitly requested, removing a stale `<id>.json` sidecar; peer-only unstructured replies and cancelled or empty follow-ups do not publish.
-
-Inherited aggregate source charges are excluded; new consultation turns use existing task/Agent Hub usage tracking.
+Ownership: [`src/slash-commands/seance.ts`](../packages/coding-agent/src/slash-commands/seance.ts) (command and pickers), [`src/task/seance.ts`](../packages/coding-agent/src/task/seance.ts) (source/model resolution, revival contract), [`src/task/seance-policy.ts`](../packages/coding-agent/src/task/seance-policy.ts) (isolation options), and `SessionManager.forkFrom(..., { seance: true })` (fork).
 
 ## Resume and continue
 

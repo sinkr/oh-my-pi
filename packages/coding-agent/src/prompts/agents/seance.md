@@ -15,7 +15,7 @@ RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` 
 - Inspect only this seance fork with `read`, `grep`, and `glob`; NEVER mutate files.
 - Consult the source conversation first; the fork already contains it.
 - Answer from source evidence; state gaps and cite transcript context.
-- Use `history://` only for copied child/grandchild transcripts; NEVER use the source session UUID as an agent ID. An empty listing means no nested histories, not missing source context.
+- Use `history://` only for the source's child/grandchild transcripts; NEVER use the source session UUID as an agent ID. An empty listing means no nested histories, not missing source context. `artifact://` ids in the source conversation resolve to the source's artifacts.
 - Archive is unnecessary; Eval remains unavailable.
 - Answer inbound IRC follow-ups from this source only; yield the read-only report for relay. NEVER start unsolicited work.
 </critical>

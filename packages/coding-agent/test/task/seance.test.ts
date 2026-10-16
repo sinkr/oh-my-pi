@@ -1,10 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
-import { resolveSeanceSource } from "@oh-my-pi/pi-coding-agent/task/seance";
+import { resolveSeanceSource, restoreSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
 import { getAgentDir, getSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function sessionHeader(id: string, cwd: string) {
@@ -56,6 +58,27 @@ async function writeSession(file: string, id: string, cwd: string, entries: unkn
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	await Bun.write(file, `${[sessionHeader(id, cwd), ...entries].map(entry => JSON.stringify(entry)).join("\n")}\n`);
 }
+
+/** Point the agent dir (and so every project's session bucket) at a temp root for one test. */
+async function withAgentDir<T>(agentDir: string, fn: () => Promise<T>): Promise<T> {
+	const originalAgentDir = getAgentDir();
+	const originalAgentDirOverride = process.env.PI_CODING_AGENT_DIR;
+	setAgentDir(agentDir);
+	try {
+		return await fn();
+	} finally {
+		if (originalAgentDirOverride !== undefined) {
+			setAgentDir(originalAgentDirOverride);
+		} else {
+			setAgentDir(originalAgentDir);
+			delete process.env.PI_CODING_AGENT_DIR;
+		}
+	}
+}
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("seance source resolution", () => {
 	it("resolves paths and stored IDs to read-only source metadata with the active model and default fallback", async () => {
@@ -178,13 +201,41 @@ describe("seance source resolution", () => {
 		});
 	});
 
+	it("finds an id stored only in another project only when global lookup is requested", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-global-lookup-");
+		await withAgentDir(path.join(tempDir.path(), "agent"), async () => {
+			const cwd = path.join(tempDir.path(), "project");
+			const otherCwd = path.join(tempDir.path(), "other-project");
+			const foreignFile = path.join(sessionDirForCwd(otherCwd), "foreign.jsonl");
+			await writeSession(foreignFile, "foreign-project-id", otherCwd);
+
+			await expect(resolveSeanceSource("foreign-project-id", { cwd })).rejects.toThrow(
+				'Session "foreign-project-id" was not found.',
+			);
+			await expect(resolveSeanceSource("foreign-project-id", { cwd, includeGlobal: true })).resolves.toMatchObject({
+				file: foreignFile,
+				id: "foreign-project-id",
+			});
+		});
+	});
+
+	it("expands a home-relative source path", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-home-path-");
+		const home = path.join(tempDir.path(), "home");
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+		const file = path.join(home, "saved", "home-source.jsonl");
+		await writeSession(file, "home-source-id", home);
+
+		const resolved = await resolveSeanceSource("~/saved/home-source.jsonl", {
+			cwd: path.join(tempDir.path(), "project"),
+		});
+		expect(path.resolve(resolved.file)).toBe(file);
+		expect(resolved.id).toBe("home-source-id");
+	});
+
 	it("does not create a default session bucket or migrate legacy directories on unhinted lookup", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-unhinted-read-only-");
-		const originalAgentDir = getAgentDir();
-		const originalAgentDirOverride = process.env.PI_CODING_AGENT_DIR;
-
-		try {
-			setAgentDir(path.join(tempDir.path(), "agent"));
+		await withAgentDir(path.join(tempDir.path(), "agent"), async () => {
 			const cwd = path.join(tempDir.path(), "project");
 			const sessionsRoot = getSessionsDir();
 			const defaultSessionDir = sessionDirForCwd(cwd);
@@ -204,24 +255,50 @@ describe("seance source resolution", () => {
 				file: sourceFile,
 				id: "source-id",
 			});
-			expect(await fs.readFile(backupFile)).toEqual(originalBackup);
-			expect((await fs.stat(legacyDir)).isDirectory()).toBe(true);
-			await expect(fs.stat(migratedLegacyDir)).rejects.toThrow();
 
 			const emptyCwd = path.join(tempDir.path(), "empty-project");
 			const emptySessionDir = sessionDirForCwd(emptyCwd);
 			await expect(fs.stat(emptySessionDir)).rejects.toThrow();
-			await expect(resolveSeanceSource("missing-unhinted-source", { cwd: emptyCwd })).rejects.toThrow(
-				'Session "missing-unhinted-source" was not found.',
-			);
+			await expect(
+				resolveSeanceSource("missing-unhinted-source", { cwd: emptyCwd, includeGlobal: true }),
+			).rejects.toThrow('Session "missing-unhinted-source" was not found.');
 			await expect(fs.stat(emptySessionDir)).rejects.toThrow();
+			expect(await fs.readFile(backupFile)).toEqual(originalBackup);
+			expect((await fs.stat(legacyDir)).isDirectory()).toBe(true);
+			await expect(fs.stat(migratedLegacyDir)).rejects.toThrow();
+		});
+	});
+});
+
+describe("seance cold restore", () => {
+	it("revives with whichever bundled read-only tools were persisted and refuses a contract without read", async () => {
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			authStorage.keys.setRuntime("anthropic", "test-key");
+			const modelRegistry = new ModelRegistry(authStorage);
+			using tempDir = TempDir.createSync("@omp-seance-restore-");
+			const cwd = tempDir.path();
+			const init = {
+				systemPrompt: ["restricted seance prompt"],
+				task: "Read the source transcript.",
+				// `glob.enabled: false` trimmed glob at spawn; `write` never belongs to a seance.
+				tools: ["read", "grep", "write", "yield"],
+				agent: "seance",
+				resolvedModel: "anthropic/claude-sonnet-4-5",
+				restrictToolNames: true,
+				spawns: "",
+			};
+
+			await expect(restoreSeanceSession({ init, cwd, modelRegistry })).resolves.toEqual({
+				cwd,
+				modelPattern: "anthropic/claude-sonnet-4-5",
+				toolNames: ["read", "grep", "yield"],
+			});
+			await expect(
+				restoreSeanceSession({ init: { ...init, tools: ["grep", "glob", "yield"] }, cwd, modelRegistry }),
+			).resolves.toBeUndefined();
 		} finally {
-			if (originalAgentDirOverride !== undefined) {
-				setAgentDir(originalAgentDirOverride);
-			} else {
-				setAgentDir(originalAgentDir);
-				delete process.env.PI_CODING_AGENT_DIR;
-			}
+			authStorage.close();
 		}
 	});
 });

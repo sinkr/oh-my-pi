@@ -171,17 +171,17 @@ export function parseSessionContent(content: string): SessionLoadResult {
 const SESSION_HEADER_READ_LIMIT = 1024 * 1024;
 
 /**
- * The session header in `filePath`, or `undefined` when there is no file
+ * The session id in `filePath`'s header, or `undefined` when there is no file
  * there or it does not start with a valid session header. Reads at most one
  * record and {@link SESSION_HEADER_READ_LIMIT} bytes.
  */
-export async function readSessionHeader(filePath: string): Promise<SessionHeader | undefined> {
-	let header: SessionHeader | undefined;
+export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
+	let id: string | undefined;
 	try {
 		await visitEntriesFromFileStream(
 			filePath,
 			entry => {
-				if (isValidSessionHeader(entry)) header = entry;
+				if (isValidSessionHeader(entry)) id = entry.id;
 				return false;
 			},
 			{ maxRecords: 1, maxBytes: SESSION_HEADER_READ_LIMIT },
@@ -190,12 +190,7 @@ export async function readSessionHeader(filePath: string): Promise<SessionHeader
 		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
 		throw err;
 	}
-	return header;
-}
-
-/** The session id in `filePath`'s header, or `undefined` when it is unusable. */
-export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
-	return (await readSessionHeader(filePath))?.id;
+	return id;
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */

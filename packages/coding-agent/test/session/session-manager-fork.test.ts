@@ -1,6 +1,5 @@
-import { describe, expect, it, vi } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
@@ -19,9 +18,7 @@ import {
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { forkSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance-fork";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { isTaskToolDetails, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
@@ -150,10 +147,9 @@ describe("SessionManager.forkFrom", () => {
 		expect(await Bun.file(path.join(sourceArtifactsDir, "1.read.log")).text()).toBe("tool output");
 	});
 
-	it("preserves historical context while neutralizing every inherited startup contract", async () => {
+	it("forks a seance in place: source untouched, history kept, startup contracts inert, artifacts not copied", async () => {
 		using tempDir = TempDir.createSync("@omp-session-seance-fork-");
-		const cwd = path.join(tempDir.path(), "project");
-		const sourceFile = path.join(tempDir.path(), "sessions", "source.jsonl");
+		const { cwd, sourceFile, sourceArtifactsDir } = await createSessionWithArtifacts(tempDir.path());
 		const timestamp = new Date().toISOString();
 		const sourceHeader: SessionHeader = {
 			type: "session",
@@ -174,46 +170,18 @@ describe("SessionManager.forkFrom", () => {
 			agent: "task",
 			spawns: "*",
 		};
-		const witnessRequest = {
+		const request = {
 			type: "message",
 			id: "witness-request",
 			parentId: "inherited-init",
 			timestamp,
 			message: { role: "user", content: "early request before resume", timestamp: 1 },
 		};
-		const witnessAssistant = {
-			type: "message",
-			id: "decision-witness",
-			parentId: "witness-request",
-			timestamp,
-			message: {
-				role: "assistant",
-				content: [{ type: "text", text: "DECISION_WITNESS: preserve the migration boundary." }],
-				api: "anthropic-messages",
-				provider: "anthropic",
-				model: "claude-sonnet-4-5",
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "stop",
-				timestamp: 2,
-			},
-		};
 		const laterInit = {
-			type: "session_init",
+			...inheritedInit,
 			id: "later-inherited-init",
-			parentId: "decision-witness",
-			timestamp,
+			parentId: "witness-request",
 			systemPrompt: ["later unrestricted resume prompt"],
-			task: "later source task",
-			tools: ["read", "write", "task"],
-			agent: "task",
-			spawns: "*",
 		};
 		const laterMessage = {
 			type: "message",
@@ -222,145 +190,38 @@ describe("SessionManager.forkFrom", () => {
 			timestamp,
 			message: { role: "user", content: "later source turn", timestamp: 3 },
 		};
-		const sourceText = [sourceHeader, inheritedInit, witnessRequest, witnessAssistant, laterInit, laterMessage]
+		const sourceText = `${[sourceHeader, inheritedInit, request, laterInit, laterMessage]
 			.map(entry => JSON.stringify(entry))
-			.join("\n")
-			.concat("\n");
-		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+			.join("\n")}\n`;
 		await Bun.write(sourceFile, sourceText);
 
-		const forked = await forkSeanceSession({
-			sourceFile,
-			cwd,
-			sessionDir: path.join(tempDir.path(), "forks"),
-			sessionFile: path.join(tempDir.path(), "forks", "seance.jsonl"),
+		const forkFile = path.join(tempDir.path(), "forks", "seance.jsonl");
+		const forked = await SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
+			seance: true,
+			suppressBreadcrumb: true,
+			sessionFile: forkFile,
+			resetInheritedCost: true,
+			repairInterruptedTail: true,
 		});
 		try {
-			const forkFile = forked.getSessionFile();
-			if (!forkFile) throw new Error("expected persisted seance fork");
-			const forkHeader = (await loadEntriesFromFile(forkFile)).find(
-				(entry): entry is SessionHeader => entry.type === "session",
-			);
-			expect(forkHeader).toMatchObject({
-				type: "session",
-				historyScope: "session",
-				sessionPolicy: "seance",
-				parentSession: "source-session",
-			});
+			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
+			const asSourceInit = { type: "custom", customType: "source_session_init" };
+			expect(await loadHistory(forkFile)).toEqual([
+				{ ...asSourceInit, id: inheritedInit.id, parentId: null, timestamp, data: inheritedInit },
+				request,
+				{ ...asSourceInit, id: laterInit.id, parentId: laterInit.parentId, timestamp, data: laterInit },
+				laterMessage,
+			] as unknown as SessionEntry[]);
+			// Revival reads the header's source pointer and finds no inherited contract to resurrect.
 			expect(await SessionManager.peekSessionInit(forkFile)).toMatchObject({
-				historyScope: "session",
-				sessionPolicy: "seance",
+				seanceSource: path.resolve(sourceFile),
 				init: null,
 			});
+			expect(forked.getSeanceSourceArtifactsDir()).toBe(sourceArtifactsDir);
 			expect(forked.getAdditionalDirectories()).toEqual([]);
-			expect(forkHeader?.additionalDirectories).toBeUndefined();
-
-			const contextText = JSON.stringify(buildSessionContext(forked.getBranch()).messages);
-			expect(contextText).toContain("DECISION_WITNESS");
-			expect(contextText).toContain("later source turn");
-			expect(contextText).not.toContain("unrestricted source prompt");
-			expect(contextText).not.toContain("later unrestricted resume prompt");
-
-			forked.appendSessionInit({
-				systemPrompt: ["restricted seance prompt"],
-				task: "read historical context only",
-				tools: ["read", "grep", "glob", "yield"],
-				agent: "seance",
-				resolvedModel: "anthropic/claude-sonnet-4-5",
-				restrictToolNames: true,
-				spawns: "",
-			});
-			expect(await SessionManager.peekSessionInit(forkFile)).toMatchObject({
-				historyScope: "session",
-				sessionPolicy: "seance",
-				init: {
-					agent: "seance",
-					restrictToolNames: true,
-					tools: ["read", "grep", "glob", "yield"],
-				},
-			});
-			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
+			await expect(fs.stat(forkFile.slice(0, -".jsonl".length))).rejects.toMatchObject({ code: "ENOENT" });
 		} finally {
 			await forked.close();
-		}
-	});
-
-	it("snapshots artifacts before copying a current host into its own artifact tree", async () => {
-		using tempDir = TempDir.createSync("@omp-session-fork-current-source-");
-		const { cwd, sourceFile, sourceArtifactsDir } = await createSessionWithArtifacts(tempDir.path());
-		const sourceText = await fs.readFile(sourceFile, "utf8");
-		const childFile = path.join(sourceArtifactsDir, "seance.jsonl");
-		const forked = await forkSeanceSession({ sourceFile, cwd, sessionFile: childFile });
-		try {
-			expect(forked.getSessionFile()).toBe(childFile);
-			const copiedHeader = (await loadEntriesFromFile(childFile)).find(
-				(entry): entry is SessionHeader => entry.type === "session",
-			);
-			expect(copiedHeader).toMatchObject({
-				historyScope: "session",
-				sessionPolicy: "seance",
-			});
-			const childArtifactsDir = childFile.slice(0, -".jsonl".length);
-			expect(await Bun.file(path.join(childArtifactsDir, "1.read.log")).text()).toBe("tool output");
-			expect(await Bun.file(path.join(childArtifactsDir, "nested", "result.txt")).text()).toBe("nested output");
-			expect(await Bun.file(path.join(childArtifactsDir, "seance.jsonl")).exists()).toBe(false);
-			expect(await Bun.file(path.join(childArtifactsDir, "seance", "nested", "result.txt")).exists()).toBe(false);
-			expect(await Bun.file(path.join(sourceArtifactsDir, "1.read.log")).text()).toBe("tool output");
-			expect(await Bun.file(path.join(sourceArtifactsDir, "nested", "result.txt")).text()).toBe("nested output");
-			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
-		} finally {
-			await forked.close();
-		}
-	});
-
-	it("rolls back seance artifact copy failures but keeps ordinary copies best-effort", async () => {
-		using tempDir = TempDir.createSync("@omp-session-fork-copy-failure-");
-		const cwd = path.join(tempDir.path(), "project");
-		const sourceFile = path.join(tempDir.path(), "sessions", "source.jsonl");
-		const sourceArtifactsDir = sourceFile.slice(0, -".jsonl".length);
-		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
-		await Bun.write(
-			sourceFile,
-			`${JSON.stringify({
-				type: "session",
-				version: CURRENT_SESSION_VERSION,
-				id: "source-session",
-				timestamp: new Date().toISOString(),
-				cwd,
-			} satisfies SessionHeader)}\n`,
-		);
-		await fs.mkdir(sourceArtifactsDir, { recursive: true });
-		await Bun.write(path.join(sourceArtifactsDir, "source.txt"), "source artifact");
-
-		const copySpy = vi.spyOn(nodeFs.promises, "cp").mockImplementation(async (_source, destination) => {
-			await fs.mkdir(String(destination), { recursive: true });
-			await fs.writeFile(path.join(String(destination), "partial.txt"), "partial artifact copy");
-			throw Object.assign(new Error("simulated artifact-copy failure"), { code: "EIO" });
-		});
-
-		try {
-			const seanceFile = path.join(tempDir.path(), "seance", "consult.jsonl");
-			await fs.mkdir(path.dirname(seanceFile), { recursive: true });
-			const seanceFailure = await forkSeanceSession({ sourceFile, cwd, sessionFile: seanceFile }).catch(
-				error => error,
-			);
-			expect(seanceFailure).toMatchObject({ code: "EIO" });
-			expect(await Bun.file(seanceFile).exists()).toBe(false);
-			expect(await Bun.file(path.join(seanceFile.slice(0, -".jsonl".length), "partial.txt")).exists()).toBe(false);
-
-			const ordinaryFile = path.join(tempDir.path(), "ordinary", "worker.jsonl");
-			await fs.mkdir(path.dirname(ordinaryFile), { recursive: true });
-			const ordinary = await SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
-				sessionFile: ordinaryFile,
-				suppressBreadcrumb: true,
-			});
-			try {
-				expect(await Bun.file(ordinaryFile).exists()).toBe(true);
-			} finally {
-				await ordinary.close();
-			}
-		} finally {
-			copySpy.mockRestore();
 		}
 	});
 

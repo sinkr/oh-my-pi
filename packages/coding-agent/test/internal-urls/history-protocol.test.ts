@@ -26,10 +26,10 @@ import {
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { forkSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance-fork";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
@@ -677,149 +677,88 @@ describe("history:// protocol", () => {
 		});
 	});
 
-	it("keeps seance history in its copied artifact tree across local and live same-ID collisions", async () => {
-		await withTempDir(async dir => {
-			const cwd = path.join(dir, "project");
-			await fs.mkdir(cwd, { recursive: true });
-			const sourceFile = path.join(dir, "source", "source.jsonl");
-			const sourceArtifacts = sourceFile.slice(0, -6);
-			const childId = "Sub1";
-			const grandchildId = `${childId}.Grandchild`;
-			const externalArtifacts = path.join(dir, "external-artifacts");
-			await fs.mkdir(externalArtifacts, { recursive: true });
-			await Bun.write(
-				path.join(externalArtifacts, "ExternalOnly.jsonl"),
-				sessionFixtureJsonl("external disk transcript"),
-			);
-			registerArtifactsDir(externalArtifacts);
-			await fs.mkdir(path.join(sourceArtifacts, childId), { recursive: true });
-			const sourceTimestamp = new Date().toISOString();
-			await Bun.write(
-				sourceFile,
-				`${JSON.stringify({
-					type: "session",
-					version: CURRENT_SESSION_VERSION,
-					id: "source-root",
-					timestamp: sourceTimestamp,
-					cwd,
-				})}\n${JSON.stringify({
-					type: "message",
-					id: "source-message",
-					parentId: null,
-					timestamp: sourceTimestamp,
-					message: { role: "user", content: "historical source branch", timestamp: 1 },
-				})}\n`,
-			);
-			await Bun.write(path.join(sourceArtifacts, `${childId}.jsonl`), sessionFixtureJsonl("copied child history"));
-			await Bun.write(
-				path.join(sourceArtifacts, childId, `${childId}.jsonl`),
-				sessionFixtureJsonl("nested source duplicate"),
-			);
-			await Bun.write(
-				path.join(sourceArtifacts, childId, `${grandchildId}.jsonl`),
-				sessionFixtureJsonl("copied grandchild history", "grandchild-transcript"),
-			);
-
-			const forkSessionDir = path.join(dir, "local-sessions");
-			const forkFile = path.join(forkSessionDir, `${childId}.jsonl`);
-			const forked = await forkSeanceSession({
-				sourceFile,
-				cwd,
-				sessionDir: forkSessionDir,
-				sessionFile: forkFile,
-			});
-			try {
-				const forkArtifacts = forkFile.slice(0, -6);
-				const copiedChildFile = path.join(forkArtifacts, `${childId}.jsonl`);
-				const copiedGrandchildFile = path.join(forkArtifacts, childId, `${grandchildId}.jsonl`);
-				await Bun.write(copiedChildFile, sessionFixtureJsonl("local artifact collision wins"));
-				expect(await Bun.file(path.join(sourceArtifacts, `${childId}.jsonl`)).text()).toContain(
-					"copied child history",
-				);
-				forked.appendMessage({ role: "user", content: "fork-bound live branch", timestamp: 2 });
-				const liveBranch = forked.getBranch();
-				AgentRegistry.global().register({
-					id: childId,
-					displayName: "foreign live child",
-					kind: "sub",
-					session: fakeLiveSession([{ role: "user", content: "foreign live child must not win", timestamp: 1 }]),
-					status: "running",
-				});
-				AgentRegistry.global().register({
-					id: "ForeignOnly",
-					displayName: "foreign only",
-					kind: "sub",
-					session: fakeLiveSession([{ role: "user", content: "outside this fork", timestamp: 1 }]),
-					status: "running",
-				});
-
-				const session = makeToolSession(cwd, forkFile, {
-					historyScope: "session",
-				});
-				const context = { session, sessionFile: forkFile };
-				const child = await InternalUrlRouter.instance().resolve(`history://${childId}`, context);
-				expect(child.content).toContain("local artifact collision wins");
-				expect(child.content).not.toContain("nested source duplicate");
-				expect(child.content).not.toContain("foreign live child must not win");
-				expect(child.sourcePath).toBe(copiedChildFile);
-
-				const grandchild = await InternalUrlRouter.instance().resolve(`history://${grandchildId}`, context);
-				expect(grandchild.content).toContain("copied grandchild history");
-				expect(grandchild.sourcePath).toBe(copiedGrandchildFile);
-				expect(await InternalUrlRouter.instance().locate(`history://${grandchildId}`, context)).toBe(
-					copiedGrandchildFile,
-				);
-
-				const index = await InternalUrlRouter.instance().resolve("history://", context);
-				expect(index.content).toContain(`| ${childId} | on disk |`);
-				expect(index.content).toContain(`| ${grandchildId} | on disk |`);
-				expect(index.content).not.toContain("ForeignOnly");
-				const completions = await new HistoryProtocolHandler().complete(undefined, context);
-				expect(completions.map(completion => completion.value).toSorted()).toEqual([childId, grandchildId]);
-				const forkSuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
-					cwd,
-					sessionId: forked.getSessionId(),
-					sessionFile: forkFile,
-					historyScope: "session",
-				}));
-				const forkValues = forkSuggestions?.items.map(item => item.value) ?? [];
-				expect(forkValues).toContain(`history://${childId}`);
-				expect(forkValues).toContain(`history://${grandchildId}`);
-				expect(forkValues).not.toContain("history://ForeignOnly");
-				expect(forkValues).not.toContain("history://ExternalOnly");
-				await expect(
-					InternalUrlRouter.instance().resolve("history://MissingFromThisSession", context),
-				).rejects.toThrow();
-				const emptyCompletions = await new HistoryProtocolHandler().complete(undefined, {
-					session,
-					sessionFile: path.join(dir, "empty-session.jsonl"),
-				});
-				expect(emptyCompletions).toEqual([]);
-
-				const ordinarySuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
-					cwd,
-					sessionId: "ordinary-session",
-					sessionFile: sourceFile,
-				}));
-				const ordinaryValues = ordinarySuggestions?.items.map(item => item.value) ?? [];
-				expect(ordinaryValues).toContain("history://ForeignOnly");
-				expect(ordinaryValues).toContain("history://ExternalOnly");
-
-				const current = await InternalUrlRouter.instance().resolve("history://current/full", {
-					...context,
-					experimentalContextManagement: true,
-					getSessionBranch: () => liveBranch,
-				});
-				expect(current.content).toContain("historical source branch");
-				expect(current.content).toContain("fork-bound live branch");
-				expect(current.content).not.toContain("foreign live child must not win");
-			} finally {
-				await forked.close();
-			}
+	it("serves a seance only the consulted source's transcript tree, read in place", async () => {
+		using tempDir = TempDir.createSync("@omp-history-seance-");
+		const dir = tempDir.path();
+		const cwd = path.join(dir, "project");
+		const sourceArtifacts = path.join(dir, "source", "source");
+		const childFile = path.join(sourceArtifacts, "Sub1.jsonl");
+		const grandchildFile = path.join(sourceArtifacts, "Sub1", "Sub1.Grandchild.jsonl");
+		await Bun.write(childFile, sessionFixtureJsonl("source child history"));
+		await Bun.write(grandchildFile, sessionFixtureJsonl("source grandchild history", "grandchild"));
+		const externalArtifacts = path.join(dir, "external-artifacts");
+		await Bun.write(path.join(externalArtifacts, "ExternalOnly.jsonl"), sessionFixtureJsonl("external transcript"));
+		registerArtifactsDir(externalArtifacts);
+		AgentRegistry.global().register({
+			id: "ForeignOnly",
+			displayName: "foreign only",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "outside the source", timestamp: 1 }]),
+			status: "running",
 		});
+		const forkFile = path.join(dir, "forks", "Seance.jsonl");
+		const context = {
+			session: makeToolSession(cwd, forkFile, { seanceSourceArtifactsDir: sourceArtifacts }),
+			sessionFile: forkFile,
+		};
+		const router = InternalUrlRouter.instance();
+
+		const child = await router.resolve("history://Sub1", context);
+		expect(child.content).toContain("source child history");
+		expect(child.sourcePath).toBe(childFile);
+		expect(await router.locate("history://Sub1.Grandchild", context)).toBe(grandchildFile);
+		const index = await router.resolve("history://", context);
+		expect(index.content).toContain("| Sub1 | on disk |");
+		expect(index.content).toContain("| Sub1.Grandchild | on disk |");
+		expect(index.content).not.toContain("ForeignOnly");
+		expect(index.content).not.toContain("ExternalOnly");
+		await expect(router.resolve("history://ForeignOnly", context)).rejects.toThrow("Unknown agent: ForeignOnly");
+		await expect(router.resolve("history://ExternalOnly", context)).rejects.toThrow("Unknown agent: ExternalOnly");
+
+		// The editor binds the seance scope as a scalar, without a tool session.
+		const seanceSuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
+			cwd,
+			sessionFile: forkFile,
+			seanceSourceArtifactsDir: sourceArtifacts,
+		}));
+		expect(seanceSuggestions?.items.map(item => item.value).toSorted()).toEqual([
+			"history://Sub1",
+			"history://Sub1.Grandchild",
+		]);
+		const ordinarySuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({ cwd }));
+		const ordinaryValues = ordinarySuggestions?.items.map(item => item.value) ?? [];
+		expect(ordinaryValues).toContain("history://ForeignOnly");
+		expect(ordinaryValues).toContain("history://ExternalOnly");
 	});
 
-	it("does not infer fork-only history scope from a custom agent name", async () => {
+	it("keeps a seance fork's foreign source children out of the parent's history", async () => {
+		using tempDir = TempDir.createSync("@omp-history-seance-parent-");
+		const dir = tempDir.path();
+		const cwd = path.join(dir, "project");
+		const foreignSource = path.join(dir, "foreign", "source.jsonl");
+		await Bun.write(foreignSource, sessionFixtureJsonl("foreign root history", "foreign-root"));
+		await Bun.write(
+			path.join(dir, "foreign", "source", "ForeignChild.jsonl"),
+			sessionFixtureJsonl("foreign child history"),
+		);
+		const parentFile = path.join(dir, "parent", "main.jsonl");
+		await Bun.write(parentFile, sessionFixtureJsonl("parent history", "parent-root"));
+		const seance = await SessionManager.forkFrom(foreignSource, cwd, undefined, undefined, {
+			seance: true,
+			suppressBreadcrumb: true,
+			sessionFile: path.join(dir, "parent", "main", "Seance.jsonl"),
+		});
+		await seance.close();
+
+		const context = { session: makeToolSession(cwd, parentFile), sessionFile: parentFile };
+		const router = InternalUrlRouter.instance();
+		const index = await router.resolve("history://", context);
+		expect(index.content).toMatch(/\| Seance \| parked \|/);
+		expect(index.content).not.toContain("ForeignChild");
+		await expect(router.resolve("history://ForeignChild", context)).rejects.toThrow("Unknown agent: ForeignChild");
+	});
+
+	it("does not infer seance scope from a custom agent name", async () => {
 		await withTempDir(async dir => {
 			const cwd = path.join(dir, "project");
 			await fs.mkdir(cwd, { recursive: true });

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
@@ -6,6 +6,8 @@ import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-s
 import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task";
 import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-lifecycle";
 import * as seanceResolver from "@oh-my-pi/pi-coding-agent/task/seance";
+import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
@@ -47,11 +49,60 @@ function taskResult(details: Partial<TaskToolDetails>, text = ""): AgentToolResu
 	};
 }
 
+beforeEach(() => {
+	const seanceAgent = getBundledAgent("seance");
+	if (!seanceAgent) throw new Error("Expected the bundled seance agent");
+	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [seanceAgent], projectAgentsDir: null });
+});
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
 describe("/seance", () => {
+	it("opens the model picker directly for a picked session with no saved model", async () => {
+		const picked = sourceSession("/elsewhere/.omp/sessions/no-model.jsonl");
+		const resolve = vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
+			file: picked.path,
+			id: picked.id,
+			modelSelectors: [],
+		});
+		const ctx = createInteractiveModeContext();
+		let onSelected: ((session: SessionInfo) => Promise<void> | void) | undefined;
+		ctx.showSessionSelector = vi.fn((_title, onSelect) => {
+			onSelected = onSelect as (session: SessionInfo) => Promise<void>;
+		}) as InteractiveModeContext["showSessionSelector"];
+		ctx.showHookSelector = vi.fn();
+		ctx.showModelSelector = vi.fn();
+
+		await runSeanceCommand(ctx, "");
+		await onSelected?.(picked);
+
+		expect(resolve).toHaveBeenCalledWith(picked.path, expect.objectContaining({ includeGlobal: true }));
+		expect(ctx.showHookSelector).not.toHaveBeenCalled();
+		expect(ctx.showModelSelector).toHaveBeenCalledWith(expect.objectContaining({ selectOnly: expect.anything() }));
+	});
+	it("offers the saved model when the picked session recorded one", async () => {
+		const picked = sourceSession("/repo/.omp/sessions/with-model.jsonl");
+		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
+			file: picked.path,
+			id: picked.id,
+			modelSelectors: ["openai/saved-model"],
+		});
+		const ctx = createInteractiveModeContext();
+		let onSelected: ((session: SessionInfo) => Promise<void> | void) | undefined;
+		ctx.showSessionSelector = vi.fn((_title, onSelect) => {
+			onSelected = onSelect as (session: SessionInfo) => Promise<void>;
+		}) as InteractiveModeContext["showSessionSelector"];
+		ctx.showHookSelector = vi.fn(async () => undefined);
+		ctx.showModelSelector = vi.fn();
+
+		await runSeanceCommand(ctx, "");
+		await onSelected?.(picked);
+
+		expect(ctx.showHookSelector).toHaveBeenCalled();
+		expect(ctx.showModelSelector).not.toHaveBeenCalled();
+	});
 	it("bypasses model pickers for an override and reports completed IDs with the actual model", async () => {
 		const resolved = sourceSession("/repo/.omp/sessions/old.jsonl");
 		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({

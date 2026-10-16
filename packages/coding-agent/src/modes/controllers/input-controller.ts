@@ -2623,7 +2623,7 @@ export class InputController {
 					cwd: manager.getCwd(),
 					sessionId: manager.getSessionId(),
 					sessionFile: manager.getSessionFile(),
-					historyScope: manager.getHeader()?.historyScope,
+					seanceSourceArtifactsDir: manager.getSeanceSourceArtifactsDir() ?? undefined,
 				};
 			},
 			keybindings: this.ctx.keybindings,

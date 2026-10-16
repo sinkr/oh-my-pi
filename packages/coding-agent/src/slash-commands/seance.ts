@@ -6,6 +6,7 @@ import { discoverAgents } from "../task/discovery";
 import { isBundledSeance, resolveSeanceSource } from "../task/seance";
 import { SEANCE_AGENT_NAME } from "../task/seance-policy";
 import seanceCommandPrompt from "../prompts/system/seance-command.md" with { type: "text" };
+import seanceCommandSolutionSpace from "../prompts/system/seance-command-solution-space.md" with { type: "text" };
 import { parseCommandArgs } from "../utils/command-args";
 import { clearSubmittedText } from "./helpers/draft";
 import type { SlashCommandSpec } from "./types";
@@ -45,7 +46,7 @@ async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, 
 		agent: SEANCE_AGENT_NAME,
 		sourceSession,
 		task: seanceCommandPrompt,
-		solutionSpace: "Historical summary; the selected transcript provides the evidence.",
+		solutionSpace: seanceCommandSolutionSpace.trim(),
 		...(model !== undefined ? { model } : {}),
 	};
 	const taskIds = new Set<string>();
@@ -98,8 +99,9 @@ async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, 
 
 async function chooseSeanceModel(
 	ctx: InteractiveModeContext,
-	sourceSession: string,
+	selector: string,
 	model: string | undefined,
+	sessionDirHint?: string,
 ): Promise<void> {
 	try {
 		const { agents } = await discoverAgents(
@@ -109,24 +111,35 @@ async function chooseSeanceModel(
 		);
 		const seanceAgent = agents.find(agent => agent.name === SEANCE_AGENT_NAME);
 		if (!seanceAgent || !isBundledSeance(seanceAgent)) {
-			throw new Error(
-				"The selected `seance` agent is not the bundled consult agent. A project or user `seance` definition may be overriding it; remove or rename that definition to use the bundled agent.",
-			);
+			throw new Error("A custom `seance` agent overrides the bundled one; rename it to use /seance.");
 		}
+		const source = await resolveSeanceSource(selector, {
+			cwd: ctx.sessionManager.getCwd(),
+			sessionDirHint,
+			includeGlobal: true,
+		});
+		const sourceSession = source.file;
 		if (model !== undefined) {
 			void launchSeance(ctx, sourceSession, model);
 			return;
 		}
-		const choice = await ctx.showHookSelector("Consult this session with", [
-			{ label: "Use saved model", description: "Use the active role or default model saved with this session" },
-			{ label: "Choose another model", description: "Select a one-off model for this consultation" },
-		]);
+		// No saved model to offer: go straight to the one-off model picker.
+		const choice =
+			source.modelSelectors.length === 0
+				? "Choose another model"
+				: await ctx.showHookSelector("Consult this session with", [
+						{
+							label: "Use saved model",
+							description: "Use the active role or default model saved with this session",
+						},
+						{ label: "Choose another model", description: "Select a one-off model for this consultation" },
+					]);
 		if (choice === "Use saved model") {
 			void launchSeance(ctx, sourceSession);
 		} else if (choice === "Choose another model") {
 			ctx.showModelSelector({
 				selectOnly: {
-					onSelect: selector => launchSeance(ctx, sourceSession, selector),
+					onSelect: picked => launchSeance(ctx, sourceSession, picked),
 				},
 			});
 		}
@@ -154,17 +167,6 @@ export const SEANCE_SLASH_COMMAND: SlashCommandSpec = {
 			);
 			return;
 		}
-		let sourceFile: string;
-		try {
-			const source = await resolveSeanceSource(parsed.source, {
-				cwd: runtime.ctx.sessionManager.getCwd(),
-				sessionDirHint: runtime.ctx.sessionManager.getSessionDir(),
-			});
-			sourceFile = source.file;
-		} catch (error) {
-			runtime.ctx.showError(sanitizeErrorLine(error));
-			return;
-		}
-		await chooseSeanceModel(runtime.ctx, sourceFile, parsed.model);
+		await chooseSeanceModel(runtime.ctx, parsed.source, parsed.model, runtime.ctx.sessionManager.getSessionDir());
 	},
 };

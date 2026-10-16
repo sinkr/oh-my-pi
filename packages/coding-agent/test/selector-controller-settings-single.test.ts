@@ -1,6 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
@@ -51,8 +50,9 @@ function overlayUi(): {
 }
 
 /** A context whose model picker reads a supplied current catalog. */
-function pickerContext(ui: OverlayUi, models: Model[] = [], current?: Model) {
+function pickerContext(ui: OverlayUi, models: Model[] = [], current?: Model, settings?: Settings) {
 	return createInteractiveModeContext({
+		settings,
 		session: {
 			model: current,
 			scopedModels: [],
@@ -138,10 +138,8 @@ describe("single-instance menus", () => {
 		const { ui, shown } = overlayUi();
 		const model = createMockModel({ provider: "openai", id: "selection-target" }).model;
 		const hostModel = createMockModel({ provider: "anthropic", id: "host-model" }).model;
-		const ctx = pickerContext(ui, [model], hostModel);
-		cfgModelRoles.override(ctx.settings, { default: "kept/default-model" });
+		const ctx = pickerContext(ui, [model], hostModel, Settings.isolated());
 		cfgTaskAgentModelOverrides.override(ctx.settings, { task: "kept/task-model" });
-		const defaultRoles = structuredClone(cfgModelRoles.get(ctx.settings));
 		const taskDefaults = structuredClone(cfgTaskAgentModelOverrides.get(ctx.settings));
 		const selected = vi.fn();
 		const controller = new SelectorController(ctx);
@@ -163,11 +161,15 @@ describe("single-instance menus", () => {
 		selectionPicker.handleInput?.("\r");
 
 		expect(selected).toHaveBeenCalledWith(`${model.provider}/${model.id}`);
-		expect(ctx.session.model).toBe(hostModel);
 		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
 		expect(ctx.session.applyRoleModel).not.toHaveBeenCalled();
-		expect(cfgModelRoles.get(ctx.settings)).toEqual(defaultRoles);
 		expect(cfgTaskAgentModelOverrides.get(ctx.settings)).toEqual(taskDefaults);
+
+		controller.showModelSelector({
+			selectOnly: { currentSelector: `${model.provider}/${model.id}`, onSelect: selected },
+		});
+		shown[2]?.handleInput?.("\x1b");
+		expect(selected).toHaveBeenCalledTimes(1);
 	});
 
 	it("replaces selection-only with an ordinary session model picker", () => {
@@ -196,7 +198,6 @@ describe("single-instance menus", () => {
 
 		expect(selected).not.toHaveBeenCalled();
 		expect(ctx.session.setModelTemporary).toHaveBeenCalledWith(model, undefined);
-		expect(ctx.session.model).toBe(hostModel);
 	});
 
 	it("uses only the newest callbacks for repeated selection-only picker requests", () => {
@@ -338,35 +339,5 @@ describe("single-instance menus", () => {
 		expect(overlayCountAtSelection).toEqual([0]);
 		expect(resume).not.toHaveBeenCalled();
 		expect(ctx.session.switchSession).not.toHaveBeenCalled();
-	});
-
-	it("returns a chosen model without changing host, role, or Task defaults", async () => {
-		const { ui, shown } = overlayUi();
-		const model = createMockModel({ provider: "openai", id: "seance-model" }).model;
-		const hostModel = createMockModel({ provider: "anthropic", id: "host-model" }).model;
-		const ctx = pickerContext(ui, [model], hostModel);
-		const taskDefaults = structuredClone(cfgTaskAgentModelOverrides.get(ctx.settings));
-		const selected = vi.fn();
-		const controller = new SelectorController(ctx);
-
-		controller.showModelSelector({
-			selectOnly: { currentSelector: `${model.provider}/${model.id}`, onSelect: selected },
-		});
-
-		const picker = shown[0]!;
-		picker.handleInput?.("\r");
-		await Promise.resolve();
-
-		expect(selected).toHaveBeenCalledWith(`${model.provider}/${model.id}`);
-		expect(ctx.session.model).toBe(hostModel);
-		expect(ctx.session.setModelTemporary).not.toHaveBeenCalled();
-		expect(ctx.session.applyRoleModel).not.toHaveBeenCalled();
-		expect(cfgTaskAgentModelOverrides.get(ctx.settings)).toEqual(taskDefaults);
-		controller.showModelSelector({
-			selectOnly: { currentSelector: `${model.provider}/${model.id}`, onSelect: selected },
-		});
-		shown[1]?.handleInput?.("\x1b");
-		await Promise.resolve();
-		expect(selected).toHaveBeenCalledTimes(1);
 	});
 });

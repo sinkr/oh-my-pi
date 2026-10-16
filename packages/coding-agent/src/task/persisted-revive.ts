@@ -32,7 +32,7 @@ import {
 } from "./executor";
 import { cfgTaskAgentAccountPools } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
-import { SEANCE_AGENT_NAME, seanceIsolationOptions } from "./seance-policy";
+import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -100,17 +100,8 @@ export function createPersistedSubagentReviverFactory(
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
 		if (!peek?.init) return undefined;
-		const sessionPolicyName = peek.sessionPolicy;
-		const isSeance = sessionPolicyName === SEANCE_AGENT_NAME;
-		if (
-			(sessionPolicyName && !isSeance) ||
-			(peek.historyScope !== undefined && peek.historyScope !== "session") ||
-			(peek.historyScope === "session" && !isSeance)
-		) {
-			return undefined;
-		}
 		let restoredSeance: RestoredSeanceSession | undefined;
-		if (isSeance) {
+		if (peek.seanceSource !== undefined) {
 			try {
 				restoredSeance = await restoreSeanceSession({
 					init: peek.init,

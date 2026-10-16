@@ -273,11 +273,11 @@ export interface ResolveContext {
 	 */
 	sessionId?: string;
 	/**
-	 * Editor completion scope. History completions may use this scalar without
-	 * constructing a tool session; tool resolution continues to use
-	 * {@link session}.historyScope.
+	 * Source artifacts dir of a seance caller (editor completion binding).
+	 * History completions may use this scalar without constructing a tool
+	 * session; tool resolution reads {@link session}.seanceSourceArtifactsDir.
 	 */
-	historyScope?: "session";
+	seanceSourceArtifactsDir?: string;
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
 	agentRegistry?: AgentRegistry;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */

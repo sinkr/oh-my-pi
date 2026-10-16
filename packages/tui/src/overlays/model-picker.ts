@@ -263,7 +263,7 @@ export class ModelPickerComponent implements Component {
 
 		this.#roleMode = roleMode;
 		this.#browser.setShowProvider(!roleMode);
-		this.#browser.setMarkOverContext(!roleMode && !this.#taskMode);
+		this.#browser.setMarkOverContext(!this.#selectOnly && !roleMode && !this.#taskMode);
 		this.#browser.setPreserveQueryOrder(roleMode);
 		const currentSelector = roleMode
 			? this.#currentQuickRoleSelector

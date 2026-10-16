@@ -339,13 +339,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * Both the bare index and `history://<id>` lookups read this one source.
 	 */
 	async #roster(context: ResolveContext | undefined): Promise<Omit<RefLookup, "ref">> {
-		if (context?.session?.historyScope === "session" || context?.historyScope === "session") {
-			return {
-				visible: [],
-				preferredArtifactDir: context?.sessionFile?.slice(0, -".jsonl".length),
-				onlyPreferred: true,
-			};
-		}
+		// A seance sees only the consulted session's transcript tree, read in place.
+		const seanceDir = context?.session?.seanceSourceArtifactsDir ?? context?.seanceSourceArtifactsDir;
+		if (seanceDir) return { visible: [], preferredArtifactDir: seanceDir, onlyPreferred: true };
 		const registry = AgentRegistry.global();
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
@@ -534,14 +530,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
-		if (context?.historyScope === "session" || context?.session?.historyScope === "session") {
-			const preferredArtifactDir = context?.sessionFile?.slice(0, -".jsonl".length);
-			if (!preferredArtifactDir) return [];
-			const completions: UrlCompletion[] = [];
-			for (const id of await diskIdsForCompletion(preferredArtifactDir, true)) {
-				completions.push({ value: id, description: "on disk" });
-			}
-			return completions;
+		const seanceDir = context?.session?.seanceSourceArtifactsDir ?? context?.seanceSourceArtifactsDir;
+		if (seanceDir) {
+			return (await diskIdsForCompletion(seanceDir, true)).map(id => ({ value: id, description: "on disk" }));
 		}
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();

@@ -584,12 +584,12 @@ function buildExecutorOptions(
 	const { session } = request;
 	const preparedSession = policy.preparedSession;
 	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
-	const localProtocolOptions = preparedSession === undefined ? sessionLocalProtocolOptions(session) : undefined;
+	const localProtocolOptions = sessionLocalProtocolOptions(session);
 	const restrictToolNames = preparedSession !== undefined || policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
-		additionalDirectories: preparedSession ? undefined : session.additionalDirectories,
+		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
@@ -643,30 +643,29 @@ function buildExecutorOptions(
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
 		asyncJobManager: session.asyncJobManager,
-		inheritedSessionAgents: preparedSession ? undefined : session.getSessionAgents?.(),
+		inheritedSessionAgents: session.getSessionAgents?.(),
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
-		customTools: preparedSession ? undefined : request.customTools,
+		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
-		contextFiles: preparedSession
-			? undefined
-			: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
-		skills: preparedSession ? undefined : skills,
+		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+		skills,
+		// Autoload runs after session start, outside the seance isolation options.
 		autoloadSkills: preparedSession ? undefined : autoloadSkills,
-		workspaceTree: preparedSession ? undefined : session.workspaceTree,
-		promptTemplates: preparedSession ? undefined : session.promptTemplates,
-		rules: preparedSession ? undefined : session.rules,
+		workspaceTree: session.workspaceTree,
+		promptTemplates: session.promptTemplates,
+		rules: session.rules,
 		// Root policy and module paths have separate jobs: the live policy drives
 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
 		// parent-bound extension instances while constructing the child.
-		extensionRoots: preparedSession ? undefined : session.effectiveExtensionRoots?.bind(session),
+		extensionRoots: session.effectiveExtensionRoots?.bind(session),
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
-		preloadedPreparedExtensions: preparedSession ? undefined : session.preparedExtensions,
+		preloadedPreparedExtensions: session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: preparedSession ? undefined : (session.getArtifactManager?.() ?? undefined),
-		parentHindsightSessionState: preparedSession ? undefined : session.getHindsightSessionState?.(),
-		parentMnemopiSessionState: preparedSession ? undefined : session.getMnemopiSessionState?.(),
+		parentHindsightSessionState: session.getHindsightSessionState?.(),
+		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		onRelease:
 			preparedSession !== undefined && lease.temporary
 				? async () => {

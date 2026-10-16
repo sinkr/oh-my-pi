@@ -14,7 +14,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
-import { forkSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance-fork";
 import subagentSystemPromptTemplate from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import seanceAssignmentTemplate from "../../src/prompts/system/seance-assignment.md" with { type: "text" };
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -81,6 +80,17 @@ async function writeSourceSession(file: string, cwd: string, additionalDirectori
 	return text + "\n";
 }
 
+/** The executor's seance fork: the source transcript in place, no artifact copy. */
+function forkSeance(sourceFile: string, cwd: string, sessionFile: string): Promise<SessionManager> {
+	return SessionManager.forkFrom(sourceFile, cwd, undefined, undefined, {
+		seance: true,
+		suppressBreadcrumb: true,
+		sessionFile,
+		resetInheritedCost: true,
+		repairInterruptedTail: true,
+	});
+}
+
 function hostilePreparedExtension(onLoad: () => void): PreparedExtension {
 	return {
 		path: "/fixture/hostile-seance-extension.ts",
@@ -134,14 +144,7 @@ describe("seance startup contracts", () => {
 		);
 		const sourceFile = path.join(tempDir.path(), "source.jsonl");
 		const sourceText = await writeSourceSession(sourceFile, cwd, [sourceRoot]);
-		const forkSessionDir = path.join(tempDir.path(), "forks");
-		const forked = await forkSeanceSession({
-			sourceFile,
-			cwd,
-			sessionDir: forkSessionDir,
-			sessionFile: path.join(forkSessionDir, "seance.jsonl"),
-		});
-		expect(forked.getAdditionalDirectories()).toEqual([]);
+		const forked = await forkSeance(sourceFile, cwd, path.join(tempDir.path(), "forks", "seance.jsonl"));
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
@@ -298,14 +301,7 @@ describe("seance startup contracts", () => {
 		);
 		const sourceFile = path.join(tempDir.path(), "source.jsonl");
 		const sourceText = await writeSourceSession(sourceFile, cwd, [sourceRoot]);
-		const forkSessionDir = path.join(tempDir.path(), "forks");
-		const forked = await forkSeanceSession({
-			sourceFile,
-			cwd,
-			sessionDir: forkSessionDir,
-			sessionFile: path.join(forkSessionDir, "seance.jsonl"),
-		});
-		expect(forked.getAdditionalDirectories()).toEqual([]);
+		const forked = await forkSeance(sourceFile, cwd, path.join(tempDir.path(), "forks", "seance.jsonl"));
 		const sessionFile = forked.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted fork");
 		const authStorage = await AuthStorage.create(":memory:");
@@ -444,18 +440,12 @@ describe("seance startup contracts", () => {
 		await fs.mkdir(cwd, { recursive: true });
 		const sourceFile = path.join(tempDir.path(), "source.jsonl");
 		await writeSourceSession(sourceFile, cwd);
-		const forkSessionDir = path.join(tempDir.path(), "forks");
-		const forked = await forkSeanceSession({
-			sourceFile,
-			cwd,
-			sessionDir: forkSessionDir,
-			sessionFile: path.join(forkSessionDir, "seance.jsonl"),
-		});
+		const forked = await forkSeance(sourceFile, cwd, path.join(tempDir.path(), "forks", "seance.jsonl"));
 		const sessionFile = forked.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted fork");
 		await forked.close();
 		const peek = await SessionManager.peekSessionInit(sessionFile);
-		expect(peek).toMatchObject({ sessionPolicy: "seance", historyScope: "session", init: null });
+		expect(peek).toMatchObject({ seanceSource: path.resolve(sourceFile), init: null });
 
 		const createReviver = createPersistedSubagentReviverFactory({
 			session: revivalParent(cwd, []),
