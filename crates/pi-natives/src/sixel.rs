@@ -234,7 +234,7 @@ fn encode_image(bytes: &[u8], target_width_px: u32, target_height_px: u32) -> Re
 /// 5 pixels further down: past the bottom of its cell box, which then takes an
 /// extra text row. Cropping that band instead of scaling the image keeps the
 /// rest pixel-exact. An image shorter than one band keeps its rows.
-fn band_rows(height_px: u32) -> u32 {
+const fn band_rows(height_px: u32) -> u32 {
 	if height_px < 6 {
 		height_px
 	} else {
