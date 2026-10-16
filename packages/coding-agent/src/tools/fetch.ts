@@ -19,6 +19,7 @@ import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
+import { decodeBody } from "../web/response-body";
 import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
@@ -909,7 +910,7 @@ async function tryRenderBinaryPayload(
 	notes: readonly string[],
 	/** The convertible-document download already made for this URL; reused instead of downloading again. */
 	prefetched?: BinaryFetchResult,
-): Promise<FetchRenderResult | null> {
+): Promise<FetchRenderResult | string | null> {
 	const hasNotebookHint = isNotebookHint(mime, extHint);
 	const hasSqliteHint = isSqliteHint(mime, extHint);
 	const hasArchiveHint = isArchiveHint(mime, extHint);
@@ -1010,6 +1011,15 @@ async function tryRenderBinaryPayload(
 				fetchedAt,
 				resultNotes,
 			);
+		}
+	}
+
+	if (rawLooksBinary && !bodySkipped && !hasNotebookHint && !hasSqliteHint && !hasArchiveHint) {
+		const bytes = Buffer.from(binary.buffer.buffer, binary.buffer.byteOffset, binary.buffer.byteLength);
+		const contentType = binary.contentType ?? mime;
+		if (!sampleLooksBinary(decodeBody(bytes.subarray(0, BINARY_SAMPLE_CHARS), contentType))) {
+			// The refetch may have negotiated a different encoding; render its text, not the first response's bytes.
+			return decodeBody(bytes, contentType);
 		}
 	}
 
@@ -1161,7 +1171,8 @@ async function renderUrl(
 		};
 	}
 
-	const { finalUrl, content: rawContent } = response;
+	const { finalUrl } = response;
+	let rawContent = response.content;
 	if (response.truncated) {
 		notes.push(`Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`);
 	}
@@ -1318,7 +1329,11 @@ async function renderUrl(
 		notes,
 		convertibleBinary,
 	);
-	if (binaryPayloadResult) return binaryPayloadResult;
+	if (typeof binaryPayloadResult === "string") {
+		rawContent = binaryPayloadResult;
+	} else if (binaryPayloadResult) {
+		return binaryPayloadResult;
+	}
 
 	// Step 4: Handle non-HTML text content
 	const isHtml = mime.includes("html") || mime.includes("xhtml");
