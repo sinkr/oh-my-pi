@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Improved nested tool status line rendering: moved preview content into a dedicated collapsible code block when expanded and limited field widths on the one-line summary
 - Suppressed typo highlighting for the word currently being typed to avoid distracting inline markers while composing
 
 ### Fixed
