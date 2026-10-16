@@ -723,7 +723,8 @@ async function adoptElementArgs(
  * and disposes its handle before surfacing the named error, so catching it cannot
  * dispatch a duplicate retry through the stale handle. Puppeteer handles expose
  * `type()` but no `fill()`; the `fill()` semantics mirror the selector-based
- * `tab.fill()`: focus, clear any existing value, then type.
+ * `tab.fill()`: focus, clear any existing value, then type, or set the value of a
+ * colour, date, time or range input directly.
  */
 export function toActionableHandle(
 	handle: ElementHandle,

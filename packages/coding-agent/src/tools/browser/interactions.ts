@@ -428,7 +428,24 @@ export async function focusTextEntryTarget(
 }
 
 /**
- * Focus a field that can take text, clear any existing value, then retype.
+ * Input types set through a picker or slider, with an example of the value each takes. Typing into
+ * one fills its segments by keystroke rules (`2026-10-12` became `61012-02-02`) or nothing at all
+ * (a colour stayed `#000000`, a range at its midpoint), so fill sets their value instead.
+ */
+const PICKER_VALUE_EXAMPLES: Record<string, string> = {
+	color: '"#ff8800"',
+	date: '"2026-10-12"',
+	"datetime-local": '"2026-10-12T14:30"',
+	month: '"2026-10"',
+	time: '"14:30"',
+	week: '"2026-W41"',
+	range: "a number within its min, max and step",
+};
+const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
+
+/**
+ * Focus a field that can take text, clear any existing value, then retype. A colour, date, time or
+ * range input gets its value set the way its picker would, and refuses one it rejects.
  *
  * Every step is a DOM evaluation or an input dispatch, so this works on tabs
  * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
@@ -446,33 +463,128 @@ export async function fillViaHandle(
 	type: (text: string) => Promise<unknown> = text => handle.type(text, { delay: 0 }),
 ): Promise<void> {
 	await focusTextEntryTarget(handle, "fill", signal);
-	await untilAborted(signal, () =>
-		handle.evaluate((el, clearing) => {
-			const node = el as unknown as {
-				value?: string;
-				focus?: () => void;
-				isContentEditable?: boolean;
-				innerText?: string;
-				dispatchEvent(event: unknown): boolean;
-			};
-			node.focus?.();
-			const before = node.isContentEditable ? node.innerText : node.value;
-			if (node.isContentEditable) node.innerText = "";
-			else if ("value" in node) {
-				// The prototype setter bypasses value trackers that frameworks (React) install on the
-				// element, so they see the cleared value as a change instead of their own write.
-				const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), "value")?.set;
-				if (setValue) setValue.call(node, "");
-				else node.value = "";
-			}
-			// Typing a value fires its own input events; an empty value types nothing,
-			// so report the clear itself when there was something to clear.
-			if (!clearing || !before) return;
-			const { Event } = globalThis as unknown as PageGlobals;
-			node.dispatchEvent(new Event("input", { bubbles: true }));
-			node.dispatchEvent(new Event("change", { bubbles: true }));
-		}, value === ""),
+	const picker = await untilAborted(signal, () =>
+		handle.evaluate(
+			(el, wanted, pickerTypes) => {
+				const node = el as unknown as {
+					localName?: string;
+					type?: string;
+					value?: string;
+					focus?: () => void;
+					isContentEditable?: boolean;
+					innerText?: string;
+					getAttribute(name: string): string | null;
+					namespaceURI: string | null;
+					ownerDocument: {
+						createElementNS(
+							namespace: string | null,
+							tag: "input",
+						): { value: string; setAttribute(name: string, value: string): void };
+					};
+					dispatchEvent(event: unknown): boolean;
+				};
+				node.focus?.();
+				// The native setter bypasses value trackers that frameworks (React) install on the element, so
+				// they see the new value as a change instead of their own write. It is looked up past the
+				// prototypes of a customized built-in (`<input is=…>`), which do not own `value`. A page class
+				// that defines its own `value` accessor is not on the chain this function sees, so that accessor
+				// never runs here.
+				let proto = Object.getPrototypeOf(node);
+				let descriptor: PropertyDescriptor | undefined;
+				while (proto && !(descriptor = Object.getOwnPropertyDescriptor(proto, "value"))) {
+					proto = Object.getPrototypeOf(proto);
+				}
+				const setValue = descriptor?.set;
+				const write = (next: string) => (setValue ? setValue.call(node, next) : (node.value = next));
+				// Like the browser's own, input leaves a shadow root and change stays inside it.
+				const report = () => {
+					const { Event } = globalThis as unknown as PageGlobals;
+					node.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+					node.dispatchEvent(new Event("change", { bubbles: true }));
+				};
+				const kind = node.type?.toLowerCase() ?? "";
+				// localName, not tagName: an XHTML page keeps the tag's lower case.
+				if (node.localName === "input" && pickerTypes.includes(kind)) {
+					const before = node.value ?? "";
+					// Tried on a plain input with the same type, min, max and step: a value written to the live
+					// control and then put back would still cut it off from its value attribute, and a copy of a
+					// customized built-in would run the page's constructor. It takes the target's namespace, which
+					// an XML document's createElement would drop for a generic element that keeps any value.
+					const probe = node.ownerDocument.createElementNS(node.namespaceURI, "input");
+					for (const name of ["type", "min", "max", "step"]) {
+						const attribute = node.getAttribute(name);
+						if (attribute !== null) probe.setAttribute(name, attribute);
+					}
+					probe.value = wanted;
+					// The browser normalises what it accepts (a colour to #rrggbb, a time's seconds), turns what
+					// it rejects into "" (a colour into #000000, a range into its midpoint) and clamps a range. A
+					// colour stored as #000000 is accepted only if it draws black, so the browser resolves it rather
+					// than a parser saying it is well-formed (`var(--missing)` is, and is still refused). A
+					// rejected range number can land on the midpoint it coerces to (`0x5`), so its spelling is
+					// checked against the decimal form the browser parses. Only the date and time types can be
+					// cleared.
+					const actual = probe.value;
+					let refused: boolean;
+					if (kind === "color") {
+						const { OffscreenCanvas } = globalThis as unknown as {
+							OffscreenCanvas: new (
+								width: number,
+								height: number,
+							) => {
+								getContext(type: "2d"): {
+									fillStyle: string;
+									fillRect(x: number, y: number, width: number, height: number): void;
+									getImageData(
+										x: number,
+										y: number,
+										width: number,
+										height: number,
+									): { data: ArrayLike<number> };
+								} | null;
+							};
+						};
+						// A colour the canvas cannot parse keeps the white set first, so it draws white.
+						const paint = new OffscreenCanvas(1, 1).getContext("2d");
+						let drawsBlack = false;
+						if (paint) {
+							paint.fillStyle = "#ffffff";
+							paint.fillStyle = wanted;
+							paint.fillRect(0, 0, 1, 1);
+							const [red, green, blue] = Array.from(paint.getImageData(0, 0, 1, 1).data);
+							drawsBlack = red === 0 && green === 0 && blue === 0;
+						}
+						refused = actual === "#000000" && !drawsBlack;
+					} else if (kind === "range") {
+						refused =
+							!/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(wanted) || Number(actual) !== Number(wanted);
+					} else {
+						refused = wanted !== "" && actual === "";
+					}
+					// A picker reports a pick that changes the value, not one that keeps it.
+					if (!refused && actual !== before) {
+						write(wanted);
+						report();
+					}
+					return { kind, refused };
+				}
+				const before = node.isContentEditable ? node.innerText : node.value;
+				if (node.isContentEditable) node.innerText = "";
+				else if ("value" in node) write("");
+				// Typing a value fires its own input events; an empty value types nothing,
+				// so report the clear itself when there was something to clear.
+				if (wanted === "" && before) report();
+				return null;
+			},
+			value,
+			PICKER_INPUT_TYPES,
+		),
 	);
+	if (picker?.refused) {
+		throw new ToolError(
+			`<input type=${picker.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[picker.kind]}`,
+		);
+	}
+	if (picker) return;
 	await untilAborted(signal, () => type(value));
 }
 
