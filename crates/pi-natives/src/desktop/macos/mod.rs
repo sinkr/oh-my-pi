@@ -2,7 +2,7 @@ mod ax;
 mod capture;
 mod date;
 mod input;
-pub(super) mod permission;
+mod permission;
 mod process;
 mod session;
 mod skylight;
