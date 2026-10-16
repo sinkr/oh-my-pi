@@ -1,0 +1,142 @@
+import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { postOpenAIStream } from "@oh-my-pi/pi-ai/utils/openai-http";
+
+const OFFLINE_ANTHROPIC =
+	"No internet connection: couldn't reach api.anthropic.com (getaddrinfo ETIMEOUT). Check your network or proxy and try again.";
+
+function bunDnsFailure(host = "api.anthropic.com"): TypeError {
+	return Object.assign(new TypeError(`getaddrinfo ETIMEOUT ${host}`), { code: "ETIMEOUT" });
+}
+
+describe("classifyNetworkCause", () => {
+	it("reads a Bun DNS rejection off the error itself", () => {
+		const err = bunDnsFailure();
+		expect(AIError.classifyNetworkCause(err)).toEqual({
+			kind: "offline",
+			code: "ETIMEOUT",
+			detail: "getaddrinfo ETIMEOUT",
+			host: "api.anthropic.com",
+		});
+		// Host parsed from the error text when no request URL is supplied.
+		expect(new AIError.AnthropicConnectionError(err).message).toBe(OFFLINE_ANTHROPIC);
+	});
+
+	it("walks the cause chain for a Bun socket-open failure that names no host", () => {
+		const inner = Object.assign(new Error("Was there a typo in the url or port?"), {
+			code: "FailedToOpenSocket",
+		});
+		const outer = new TypeError("fetch failed", { cause: inner });
+
+		expect(AIError.classifyNetworkCause(outer)).toEqual({
+			kind: "offline",
+			code: "FailedToOpenSocket",
+			detail: "FailedToOpenSocket",
+			host: undefined,
+		});
+		// The request URL supplies the host the error text lacks.
+		expect(new AIError.AnthropicConnectionError(outer, "https://api.anthropic.com/v1/messages").message).toBe(
+			"No internet connection: couldn't reach api.anthropic.com (FailedToOpenSocket). Check your network or proxy and try again.",
+		);
+	});
+
+	it("descends into AggregateError branches for a Node ECONNREFUSED", () => {
+		const errno = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), { code: "ECONNREFUSED" });
+		const err = new TypeError("fetch failed", { cause: new AggregateError([errno]) });
+
+		expect(AIError.classifyNetworkCause(err)?.kind).toBe("refused");
+		expect(AIError.networkFailureMessage(err, "http://127.0.0.1:443/v1/chat/completions")).toBe(
+			"Couldn't connect to 127.0.0.1:443 (connection refused). A proxy or firewall may be blocking it.",
+		);
+	});
+
+	it("classifies Bun's connection-refused wording", () => {
+		const err = Object.assign(new TypeError("Unable to connect. Is the computer able to access the url?"), {
+			code: "ConnectionRefused",
+		});
+
+		expect(AIError.classifyNetworkCause(err)?.kind).toBe("refused");
+	});
+
+	it("classifies a certificate verification failure as tls, not a dead network", () => {
+		const err = Object.assign(new Error("unable to verify the first certificate"), {
+			code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+		});
+
+		expect(AIError.classifyNetworkCause(err)?.kind).toBe("tls");
+		expect(AIError.networkFailureMessage(err, "https://api.openai.com/v1/responses")).toBe(
+			"TLS certificate verification failed for api.openai.com (UNABLE_TO_VERIFY_LEAF_SIGNATURE). If you're behind a TLS-inspecting proxy, its CA may need to be trusted.",
+		);
+	});
+
+	it("classifies a flattened message-only errno (fetchWithRetry drops the cause)", () => {
+		expect(AIError.classifyNetworkCause(new Error("Network error: getaddrinfo ENOTFOUND api.openai.com"))).toEqual({
+			kind: "offline",
+			code: undefined,
+			detail: "getaddrinfo ENOTFOUND",
+			host: "api.openai.com",
+		});
+	});
+
+	it("leaves non-network errors alone", () => {
+		for (const err of [new Error("Overloaded"), new TypeError("fetch failed")]) {
+			expect(AIError.classifyNetworkCause(err)).toBeUndefined();
+			expect(AIError.networkFailureError(err, "https://api.openai.com/v1/responses")).toBe(err);
+			expect(new AIError.AnthropicConnectionError(err).message).toBe("Connection error.");
+		}
+	});
+
+	it("terminates on a cyclic cause chain", () => {
+		const a = new Error("a");
+		const b = new Error("b", { cause: a });
+		(a as { cause?: unknown }).cause = b;
+
+		expect(AIError.classifyNetworkCause(a)).toBeUndefined();
+	});
+});
+
+describe("network failure classification flags", () => {
+	it("keeps offline failures transient and retryable", () => {
+		const id = AIError.classify(new AIError.AnthropicConnectionError(bunDnsFailure()));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+
+		for (const message of [
+			OFFLINE_ANTHROPIC,
+			"No internet connection: couldn't reach api.openai.com (getaddrinfo ENOTFOUND). Check your network or proxy and try again.",
+			"getaddrinfo ENOTFOUND api.openai.com",
+			"FailedToOpenSocket",
+		]) {
+			expect(AIError.isProviderRetryableError(new Error(message))).toBe(true);
+			expect(AIError.is(AIError.classify(new Error(message)), AIError.Flag.Transient)).toBe(true);
+		}
+	});
+});
+
+describe("postOpenAIStream transport rejection", () => {
+	it("names the host and cause instead of the runtime's bare DNS text", async () => {
+		const networkError = bunDnsFailure("api.openai.com");
+		const fetchImpl: FetchImpl = async () => {
+			throw networkError;
+		};
+
+		const error = await postOpenAIStream({
+			url: "https://api.openai.com/v1/chat/completions",
+			headers: {},
+			body: {},
+			signal: new AbortController().signal,
+			fetch: fetchImpl,
+			maxAttempts: 1,
+		}).then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toBe(
+			"No internet connection: couldn't reach api.openai.com (getaddrinfo ETIMEOUT). Check your network or proxy and try again.",
+		);
+		expect((error as Error).cause).toBe(networkError);
+	});
+});
