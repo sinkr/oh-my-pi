@@ -272,4 +272,37 @@ describe("read URL binary dispatch", () => {
 			server.stop(true);
 		}
 	});
+
+	for (const { charset, encoding, title } of [
+		{ charset: "utf-16le", encoding: "utf16le", title: "Северный чай" },
+		{ charset: "windows-1252", encoding: "latin1", title: "Café résumé" },
+	] as const) {
+		it(`renders refetched ${charset} HTML using its HTTP charset`, async () => {
+			const html = `<!DOCTYPE html><html><body><h1>${title}</h1>${"<p>Readable article paragraph.</p>".repeat(300)}</body></html>`;
+			const compressed = Bun.gzipSync(Buffer.from(html, encoding));
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch(request) {
+					if (new URL(request.url).pathname !== "/article") return new Response("Not found", { status: 404 });
+					const headers: Record<string, string> = { "content-type": "text/html" };
+					if (request.headers.get("accept-encoding")?.includes("gzip")) {
+						headers["content-type"] = `text/html; charset=${charset}`;
+						headers["content-encoding"] = "gzip";
+					}
+					return new Response(compressed, { headers });
+				},
+			});
+
+			try {
+				const result = await new ReadTool(makeSession(testDir)).execute("read-url-charset-html", {
+					path: `http://127.0.0.1:${server.port}/article`,
+				});
+				expect(result.details?.method).not.toBe("binary");
+				expect(textOutput(result)).toContain(title);
+			} finally {
+				server.stop(true);
+			}
+		});
+	}
 });

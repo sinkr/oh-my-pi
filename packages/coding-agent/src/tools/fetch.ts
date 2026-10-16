@@ -1012,9 +1012,10 @@ async function tryRenderBinaryPayload(
 
 	if (rawLooksBinary && !bodySkipped && !hasNotebookHint && !hasSqliteHint && !hasArchiveHint) {
 		const bytes = Buffer.from(binary.buffer.buffer, binary.buffer.byteOffset, binary.buffer.byteLength);
-		if (!sampleLooksBinary(decodeBody(bytes.subarray(0, BINARY_SAMPLE_CHARS), mime))) {
+		const contentType = binary.contentType ?? mime;
+		if (!sampleLooksBinary(decodeBody(bytes.subarray(0, BINARY_SAMPLE_CHARS), contentType))) {
 			// The refetch may have negotiated a different encoding; render its text, not the first response's bytes.
-			return decodeBody(bytes, mime);
+			return decodeBody(bytes, contentType);
 		}
 	}
 
