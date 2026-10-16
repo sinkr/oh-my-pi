@@ -125,6 +125,19 @@ describe("SDK session dialogs and the computer display hold", () => {
 		expect(releases).toEqual([1, 2]);
 	});
 
+	it("keeps the hold while an `ask` with an `ask.timeout` deadline waits, since the turn goes on unattended", async () => {
+		const target = await createSession({ "ask.timeout": 30 }, [
+			call("ask", { questions: [{ id: "go", question: "Go on?", options: [{ label: "Yes" }, { label: "No" }] }] }),
+			{ content: ["done"] },
+		]);
+		const running = target.prompt("go");
+		const open = await dialog.promise;
+		expect(open).toMatchObject({ turn: 1, releases: 0 });
+		open.answer("Yes");
+		await running;
+		expect(releases).toEqual([1]);
+	});
+
 	it("ends the hold while a tool approval waits for an answer", async () => {
 		const target = await createSession({ "tools.approvalMode": "always-ask" }, [
 			call("bash", { command: "echo hi" }),
@@ -161,5 +174,15 @@ describe("trackUserWaits", () => {
 		expect(ui.askDialog).toBeUndefined();
 		rpcLike.enabled = true;
 		expect(ui.askDialog).toBeFunction();
+	});
+
+	it("calls a dialog the context replaced after the first access", async () => {
+		const calls: string[] = [];
+		const replaceable = { select: async () => calls.push("first") };
+		const ui = trackUserWaits(replaceable as unknown as ExtensionUIContext, dialog => dialog());
+		await ui.select("a", []);
+		replaceable.select = async () => calls.push("second");
+		await ui.select("b", []);
+		expect(calls).toEqual(["first", "second"]);
 	});
 });
