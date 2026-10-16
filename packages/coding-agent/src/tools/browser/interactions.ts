@@ -128,6 +128,10 @@ interface PageGlobals {
 	File: new (parts: Uint8Array[], name: string, options: { type: string; lastModified?: number }) => unknown;
 	DataTransfer: new () => { items: { add(file: unknown): void }; files: unknown };
 	DragEvent: new (type: string, options: { bubbles: boolean; cancelable: boolean; dataTransfer: unknown }) => unknown;
+	MessageChannel: new () => {
+		port1: { onmessage: (() => void) | null; close(): void };
+		port2: { postMessage(message: null): void; close(): void };
+	};
 }
 
 /** A click aborted while its element was still refused; `refusal` names the last failed check. */
@@ -1028,14 +1032,158 @@ function cancelChooser(el: unknown): void {
 	(el as PageElement).dispatchEvent(new page.Event("cancel", { bubbles: true }));
 }
 
-/** Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world. */
-function dropUploadFiles(el: unknown, files: unknown[]): void {
+/**
+ * Drop `files` on an element through the drag events a user's drop fires. Runs in the isolated world.
+ *
+ * A user's drop runs the page's microtasks after each listener, so a drop handler may read the files after an `await`.
+ * A script's `dispatchEvent` runs them only once the script yields, so each event is followed by a yield to a task
+ * (a message, which background tabs do not throttle as they do timers) that lets everything the event queued settle.
+ */
+async function dropUploadFiles(el: unknown, files: unknown[], watch: string): Promise<void> {
 	const element = el as PageElement;
 	const page = globalThis as unknown as PageGlobals;
 	const transfer = new page.DataTransfer();
 	for (const file of files) transfer.items.add(file);
-	for (const type of ["dragenter", "dragover", "drop"]) {
+	const settle = async (): Promise<void> => {
+		const channel = new page.MessageChannel();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		channel.port1.onmessage = () => resolve();
+		channel.port2.postMessage(null);
+		try {
+			await promise;
+		} finally {
+			channel.port1.close();
+			channel.port2.close();
+		}
+	};
+	const fire = (type: string) =>
 		element.dispatchEvent(new page.DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer }));
+	fire("dragenter");
+	await settle();
+	fire("dragover");
+	await settle();
+	// `watch`, private to this drop, opens the count of reads for {@link watchDropRead} right before `drop` and closes it
+	// once what `drop` queued has settled, so reads made in `drop` or in the microtasks it queued count, and reads
+	// deferred from dragenter or dragover do not.
+	fire(watch);
+	fire("drop");
+	await settle();
+	fire(watch);
+}
+
+/** A watch for a page reading a drop's files; see {@link watchDropRead}. */
+interface DropReadWatch {
+	counting: boolean;
+	read: boolean;
+	end(): void;
+}
+
+/**
+ * Watch for the page reading the files of the drop on an element: getting the drop's `files` or `items` while `drop` is
+ * dispatched or in what it queued before the next task. {@link dropUploadFiles} fires the private `type` event right
+ * before `drop`, which wraps the getters and opens the count, and again once `drop` has settled, which closes it. No
+ * page listener can run before the first, as one registered for `drop` itself could; reads during dragenter and
+ * dragover, or deferred from them, stay uncounted. Runs in the main world, where the page's listeners get the wrapper
+ * whose reads it watches.
+ */
+function watchDropRead(el: unknown, type: string): DropReadWatch {
+	interface DropEvent {
+		dataTransfer: object | null;
+	}
+	interface WatchTarget {
+		addEventListener(type: string, listener: (event: DropEvent) => void): void;
+		removeEventListener(type: string, listener: (event: DropEvent) => void): void;
+	}
+	const element = el as unknown as WatchTarget;
+	const instrument = (event: DropEvent): void => {
+		const transfer = event.dataTransfer;
+		if (!transfer) return;
+		if (watch.counting) {
+			watch.counting = false;
+			return;
+		}
+		for (const key of ["files", "items"]) {
+			// The wrapper's own prototype, not the `DataTransfer` global a page may replace.
+			const get = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(transfer), key)?.get;
+			Object.defineProperty(transfer, key, {
+				configurable: true,
+				get() {
+					if (watch.counting) watch.read = true;
+					return get?.call(transfer);
+				},
+			});
+		}
+		watch.counting = true;
+	};
+	const watch = { counting: false, read: false, end: () => element.removeEventListener(type, instrument) };
+	element.addEventListener(type, instrument);
+	return watch;
+}
+
+/** Stop a drop watch; whether the page read the files. Runs in the main world. */
+function endDropReadWatch(watch: DropReadWatch): boolean {
+	watch.end();
+	return watch.read;
+}
+
+/** End a drop watch and release its handle. */
+async function releaseDropReadWatch(watch: JSHandle<DropReadWatch>): Promise<void> {
+	try {
+		await watch.evaluate(endDropReadWatch);
+	} finally {
+		await watch.dispose();
+	}
+}
+
+/**
+ * Wait for `pending` under `signal`. An abort does not stop the call behind it, so a result that arrives after the
+ * abort is handed to `release`.
+ */
+async function untilAbortedOrReleased<T>(
+	signal: AbortSignal | undefined,
+	pending: Promise<T>,
+	release: (late: T) => Promise<unknown>,
+): Promise<T> {
+	return await untilAborted(signal, () => pending).catch(error => {
+		void pending.then(release).catch(() => undefined);
+		throw error;
+	});
+}
+
+/**
+ * Run `drop` on `zone` with a fresh private watch event type and report whether the page read the dropped files.
+ * Canceling proves nothing: pages cancel dragover and drop document-wide only to stop the browser navigating to a
+ * dropped file. A read is the strongest signal there is, not proof of acceptance: a document guard that checks
+ * `files.length` counts too, and counting element-level reads only would fail delegated drop zones, which read at the
+ * document (React 16 and older, jQuery `.on("drop", selector)`).
+ */
+export async function dropRead(
+	zone: ElementHandle,
+	drop: (watch: string) => Promise<void>,
+	signal: AbortSignal | undefined,
+): Promise<boolean> {
+	const type = `omp-upload-drop-${crypto.randomUUID()}`;
+	const realm = zone.frame.mainRealm();
+	const target = await untilAbortedOrReleased(signal, realm.adoptHandle(zone), late => late.dispose());
+	try {
+		const watch = await untilAbortedOrReleased(
+			signal,
+			realm.evaluateHandle(watchDropRead, target, type),
+			releaseDropReadWatch,
+		);
+		try {
+			try {
+				await drop(type);
+			} catch (error) {
+				await watch.evaluate(endDropReadWatch).catch(() => undefined);
+				throw error;
+			}
+			return await untilAborted(signal, () => watch.evaluate(endDropReadWatch));
+		} finally {
+			await watch.dispose().catch(() => undefined);
+		}
+	} finally {
+		await target.dispose().catch(() => undefined);
 	}
 }
 
@@ -1135,12 +1283,16 @@ async function deliverToInput(
 	}
 }
 
-/** Drop the files on an element, built from staged copies by a detached picker or from streamed contents. */
+/**
+ * Drop the files on an element, built from staged copies by a detached picker or from streamed contents; fails when
+ * nothing on the page read them.
+ */
 async function deliverToDropZone(
 	zone: ElementHandle,
 	sources: UploadSource[],
 	route: UploadRoute,
 	staging: UploadStaging,
+	label: string,
 	signal: AbortSignal | undefined,
 ): Promise<void> {
 	const realm = zone.frame.isolatedRealm();
@@ -1151,7 +1303,16 @@ async function deliverToDropZone(
 				? await pickFiles(realm, await staging.stage(sources, signal), signal)
 				: await streamUploadFiles(realm, sources, signal);
 		try {
-			await untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files));
+			const read = await dropRead(
+				zone,
+				watch => untilAborted(signal, () => realm.evaluate(dropUploadFiles, target, files, watch)),
+				signal,
+			);
+			if (!read) {
+				throw new ToolError(
+					`${label} opened no file chooser and nothing on the page took the dropped files; target the page's <input type=file>, the control that opens the chooser, or its drop zone`,
+				);
+			}
 		} finally {
 			await files.dispose().catch(() => undefined);
 		}
@@ -1308,7 +1469,7 @@ export async function prepareElementUpload(
 	} finally {
 		pagesAwaitingChooser.delete(page);
 	}
-	return preparedUpload(sources, sig => deliverToDropZone(handle, sources, route, staging, sig));
+	return preparedUpload(sources, sig => deliverToDropZone(handle, sources, route, staging, label, sig));
 }
 
 /** Press a keyboard key without releasing it. */

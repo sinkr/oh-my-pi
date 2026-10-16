@@ -23,7 +23,8 @@ import { chromiumAvailable } from "./chromium-probe";
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 // File inputs reached by selector, by handle and inside a shadow root; buttons whose click opens a hidden input's
-// chooser, one of which turns its input into a text field once the chooser is open; a drop zone.
+// chooser, one of which turns its input into a text field once the chooser is open; drop zones in the document and in
+// the shadow root, and an element that takes no drop though the document cancels drops everywhere.
 const html = `<!doctype html>
 <style>button, #drop { display: block; margin: 8px; padding: 8px; }</style>
 <input id="direct" type="file" multiple>
@@ -33,11 +34,19 @@ const html = `<!doctype html>
 <button id="other" type="button">Upload another</button><input id="other-input" type="file" hidden>
 <button id="swap" type="button">Upload, then swap</button><input id="swap-input" type="file" hidden>
 <div id="drop">Drop files here</div>
+<div id="inert">Not a drop zone</div>
 <input id="folder" type="file" webkitdirectory>
 <script>
 window.composedInputs = [];
 window.dropped = [];
-document.getElementById("host").attachShadow({ mode: "open" }).innerHTML = '<input id="shadow" type="file">';
+const shadow = document.getElementById("host").attachShadow({ mode: "open" });
+shadow.innerHTML = '<input id="shadow" type="file"><div id="shadow-drop">Drop files here</div>';
+shadow.getElementById("shadow-drop").addEventListener("drop", event => {
+  event.preventDefault();
+  window.dropped = [...event.dataTransfer.files];
+});
+document.addEventListener("dragover", event => event.preventDefault());
+document.addEventListener("drop", event => event.preventDefault());
 document.addEventListener("input", event => composedInputs.push(event.composedPath()[0].id));
 for (const id of ["trigger", "other"])
   document.getElementById(id).addEventListener("click", () => document.getElementById(id + "-input").click());
@@ -397,6 +406,28 @@ return {
 				// A browser's own pick of a file whose extension names no MIME type reports an empty type.
 				const file = ["no extension", ""];
 				expect(received).toEqual([file, file, file]);
+			} finally {
+				await close();
+			}
+		}, 60_000);
+
+		test("fails a drop that nothing on the page reads", async () => {
+			const { run, close } = await openConnectedTab(`browser-upload-inert-${route}`, {
+				proxy: routeProxy(route),
+			});
+			try {
+				await Bun.write(path.join(tempDir, "alpha.txt"), "alpha");
+				const result = await run(`const errors = [];
+for (const selector of ["#inert", "pierce/#shadow-drop"]) {
+	try { await tab.uploadFile(selector, "alpha.txt"); errors.push(null); }
+	catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+}
+return { errors, dropped: await tab.evaluate(() => window.dropped.map(file => file.name)) };`);
+				// The document cancels the inert element's drop but never reads its files; the shadow root's zone does.
+				expect(result).toEqual({
+					errors: [expect.stringContaining("nothing on the page took the dropped files"), null],
+					dropped: ["alpha.txt"],
+				});
 			} finally {
 				await close();
 			}
