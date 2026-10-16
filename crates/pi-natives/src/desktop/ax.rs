@@ -849,6 +849,8 @@ pub fn refind(
 		WalkState::new(proof.max_nodes.max(5_000), proof.max_depth.max(24), WalkBounds::Skip)
 			.cancellable();
 	let target = entry.target_key.clone();
+	// The match is proved by this walk, so a search for it reads as far.
+	registry.note_window(&target, &root, &state);
 	let Some(root) = walk_raw(backend, root, 0, &mut state)? else {
 		return Ok(None);
 	};
@@ -1410,9 +1412,9 @@ mod tests {
 			.expect("the one copy");
 		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(4)));
 	}
-	#[test]
-	fn a_ref_from_a_read_deeper_than_find_reads_is_searched_as_deep() {
-		// A button 31 levels down, past the 24 `find()` reads.
+	/// A window with a "Go" button, node 100, 31 levels down: past the 24
+	/// `find()` reads.
+	fn deep_go() -> Mock {
 		let mut m = Mock {
 			props: [(1, p("window", Some("Title"))), (100, p("button", Some("Go")))].into(),
 			..Default::default()
@@ -1422,18 +1424,46 @@ mod tests {
 			m.children.insert(group - 1, vec![group]);
 		}
 		m.children.insert(31, vec![100]);
+		m
+	}
+	/// The app destroys the deep button `old` and puts an identical `new` in
+	/// its place.
+	fn rebuild_deep(m: &mut Mock, old: u64, new: u64) {
+		m.destroyed.insert(old);
+		m.props.insert(new, p("button", Some("Go")));
+		m.children.insert(31, vec![new]);
+	}
+	#[test]
+	fn a_ref_from_a_read_deeper_than_find_reads_is_searched_as_deep() {
+		let mut m = deep_go();
 		let mut registry = AxRegistry::default();
 		let options = AxSnapshotOptions { max_depth: Some(40), ..Default::default() };
 		let read = snapshot(&mut m, &mut registry, &window(), &options).unwrap();
 		assert!(!read.truncated && read.text.contains("\"Go\" [ref=e2]"), "{}", read.text);
-		// The app rebuilds the button.
-		m.destroyed.insert(100);
-		m.props.insert(101, p("button", Some("Go")));
-		m.children.insert(31, vec![101]);
+		rebuild_deep(&mut m, 100, 101);
 		let found = refind(&mut m, &mut registry, &window(), "e2")
 			.unwrap()
 			.expect("the one copy");
 		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(101)));
+	}
+	#[test]
+	fn a_match_a_deep_search_found_is_searched_as_deep() {
+		let mut m = deep_go();
+		let mut registry = AxRegistry::default();
+		let deep = AxSnapshotOptions { max_depth: Some(40), ..Default::default() };
+		snapshot(&mut m, &mut registry, &window(), &deep).unwrap();
+		// A read within the default depth misses the button.
+		let read = snapshot(&mut m, &mut registry, &window(), &AxSnapshotOptions::default()).unwrap();
+		assert!(read.truncated, "{}", read.text);
+		rebuild_deep(&mut m, 100, 101);
+		let found = refind(&mut m, &mut registry, &window(), "e2")
+			.unwrap()
+			.expect("the one copy");
+		rebuild_deep(&mut m, 101, 102);
+		let again = refind(&mut m, &mut registry, &window(), &found)
+			.unwrap()
+			.expect("the one copy of the copy");
+		assert!(matches!(registry.resolve(&again).unwrap(), AxHandle::Test(102)));
 	}
 	#[test]
 	fn a_read_that_missed_part_of_the_window_cannot_make_a_ref_refindable() {
