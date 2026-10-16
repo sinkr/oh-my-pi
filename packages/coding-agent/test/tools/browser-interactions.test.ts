@@ -799,6 +799,38 @@ return { tag: await tab.evaluate(() => document.querySelector("#date").tagName),
 		}
 	}, 30_000);
 
+	test("refuses a value a picker input rejects on an XML page", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `picker-xml-${crypto.randomUUID()}`;
+		// An XML document's createElement makes a generic element that keeps any value, not an input.
+		const xml = `<root><input xmlns="http://www.w3.org/1999/xhtml" id="date" type="date" value="2026-10-12"/></root>`;
+		const context = { session, toolCallId: "browser-picker-xml" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:application/xml,${encodeURIComponent(xml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `let refused = "";
+try { await tab.fill("#date", "12/10/2026"); } catch (error) { refused = error.message; }
+return { refused, date: await tab.value("#date") };`,
+					timeout: 20,
+				},
+				context,
+			);
+			expect(valueFrom<{ refused: string; date: string }>(result)).toEqual({
+				refused: expect.stringContaining('<input type=date> does not accept "12/10/2026"'),
+				date: "2026-10-12",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
 	test("fills a customized built-in picker past a value tracker on the element", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);

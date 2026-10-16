@@ -474,8 +474,12 @@ export async function fillViaHandle(
 					isContentEditable?: boolean;
 					innerText?: string;
 					getAttribute(name: string): string | null;
+					namespaceURI: string | null;
 					ownerDocument: {
-						createElement(tag: "input"): { value: string; setAttribute(name: string, value: string): void };
+						createElementNS(
+							namespace: string | null,
+							tag: "input",
+						): { value: string; setAttribute(name: string, value: string): void };
 					};
 					dispatchEvent(event: unknown): boolean;
 				};
@@ -504,8 +508,9 @@ export async function fillViaHandle(
 					const before = node.value ?? "";
 					// Tried on a plain input with the same type, min, max and step: a value written to the live
 					// control and then put back would still cut it off from its value attribute, and a copy of a
-					// customized built-in would run the page's constructor.
-					const probe = node.ownerDocument.createElement("input");
+					// customized built-in would run the page's constructor. It takes the target's namespace, which
+					// an XML document's createElement would drop for a generic element that keeps any value.
+					const probe = node.ownerDocument.createElementNS(node.namespaceURI, "input");
 					for (const name of ["type", "min", "max", "step"]) {
 						const attribute = node.getAttribute(name);
 						if (attribute !== null) probe.setAttribute(name, attribute);
