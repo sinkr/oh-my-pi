@@ -172,6 +172,8 @@ class TabState {
 	detaching: Promise<void> | null = null;
 	/** A successful attach completed after the most recently requested relay detach. */
 	reattachedAfterDetach = false;
+	/** The relay asked the extension to close this tab (`Target.closeTarget`); its coming detach is not Chrome's own. */
+	closing = false;
 	/** True after the relay put this tab in the omp group; `ompGroupId` holds that group. */
 	grouped = false;
 	/** Group RPC in flight — suppresses duplicate requests from load-time tabUpdated bursts. */
@@ -977,7 +979,14 @@ export class RelayBridge {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
 					return;
 				}
-				await this.#rpc({ op: "removeTab", tabId: removedTab.tabId }, this.#instanceFor(removedTab));
+				removedTab.closing = true;
+				try {
+					await this.#rpc({ op: "removeTab", tabId: removedTab.tabId }, this.#instanceFor(removedTab));
+				} catch (err) {
+					// The tab stays open, so a later detach is Chrome's own again.
+					removedTab.closing = false;
+					throw err;
+				}
 				this.#reply(conn, msg, { success: true });
 				return;
 			}
@@ -1154,17 +1163,20 @@ export class RelayBridge {
 		// A user cancel releases the tab's omp-group membership; any other detach keeps it.
 		this.#syncTabGrouping(tab);
 		// Relay-private event, ahead of the sessions' detach: a client driving the tab learns that Chrome
-		// ended the attachment, not the page, and can re-adopt it instead of waiting on a dead session.
-		for (const conn of this.#conns.values()) {
-			for (const pageSession of conn.sessionsForTab(tabKey, "page")) {
-				this.#emit(conn, "OMP.debuggerDetached", { reason }, pageSession);
+		// ended the attachment, not the page, and can re-adopt it instead of waiting on a dead session. A tab
+		// the relay is closing detaches on its way out (Chrome may report that before the removal): not re-adoptable.
+		if (!tab.closing) {
+			for (const conn of this.#conns.values()) {
+				for (const pageSession of conn.sessionsForTab(tabKey, "page")) {
+					this.#emit(conn, "OMP.debuggerDetached", { reason }, pageSession);
+				}
 			}
 		}
 		// Failures of commands that were in flight are released behind the event (#forwardToTab).
 		tab.chromeDetach.resolve();
 		tab.chromeDetach = Promise.withResolvers<void>();
 		this.#retractTab(tab);
-		if (!cancelledByUser && this.#eligible(tab) && !tab.discarded) this.#announceTab(tab);
+		if (!cancelledByUser && !tab.closing && this.#eligible(tab) && !tab.discarded) this.#announceTab(tab);
 	}
 
 	#onTabRemoved(tabKey: string): void {

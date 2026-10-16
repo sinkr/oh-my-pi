@@ -852,6 +852,44 @@ describe("RelayBridge attachment release", () => {
 		expect(cdp.messages.findIndex(m => m.id === clickId && "error" in m)).toBeGreaterThan(told);
 	});
 
+	it("neither reports nor re-announces the detach of a tab the relay is closing", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: {} }));
+		await flush();
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const created = () =>
+			cdp.messages.filter(
+				m => m.method === "Target.targetCreated" && JSON.stringify(m.params).includes(`"PAGE${ANON}.1"`),
+			).length;
+		const closeId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: closeId,
+				sessionId,
+				method: "Target.closeTarget",
+				params: { targetId: `PAGE${ANON}.1` },
+			}),
+		);
+		await flush();
+		expect(ext.pending("removeTab").map(r => r.tabId)).toEqual([1]);
+
+		// Chrome reports the debugger detach of the closing tab before its removal.
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		expect(cdp.messages.some(m => m.method === "OMP.debuggerDetached")).toBe(false);
+		expect(created()).toBe(1);
+		ack(bridge, ext, "removeTab");
+		bridge.extMessage(ext, JSON.stringify({ t: "tabRemoved", tabId: 1 }));
+		await flush();
+		expect(cdp.messages.some(m => m.id === closeId && "result" in m)).toBe(true);
+		expect(bridge.listTargets()).toEqual([]);
+	});
+
 	it("detaches cleanly on explicit last-session release and permits reattachment", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
