@@ -60,10 +60,12 @@ struct DisplayAwake(Mutex<AwakeState>);
 
 #[derive(Default)]
 struct AwakeState {
-	hold:           Option<DisplayAwakeHold>,
-	/// An agent turn is acting: the grace period does not end the hold; only
-	/// [`DisplayAwake::release_turn`] or closing the session does.
-	until_released: bool,
+	hold:       Option<DisplayAwakeHold>,
+	/// An agent turn is acting: activity from now on holds for the turn.
+	armed:      bool,
+	/// Activity came while `armed`: the grace period does not end the
+	/// hold; only [`DisplayAwake::release_turn`] or closing the session does.
+	turn_holds: bool,
 }
 
 impl DisplayAwake {
@@ -82,21 +84,27 @@ impl DisplayAwake {
 		if state.hold.is_none() {
 			state.hold = start();
 		}
+		if state.armed {
+			state.turn_holds = true;
+		}
 		true
 	}
 
 	/// Keeps the hold that activity takes from now on until
-	/// [`Self::release_turn`], instead of for the grace period.
+	/// [`Self::release_turn`], instead of for the grace period. A hold taken
+	/// earlier keeps its grace until the turn's first request.
 	fn hold_until_released(&self) {
-		self.0.lock().until_released = true;
+		self.0.lock().armed = true;
 	}
 
 	/// Drops a turn's hold now and returns later activity to the grace period.
-	/// A hold no turn took (activity outside a turn) keeps its grace.
+	/// A hold no turn request took (activity outside a turn, or a turn that
+	/// made no request) keeps its grace.
 	fn release_turn(&self) {
 		let released = {
 			let mut state = self.0.lock();
-			if std::mem::take(&mut state.until_released) {
+			state.armed = false;
+			if std::mem::take(&mut state.turn_holds) {
 				state.hold.take()
 			} else {
 				None
@@ -110,7 +118,7 @@ impl DisplayAwake {
 	fn expire(&self) {
 		let released = {
 			let mut state = self.0.lock();
-			if state.until_released {
+			if state.turn_holds {
 				None
 			} else {
 				state.hold.take()
@@ -2485,8 +2493,10 @@ mod capture_tests {
 		let awake = Arc::clone(&backend.awake);
 		let (turn, tx, serving) = serving_with_turns(backend, Duration::from_millis(300));
 
-		// A background job acts between turns; a later turn ends without acting.
+		// A background job acts between turns; a later turn's run makes no
+		// request, and the turn ends.
 		send_and_wait(&tx, |reply| Request::ListWindows { reply });
+		turn.hold_until_released();
 		turn.release_turn();
 		assert_eq!(*awake.lock(), [true], "the turn's end cut the grace short");
 		wait_for_awake(&awake, &[true, false]);
