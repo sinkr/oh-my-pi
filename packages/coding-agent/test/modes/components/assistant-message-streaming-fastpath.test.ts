@@ -173,7 +173,8 @@ describe("AssistantMessageComponent streaming fast path", () => {
 	it("retires finished items of a list while it is still the streaming block", () => {
 		const items = Array.from(
 			{ length: 12 },
-			(_, i) => `- ITEM-${i + 1}: a **short** line about \`printing\` that wraps once the width gets narrow enough`,
+			(_, i) =>
+				`- ITEM-${i + 1}: a **short** line about \`argv[0]\` and [a link](https://example.com) that wraps once the width gets narrow enough`,
 		);
 		const text = `Here is the list:\n\n${items.join("\n")}`;
 		const component = new AssistantMessageComponent();
@@ -200,20 +201,24 @@ describe("AssistantMessageComponent streaming fast path", () => {
 			"- one\n- two\n\\begin{align}\n- x\n\\end{align}\n- three",
 			"* one\n* two\n- three\n- four",
 			"$$\nx = 1\n\n- one\n- two\n- three\n$$",
+			"- [foo]\n- second\n- [foo]: https://example.com\n- four",
+			"- [Foo][] item\n- second\n  [foo]: https://example.com\n- third",
 		];
 		for (const doc of docs) {
 			const text = `Intro.\n\n${doc}\n\nDone.`;
 			const component = new AssistantMessageComponent();
-			let stable: readonly string[] = [];
+			let published: readonly string[] = [];
 			for (let end = 1; end <= text.length; end++) {
 				component.updateContent(msg([{ type: "text", text: text.slice(0, end) }]), { transient: true });
 				const rows = trimBlankEdges(component.render(W));
-				stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, W);
+				const stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, W);
 				expect(rows.slice(0, stable.length)).toEqual([...stable]);
+				expect(stable.slice(0, published.length)).toEqual(published.slice(0, stable.length));
+				if (stable.length > published.length) published = stable;
 			}
 			component.updateContent(msg([{ type: "text", text }]));
 			component.markTranscriptBlockFinalized();
-			expect(trimBlankEdges(component.render(W)).slice(0, stable.length)).toEqual([...stable]);
+			expect(trimBlankEdges(component.render(W)).slice(0, published.length)).toEqual([...published]);
 		}
 	});
 
