@@ -1590,6 +1590,46 @@ describe("RelayBridge auto-attach gating", () => {
 		ack(bridge, ext, "detach");
 	});
 
+	it("announces and attaches a tab again once its URL changes after Chrome refused its reattach", async () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		// Tab 2 is another relay tab in use, so the auto-attaching connection stays open throughout.
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }),
+		);
+		await flush();
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
+		);
+		ack(bridge, ext, "attach");
+		await flush();
+		const attachedTab1 = () => attachedIds(cdp).filter(id => id === `TAB${ANON}.1`).length;
+		expect(attachedTab1()).toBe(1);
+
+		// Another extension's frame loads in tab 1: Chrome detaches, and refuses the reattach while the frame is there.
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		nack(bridge, ext, "attach", "Cannot access a chrome-extension:// URL of different extension");
+		await flush();
+		expect(bridge.listTargets().map(t => t.id)).toEqual([`PAGE${ANON}.2`]);
+
+		// The frame is gone and the user navigates: the tab is announced and attached on the open connection again.
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, url: "https://example.com/next" }) }),
+		);
+		await flush();
+		expect(ext.pending("attach").map(r => r.tabId)).toEqual([1]);
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(attachedTab1()).toBe(2);
+	});
+
 	it("does not reattach an initially discovered tab discarded during attach", async () => {
 		const bridge = new RelayBridge();
 		const ext = new FakeExtSocket();

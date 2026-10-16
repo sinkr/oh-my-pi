@@ -1248,7 +1248,12 @@ export class RelayBridge {
 		}
 		if (!hasAutoAttach) return;
 		void this.#ensureAttached(tab, { retryAfterDiscard: true }).then(ok => {
-			if (!ok) return;
+			if (!ok) {
+				// A refused attach banned the tab until its URL changes. Withdraw the announcement too, or the URL change
+				// finds the tab already announced and neither announces nor attaches it again.
+				if (tab.banned && tab.announced && this.#tabs.get(tab.tabKey) === tab) this.#retractTab(tab);
+				return;
+			}
 			if (tab.discarded || !this.#eligible(tab) || this.#tabs.get(tab.tabKey) !== tab) {
 				this.#retractTab(tab);
 				this.#detachIfUnheld(tab.tabKey);
