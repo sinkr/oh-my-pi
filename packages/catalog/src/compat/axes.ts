@@ -473,6 +473,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	/**
+	 * Supported formats and size bounds for judgment-request images; `mime-types`
+	 * is comma-separated because object payloads have no array shape.
+	 */
+	"judgment-image-input": { key: "judgmentImageInput", set: "catalog", shape: "object" },
+	/**
 	 * Most questions one System One judgment request may carry; the judge
 	 * splits larger requests. Unassigned: the endpoint takes any batch size.
 	 */
