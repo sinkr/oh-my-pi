@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.11.2] - 2026-10-16
+
 ### Added
 
 - Added `parseCodeStatus` to check code syntax and its resolved language without generating a summary ([#15904](https://github.com/can1357/oh-my-pi/pull/15904) by [@iliaal](https://github.com/iliaal)).

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.11.2] - 2026-10-16
+
 ### Added
 
 - `agent_start` carries `resumedToolCallIds` when a continued run first executes the calls of an unpaired assistant tail
