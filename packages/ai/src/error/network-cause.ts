@@ -7,12 +7,13 @@
  * `TypeError: fetch failed` (sometimes through an `AggregateError`), and
  * `fetchWithRetry` may already have flattened the chain into a message-only
  * `Error`. Both the code and the text are inspected so every one of those
- * shapes produces the same user-visible sentence.
+ * shapes lands in the right bucket.
  */
 
 /** Transport-level failure families that get their own user-visible wording. */
-export type NetworkFailureKind = "offline" | "refused" | "tls";
+export type NetworkFailureKind = "offline" | "unreachable" | "refused" | "tls";
 
+/** What {@link classifyNetworkCause} reports about a rejected `fetch`: the failure family plus the bits its sentence needs. */
 export interface NetworkFailure {
 	kind: NetworkFailureKind;
 	/** Runtime error code when the chain exposed one (`ETIMEOUT`, `FailedToOpenSocket`, …). */
@@ -29,9 +30,10 @@ const MAX_LINKS = 16;
 const MAX_DETAIL_LENGTH = 120;
 const UNKNOWN_HOST = "the API host";
 
-const OFFLINE_CODE_PATTERN = /^(?:ETIMEOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|FailedToOpenSocket)$/i;
-const OFFLINE_TEXT_PATTERN =
-	/\b(?:getaddrinfo|ETIMEOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|FailedToOpenSocket)\b/i;
+const OFFLINE_CODE_PATTERN = /^(?:ETIMEOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)$/i;
+const OFFLINE_TEXT_PATTERN = /\b(?:ETIMEOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH)\b/i;
+const UNREACHABLE_CODE_PATTERN = /^(?:ENOTFOUND|FailedToOpenSocket)$/i;
+const UNREACHABLE_TEXT_PATTERN = /\b(?:ENOTFOUND|FailedToOpenSocket|getaddrinfo)\b/i;
 const REFUSED_CODE_PATTERN = /^(?:ECONNREFUSED|ConnectionRefused)$/i;
 const REFUSED_TEXT_PATTERN = /\bECONNREFUSED\b|\bConnectionRefused\b|\bUnable to connect\b/i;
 const TLS_CODE_PATTERN =
@@ -42,6 +44,7 @@ const GETADDRINFO_HOST_PATTERN = /\bgetaddrinfo\s+[A-Z_]+\s+([^\s,)]+)/i;
 const CONNECT_HOST_PATTERN = /\b(?:connect|connection to)\s+[A-Z_]+\s+([^\s,)]+?)(?::\d+)?(?=[\s,)]|$)/i;
 const BARE_HOST_PATTERN = /\b((?:[a-z0-9-]+\.)+[a-z]{2,})\b/i;
 const GETADDRINFO_DETAIL_PATTERN = /\bgetaddrinfo\s+[A-Z_]+/i;
+const ERRNO_DETAIL_PATTERN = /\b(?:ETIMEOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|FailedToOpenSocket)\b/i;
 const HOST_PATTERNS = [GETADDRINFO_HOST_PATTERN, CONNECT_HOST_PATTERN, BARE_HOST_PATTERN];
 
 interface Link {
@@ -55,8 +58,11 @@ function kindOf(code: string | undefined, message: string | undefined): NetworkF
 	if (message !== undefined && TLS_TEXT_PATTERN.test(message)) return "tls";
 	if (code !== undefined && REFUSED_CODE_PATTERN.test(code)) return "refused";
 	if (message !== undefined && REFUSED_TEXT_PATTERN.test(message)) return "refused";
+	// Offline before unreachable: `getaddrinfo ETIMEOUT` matches both text patterns.
 	if (code !== undefined && OFFLINE_CODE_PATTERN.test(code)) return "offline";
 	if (message !== undefined && OFFLINE_TEXT_PATTERN.test(message)) return "offline";
+	if (code !== undefined && UNREACHABLE_CODE_PATTERN.test(code)) return "unreachable";
+	if (message !== undefined && UNREACHABLE_TEXT_PATTERN.test(message)) return "unreachable";
 	return undefined;
 }
 
@@ -75,11 +81,13 @@ function detailOf(kind: NetworkFailureKind, code: string | undefined, message: s
 	// The refused template already carries its own wording.
 	if (kind === "refused") return undefined;
 	if (kind === "tls" && code !== undefined) return code;
-	const pattern = kind === "offline" ? GETADDRINFO_DETAIL_PATTERN : TLS_TEXT_PATTERN;
+	const pattern = kind === "tls" ? TLS_TEXT_PATTERN : GETADDRINFO_DETAIL_PATTERN;
 	const matched = message === undefined ? undefined : pattern.exec(message)?.[0];
-	// An offline failure without a `getaddrinfo …` fragment still has its errno.
-	if (matched === undefined) return kind === "offline" ? code : undefined;
-	return matched.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL_LENGTH);
+	if (matched !== undefined) return matched.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL_LENGTH);
+	if (kind === "tls") return undefined;
+	// A DNS/route failure without a `getaddrinfo …` fragment still names its errno; keeping it in
+	// the sentence is what keeps the rendered message matching TRANSIENT_TRANSPORT_PATTERN.
+	return code ?? (message === undefined ? undefined : ERRNO_DETAIL_PATTERN.exec(message)?.[0]);
 }
 
 /**
@@ -151,8 +159,10 @@ export function networkFailureMessage(err: unknown, requestUrl?: string): string
 	switch (failure.kind) {
 		case "offline":
 			return `No internet connection: couldn't reach ${host}${detail}. Check your network or proxy and try again.`;
+		case "unreachable":
+			return `Couldn't reach ${host}${detail}. Check the URL, your network, or proxy.`;
 		case "refused":
-			return `Couldn't connect to ${host} (connection refused). A proxy or firewall may be blocking it.`;
+			return `Couldn't connect to ${host} (connection refused). Check that the server is running and reachable.`;
 		case "tls":
 			return `TLS certificate verification failed for ${host}${detail}. If you're behind a TLS-inspecting proxy, its CA may need to be trusted.`;
 	}

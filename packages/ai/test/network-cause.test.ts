@@ -30,14 +30,14 @@ describe("classifyNetworkCause", () => {
 		const outer = new TypeError("fetch failed", { cause: inner });
 
 		expect(AIError.classifyNetworkCause(outer)).toEqual({
-			kind: "offline",
+			kind: "unreachable",
 			code: "FailedToOpenSocket",
 			detail: "FailedToOpenSocket",
 			host: undefined,
 		});
 		// The request URL supplies the host the error text lacks.
 		expect(new AIError.AnthropicConnectionError(outer, "https://api.anthropic.com/v1/messages").message).toBe(
-			"No internet connection: couldn't reach api.anthropic.com (FailedToOpenSocket). Check your network or proxy and try again.",
+			"Couldn't reach api.anthropic.com (FailedToOpenSocket). Check the URL, your network, or proxy.",
 		);
 	});
 
@@ -47,7 +47,7 @@ describe("classifyNetworkCause", () => {
 
 		expect(AIError.classifyNetworkCause(err)?.kind).toBe("refused");
 		expect(AIError.networkFailureMessage(err, "http://127.0.0.1:443/v1/chat/completions")).toBe(
-			"Couldn't connect to 127.0.0.1:443 (connection refused). A proxy or firewall may be blocking it.",
+			"Couldn't connect to 127.0.0.1:443 (connection refused). Check that the server is running and reachable.",
 		);
 	});
 
@@ -72,11 +72,38 @@ describe("classifyNetworkCause", () => {
 
 	it("classifies a flattened message-only errno (fetchWithRetry drops the cause)", () => {
 		expect(AIError.classifyNetworkCause(new Error("Network error: getaddrinfo ENOTFOUND api.openai.com"))).toEqual({
-			kind: "offline",
+			kind: "unreachable",
 			code: undefined,
 			detail: "getaddrinfo ENOTFOUND",
 			host: "api.openai.com",
 		});
+	});
+
+	it("keeps NXDOMAIN on a custom host neutral instead of claiming the network is down", () => {
+		const bun = Object.assign(new TypeError("getaddrinfo ENOTFOUND my-llm.lan"), { code: "ENOTFOUND" });
+		const node = new TypeError("fetch failed", {
+			cause: Object.assign(new Error("getaddrinfo ENOTFOUND my-llm.lan"), {
+				code: "ENOTFOUND",
+				syscall: "getaddrinfo",
+				hostname: "my-llm.lan",
+			}),
+		});
+
+		for (const err of [bun, node]) {
+			expect(AIError.classifyNetworkCause(err)).toEqual({
+				kind: "unreachable",
+				code: "ENOTFOUND",
+				detail: "getaddrinfo ENOTFOUND",
+				host: "my-llm.lan",
+			});
+			const message = AIError.networkFailureMessage(err, "http://my-llm.lan:11434/v1/chat/completions");
+			expect(message).toBe(
+				"Couldn't reach my-llm.lan:11434 (getaddrinfo ENOTFOUND). Check the URL, your network, or proxy.",
+			);
+			expect(message).not.toContain("No internet connection");
+			// Neutral wording must stay retryable (flags.ts keys on the errno in the detail).
+			expect(AIError.isProviderRetryableError(new Error(message as string))).toBe(true);
+		}
 	});
 
 	it("leaves non-network errors alone", () => {
@@ -104,7 +131,7 @@ describe("network failure classification flags", () => {
 
 		for (const message of [
 			OFFLINE_ANTHROPIC,
-			"No internet connection: couldn't reach api.openai.com (getaddrinfo ENOTFOUND). Check your network or proxy and try again.",
+			"Couldn't reach my-llm.lan (getaddrinfo ENOTFOUND). Check the URL, your network, or proxy.",
 			"getaddrinfo ENOTFOUND api.openai.com",
 			"FailedToOpenSocket",
 		]) {
