@@ -7,7 +7,8 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { asGlobalFetch, requestBodyText } from "./helpers/fetch-mock";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 
 interface MessagesRequest {
 	system?: unknown;
@@ -124,7 +125,7 @@ describe("AgentSession Anthropic native compaction", () => {
 				if (!String(input).startsWith("https://api.anthropic.com/v1/messages")) {
 					throw new Error(`Unexpected request to ${String(input)}`);
 				}
-				requests.push(JSON.parse(requestBodyText(init)));
+				requests.push(JSON.parse(requestBodyText(init) ?? "{}"));
 				return respond(requests.length);
 			}),
 		);

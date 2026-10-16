@@ -6,7 +6,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
 const MODEL: Model<"anthropic-messages"> = buildModel({
 	id: "claude-sonnet-4-5",
@@ -30,6 +30,7 @@ function captureFetch(): { calls: Array<{ url: string; init: RequestInit & { tls
 	return { calls, fetch };
 }
 
+withOfficialAnthropicEndpoint();
 afterEach(() => resetAnthropicPrewarmForTesting());
 
 describe("prewarmAnthropicConnection", () => {
@@ -51,7 +52,7 @@ describe("prewarmAnthropicConnection", () => {
 		expect([headers.get("authorization"), headers.get("x-api-key")]).toEqual([null, null]);
 	});
 
-	it("throttles repeat warm-ups of the same host", async () => {
+	it("throttles repeat warm-ups", async () => {
 		const { calls, fetch } = captureFetch();
 		await prewarmAnthropicConnection(MODEL, { fetch });
 		await prewarmAnthropicConnection(MODEL, { fetch });
@@ -59,11 +60,19 @@ describe("prewarmAnthropicConnection", () => {
 		expect(calls).toHaveLength(1);
 	});
 
-	it("ignores models on other APIs", async () => {
+	it("never probes third-party Anthropic-compatible gateways", async () => {
 		const { calls, fetch } = captureFetch();
-		const openai = getBundledModel("openai", "gpt-4o");
-		if (!openai) throw new Error("Expected bundled gpt-4o");
-		await prewarmAnthropicConnection(openai, { fetch });
+		const gateway = buildModel({ ...MODEL, provider: "opencode-zen", baseUrl: "https://opencode.ai/zen" });
+		await prewarmAnthropicConnection(gateway, { fetch });
+
+		expect(calls).toHaveLength(0);
+	});
+
+	it("never probes a custom ANTHROPIC_BASE_URL endpoint", async () => {
+		const { calls, fetch } = captureFetch();
+		await withEnv({ ANTHROPIC_BASE_URL: "https://llm-gateway.corp.example" }, () =>
+			prewarmAnthropicConnection(MODEL, { fetch }),
+		);
 
 		expect(calls).toHaveLength(0);
 	});

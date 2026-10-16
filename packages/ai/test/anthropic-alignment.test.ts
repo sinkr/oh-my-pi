@@ -37,7 +37,7 @@ import type {
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
-import { requestBodyText } from "./helpers/fetch-mock";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
 const ANTHROPIC_MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
 	id: "claude-sonnet-4-5",
@@ -3103,7 +3103,7 @@ describe("cch attestation", () => {
 		let gzipped = false;
 		const fakeFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			gzipped = new Headers(init?.headers).get("content-encoding") === "gzip";
-			bodyResolve(requestBodyText(init));
+			bodyResolve(requestBodyText(init) ?? "");
 			controller.abort();
 			return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
 				status: 200,

@@ -148,7 +148,7 @@ import { prepareAnthropicImageContext } from "./anthropic-images";
 import { servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
-import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
+import { isAnthropicMessagesModel, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
 	injectedClientBaseUrl,
@@ -4306,33 +4306,34 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 }
 
 /**
- * Minimum gap between warm-ups of one host. Pooled sockets outlive it by
- * minutes, so a tighter cadence would only add requests.
+ * Minimum gap between warm-ups. Pooled sockets outlive it by minutes, so a
+ * tighter cadence would only add requests.
  */
 const ANTHROPIC_PREWARM_INTERVAL_MS = 30_000;
 const ANTHROPIC_PREWARM_TIMEOUT_MS = 10_000;
-const anthropicPrewarmedAt = new Map<string, number>();
+let anthropicPrewarmedAt: number | undefined;
 
 /**
- * Opens, or keeps alive, a pooled connection to the model's Messages host so
+ * Opens, or keeps alive, a pooled connection to the official Anthropic API so
  * the next turn skips DNS + TCP + TLS. Sends a credential-less `HEAD` through
  * the same transport (proxy, CA, Cowork profile) and TLS options as real
  * requests: sockets pool per TLS configuration, so a warm-up made any other
- * way (e.g. `fetch.preconnect`) is never reused. No-op for models on other
- * APIs; throttled per host; best effort, never throws.
+ * way (e.g. `fetch.preconnect`) is never reused.
+ *
+ * Only first-party `anthropic` models whose requests resolve to the official
+ * API are warmed: third-party gateways and custom endpoints never receive
+ * unsolicited probes. Throttled; best effort, never throws.
  */
 export async function prewarmAnthropicConnection(model: Model<Api>, options?: { fetch?: FetchImpl }): Promise<void> {
-	if (model.api !== "anthropic-messages") return;
-	// `.api` equality doesn't narrow the generic; the guard above makes this sound.
-	const anthropicModel = model as Model<"anthropic-messages">;
-	const baseUrl = resolveAnthropicBaseUrl(anthropicModel) ?? "https://api.anthropic.com";
+	if (model.provider !== "anthropic" || !isAnthropicMessagesModel(model)) return;
+	const baseUrl = resolveAnthropicBaseUrl(model) ?? "https://api.anthropic.com";
+	if (!isOfficialAnthropicApiUrl(baseUrl)) return;
 	const now = Date.now();
-	const last = anthropicPrewarmedAt.get(baseUrl);
-	if (last !== undefined && now - last < ANTHROPIC_PREWARM_INTERVAL_MS) return;
-	anthropicPrewarmedAt.set(baseUrl, now);
+	if (anthropicPrewarmedAt !== undefined && now - anthropicPrewarmedAt < ANTHROPIC_PREWARM_INTERVAL_MS) return;
+	anthropicPrewarmedAt = now;
 	try {
 		const response = await transportFetch(model, options?.fetch)(baseUrl, {
-			...buildClaudeCodeTlsFetchOptions(anthropicModel, baseUrl),
+			...buildClaudeCodeTlsFetchOptions(model, baseUrl),
 			method: "HEAD",
 			headers: {},
 			signal: AbortSignal.timeout(ANTHROPIC_PREWARM_TIMEOUT_MS),
@@ -4340,15 +4341,14 @@ export async function prewarmAnthropicConnection(model: Model<Api>, options?: { 
 		await response.body?.cancel();
 	} catch (error) {
 		logger.debug("anthropic: connection prewarm failed", {
-			provider: model.provider,
 			error: error instanceof Error ? error.message : String(error),
 		});
 	}
 }
 
-/** Test hook: forgets which hosts were recently warmed. */
+/** Test hook: forgets the last warm-up so the next call is not throttled. */
 export function resetAnthropicPrewarmForTesting(): void {
-	anthropicPrewarmedAt.clear();
+	anthropicPrewarmedAt = undefined;
 }
 
 function createClient(
