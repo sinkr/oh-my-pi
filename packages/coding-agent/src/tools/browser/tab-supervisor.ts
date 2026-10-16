@@ -363,6 +363,12 @@ export function acquireTab(name: string, browser: BrowserHandle, opts: AcquireTa
 	const result = acquisition.then(
 		async value => {
 			await releaseBrowser(browser, { kill: false });
+			// A worker that exited with no run in flight left the reset unreported; reusing its tab reports it.
+			if (!value.created && value.tab.backend === "worker" && value.tab.workerExitNotice) {
+				const notice = value.tab.workerExitNotice;
+				value.tab.workerExitNotice = undefined;
+				return { ...value, note: value.note ? `${notice}\n${value.note}` : notice };
+			}
 			return value;
 		},
 		async error => {
@@ -483,12 +489,7 @@ async function acquireTabImpl(
 					}
 					if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt);
 				};
-				// A worker that exited with no run in flight left the reset unreported; this open reports it.
 				let note: string | undefined;
-				if (existing.backend === "worker" && existing.workerExitNotice) {
-					note = existing.workerExitNotice;
-					existing.workerExitNotice = undefined;
-				}
 				try {
 					await reuse();
 				} catch (error) {
@@ -498,7 +499,7 @@ async function acquireTabImpl(
 						!(error instanceof RendererCrashedError && tabs.get(name) === existing && existing.state === "alive")
 					)
 						throw error;
-					note = note ? `${note} ${RENDERER_RELOADED_NOTE}` : RENDERER_RELOADED_NOTE;
+					note = RENDERER_RELOADED_NOTE;
 					await reuse();
 				}
 				// The user may have navigated or switched tabs since: the result reports where the page is now.
@@ -863,7 +864,7 @@ async function acquireTernTab(
 }
 
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
-	return await runInTabWithSnapshot(
+	const result = await runInTabWithSnapshot(
 		name,
 		{ code: opts.code, timeoutMs: opts.timeoutMs, signal: opts.signal, session: opts.session },
 		{
@@ -872,6 +873,14 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 			excludeWebP: webpExclusionForModel(opts.session.getActiveModel?.()),
 		},
 	);
+	// A worker that exited with no run in flight left the reset unreported; this call reports it. Runs an open
+	// makes on the tab leave it for the open to report.
+	const tab = tabs.get(name);
+	if (tab?.backend === "worker" && tab.workerExitNotice) {
+		result.displays.unshift({ type: "text", text: tab.workerExitNotice });
+		tab.workerExitNotice = undefined;
+	}
+	return result;
 }
 
 async function runInTabWithSnapshot(
@@ -1058,10 +1067,6 @@ async function runInTabWithSnapshot(
 						? `Browser request interception could not be reset after this run; the tab was reattached to a new worker. ${RECYCLE_RESETS}`
 						: "Browser request interception could not be reset after this run; the tab was closed.",
 				});
-			}
-			if (tab.workerExitNotice) {
-				result.displays.unshift({ type: "text", text: tab.workerExitNotice });
-				tab.workerExitNotice = undefined;
 			}
 			return result;
 		} catch (error) {
