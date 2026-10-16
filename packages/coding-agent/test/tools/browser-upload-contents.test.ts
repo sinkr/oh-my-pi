@@ -187,6 +187,7 @@ async function openConnectedTab(toolCallId: string, options: { page?: string; pr
 		[
 			exe,
 			"--headless=new",
+			"--no-sandbox",
 			"--no-first-run",
 			"--use-mock-keychain",
 			`--user-data-dir=${root}`,
@@ -446,17 +447,19 @@ return {
 		try {
 			// Base64 in a single message would come to 4/3 of the file, over the cap.
 			const digest = await writeRandomFile(path.join(tempDir, "large.bin"), maxMessageBytes);
+			// Three 16 MiB uploads: the budget covers slow hosts, since this checks chunking, not throughput.
 			const errors = await run(
 				collectErrors(`() => tab.uploadFile("#direct", "large.bin"),
 	() => tab.uploadFile("#trigger", "large.bin"),
 	() => tab.uploadFile("#drop", "large.bin"),`),
+				60,
 			);
 			expect(errors).toEqual([]);
 			expect(await run(readDigests)).toEqual([digest, digest, digest]);
 		} finally {
 			await close();
 		}
-	}, 90_000);
+	}, 120_000);
 
 	test("gives streaming contents the cell's budget, not the action deadline", async () => {
 		// Each chunk takes longer than the 8 s action deadline to arrive; finding the target does not.
