@@ -2232,6 +2232,13 @@ export class Markdown implements Component {
 	// The frozen prefix's leading run in front of the first of those openers:
 	// no append can change its tokens, so getLastRenderStableText publishes it.
 	#streamSettledText?: string;
+	// The text in front of the newest top-level item of a list that is still
+	// streaming as the last block. Once an item's marker line has ended, no
+	// append can add to the items in front of it, and #renderList draws each
+	// item from its own tokens alone, so their rows are final. Kept while later
+	// texts extend it, so the published prefix never shrinks when the list
+	// stops being the last block.
+	#streamListSettledText?: string;
 	// The prefix before a rewind that only a closer on the still-growing last
 	// line caused. Once a later text holds no closer line after it, that
 	// prefix is right again, so #lexTokens puts it back.
@@ -2411,14 +2418,18 @@ export class Markdown implements Component {
 	}
 
 	/**
-	 * Width-independent source prefix of the last render ending at a frozen
-	 * Markdown block boundary that no append can move: it stops in front of a
-	 * display-math opener whose block an append could still close. Only
+	 * Width-independent source prefix of the last render that no append can
+	 * change: up to a frozen Markdown block boundary, stopping in front of a
+	 * display-math opener whose block an append could still close, or, while a
+	 * list streams as the last block, up to its newest top-level item. Only
 	 * meaningful while streaming (transient render cache on); grows
 	 * monotonically under append-only `setText`.
 	 */
 	getLastRenderStableText(): string {
-		return this.#transientRenderCache ? (this.#streamSettledText ?? "") : "";
+		if (!this.#transientRenderCache) return "";
+		const settled = this.#streamSettledText ?? "";
+		const list = this.#streamListSettledText;
+		return list !== undefined && list.length > settled.length ? list : settled;
 	}
 
 	get transientRenderCache(): boolean {
@@ -2589,6 +2600,9 @@ export class Markdown implements Component {
 	#checkpointStreamingList(text: string, tokens: Token[]): void {
 		const previous = this.#streamingListCache;
 		this.#streamingListCache = undefined;
+		if (this.#streamListSettledText !== undefined && !text.startsWith(this.#streamListSettledText)) {
+			this.#streamListSettledText = undefined;
+		}
 		let index = tokens.length - 1;
 		while (tokens[index]?.type === "space") index--;
 		const token = tokens[index];
@@ -2617,6 +2631,17 @@ export class Markdown implements Component {
 			cursor = position + item.raw.length;
 		}
 		this.#streamingListCache = { text, before: tokens.slice(0, index), start, tailStart, stableCount, list };
+		// No append can add to an item once a later one has begun. The list must
+		// also start right at the settled boundary: in front of it may sit a
+		// display-math opener whose closer, arriving after the list, would turn
+		// the whole run, list included, into one math block.
+		if (
+			stableCount > 0 &&
+			(this.#streamSettledText?.length ?? 0) === start &&
+			tailStart > (this.#streamListSettledText?.length ?? 0)
+		) {
+			this.#streamListSettledText = text.slice(0, tailStart);
+		}
 	}
 
 	/**
@@ -2629,6 +2654,7 @@ export class Markdown implements Component {
 		this.#streamPrefixTokens = undefined;
 		this.#streamPrefixOpeners = NO_OPENERS;
 		this.#streamSettledText = undefined;
+		this.#streamListSettledText = undefined;
 		this.#streamPrefixLineCache = undefined;
 		this.#tailRowCache = undefined;
 		this.#listItemRowsCache = undefined;
