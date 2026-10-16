@@ -253,6 +253,8 @@ const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
 const DEBUGGER_DETACH_CAUSE =
 	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu";
+const DEBUGGER_DETACH_REFUSAL =
+	"Chrome refuses the attach while another extension's frame, such as a password manager's inline autofill menu, is open in it";
 /** Chrome's `chrome.debugger.onDetach` reason when the user pressed Cancel on its debugging bar. */
 const USER_CANCELLED_DEBUGGER = "canceled_by_user";
 class RecoverableWorkerError extends ToolError {}
@@ -1031,9 +1033,10 @@ async function runInTabWithSnapshot(
 					throw new ToolError(cancelled);
 				}
 				// Re-adopt the same Chrome tab on a new worker. No `recover` pass: the page is healthy, and stopping
-				// its loading would cancel a navigation the call itself started.
+				// its loading would cancel a navigation the call itself started. Chrome reports the same reason when the
+				// tab itself closes, so only a re-adoption that worked names another extension's frame as the cause.
 				const detached = `${error.message}. ${DEBUGGER_DETACH_CAUSE}${landed}`;
-				const lost = `${detached}. omp could not reattach to the tab, so it was closed; once the other extension's frame is gone, open it again. If Chrome refused the attach, the relay hides the tab until its URL changes, so navigate it in Chrome first`;
+				const lost = `${error.message}${landed}. omp could not reattach to the tab, so it was released: either the tab was closed, or ${DEBUGGER_DETACH_REFUSAL}. If the tab is still open, open it again once that frame is gone; if Chrome refused the attach, the relay hides the tab until its URL changes, so navigate it in Chrome first`;
 				const reattached = await recoverWorkerTab(tab, name, opts.timeoutMs, lost, {
 					recover: false,
 					failedReason: lost,
