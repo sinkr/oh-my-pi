@@ -188,19 +188,22 @@ function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentIm
 		return `accepts at most ${limits.maxCount} images, got ${images.length}`;
 	}
 	let totalBytes = 0;
+	const { minPixels, maxPixels, minSide, maxSide } = limits;
+	const checkDimensions =
+		minPixels !== undefined || maxPixels !== undefined || minSide !== undefined || maxSide !== undefined;
+	const needsBytes = limits.maxBytes !== undefined || limits.maxTotalBytes !== undefined;
 	for (const [index, image] of images.entries()) {
 		const mimeType = image.mimeType.toLowerCase();
 		if (limits.mimeTypes && !limits.mimeTypes.includes(mimeType)) {
 			return `does not accept ${mimeType} images (images[${index}]); use ${limits.mimeTypes.join(", ")}`;
 		}
+		if (!needsBytes && !checkDimensions) continue;
 		const bytes = Buffer.from(image.data, "base64");
 		totalBytes += bytes.length;
 		if (limits.maxBytes !== undefined && bytes.length > limits.maxBytes) {
 			return `accepts images up to ${limits.maxBytes} bytes; images[${index}] is ${bytes.length} bytes`;
 		}
-		const { minPixels, maxPixels, minSide, maxSide } = limits;
-		if (minPixels === undefined && maxPixels === undefined && minSide === undefined && maxSide === undefined)
-			continue;
+		if (!checkDimensions) continue;
 		const metadata = parseImageMetadata(bytes);
 		if (!metadata?.width || !metadata.height) continue;
 		const { width, height } = metadata;

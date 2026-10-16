@@ -380,6 +380,62 @@ describe("NativeJudge", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("enforces an aggregate-only image byte limit at the exact boundary", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			api: "typesafe",
+			provider: "self-hosted",
+			model: "custom-total-limit",
+			supportsImages: true,
+			imageInput: { maxTotalBytes: 6 },
+			apiKey: "ts-key",
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+
+		await judge.judge({ ...request, images: IMAGE_REFS });
+		const overflow = await judge
+			.judge({ ...request, images: [...IMAGE_REFS, IMAGE_REFS[0]] })
+			.catch((caught: unknown) => caught);
+
+		expect(overflow).toBeInstanceOf(ValidationError);
+		expect(calls).toBe(1);
+	});
+
+	it("enforces dimension-only image bounds before fetching", async () => {
+		let calls = 0;
+		const cases = [
+			{
+				imageInput: { minSide: 2 },
+				image: TINY_PNG,
+			},
+			{
+				imageInput: { maxSide: 300 },
+				image: { ...TINY_PNG, data: JEV_PNG },
+			},
+		] as const;
+		for (const { imageInput, image } of cases) {
+			const judge = new NativeJudge({
+				api: "typesafe",
+				provider: "self-hosted",
+				model: "custom-dimension-limit",
+				supportsImages: true,
+				imageInput,
+				apiKey: "ts-key",
+				fetch: async () => {
+					calls++;
+					return answered();
+				},
+			});
+			const error = await judge.judge({ ...request, images: [image] }).catch((caught: unknown) => caught);
+
+			expect(error).toBeInstanceOf(ValidationError);
+		}
+		expect(calls).toBe(0);
+	});
+
 	it("filters Jev candidates by catalog bounds, not their request model id", () => {
 		const jev = typesafeVisionModel("jev-1.14.0", "typesafe", "custom-wire-model");
 		const unlisted = typesafeVisionModel("custom-vision-model", "self-hosted");
