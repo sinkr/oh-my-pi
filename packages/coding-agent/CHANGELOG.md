@@ -4,7 +4,7 @@
 
 ### Changed
 
-- With an Anthropic-API model selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup
+- With an Anthropic-API model selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
 
 ## [18.11.3] - 2026-10-16
 

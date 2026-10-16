@@ -4,11 +4,11 @@
 
 ### Added
 
-- Added `prewarmAnthropicConnection(model)`, which opens the model's API connection ahead of a request using the same transport and TLS settings, so the request reuses it instead of paying the connection handshake
+- Added `prewarmAnthropicConnection(model)`, which opens the model's API connection ahead of a request using the same transport and TLS settings, so the request reuses it instead of paying the connection handshake ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
 
-- Anthropic requests to the official API now gzip the request body, so long conversations reach the model sooner on slow uplinks; set `PI_ANTHROPIC_GZIP=0` to disable it
+- Anthropic requests to the official API now gzip the request body, so long conversations reach the model sooner on slow uplinks; set `PI_ANTHROPIC_GZIP=0` to disable it ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
 
 ## [18.11.3] - 2026-10-16
 
