@@ -378,8 +378,8 @@ export function rfc9728ProtectedResourceMetadataUrl(serverUrl: string | undefine
  * (`scopes` / `scope`), matching what MCP gateways emit under
  * `/.well-known/oauth-*`.
  */
-function readMetadataScopes(metadata: Record<string, unknown>): string | undefined {
-	if (Array.isArray(metadata.scopes_supported)) {
+function readMetadataScopes(metadata: Record<string, unknown>, includeSupportedScopes = true): string | undefined {
+	if (includeSupportedScopes && Array.isArray(metadata.scopes_supported)) {
 		const joined = metadata.scopes_supported.filter((scope): scope is string => typeof scope === "string").join(" ");
 		if (joined) return joined;
 	}
@@ -492,7 +492,8 @@ export async function discoverOAuthEndpoints(
 	addDiscoveryBase(authServerUrl, true);
 	addDiscoveryBase(serverUrl, false);
 
-	const findEndpoints = (metadata: Record<string, unknown>): OAuthEndpoints | null => {
+	const findEndpoints = (metadata: Record<string, unknown>, isProtectedResource: boolean): OAuthEndpoints | null => {
+		const resourceScopes = isProtectedResource ? readMetadataScopes(metadata) : undefined;
 		if (metadata.authorization_endpoint && metadata.token_endpoint) {
 			const resource = typeof metadata.resource === "string" ? metadata.resource : protectedResource;
 
@@ -511,7 +512,8 @@ export async function discoverOAuthEndpoints(
 								: typeof metadata.public_client_id === "string"
 									? metadata.public_client_id
 									: undefined,
-				scopes: protectedScopes ?? readMetadataScopes(metadata),
+				// An authorization server's supported scopes are a catalogue, not a grant request.
+				scopes: protectedScopes ?? resourceScopes ?? readMetadataScopes(metadata, false),
 				resource,
 			};
 		}
@@ -536,7 +538,7 @@ export async function discoverOAuthEndpoints(
 									: typeof oauthData.public_client_id === "string"
 										? oauthData.public_client_id
 										: undefined,
-					scopes: protectedScopes ?? readMetadataScopes(oauthData),
+					scopes: protectedScopes ?? resourceScopes ?? readMetadataScopes(oauthData, isProtectedResource),
 					resource,
 				};
 			}
@@ -571,7 +573,9 @@ export async function discoverOAuthEndpoints(
 							(path === "/.well-known/oauth-authorization-server" ||
 								path === "/.well-known/openid-configuration");
 						const issuerOk = requireIssuerMatch ? issuerMatchesBase(metadata.issuer, base.url) : true;
-						const endpoints = issuerOk ? findEndpoints(metadata) : null;
+						const endpoints = issuerOk
+							? findEndpoints(metadata, path === "/.well-known/oauth-protected-resource")
+							: null;
 						if (endpoints) return endpoints;
 
 						if (path === "/.well-known/oauth-protected-resource") {

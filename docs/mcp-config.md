@@ -272,6 +272,8 @@ profile for untrusted checkouts.
 
 Use `oauth` when the MCP server requires explicit OAuth client, scope, or callback settings. The callback listener defaults to port `3000` and path `/callback`; an HTTP loopback `redirectUri` supplies its own port/path unless explicitly overridden. An HTTPS loopback redirect requires a distinct `callbackPort` for the local HTTP listener behind your TLS terminator.
 
+During `/mcp reauth`, scopes advertised by the protected resource or its authentication challenge take precedence; `oauth.scope` supplies the fallback. Authorization-server `scopes_supported` is a catalogue of available scopes, not a request to grant all of them. OMP does not copy that catalogue into the login request. If the resource advertises no scopes, set `oauth.scope` to the scopes allowed for your registered client (for example, `"openid"` for an OpenID Connect login), or leave it unset to use the authorization server's defaults.
+
 `prompt` controls the OAuth `prompt` authorization parameter. By default OMP omits it, except that a requested `offline_access` scope defaults to `"consent"` so the provider can issue refresh access. Set it explicitly to a provider-supported value such as `"consent"` or `"select_account"`, or to `""` to force omission.
 
 Example:
