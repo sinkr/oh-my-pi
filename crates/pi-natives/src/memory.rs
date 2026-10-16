@@ -40,31 +40,53 @@ impl Drop for NativeWork {
 	}
 }
 
-/// Report that a job's result was converted for JavaScript, freeing its Rust
-/// allocations.
+/// Owns a job result until it leaves Rust, then counts that as finished work.
 ///
-/// Conversion runs on the JS thread after the job's [`NativeWork`] guard has
-/// dropped, possibly after the trim that guard scheduled; reporting it counts
-/// as finished work, so the pages it frees are trimmed in turn.
-#[inline]
-pub fn result_settled() {
-	#[cfg(all(target_os = "linux", target_env = "gnu"))]
-	allocator::settled();
+/// A result outlives its job's [`NativeWork`] guard: it waits for the JS
+/// thread, which may be busy past the trim that guard scheduled. Whichever way
+/// the result goes — converted for JavaScript, unwrapped for conversion, or
+/// dropped on an abort or error path — the trimmer then schedules another
+/// trim, so the pages it frees are returned in turn. `Settled<()>` marks a
+/// result handed off elsewhere, such as through a threadsafe function call.
+pub struct Settled<T>(Option<T>);
+
+impl<T> Settled<T> {
+	pub const fn new(value: T) -> Self {
+		Self(Some(value))
+	}
+
+	/// Take the result for a conversion that follows immediately, inside the
+	/// trimmer's quiet period.
+	pub fn into_inner(mut self) -> T {
+		self.0.take().expect("a settled result is taken only once")
+	}
 }
 
-/// A job result that reports [`result_settled`] once converted for
-/// JavaScript.
-pub struct Settled<T>(pub T);
+impl<T> Drop for Settled<T> {
+	#[inline]
+	fn drop(&mut self) {
+		#[cfg(all(target_os = "linux", target_env = "gnu"))]
+		allocator::settled();
+	}
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Settled<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("Settled").field(&self.0).finish()
+	}
+}
 
 impl<T: napi::bindgen_prelude::ToNapiValue> napi::bindgen_prelude::ToNapiValue for Settled<T> {
 	unsafe fn to_napi_value(
 		env: napi::sys::napi_env,
-		val: Self,
+		mut val: Self,
 	) -> napi::Result<napi::sys::napi_value> {
+		let value = val.0.take().expect("a settled result is taken only once");
 		// SAFETY: forwarded unchanged from the caller's contract.
-		let value = unsafe { T::to_napi_value(env, val.0) };
-		result_settled();
-		value
+		let converted = unsafe { T::to_napi_value(env, value) };
+		// Report only now that the conversion has freed the result.
+		drop(val);
+		converted
 	}
 }
 

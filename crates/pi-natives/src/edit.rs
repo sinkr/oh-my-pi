@@ -44,7 +44,7 @@ use pi_edit::{
 	text::normalize_to_lf,
 };
 
-use crate::memory::native_work;
+use crate::memory::{Settled, native_work};
 
 fn parse_mode(mode: &str) -> Result<EditMode> {
 	EditMode::parse(mode)
@@ -686,6 +686,9 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 		let Some(batch) = settled_preview(&shared).await else {
 			continue;
 		};
+		// Held until the delivery below has converted and released the batch
+		// on the JS thread, however this iteration ends.
+		let _settled = Settled::new(());
 		let is_final = !batch.streaming;
 		if shared.closed.load(Ordering::Acquire) {
 			return;

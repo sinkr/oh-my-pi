@@ -39,7 +39,7 @@ use pi_vfs::BlockingFs;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-	memory::{Settled, native_work, result_settled},
+	memory::{Settled, native_work},
 	prof::profile_region,
 };
 
@@ -171,7 +171,7 @@ where
 	T: ToNapiValue + Send + 'static + TypeName,
 {
 	type JsValue = T;
-	type Output = T;
+	type Output = Settled<T>;
 
 	fn compute(&mut self) -> Result<Self::Output> {
 		let _guard = profile_region(self.tag);
@@ -184,19 +184,14 @@ where
 		let tag = self.tag;
 		// N-API's execute callback is not `extern "C-unwind"`; never let a
 		// worker panic escape into its FFI frame.
-		catch_worker_panic(tag, move || work(cancel_token))?
+		catch_worker_panic(tag, move || work(cancel_token))?.map(Settled::new)
 	}
 
 	fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
 		if let Some(reason) = self.cancel_token.abort_reason() {
 			return Err(abort_error(env, reason));
 		}
-		Ok(output)
-	}
-
-	fn finally(self, _env: Env) -> Result<()> {
-		result_settled();
-		Ok(())
+		Ok(output.into_inner())
 	}
 }
 
@@ -268,7 +263,7 @@ where
 	E: Send + 'static,
 {
 	type JsValue = T;
-	type Output = T;
+	type Output = Settled<T>;
 
 	fn compute(&mut self) -> Result<Self::Output> {
 		let _guard = profile_region(self.tag);
@@ -280,7 +275,7 @@ where
 		let cancel_token = self.cancel_token.clone();
 		let tag = self.tag;
 		match catch_worker_panic(tag, move || work(cancel_token)) {
-			Ok(Ok(value)) => Ok(value),
+			Ok(Ok(value)) => Ok(Settled::new(value)),
 			Ok(Err(domain)) => {
 				// Stash the typed error; the placeholder reason is replaced in
 				// `reject`, which has the `Env` needed to build the rich error.
@@ -302,12 +297,7 @@ where
 		if let Some(reason) = self.cancel_token.abort_reason() {
 			return Err((self.cancel_hook)(env, reason));
 		}
-		Ok(output)
-	}
-
-	fn finally(self, _env: Env) -> Result<()> {
-		result_settled();
-		Ok(())
+		Ok(output.into_inner())
 	}
 }
 
@@ -402,13 +392,11 @@ where
 			}
 			// An elapsed deadline has no explicit abort flag. The worker was
 			// already cancelled, so the provider cannot hold up this Promise.
-			result
-				.unwrap_or_else(|| Err(Error::from_reason("Aborted: Timeout")))
-				.map(Settled)
+			result.unwrap_or_else(|| Err(Error::from_reason("Aborted: Timeout")))
 		},
 	)?;
-	// `Settled` only changes what happens after conversion; the Promise still
-	// resolves to `T`.
+	// `Settled` only adds settlement reporting; the Promise still resolves to
+	// `T`.
 	Ok(PromiseRaw::new(env.raw(), promise.raw()))
 }
 
@@ -418,7 +406,7 @@ async fn run_filesystem_worker<T, F>(
 	cancel_token: CancelToken,
 	fs: BlockingFs,
 	work: F,
-) -> Option<Result<T>>
+) -> Option<Result<Settled<T>>>
 where
 	F: FnOnce(BlockingFs, CancelToken) -> Result<T> + Send + 'static,
 	T: Send + 'static,
@@ -429,7 +417,7 @@ where
 	let mut worker = tokio::task::spawn_blocking(move || {
 		let _guard = profile_region(tag);
 		let _work = native_work();
-		catch_worker_panic(tag, move || work(fs, worker_token))?
+		catch_worker_panic(tag, move || work(fs, worker_token))?.map(Settled::new)
 	});
 	tokio::select! {
 		biased;
@@ -506,7 +494,7 @@ mod tests {
 	#[test]
 	fn compute_forwards_ok_result() {
 		let mut task = blocking_task("t_ok", |_| Ok(42_u32));
-		assert_eq!(task.compute().unwrap(), 42);
+		assert_eq!(task.compute().unwrap().into_inner(), 42);
 	}
 
 	#[test]
@@ -694,7 +682,7 @@ mod tests {
 	#[test]
 	fn compute_rejects_second_call() {
 		let mut task = blocking_task("t_double", |_| Ok(1_u32));
-		assert_eq!(task.compute().unwrap(), 1);
+		assert_eq!(task.compute().unwrap().into_inner(), 1);
 		let err = task.compute().unwrap_err();
 		assert!(err.reason.contains("work already consumed"), "reason = {}", err.reason);
 	}
