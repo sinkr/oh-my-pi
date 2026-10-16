@@ -129,10 +129,11 @@ async fn recovered_rem_reports_authored_and_deleted_paths() {
 		.expect("recovered delete");
 
 	assert!(!target.exists());
+	let deleted = pi_edit::path_policy::canonical_key(&target);
 	assert!(
 		outcome
 			.text
-			.contains(&format!("Deleted {}", target.display())),
+			.contains(&format!("Deleted {}", deleted.display())),
 		"{}",
 		outcome.text
 	);
@@ -140,7 +141,7 @@ async fn recovered_rem_reports_authored_and_deleted_paths() {
 		outcome.text.contains(&format!(
 			"Warnings:\nPath \"wrong/target.ts\" does not exist; matched its filename and snapshot \
 			 tag #{tag} to {}",
-			target.display()
+			deleted.display()
 		)),
 		"{}",
 		outcome.text
