@@ -470,10 +470,13 @@ describe("runSubprocess result acceptance", () => {
 		}
 	});
 
-	it("publishes and delivers a message result once when the user resumes a failed agent directly", async () => {
+	it("delivers a user-resumed message result when all execution slots are occupied", async () => {
 		const tempDir = TempDir.createSync("@omp-user-resumed-result-");
 		const artifactsDir = tempDir.path();
-		const manager = new AsyncJobManager({});
+		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+		const blocker = Promise.withResolvers<string>();
+		manager.register("bash", "busy", () => blocker.promise, { ownerId: "Other" });
+		expect(manager.atCapacity).toBe(true);
 		const delivered: string[] = [];
 		manager.registerDeliverySink("Parent", (_jobId, text) => {
 			delivered.push(text);
@@ -505,7 +508,7 @@ describe("runSubprocess result acceptance", () => {
 			]);
 			harness.emitAssistantText("## Report\nroot cause found");
 			await finish?.(undefined);
-			await manager.waitForAll();
+			expect(manager.atCapacity).toBe(true);
 			await manager.drainDeliveries({ timeoutMs: 1000 });
 			AgentRegistry.global().setStatus(AGENT_ID, "idle");
 
@@ -515,7 +518,9 @@ describe("runSubprocess result acceptance", () => {
 			expect(delivered[0]).toContain("root cause found");
 		} finally {
 			InternalUrlRouter.resetForTests();
+			blocker.resolve("finished");
 			resetRegisteredArtifactDirsForTests();
+			await manager.waitForAll();
 			await manager.dispose({ timeoutMs: 1000 });
 			tempDir.removeSync();
 		}

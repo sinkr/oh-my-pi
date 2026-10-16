@@ -3343,10 +3343,20 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					error: caught instanceof Error ? caught.message : String(caught),
 				});
 			} finally {
-				// A user-driven message result reaches the parent like a yield: the
-				// published artifact is this run's completion.
+				// A user-driven message result is already complete: enqueue its
+				// delivery without reserving an execution slot (which may be full).
 				const messageResult = userPrompted && options.structured === false && result?.outputPath !== undefined;
-				if (messageResult) registerWakeJob();
+				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
+					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					try {
+						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+					} catch (error) {
+						logger.warn("User-resumed subagent result delivery failed", {
+							id,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
 				// Once registered, the wake job carries this turn's outcome to the
 				// parent whatever it is: the yield result, the failure that
 				// superseded it, or, for a turn that never yielded, the answer a
