@@ -127,6 +127,7 @@
 ### Fixed
 
 - Fixed `--session-dir <dir> --resume <id>` not finding a transcript that is a symlink in that directory, and the session lists and id-prefix lookups skipping symlinked transcripts the same way ([#15878](https://github.com/can1357/oh-my-pi/issues/15878)).
+- Fixed `--session-dir <dir> --resume <id>` not finding a transcript that is a symlink in that directory, and the session lists and id-prefix lookups skipping symlinked transcripts the same way ([#15878](https://github.com/can1357/oh-my-pi/issues/15878)); a project bucket that is itself a symlink to another no longer lists every session in it twice, nor reports an ambiguous id-prefix match.
 
 ## [18.11.1] - 2026-10-15
 

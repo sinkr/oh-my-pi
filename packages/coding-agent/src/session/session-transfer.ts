@@ -469,9 +469,22 @@ async function findLocalCopies(id: string, sessionDir: string): Promise<string[]
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
+	// One transcript reached by two names — a bucket symlinked to another
+	// lists it under both (#5385) — is one copy, or `setAside` would try to
+	// move the same file aside twice. `path.resolve` leaves the symlink in
+	// place, so the identity has to come from `realpath`.
+	const seen = new Set<string>();
 	const copies: string[] = [];
 	for (const file of candidates) {
 		if (!path.basename(file).endsWith(`_${id}.jsonl`)) continue;
+		let key: string;
+		try {
+			key = await fs.promises.realpath(file);
+		} catch {
+			key = file;
+		}
+		if (seen.has(key)) continue;
+		seen.add(key);
 		if ((await readSessionHeaderId(file)) === id) copies.push(file);
 	}
 	return copies.sort();
