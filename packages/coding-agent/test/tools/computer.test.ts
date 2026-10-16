@@ -2806,4 +2806,39 @@ describe("display hold follows the agent turn", () => {
 		expect(workers).toBe(1);
 		await supervisor.close();
 	});
+
+	it("holds the display for a run whose turn goes on while its worker is still starting", async () => {
+		const native = new FakeNativeSession();
+		const ready = Promise.withResolvers<void>();
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				const transport = new MemoryTransport();
+				new ComputerWorkerCore(transport, () => native);
+				return {
+					send: message => transport.inbound(message),
+					onMessage: handler => {
+						transport.listeners.add(handler);
+						void ready.promise.then(() => handler({ type: "ready" }));
+						return () => {
+							transport.listeners.delete(handler);
+						};
+					},
+					onError: () => () => {},
+					terminate: async () => {
+						transport.inbound({ type: "close" });
+					},
+				};
+			},
+			{ startMs: 1_000, closeMs: 200 },
+		);
+		const run = supervisor.run("return 1;", 2_000, snapshot(false, 1));
+		// A dialog opens and is answered before the cold worker's handshake, so before the run reaches it.
+		supervisor.releaseDisplay(1);
+		supervisor.resumeDisplay(1, 2);
+		ready.resolve();
+		await run;
+		expect(native.displayHolds).toEqual(["turn"]);
+		await supervisor.close();
+	});
 });

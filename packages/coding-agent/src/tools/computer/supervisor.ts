@@ -38,7 +38,10 @@ export interface ComputerController {
 	revokeControl?(): Promise<void>;
 	/** The owner's agent turn `turn` ended: let the display sleep now, keeping control, refs and the worker. */
 	releaseDisplay?(turn: number): void;
-	/** Turn `from` stopped for a dialog and went on as `turn`: a run of `from` still active holds the display again. */
+	/**
+	 * Turn `from` stopped for a dialog and went on as `turn`: a run of `from` active or starting holds the display
+	 * again.
+	 */
 	resumeDisplay?(from: number, turn: number): void;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
 	close(): Promise<void>;
@@ -150,6 +153,11 @@ export class ComputerSupervisor implements ComputerController {
 	#pendingCapabilities = new Map<string, PendingCapabilities>();
 	#pending = new Map<string, PendingRun>();
 	#revocations = new Map<string, () => void>();
+	/**
+	 * Snapshots of runs waiting for the worker to start: a resume the worker gets before their `run` would find
+	 * nothing to hold, so it moves them to the turn that went on here.
+	 */
+	readonly #startingRuns = new Set<ComputerSessionSnapshot>();
 	#nextId = 0;
 	#controlEpoch = 0;
 	#closed = false;
@@ -204,7 +212,13 @@ export class ComputerSupervisor implements ComputerController {
 		if (this.#closed) throw new ToolError("Computer session is closed");
 		if (signal?.aborted) throw new ToolAbortError();
 		const epoch = this.#controlEpoch;
-		await this.#start();
+		const session = { ...snapshot };
+		this.#startingRuns.add(session);
+		try {
+			await this.#start();
+		} finally {
+			this.#startingRuns.delete(session);
+		}
 		if (signal?.aborted || epoch !== this.#controlEpoch) throw new ToolAbortError();
 
 		const id = `computer-${++this.#nextId}`;
@@ -219,7 +233,7 @@ export class ComputerSupervisor implements ComputerController {
 		else signal?.addEventListener("abort", abort, { once: true });
 
 		try {
-			this.#worker?.send({ type: "run", id, code, timeoutMs, session: snapshot });
+			this.#worker?.send({ type: "run", id, code, timeoutMs, session });
 			return await this.#raceWithGrace(promise, timeoutMs);
 		} finally {
 			signal?.removeEventListener("abort", abort);
@@ -352,6 +366,7 @@ export class ComputerSupervisor implements ComputerController {
 	}
 
 	resumeDisplay(from: number, turn: number): void {
+		for (const starting of this.#startingRuns) if (starting.displayTurn === from) starting.displayTurn = turn;
 		this.#safeSend({ type: "resume-display", from, turn });
 	}
 
