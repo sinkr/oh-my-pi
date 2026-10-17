@@ -1,7 +1,7 @@
 import { isCatalogEndpointUrl } from "@oh-my-pi/pi-catalog/compat/catalog-endpoint";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Api, FetchImpl, Model } from "../types";
-import { transportFetch } from "../utils/transport-fetch";
+import { lastDispatchOrigin, transportFetch } from "../utils/transport-fetch";
 import { resolveAnthropicPrewarmTarget } from "./anthropic";
 
 /**
@@ -17,19 +17,23 @@ const prewarmedAt = new Map<string, number>();
 /**
  * Where a warm-up for {@link model} goes, or `undefined` when it must not be
  * probed. First-party Anthropic resolves its effective endpoint (following
- * `ANTHROPIC_BASE_URL`/Foundry reroutes) and TLS options; every other model
- * warms its `baseUrl` origin only while that is the provider's own endpoint.
- * A custom provider, or a catalog provider id whose `baseUrl` a models.yml
- * entry or provider override points at a gateway, proxy, or local server, is
- * never probed.
+ * `ANTHROPIC_BASE_URL`/Foundry reroutes) and TLS options up front. Every
+ * other model warms only the origin its last inference request actually
+ * reached, so credential endpoints (Copilot plans), env overrides
+ * (`MOONSHOT_BASE_URL`, `XAI_BASE_URL`), and regional hosts are never guessed
+ * from `baseUrl`; before its first request there is nothing to warm. That
+ * origin must also be the provider's own endpoint: a custom provider, or a
+ * catalog provider id routed to a gateway, proxy, or local server, is never
+ * probed.
  */
 function resolvePrewarmTarget(model: Model<Api>): { origin: string; init: RequestInit } | undefined {
 	if (model.provider === "anthropic") {
 		const target = resolveAnthropicPrewarmTarget(model);
 		return target && { origin: new URL(target.url).origin, init: target.init };
 	}
-	if (!isCatalogEndpointUrl(model, model.baseUrl)) return undefined;
-	return { origin: new URL(model.baseUrl).origin, init: {} };
+	const origin = lastDispatchOrigin(model);
+	if (!origin || !isCatalogEndpointUrl(model, origin)) return undefined;
+	return { origin, init: {} };
 }
 
 /**
