@@ -4616,10 +4616,20 @@ export class Markdown implements Component {
 			// wrap past the lines its row's finished cells need. Those extra lines
 			// come and go as the cell grows and the column widens, moving every row
 			// below the table each frame; hold the row at its finished cells' height
-			// until the cell closes and counts toward the widths.
+			// until the cell closes and counts toward the widths. The kept tail ends
+			// in an ellipsis so the held-back text reads as hidden, not missing.
 			if (rowIndex === lastRow && rowCellLines[openCell]) {
 				const settledLineCount = Math.max(1, ...rowCellLines.filter((_, i) => i !== openCell).map(c => c.length));
-				rowCellLines[openCell] = rowCellLines[openCell].slice(0, settledLineCount);
+				const openLines = rowCellLines[openCell];
+				if (openLines.length > settledLineCount) {
+					const kept = openLines.slice(0, settledLineCount);
+					kept[settledLineCount - 1] = truncateToWidth(
+						`${kept[settledLineCount - 1]} ${openLines[settledLineCount]}`,
+						columnWidths[openCell],
+						Ellipsis.Unicode,
+					);
+					rowCellLines[openCell] = kept;
+				}
 				rowLineCount = settledLineCount;
 			}
 

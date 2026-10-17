@@ -399,18 +399,31 @@ Average Latency: 1,240 ms
 			}
 		});
 
-		it("keeps a streaming table's height while its last row's open cell grows", () => {
+		it("keeps a streaming table's height while its last row's open cell grows, then shows it whole", () => {
 			const table = "| # | Name | Score |\n| --- | --- | --- |\n| 1 | black | 1.1 |\n| 2 | bright";
+			const label = "green with a long label that wraps";
 			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
 			markdown.transientRenderCache = true;
-			const heights = [" gr", " green", " green with a long label that wraps"].map(tail => {
+			const frame = (tail: string): string[] => {
 				clearRenderCache();
 				markdown.setText(table + tail);
-				return markdown.render(40).length;
-			});
+				return markdown.render(40).map(line => stripVTControlCharacters(line));
+			};
+			const open = [" gr", " green", ` ${label}`].map(frame);
+			const closed = frame(` ${label} | 2.2 |`);
 			clearRenderCache();
 			// Rows below the table would move by the difference between any two frames.
-			expect(heights).toEqual([heights[0], heights[0], heights[0]]);
+			const height = open[0]!.length;
+			expect(open.map(lines => lines.length)).toEqual([height, height, height]);
+			// The held-back tail of the open cell reads as hidden.
+			expect(open[2]!.some(line => line.includes("…"))).toBe(true);
+			// Closing the cell never shrinks the table, and every word of the label shows.
+			expect(closed.length).toBeGreaterThanOrEqual(height);
+			const shown = closed
+				.join(" ")
+				.replace(/[│|]/g, " ")
+				.split(/\s+/);
+			expect(label.split(" ").every(word => shown.includes(word))).toBe(true);
 		});
 
 		it("measures a streaming table's finished last row even without its trailing newline", () => {
