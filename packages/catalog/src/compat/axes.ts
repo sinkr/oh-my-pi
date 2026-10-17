@@ -486,6 +486,26 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"judgment-image-input": { key: "judgmentImageInput", set: "catalog", shape: "object" },
 	/**
+	 * `Content-Encoding`s the host decodes on request bodies, most preferred
+	 * first. Applied only while the request reaches the provider's own endpoint
+	 * (see `endpoint-hosts`), so a proxy or rerouted endpoint never receives
+	 * bytes it cannot read. Unassigned: bodies are sent uncompressed.
+	 */
+	"request-encodings": { key: "requestEncodings", set: "catalog", shape: "array", values: ["zstd", "gzip"] },
+	/**
+	 * HTTPS hostnames the provider itself serves besides its bundled base URL's
+	 * host — per-account endpoints such as Copilot's plan hosts. Together with
+	 * that host they define the provider's own endpoint, which tells first-party
+	 * traffic from a custom gateway that reuses the provider id.
+	 */
+	"endpoint-hosts": { key: "endpointHosts", set: "catalog", shape: "array" },
+	/**
+	 * Pattern of the 400/415 error body the host returns when it cannot decode
+	 * a compressed request body. Unassigned: every 400/415 is a possible
+	 * rejection and is re-checked with an uncompressed resend.
+	 */
+	"request-encoding-rejection": { key: "requestEncodingRejection", set: "catalog", shape: "scalar" },
+	/**
 	 * Most questions one System One judgment request may carry; the judge
 	 * splits larger requests. Unassigned: the endpoint takes any batch size.
 	 */

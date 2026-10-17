@@ -9,6 +9,10 @@
 - Scoped Jev image bounds to the selected models instead of applying them to unrelated native judges ([#16002](https://github.com/can1357/oh-my-pi/pull/16002) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed Bedrock sessions rejecting replayed tool names over 64 characters after a model switch ([#15839](https://github.com/can1357/oh-my-pi/issues/15839))
 
+### Added
+
+- Added the `request-encodings`, `request-encoding-rejection`, and `endpoint-hosts` rule axes, `resolveRequestCompression(model, url)`, and `isCatalogEndpointUrl(model, url)`, declaring which providers' own endpoints decode compressed request bodies: official Anthropic API (gzip), Codex backend (zstd), and GitHub Copilot's API hosts (zstd, then gzip); Moonshot's China host counts as its own endpoint ([#16086](https://github.com/can1357/oh-my-pi/pull/16086) by [@H4vC](https://github.com/H4vC))
+
 ## [18.11.3] - 2026-10-16
 
 ### Changed
