@@ -9,6 +9,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
@@ -1402,10 +1403,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
-	// The latest prose that can describe completed work. Work in a later
-	// assistant turn invalidates it; on providers that complete a server-side
-	// tool loop in one stop turn, only text after the last tool call qualifies.
-	// A text-less yield turn may still finalize the preceding report.
+	// The latest prose that can describe completed work. Locally runnable work
+	// invalidates it; after tools Cursor already ran server-side, only text
+	// following the last such call qualifies. A text-less yield turn may still
+	// finalize the preceding report.
 	let lastReportTurnText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
@@ -2027,6 +2028,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					if (messageContent && Array.isArray(messageContent)) {
 						const turnText: string[] = [];
 						let startedMoreWork = false;
+						let completedServerWork = false;
 						for (const block of messageContent) {
 							if (!isRecord(block)) continue;
 							if (block.type === "text" && typeof block.text === "string") {
@@ -2042,19 +2044,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 								}
 								continue;
 							}
-							startedMoreWork = true;
+							if (isCursorExecResolved(block)) completedServerWork = true;
+							else startedMoreWork = true;
 							turnText.length = 0;
 						}
-						// A non-yield tool call invalidates earlier prose, including a
-						// report from a previous turn. Cursor may finish its server-side
-						// tool loop in this same stop turn, so text after the last call
-						// is the report; a tool-use turn is still mid-work narration.
+						// Locally runnable calls make all prose in or before this turn
+						// mid-work narration. Cursor exec-resolved calls already ran, so
+						// text after the last one is a report; without such text, prior
+						// prose predates that work and is invalidated.
 						const text = turnText.join("\n");
-						if (startedMoreWork) {
-							lastReportTurnText = event.message.stopReason === "stop" && text.trim() ? text : undefined;
-						} else if (text.trim()) {
-							lastReportTurnText = text;
-						}
+						if (startedMoreWork) lastReportTurnText = undefined;
+						else if (text.trim()) lastReportTurnText = text;
+						else if (completedServerWork) lastReportTurnText = undefined;
 					}
 					// A yield awaiting validation suppresses the budget check for
 					// its own turn (#5006). Defer it rather than drop it: every

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AgentBusyError, type AgentTelemetryConfig, type Tracer } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
+import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionActions, LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -601,19 +602,28 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.output).toBe(report);
 	});
 
-	it("returns only the text after Cursor's last tool call in a completed turn", async () => {
+	it("returns only the text after Cursor's last server-resolved tool call", async () => {
 		const report = "## Result\nThe auth lookup is complete.";
 		const session = createMockSession(({ emit, state }) => {
+			const edit = {
+				type: "toolCall" as const,
+				id: "tool-edit",
+				name: "edit",
+				arguments: { path: "src/auth.ts" },
+				[kCursorExecResolved]: true as const,
+			};
+			const read = {
+				type: "toolCall" as const,
+				id: "tool-read",
+				name: "read",
+				arguments: { path: "src/auth.ts" },
+				[kCursorExecResolved]: true as const,
+			};
 			const final: AssistantMessage = {
 				...createAssistantStopMessage(""),
 				api: "cursor-agent",
 				provider: "cursor",
-				content: [
-					{ type: "text", text: "Checking auth." },
-					{ type: "toolCall", id: "tool-edit", name: "edit", arguments: { path: "src/auth.ts" } },
-					{ type: "toolCall", id: "tool-read", name: "read", arguments: { path: "src/auth.ts" } },
-					{ type: "text", text: report },
-				],
+				content: [{ type: "text", text: "Checking auth." }, edit, read, { type: "text", text: report }],
 			};
 			state.messages.push(final);
 			emit({ type: "message_end", message: final });
@@ -627,24 +637,20 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.output).toBe(report);
 	});
 
-	it("rejects a Cursor stop turn whose only text precedes its last tool call", async () => {
+	it("rejects prose after a locally runnable tool call in a stop turn", async () => {
 		const session = createMockSession(({ emit, state }) => {
-			const unfinished: AssistantMessage = {
-				...createAssistantStopMessage(""),
-				api: "cursor-agent",
-				provider: "cursor",
-				content: [
-					{ type: "text", text: "Checking auth." },
-					{ type: "toolCall", id: "tool-read", name: "read", arguments: { path: "src/auth.ts" } },
-				],
-			};
+			const unfinished = createAssistantStopMessage("");
+			unfinished.content = [
+				{ type: "toolCall", id: "tool-read", name: "read", arguments: { path: "src/auth.ts" } },
+				{ type: "text", text: "The auth lookup is complete." },
+			];
 			state.messages.push(unfinished);
 			emit({ type: "message_end", message: unfinished });
 			emit({ type: "agent_end", messages: [unfinished] });
 		});
 		mockCreateAgentSession(session);
 
-		const result = await runSubprocess({ ...baseOptions, id: "subagent-cursor-no-report", structured: false });
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-local-tool-prose", structured: false });
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toBe(SUBAGENT_WARNING_EMPTY_MESSAGE);
