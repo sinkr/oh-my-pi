@@ -1050,6 +1050,12 @@ export class UiHelpers {
 		this.ctx.initialChatRendered = false;
 		const run = this.#replayTail
 			.then(() => this.#renderInitialMessages(options, generation))
+			.catch((error: unknown) => {
+				// A replay that throws before its rollback (building the transcript context)
+				// must not leave live display closed until some later replay.
+				if (generation === this.#replayGeneration) this.ctx.initialChatRendered = this.#chatRenderedBeforeReplay;
+				throw error;
+			})
 			.finally(() => {
 				this.#replaysInFlight--;
 			});

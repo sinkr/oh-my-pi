@@ -370,6 +370,21 @@ describe("UiHelpers.renderInitialMessages — responsiveness", () => {
 		expect(ctx.initialChatRendered).toBeTrue();
 	});
 
+	it("reopens live display when a replay fails before it starts rebuilding", async () => {
+		// The display gate closes when a replay is requested; a replay that throws
+		// while reading the transcript must not leave live messages hidden.
+		await Settings.init({ inMemory: true });
+		const { ctx } = makeRenderCtx(transcriptWith([{ role: "user", content: "hello", timestamp: 0 }]));
+		vi.spyOn(ctx.viewSession, "buildTranscriptSessionContext").mockImplementation(() => {
+			throw new Error("transcript unavailable");
+		});
+		ctx.initialChatRendered = true;
+		const helpers = new UiHelpers(ctx);
+
+		await expect(helpers.renderInitialMessages()).rejects.toThrow("transcript unavailable");
+		expect(ctx.initialChatRendered).toBeTrue();
+	});
+
 	it("yields across a large parallel read-result batch", async () => {
 		// Regression: a single assistant turn whose results are all grouped `read`
 		// toolResults replays entirely through the `isReadGroupResult` early
