@@ -426,6 +426,20 @@ Average Latency: 1,240 ms
 			expect(label.split(" ").every(word => shown.includes(word))).toBe(true);
 		});
 
+		it("marks a held streaming cell's hidden lines even when they came from explicit breaks", () => {
+			const table = "| # | Description of the row |\n| --- | --- |\n| 1 | short |\n| 2 | First<br><br>Second";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(60).map(line => stripVTControlCharacters(line));
+			clearRenderCache();
+			const row = lines.filter(line => line.includes("First"));
+			// The row keeps its settled single line and says lines are held back.
+			expect(row.length).toBe(1);
+			expect(row[0]).toContain("…");
+			expect(lines.some(line => line.includes("Second"))).toBe(false);
+		});
+
 		it("measures a streaming table's finished last row even without its trailing newline", () => {
 			// Assistant text reaches Markdown trimmed, so a finished row is told apart by its closing `|`.
 			const text =
@@ -1591,6 +1605,23 @@ bar`,
 
 			return { visible, targets };
 		}
+
+		it("keeps a held streaming cell's link from spilling into the marker and borders", () => {
+			// The link fills the open cell's first wrapped line, so holding the row
+			// at one line cuts the cell inside the link.
+			const table = "| # | Link |\n| --- | --- |\n| 1 | a |\n| 2 | [documentation](https://example.com/x) more";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(24);
+			clearRenderCache();
+			const row = lines.map(inspectHyperlinks).filter(line => line.visible.includes("…"));
+			expect(row.length).toBe(1);
+			// Only the link text itself may carry the target; the marker and the
+			// table borders after it must not become clickable.
+			const { visible, targets } = row[0]!;
+			for (let i = visible.indexOf("…"); i < visible.length; i++) expect(targets[i]).toBeNull();
+		});
 
 		it("should not duplicate URL for autolinked emails", () => {
 			const markdown = new Markdown("Contact user@example.com for help", 0, 0, defaultMarkdownTheme);
