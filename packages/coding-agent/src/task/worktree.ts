@@ -286,22 +286,13 @@ async function writeSyntheticTree(
  * Capture the baseline of `repoRoot` and every nested repo under it. Each repo
  * baseline may buffer at most `budgetBytes` of uncommitted content (the
  * isolation-snapshot budget, {@link ISOLATION_BASELINE_MAX_CONTENT_BYTES}).
+ * Linked worktrees of any repo in `ownRepos` are not nested repos (see
+ * {@link discoverNestedRepos}).
  */
 export async function captureBaseline(
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
-): Promise<WorktreeBaseline> {
-	return captureTreeBaseline(repoRoot, budgetBytes, [repoRoot]);
-}
-
-/**
- * {@link captureBaseline}, skipping linked worktrees of any repo in `ownRepos`
- * (see {@link discoverNestedRepos}).
- */
-async function captureTreeBaseline(
-	repoRoot: string,
-	budgetBytes: number,
-	ownRepos: readonly string[],
+	ownRepos: readonly string[] = [repoRoot],
 ): Promise<WorktreeBaseline> {
 	const [root, nestedPaths] = await Promise.all([
 		captureRepoBaseline(repoRoot, budgetBytes),
@@ -333,7 +324,7 @@ export async function captureIsolationBaseline(
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 ): Promise<WorktreeBaseline> {
-	const { root, nested } = await captureTreeBaseline(isolationDir, budgetBytes, [isolationDir, repoRoot]);
+	const { root, nested } = await captureBaseline(isolationDir, budgetBytes, [isolationDir, repoRoot]);
 	return {
 		root: { ...root, repoRoot },
 		nested: nested.map(({ relativePath, baseline }) => ({
