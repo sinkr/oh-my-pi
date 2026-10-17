@@ -2439,7 +2439,8 @@ impl EntryVisitor for RankedCollectVisitor<'_> {
 			self.filtered += 1;
 			return Ok(WalkControl::Continue);
 		}
-		let candidate = || RankedEntry {
+		// Allocates the owned path; call only once the entry is retained.
+		let owned_candidate = || RankedEntry {
 			entry: CollectedEntry {
 				path:      entry.relative.to_string(),
 				file_type: entry.file_type,
@@ -2449,14 +2450,14 @@ impl EntryVisitor for RankedCollectVisitor<'_> {
 			rank:  self.rank,
 		};
 		if self.entries.len() < self.limit {
-			self.entries.push(candidate());
+			self.entries.push(owned_candidate());
 		} else if let Some(mut worst) = self.entries.peek_mut()
 			&& self
 				.rank
 				.compare(entry.relative, entry.mtime, &worst.entry.path, worst.entry.mtime)
 				== Ordering::Less
 		{
-			*worst = candidate();
+			*worst = owned_candidate();
 		}
 		Ok(WalkControl::Continue)
 	}
