@@ -575,7 +575,7 @@ describe("eval native run boxes", () => {
 		expect(preview?.k).toBe("code");
 		expect(props(preview)).toMatchObject({
 			role: "omp.tool.eval.status.preview",
-			lang: "typescript",
+			path: "src/rollup.ts",
 			wrap: false,
 			preview: { lines: 3 },
 		});

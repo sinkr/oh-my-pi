@@ -36,7 +36,6 @@ import {
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
 import { splitPathAndSel } from "./read";
-import { getLanguageFromPath } from "../lang-from-path";
 import {
 	DEFAULT_TERMINAL_PREVIEW_LINES,
 	PREVIEW_LIMITS,
@@ -713,13 +712,12 @@ function describeStatusEvent(event: EvalStatusEvent, expanded: boolean): NativeN
 	if (!preview) return line;
 	const head = cappedHeadLines(sanitizeDisplayLines(preview), PREVIEW_LIMITS.OUTPUT_EXPANDED).lines;
 	const path = eventString(event.path);
-	const lang = path ? getLanguageFromPath(splitPathAndSel(path).path) : undefined;
 	return node("col", { role: "omp.tool.eval.status.event", gap: "none" }, [
 		keyed(line, "line"),
 		keyed(
 			code(head.join("\n"), {
 				role: "omp.tool.eval.status.preview",
-				lang,
+				path: path ? splitPathAndSel(path).path : undefined,
 				wrap: false,
 				preview: { lines: PREVIEW_LIMITS.COLLAPSED_LINES },
 			}),
