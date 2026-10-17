@@ -37,7 +37,7 @@ export interface ComposerPreferences {
 	readonly showHardwareCursor: boolean;
 	readonly maxInlineImages: number;
 	readonly resizeScrollback: ResizeScrollbackMode;
-	/** Bill retirement at the chrome's current height instead of its floor, so displaced rows reach scrollback rather than being held live. */
+	/** Send rows a growing HUD or dialog pushes off screen straight to scrollback instead of holding them back until it shrinks. */
 	readonly completeScrollback: boolean;
 	readonly imeSafeCursor: boolean;
 	readonly autocompleteMaxVisible: number;
@@ -274,8 +274,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// displaced rows, so those rows refill the screen when it shrinks (#11007).
 	// Displaced rows reach history when newer output pushes them past the floor
 	// or persistent idle chrome settles and raises it.
-	// `completeScrollback` bills the current height instead, so displaced rows
-	// reach scrollback at once and the shrink leaves a blank band.
+	// With `completeScrollback`, rows the chrome pushes off screen go straight
+	// to scrollback, and when it shrinks the freed rows stay blank.
 	// The floor is terminal-height independent — chrome heights do not scale
 	// with rows — so it is retained across resizes rather than rediscovered
 	// from whatever chrome is expanded when the height changes.
@@ -453,7 +453,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// inter-block blanks) engages only when a block genuinely cannot retire.
 		// Rows the chrome above its floor displaces are clipped from the top by
 		// the `drop` slice below; they stay live until the chrome shrinks. With
-		// `completeScrollback` the floor is the current height, so none are held.
+		// `completeScrollback` none are held back.
 		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - belowFloor), frame);
 		const activeSpans: ViewportClickSpan[] = [];
 		for (const span of transcript.getLastViewportSpans()) {
