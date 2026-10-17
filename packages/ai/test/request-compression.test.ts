@@ -143,6 +143,19 @@ describe("wrapFetchForRequestCompression", () => {
 		expect(calls.map(call => call.headers["Content-Encoding"])).toEqual(["gzip", undefined, "gzip"]);
 	});
 
+	it("keeps resending when the uncompressed resend reaches the provider's own JSON error", async () => {
+		const blocked = () => new Response("<html><body>Compressed uploads are blocked.</body></html>", { status: 403 });
+		const denied = new Response('{"error":{"message":"Model not accessible."}}', { status: 403 });
+		const { calls, fetch } = captureFetch([blocked(), denied, blocked()]);
+		const toAnthropic = wrapFetchForRequestCompression(fetch, anthropic);
+
+		const first = await toAnthropic(ANTHROPIC_URL, post());
+		const second = await toAnthropic(ANTHROPIC_URL, post());
+
+		expect([first.status, second.status]).toEqual([403, 200]);
+		expect(calls.map(call => call.headers["Content-Encoding"])).toEqual(["gzip", undefined, "gzip", undefined]);
+	});
+
 	it("resends uncompressed when a proxy drops Content-Encoding and Anthropic cannot parse the gzip bytes", async () => {
 		const unparsed = new Response(
 			JSON.stringify({

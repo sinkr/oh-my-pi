@@ -78,6 +78,24 @@ function compress(body: string | ArrayBufferView, encoding: RequestBodyEncoding)
 	return encoding === "zstd" ? Bun.zstdCompress(bytes, { level: ZSTD_LEVEL }) : gzip(bytes, { level: GZIP_LEVEL });
 }
 
+/** Reads a clone of {@link response}'s body; `undefined` when it cannot be read. */
+async function bodyText(response: Response): Promise<string | undefined> {
+	try {
+		return await response.clone().text();
+	} catch {
+		return undefined;
+	}
+}
+
+function isJson(text: string): boolean {
+	try {
+		JSON.parse(text);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * `host`: a JSON 400/415 matching the host's rejection pattern (or any JSON
  * 400/415 when none is assigned). `proxy`: a 400/403/415 whose body is not JSON,
@@ -90,17 +108,9 @@ async function suspectEncodingRejection(
 	policy: RequestCompressionPolicy,
 ): Promise<RejectionSuspect | undefined> {
 	if (response.status !== 400 && response.status !== 403 && response.status !== 415) return undefined;
-	let body: string;
-	try {
-		body = await response.clone().text();
-	} catch {
-		return undefined;
-	}
-	try {
-		JSON.parse(body);
-	} catch {
-		return "proxy";
-	}
+	const body = await bodyText(response);
+	if (body === undefined) return undefined;
+	if (!isJson(body)) return "proxy";
 	if (response.status === 403) return undefined;
 	return (policy.rejection?.test(body) ?? true) ? "host" : undefined;
 }
@@ -119,8 +129,8 @@ async function suspectEncodingRejection(
  * non-JSON 400/403/415 from a proxy in front of it — is resent uncompressed
  * once; only when that resend succeeds is the encoding latched off for the
  * host, so a genuine 400 never disables compression. When a non-JSON refusal
- * recurs uncompressed with the same status, that status stops being re-checked
- * for the host.
+ * recurs uncompressed with the same status and a non-JSON body, that status
+ * stops being re-checked for the host.
  */
 export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): FetchImpl {
 	const wrapped: FetchImpl = async (input, init) => {
@@ -174,7 +184,10 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 				status: response.status,
 			});
 		} else if (suspect === "proxy" && plain.status === response.status) {
-			encodingUnrelatedRefusals.add(refusal);
+			// A JSON body means the resend reached the provider; its own error says
+			// nothing about whether the proxy refuses every request.
+			const plainBody = await bodyText(plain);
+			if (plainBody !== undefined && !isJson(plainBody)) encodingUnrelatedRefusals.add(refusal);
 		}
 		return plain;
 	};
