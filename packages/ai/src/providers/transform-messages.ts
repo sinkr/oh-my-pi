@@ -350,6 +350,22 @@ function deduplicateToolCallIds(
 const MAX_TOOL_CALL_NAME_LENGTH = 128;
 const STRICT_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const GOOGLE_TOOL_CALL_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.:-]*$/;
+/** Any character some provider accepts in a declared tool name, for checks with no target. */
+const ANY_PROVIDER_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_.:-]+$/;
+
+/**
+ * Charset and length a tool-call name must meet to replay to `model`. Without a
+ * target, a name passes when any provider could declare it.
+ */
+function toolCallNameLimits(model: Model | undefined): { allowedName: RegExp; maxLength: number } {
+	if (!model) return { allowedName: ANY_PROVIDER_TOOL_CALL_NAME_RE, maxLength: MAX_TOOL_CALL_NAME_LENGTH };
+	const policy = resolveCatalogPolicy(model);
+	return {
+		allowedName: policy.toolCallNameCharset === "google" ? GOOGLE_TOOL_CALL_NAME_RE : STRICT_TOOL_CALL_NAME_RE,
+		maxLength:
+			typeof policy.toolCallNameMaxLength === "number" ? policy.toolCallNameMaxLength : MAX_TOOL_CALL_NAME_LENGTH,
+	};
+}
 
 /**
  * Whether a tool-call name cannot be replayed to the target: missing, empty,
@@ -400,10 +416,7 @@ function isMalformedToolCall(block: { id: string; name: string }, allowedName: R
  * list returns the input untouched.
  */
 function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[] {
-	const policy = resolveCatalogPolicy(model);
-	const allowedName = policy.toolCallNameCharset === "google" ? GOOGLE_TOOL_CALL_NAME_RE : STRICT_TOOL_CALL_NAME_RE;
-	const maxLength =
-		typeof policy.toolCallNameMaxLength === "number" ? policy.toolCallNameMaxLength : MAX_TOOL_CALL_NAME_LENGTH;
+	const { allowedName, maxLength } = toolCallNameLimits(model);
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
 	outer: for (const msg of messages) {
@@ -477,20 +490,24 @@ export function shouldDropTruncatedThinkingOnlyAssistant(msg: AssistantMessage):
  * surviving one: {@link sanitizeMalformedToolCalls} drops its malformed tool
  * calls, then {@link shouldDropTruncatedThinkingOnlyAssistant} a truncated
  * turn left with no text and no tool call. On an already sanitized list this
- * is `!shouldDropTruncatedThinkingOnlyAssistant(msg)`.
+ * is `!shouldDropTruncatedThinkingOnlyAssistant(msg)`. Pass the target `model`
+ * to apply its tool-name limits; without one, any provider-declarable name survives.
  */
-export function isSurvivingAssistant(msg: AssistantMessage): boolean {
+export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): boolean {
 	const isTruncatedStop = msg.stopReason === "length" || msg.stopReason === "error" || msg.stopReason === "aborted";
 	if (msg.content.length === 0) return !isTruncatedStop;
+	const { allowedName, maxLength } = toolCallNameLimits(model);
 	return msg.content.some(block =>
-		block.type === "toolCall" ? !isMalformedToolCall(block) : !isTruncatedStop || block.type === "text",
+		block.type === "toolCall"
+			? !isMalformedToolCall(block, allowedName, maxLength)
+			: !isTruncatedStop || block.type === "text",
 	);
 }
 
-function getLatestSurvivingAssistantIndex(messages: readonly Message[]): number {
+function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;
-		if (msg.role === "assistant" && isSurvivingAssistant(msg)) {
+		if (msg.role === "assistant" && isSurvivingAssistant(msg, model)) {
 			return index;
 		}
 	}
@@ -813,7 +830,7 @@ export function transformMessages<TApi extends Api>(
 	// Completions ids pair by raw equality and must never be canonicalized).
 	const responsesCompositeIdMap = new Map<string, string>();
 
-	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages);
+	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages, model);
 	const invalidBoundThinkingAssistantIndexes = new Set<number>();
 	if (model.thinking?.prefixBinding) {
 		let latestRewriteAt: number | undefined;
