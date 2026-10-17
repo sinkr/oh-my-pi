@@ -144,7 +144,7 @@ import {
 	wrapFetchForCopilotFallback,
 } from "./github-copilot-headers";
 import { prepareAnthropicImageContext } from "./anthropic-images";
-import { servedModelFromAnthropicSignature } from "./anthropic-signature";
+import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { isAnthropicMessagesModel, redactSensitiveCredentials, transformMessages } from "./transform-messages";
@@ -2611,11 +2611,14 @@ const streamAnthropicOnce = (
 					if (unwrappedThinking !== undefined) {
 						block.thinking = unwrappedThinking;
 						block.thinkingSignature = undefined;
-					} else if (!output.upstreamModel && block.thinkingSignature) {
+					} else if (block.thinkingSignature) {
 						// The signature names the model that actually produced the
 						// block; a gateway serving a different model than requested
 						// cannot mint one that says otherwise.
-						output.upstreamModel = servedModelFromAnthropicSignature(block.thinkingSignature);
+						if (!output.upstreamModel) {
+							output.upstreamModel = servedModelFromAnthropicSignature(block.thinkingSignature);
+						}
+						if (isAnthropicNarrationSignature(block.thinkingSignature)) block.narration = true;
 					}
 					stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 				} else if (block.type === "anthropicServerTool" && block.block.type === "server_tool_use") {
