@@ -94,7 +94,8 @@ describe("findToolRenderer", () => {
 		expect(ansi).not.toContain("\x1b[1m/src/");
 
 		const native = JSON.stringify(findToolRenderer.describeResult(input, options, args));
-		expect(native).toContain("file:///repo/%1B%5B1m/src/%1B%5B31mretry.ts");
+		// Windows resolves `/repo` under the current drive (`file:///C:/repo/…`).
+		expect(native).toMatch(/file:\/\/\/(?:[A-Za-z]:\/)?repo\/%1B%5B1m\/src\/%1B%5B31mretry\.ts/);
 		expect(native).not.toContain("\\u001b");
 	});
 

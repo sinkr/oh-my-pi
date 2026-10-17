@@ -75,87 +75,98 @@ describe("tool result details with raw control sequences", () => {
 		expect(privateModeSequences(rendered)).toEqual([]);
 	});
 
-	it("keeps a control-byte filename as the hyperlink target while cleaning its label", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-read-link-"));
-		const filename = path.join(dir, `fixture${FILE_ESCAPES}.txt`);
-		try {
-			await Bun.write(filename, "needle");
-			const cases: Array<[string, ReadToolDetails]> = [
-				[
-					"target",
-					{ displayTarget: filename, resolvedPath: "/wrong", meta: { source: { type: "path", value: "/wrong" } } },
-				],
-				["resolved", { resolvedPath: filename, meta: { source: { type: "path", value: "/wrong" } } }],
-				["source", { meta: { source: { type: "path", value: filename } } }],
-			];
-			for (const [id, details] of cases) {
-				const group = new ReadToolGroupComponent({ showContentPreview: true });
-				group.updateArgs({ path: filename }, id);
-				group.updateResult(
-					{
-						content: [{ type: "text", text: "needle" }],
-						details: { ...details, displayContent: { text: LINE, startLine: 1 } },
-					},
-					false,
-					id,
+	// Windows rejects control characters in filenames.
+	it.skipIf(process.platform === "win32")(
+		"keeps a control-byte filename as the hyperlink target while cleaning its label",
+		async () => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-read-link-"));
+			const filename = path.join(dir, `fixture${FILE_ESCAPES}.txt`);
+			try {
+				await Bun.write(filename, "needle");
+				const cases: Array<[string, ReadToolDetails]> = [
+					[
+						"target",
+						{
+							displayTarget: filename,
+							resolvedPath: "/wrong",
+							meta: { source: { type: "path", value: "/wrong" } },
+						},
+					],
+					["resolved", { resolvedPath: filename, meta: { source: { type: "path", value: "/wrong" } } }],
+					["source", { meta: { source: { type: "path", value: filename } } }],
+				];
+				for (const [id, details] of cases) {
+					const group = new ReadToolGroupComponent({ showContentPreview: true });
+					group.updateArgs({ path: filename }, id);
+					group.updateResult(
+						{
+							content: [{ type: "text", text: "needle" }],
+							details: { ...details, displayContent: { text: LINE, startLine: 1 } },
+						},
+						false,
+						id,
+					);
+					const view = group.describe({
+						cols: 120,
+						reduceMotion: false,
+						dark: true,
+						supports: kind => kind === "tool",
+						feature: () => true,
+					});
+					if (view.k !== "tool") throw new Error("Expected read tool node");
+					const href = view.p?.href;
+					expect(href).toBe(pathToFileURL(filename).href);
+					expect(view.p?.target).not.toContain("\x1b");
+					expect(group.render(120).join("\n")).not.toContain(FILE_ESCAPES);
+					if (!href) throw new Error("Missing file link");
+					expect(await Bun.file(new URL(href)).text()).toBe("needle");
+				}
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"standalone read cards keep the original file hyperlink target",
+		async () => {
+			applyHyperlinkSetting("always");
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-read-single-link-"));
+			const filename = path.join(dir, `fixture${FILE_ESCAPES}.txt`);
+			try {
+				await Bun.write(filename, "needle");
+				const component = new ToolExecutionComponent(
+					"read",
+					{ path: filename },
+					{ useBuiltInRenderer: true },
+					undefined,
+					{ requestRender: vi.fn(), requestComponentRender: vi.fn(), resetDisplay: vi.fn() },
+					dir,
 				);
-				const view = group.describe({
+				component.updateResult({
+					content: [{ type: "text", text: "needle" }],
+					details: { resolvedPath: filename, mediaPath: filename, displayContent: { text: LINE, startLine: 1 } },
+				});
+				const view = component.describe({
 					cols: 120,
 					reduceMotion: false,
 					dark: true,
-					supports: kind => kind === "tool",
+					supports: kind => kind === "tool" || kind === "media",
 					feature: () => true,
 				});
 				if (view.k !== "tool") throw new Error("Expected read tool node");
-				const href = view.p?.href;
-				expect(href).toBe(pathToFileURL(filename).href);
+				expect(view.p?.href).toBe(pathToFileURL(filename).href);
 				expect(view.p?.target).not.toContain("\x1b");
-				expect(group.render(120).join("\n")).not.toContain(FILE_ESCAPES);
-				if (!href) throw new Error("Missing file link");
-				expect(await Bun.file(new URL(href)).text()).toBe("needle");
+				const media = (view.c ?? []).find(child => "k" in child && child.k === "media");
+				expect(media?.p?.path).toBe(filename);
+				const rendered = component.render(120).join("\n");
+				expect(rendered).toContain(pathToFileURL(filename).href);
+				expect(rendered).not.toContain(FILE_ESCAPES);
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
 			}
-		} finally {
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("standalone read cards keep the original file hyperlink target", async () => {
-		applyHyperlinkSetting("always");
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-read-single-link-"));
-		const filename = path.join(dir, `fixture${FILE_ESCAPES}.txt`);
-		try {
-			await Bun.write(filename, "needle");
-			const component = new ToolExecutionComponent(
-				"read",
-				{ path: filename },
-				{ useBuiltInRenderer: true },
-				undefined,
-				{ requestRender: vi.fn(), requestComponentRender: vi.fn(), resetDisplay: vi.fn() },
-				dir,
-			);
-			component.updateResult({
-				content: [{ type: "text", text: "needle" }],
-				details: { resolvedPath: filename, mediaPath: filename, displayContent: { text: LINE, startLine: 1 } },
-			});
-			const view = component.describe({
-				cols: 120,
-				reduceMotion: false,
-				dark: true,
-				supports: kind => kind === "tool" || kind === "media",
-				feature: () => true,
-			});
-			if (view.k !== "tool") throw new Error("Expected read tool node");
-			expect(view.p?.href).toBe(pathToFileURL(filename).href);
-			expect(view.p?.target).not.toContain("\x1b");
-			const media = (view.c ?? []).find(child => "k" in child && child.k === "media");
-			expect(media?.p?.path).toBe(filename);
-			const rendered = component.render(120).join("\n");
-			expect(rendered).toContain(pathToFileURL(filename).href);
-			expect(rendered).not.toContain(FILE_ESCAPES);
-		} finally {
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 
 	it("write cards link to the original control-byte filename without displaying its controls", () => {
 		applyHyperlinkSetting("always");
