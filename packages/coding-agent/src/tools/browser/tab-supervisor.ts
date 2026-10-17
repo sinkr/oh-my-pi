@@ -1394,7 +1394,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 				void forgetSharedTarget(scope, tab.targetId);
 			}
 		} else if (targetCloseFailed) {
-			// Nothing here can retry it (a relay tab, e.g. while its browser's extension is offline).
+			// Nothing here can retry it; a relay closes a tab of an offline browser once that browser reconnects.
 			logger.warn("Could not confirm a browser tab omp opened was closed; it may still be open", {
 				name,
 				targetId: tab.targetId,

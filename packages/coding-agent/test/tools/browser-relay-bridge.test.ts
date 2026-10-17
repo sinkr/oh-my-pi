@@ -1573,12 +1573,15 @@ describe("closeRelayTarget", () => {
 		return { send } as unknown as Pick<CDPSession, "send">;
 	}
 
-	it("does not report a tab closed while its browser's extension is offline", async () => {
+	it("does not report a tab closed while its browser's extension is offline, and closes it once that browser reconnects", async () => {
 		const bridge = new RelayBridge({});
 		const chrome = new FakeExtSocket();
-		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 7 })]);
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 7 }), tab({ tabId: 8 })]);
 		bridge.extClosed(chrome);
 		expect(await closeRelayTarget(channel(bridge), `PAGE${instanceCode("chrome")}.7`)).toBeFalse();
+		const back = new FakeExtSocket();
+		connectInstance(bridge, back, "chrome", [tab({ tabId: 7 }), tab({ tabId: 8 })]);
+		expect(back.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
 	});
 
 	it("reports a tab the relay no longer knows as closed", async () => {
@@ -1616,6 +1619,19 @@ describe("RelayBridge last-hello fallback and offline instance pruning", () => {
 		await flush();
 		expect(bridge.versionInfo("ws://relay").Browser).toBe("Chrome/151.0.0.0");
 		expect(bridge.listTargets().map(t => t.title)).toContain("Created");
+	});
+
+	it("falls back to the live instance whose hello ran most recently, not the first connected", () => {
+		const bridge = new RelayBridge({});
+		const [first, second, third] = [new FakeExtSocket(), new FakeExtSocket(), new FakeExtSocket()];
+		connectInstance(bridge, first, "first", [tab({ tabId: 1 })]);
+		connectInstance(bridge, second, "second", [tab({ tabId: 1 })]);
+		connectInstance(bridge, third, "third", [tab({ tabId: 1 })]);
+		bridge.extClosed(third);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
+		expect(second.rpcs("createTab")).toHaveLength(1);
+		expect(first.rpcs("createTab")).toHaveLength(0);
 	});
 
 	it("hides tabs of an instance whose socket went offline", () => {

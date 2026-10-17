@@ -189,30 +189,6 @@ const session = {
 } as unknown as ToolSession;
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
-	it("leaves the user's selected tab in place when a relay open names no target", async () => {
-		const fixture = await launchRelayFixture();
-		const human = await fixture.browser.newPage();
-		const humanUrl = `${fixture.origin}/human`;
-		await human.goto(humanUrl);
-		await human.bringToFront();
-		const humanTabId = await fixture.extension.evaluate(
-			"chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(tabs => tabs[0]?.id)",
-		);
-		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
-		const name = `relay-no-target-${process.pid}`;
-		try {
-			const { tab } = await acquireTab(name, relay, { url: `${fixture.origin}/first`, timeoutMs: 15_000 });
-			expect(chromeTabId(tab.targetId)).not.toBe(humanTabId);
-			expect(human.url()).toBe(humanUrl);
-			expect(await human.title()).toBe("Human sentinel");
-			expect(await activeChromeTabUrl(fixture)).toBe(humanUrl);
-		} finally {
-			await releaseTab(name).catch(() => undefined);
-			await releaseBrowser(relay, { kill: false });
-			await fixture.close();
-		}
-	}, 60_000);
-
 	it("opens default relay tabs in the background and closes them, leaving borrowed pages open", async () => {
 		const fixture = await launchRelayFixture();
 		const human = await fixture.browser.newPage();
@@ -223,6 +199,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		const names = [`relay-first-${process.pid}`, `relay-second-${process.pid}`, `relay-borrowed-${process.pid}`];
 		try {
 			const first = await acquireTab(names[0]!, relay, { url: `${fixture.origin}/first`, timeoutMs: 15_000 });
+			// An open that adopted the selected tab would have navigated it to the `url`.
+			expect(human.url()).toBe(humanUrl);
 			const second = await acquireTab(names[1]!, relay, { url: `${fixture.origin}/second`, timeoutMs: 15_000 });
 			expect(first.tab.targetId).not.toBe(second.tab.targetId);
 			expect(human.url()).toBe(humanUrl);

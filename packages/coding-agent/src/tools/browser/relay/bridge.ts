@@ -264,6 +264,10 @@ export class RelayBridge {
 	/** Instance whose hello ran last: answers browser-wide requests and owns created tabs. */
 	#lastHelloInstance: string | null = null;
 	#extensionSeen = false;
+	/** Instance ids by hello, the most recent last. */
+	#helloOrder = new Set<string>();
+	/** Keys of tabs a client closed while their browser was offline: closed at that browser's next hello. */
+	#closeOnHello = new Set<string>();
 	/** `Date.now()` when the last ready extension socket closed; null while one is ready or none ever was. */
 	#extensionGoneSince: number | null = null;
 	#pendingRpc = new Map<
@@ -309,10 +313,12 @@ export class RelayBridge {
 			const inst = this.#instances.get(this.#lastHelloInstance);
 			if (inst?.socket) return inst;
 		}
-		for (const inst of this.#instances.values()) {
-			if (inst.socket) return inst;
+		let last: ExtInstance | undefined;
+		for (const id of this.#helloOrder) {
+			const inst = this.#instances.get(id);
+			if (inst?.socket) last = inst;
 		}
-		return undefined;
+		return last;
 	}
 
 	/**
@@ -550,6 +556,19 @@ export class RelayBridge {
 		for (const [key, tab] of this.#tabs) {
 			if (tab.instanceId !== instanceId || seen.has(tab.tabId)) continue;
 			this.#onTabRemoved(key);
+		}
+		this.#helloOrder.delete(instanceId);
+		this.#helloOrder.add(instanceId);
+		// Close the tabs clients closed while this browser was offline; one the user closed meanwhile is gone already.
+		for (const key of this.#closeOnHello) {
+			if (!key.startsWith(`${inst.code}:`)) continue;
+			this.#closeOnHello.delete(key);
+			const closed = this.#tabs.get(key);
+			if (!closed) continue;
+			closed.closing = true;
+			void this.#rpc({ op: "removeTab", tabId: closed.tabId }, inst).catch(() => {
+				closed.closing = false;
+			});
 		}
 		for (const tab of this.#tabs.values()) {
 			if (tab.instanceId !== instanceId) continue;
@@ -1076,6 +1095,11 @@ export class RelayBridge {
 				const removedTab = this.#tabs.get(parsed.key);
 				if (!removedTab) {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
+					return;
+				}
+				if (!this.#instanceFor(removedTab).socket) {
+					this.#closeOnHello.add(parsed.key);
+					this.#replyError(conn, msg, "relay extension is offline; the tab closes when its browser reconnects");
 					return;
 				}
 				removedTab.closing = true;
