@@ -1,4 +1,4 @@
-import { describe, expect, it, jest } from "bun:test";
+import { describe, expect, it, jest, setSystemTime } from "bun:test";
 import { createHash } from "node:crypto";
 import { closeRelayTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
 import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
@@ -1443,26 +1443,6 @@ describe("RelayBridge multiple extension instances", () => {
 		expect(chrome.rpcs("createTab")).toHaveLength(0);
 	});
 
-	it("opens a new tab in the browser of nearTargetId on a connection that drives nothing yet", () => {
-		const bridge = new RelayBridge({});
-		const chrome = new FakeExtSocket();
-		const edge = new FakeExtSocket();
-		// Chrome shows the first selected tab and said hello last; omp drives Edge's tab on another connection.
-		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
-		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
-		const connId = bridge.cdpConnected(new FakeCdpSocket());
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({
-				id: ++msgSeq,
-				method: "Target.createTarget",
-				params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
-			}),
-		);
-		expect(edge.rpcs("createTab")).toHaveLength(1);
-		expect(chrome.rpcs("createTab")).toHaveLength(0);
-	});
-
 	it("opens a new tab in the browser of nearTargetId after the user closed that tab", () => {
 		const bridge = new RelayBridge({});
 		const chrome = new FakeExtSocket();
@@ -1504,6 +1484,32 @@ describe("RelayBridge multiple extension instances", () => {
 		await flush();
 		expect(chrome.rpcs("createTab")).toHaveLength(0);
 		expect(cdp.messages.find(message => message.id === createId)).toHaveProperty("error");
+	});
+
+	it("opens a new tab in another browser once the browser of nearTargetId has been offline past the hold", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		const edge = new FakeExtSocket();
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
+		bridge.extClosed(edge);
+		// The user quit Edge for good: its service worker would have reconnected within the minute.
+		setSystemTime(Date.now() + 60_000);
+		try {
+			const connId = bridge.cdpConnected(new FakeCdpSocket());
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					method: "Target.createTarget",
+					params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
+				}),
+			);
+			await flush();
+			expect(chrome.rpcs("createTab")).toHaveLength(1);
+		} finally {
+			setSystemTime();
+		}
 	});
 
 	it("closes a tab Chrome creates after the createTab RPC timed out", async () => {

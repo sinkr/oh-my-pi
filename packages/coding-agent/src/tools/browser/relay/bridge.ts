@@ -117,6 +117,8 @@ interface ExtInstance {
 	instanceId: string;
 	/** Stable short code derived from the instance id; names target ids (`TAB<code>.<tabId>`). */
 	code: string;
+	/** When its socket closed; unset while connected. */
+	offlineSince?: number;
 	socket: RelaySocket | null;
 	info: { userAgent: string; browserVersion: string; discardedTabsProtocol?: number } | null;
 }
@@ -237,6 +239,12 @@ const CDP_ERROR_SERVER = -32000;
 const DETACHED_COMMAND_ERROR = /Detached while handling command/;
 /** How long such a failure waits for the extension to report the detach itself. */
 const CHROME_DETACH_REPORT_MS = 1_000;
+/**
+ * How long a disconnected browser still takes the new tabs meant for it: a restarted service worker is
+ * back within the extension's keepalive alarm (30 s) plus its reconnect backoff (10 s). Past that the
+ * browser counts as gone and new tabs open by the other rules.
+ */
+const OFFLINE_BROWSER_HOLD_MS = 60_000;
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -312,29 +320,32 @@ export class RelayBridge {
 	 * another connection; omp gives every tab its own), else one holding a tab this connection
 	 * drives, else the one showing the first selected tab (the tab an open without a target used to
 	 * adopt), else the last hello. A reconnecting extension's hello must not move new tabs to another browser,
-	 * and neither may the caller's browser being offline: undefined then, instead of another browser.
+	 * and neither may the caller's browser being briefly offline: undefined then, instead of another browser.
 	 */
 	#instanceForNewTab(conn: CdpConnection, nearTargetId: unknown): ExtInstance | undefined {
 		const near = typeof nearTargetId === "string" ? parseTargetId(nearTargetId) : null;
 		if (near) {
 			// The target id names its browser even after the user closed that tab.
 			const code = near.key.slice(0, near.key.indexOf(":"));
-			for (const inst of this.#instances.values()) {
-				if (inst.code === code) return inst.socket ? inst : undefined;
-			}
-			return undefined;
+			const inst = [...this.#instances.values()].find(inst => inst.code === code);
+			if (inst?.socket) return inst;
+			if (inst && this.#holdsNewTabs(inst)) return undefined;
 		}
 		const own = [...conn.claims].map(key => this.#tabs.get(key)).find(tab => tab !== undefined);
-		if (own) {
-			const inst = this.#instances.get(own.instanceId);
-			return inst?.socket ? inst : undefined;
-		}
+		const ownInst = own && this.#instances.get(own.instanceId);
+		if (ownInst?.socket) return ownInst;
+		if (ownInst && this.#holdsNewTabs(ownInst)) return undefined;
 		for (const tab of this.#tabs.values()) {
 			if (!tab.active || tab.discarded || !this.#eligible(tab)) continue;
 			const inst = this.#instances.get(tab.instanceId);
 			if (inst?.socket) return inst;
 		}
 		return this.#lastHello();
+	}
+
+	/** A browser offline for less than {@link OFFLINE_BROWSER_HOLD_MS} keeps its new tabs: they wait for it. */
+	#holdsNewTabs(inst: ExtInstance): boolean {
+		return inst.offlineSince !== undefined && Date.now() - inst.offlineSince < OFFLINE_BROWSER_HOLD_MS;
 	}
 
 	/** True after the first hello, and stays true: separates a reaped service worker from an absent extension. */
@@ -438,6 +449,7 @@ export class RelayBridge {
 			tab.ompGroupId = undefined;
 		}
 		this.#groupQueue = this.#groupQueue.filter(tab => tab.instanceId !== instanceId);
+		inst.offlineSince = Date.now();
 		if (!this.ready) this.#extensionGoneSince ??= Date.now();
 	}
 
@@ -517,6 +529,7 @@ export class RelayBridge {
 			inst.socket.close();
 		}
 		inst.socket = socket;
+		inst.offlineSince = undefined;
 		this.#socketInstance.set(socket, instanceId);
 		inst.info = {
 			userAgent: msg.userAgent,
