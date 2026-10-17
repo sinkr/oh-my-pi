@@ -330,6 +330,14 @@ export function applyCatalogCorrections(
 		const maxTokens = numberField(limitsPatch, "maxTokens");
 		if (maxTokens !== undefined) model.maxTokens = maxTokens;
 	}
+	const maxTokensFallback = catalog.maxTokensFallback;
+	if (typeof maxTokensFallback === "number" && model.maxTokens === null) {
+		model.maxTokens = maxTokensFallback;
+	}
+	const maxTokensCeiling = catalog.maxTokensCeiling;
+	if (typeof maxTokensCeiling === "number" && model.maxTokens !== null && model.maxTokens > maxTokensCeiling) {
+		model.maxTokens = maxTokensCeiling;
+	}
 	const contextWindowFloor = catalog.contextWindowFloor;
 	if (typeof contextWindowFloor === "number") {
 		model.contextWindow = Math.max(model.contextWindow ?? 0, contextWindowFloor);

@@ -2868,9 +2868,6 @@ export class ModelRegistry {
 			if (!model.contextWindowAuthoritative) {
 				({ model, tiers } = this.#applyContextWindowPolicies(model, extendedContext, compactionPoints));
 			}
-			if (model.provider === "ollama-cloud" && model.omitMaxOutputTokens !== true) {
-				model = applyModelOverride(model, { omitMaxOutputTokens: true });
-			}
 			if (tiers) this.#policyWindowTiers.set(model, tiers);
 			return model;
 		});
