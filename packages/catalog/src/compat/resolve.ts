@@ -474,7 +474,9 @@ function detectOpenAICompat(
 			provider === "github-copilot" ||
 			provider === "zenmux");
 
-	// Endpoint-only watchdogs remain here; provider and lineage policy lives in KDL.
+	// URL-keyed watchdogs: they also cover custom provider ids pointed at these
+	// hosts, which provider-keyed rules (`stream-idle-timeout-ms` in
+	// classes/{glm,kimi,mimo}.kdl) cannot match. KDL rules override them.
 	const streamIdleTimeoutMs =
 		facts.is("glm") &&
 		facts.revGte("5") &&
@@ -600,6 +602,8 @@ function detectOpenAICompat(
 		streamFirstEventTimeoutMs: d.isLocalServingBackend ? 0 : undefined,
 		streamIdleTimeoutMs,
 		stripDeepseekSpecialTokens: facts.is("deepseek") && (provider === "nvidia" || provider === "deepseek"),
+		// URL-derived like the Responses field; unset off the official OpenAI API.
+		officialEndpoint: isOfficialOpenAIEndpoint(spec.provider, baseUrl) || undefined,
 		streamMarkupHealingPattern: detectStreamMarkupHealing(spec.provider, facts, baseUrl),
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
@@ -1037,7 +1041,11 @@ function readCompatEffortMap(compat: CompatOf<Api>): Partial<Record<Effort, stri
 	const map = compat.reasoningEffortMap;
 	return map && Object.keys(map).length > 0 ? map : undefined;
 }
-/** Host-quirk effort remaps detected outside the rules (URL/API compounds). */
+/**
+ * URL-keyed Fireworks effort remap: covers custom provider ids pointed at the
+ * Fireworks host, which the `fireworks`/`firepass` `thinking-effort-map`
+ * rules cannot match. Rule and configured maps override it.
+ */
 const FIREWORKS_THINKING_EFFORT_MAP: Readonly<Partial<Record<Effort, string>>> = {
 	[Effort.Minimal]: "none",
 };
@@ -1051,10 +1059,6 @@ function defaultThinkingMode<TApi extends Api>(spec: ModelSpec<TApi>, facts: Ide
 			// Gemini 3+ `google-level` is a `thinking-mode` rule in classes/gemini.kdl.
 			return "budget";
 		case "anthropic-messages":
-			if (facts.is("minimax") && facts.family("m2", "m3")) return "anthropic-adaptive";
-			if (facts.is("glm") && facts.revGte("5.2") && (spec.provider === "umans" || spec.provider === "zai")) {
-				return "anthropic-budget-effort";
-			}
 			if (facts.is("anthropic")) {
 				// Haiku stays on budget thinking until 5.5, its first adaptive generation.
 				if (facts.revGte(facts.family("haiku") ? "5.5" : "4.6")) return "anthropic-adaptive";
