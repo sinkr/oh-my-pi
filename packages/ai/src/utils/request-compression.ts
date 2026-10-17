@@ -68,13 +68,23 @@ function compress(body: string | ArrayBufferView, encoding: RequestBodyEncoding)
 }
 
 async function mayBeEncodingRejection(response: Response, policy: RequestCompressionPolicy): Promise<boolean> {
-	if (response.status !== 400 && response.status !== 415) return false;
-	if (!policy.rejection) return true;
+	if (response.status !== 400 && response.status !== 403 && response.status !== 415) return false;
+	let body: string;
 	try {
-		return policy.rejection.test(await response.clone().text());
+		body = await response.clone().text();
 	} catch {
 		return false;
 	}
+	try {
+		JSON.parse(body);
+	} catch {
+		// Provider APIs answer errors in JSON. Any other body came from a proxy or
+		// TLS-inspecting gateway in front of the host, which may refuse a
+		// compressed upload the host itself decodes.
+		return true;
+	}
+	if (response.status === 403) return false;
+	return policy.rejection?.test(body) ?? true;
 }
 
 /**
@@ -87,9 +97,10 @@ async function mayBeEncodingRejection(response: Response, policy: RequestCompres
  * Install it beneath any body rewriter or signer (e.g. the cch attestation
  * patch): those must see the uncompressed bytes. Other hosts, small bodies,
  * bodies that already carry `Content-Encoding`, and `PI_REQUEST_COMPRESSION=0`
- * pass through untouched. A possible rejection is resent uncompressed once;
- * only when that resend succeeds is the encoding latched off for the host, so
- * a genuine 400 never disables compression.
+ * pass through untouched. A possible rejection — the host's decode error, or a
+ * non-JSON 400/403/415 from a proxy in front of it — is resent uncompressed
+ * once; only when that resend succeeds is the encoding latched off for the
+ * host, so a genuine 400 never disables compression.
  */
 export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): FetchImpl {
 	const wrapped: FetchImpl = async (input, init) => {
