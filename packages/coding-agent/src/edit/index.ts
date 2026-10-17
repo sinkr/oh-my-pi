@@ -307,6 +307,21 @@ async function mkdirAllowingFallback(directory: string): Promise<void> {
 }
 
 /**
+ * Permission bits a move carries to its destination, or undefined where they cannot be read:
+ * Windows has no POSIX mode, and a source the process may not stat is moved by the
+ * privileged fallback writer, which keeps the destination's own mode.
+ */
+async function movedFileMode(filePath: string): Promise<number | undefined> {
+	if (process.platform === "win32") return undefined;
+	try {
+		return (await fs.stat(filePath)).mode & 0o7777;
+	} catch (error) {
+		if (isPermissionDeniedError(error)) return undefined;
+		throw error;
+	}
+}
+
+/**
  * Give a moved file its source's mode. The content is already at the destination, possibly
  * written by a privileged fallback writer, so a destination that denies mode changes keeps
  * its own mode instead of failing the move halfway with both files left behind.
@@ -686,7 +701,7 @@ export class EditTool implements AgentTool<TInput> {
 			if (!request.moveTo) {
 				throw new ToolError("Native edit move request omitted destination", { path: request.path });
 			}
-			const mode = process.platform === "win32" ? undefined : (await fs.stat(request.path)).mode & 0o7777;
+			const mode = await movedFileMode(request.path);
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
 			await writeFileWithFallback(request.moveTo, request.content);
 			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
