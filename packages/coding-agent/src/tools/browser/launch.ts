@@ -214,9 +214,13 @@ export async function connectPuppeteer(puppeteer: typeof Puppeteer, options: Con
  */
 export function browserConnection(browser: Browser): Connection {
 	// Puppeteer's CDP browser keeps its connection behind an internal getter.
-	if (!("_connection" in browser)) throw new ToolError("Puppeteer browser exposes no CDP connection");
-	const connection = browser._connection as Connection;
+	const connection = "_connection" in browser ? browser._connection : undefined;
+	if (!isCdpConnection(connection)) throw new ToolError("Puppeteer browser exposes no CDP connection");
 	return connection;
+}
+
+function isCdpConnection(value: unknown): value is Connection {
+	return isRecord(value) && typeof value.send === "function" && typeof value.createSession === "function";
 }
 
 /** Return device descriptors from the already-loaded Puppeteer module. */

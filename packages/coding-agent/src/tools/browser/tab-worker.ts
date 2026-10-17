@@ -221,17 +221,18 @@ import { navigateMainFrame, pushState, reloadPage, traverseHistory, type Navigat
 
 import { cloneSafe, RunOutput } from "./run-output";
 import { type UploadRoute, UploadStaging } from "./upload-files";
-import type {
-	Observation,
-	ObservationEntry,
-	ReadyInfo,
-	RunErrorPayload,
-	ScreenshotResult,
-	SessionSnapshot,
-	ToolReply,
-	Transport,
-	WorkerInbound,
-	WorkerInitPayload,
+import {
+	type Observation,
+	type ObservationEntry,
+	ownsPage,
+	type ReadyInfo,
+	type RunErrorPayload,
+	type ScreenshotResult,
+	type SessionSnapshot,
+	type ToolReply,
+	type Transport,
+	type WorkerInbound,
+	type WorkerInitPayload,
 } from "./tab-protocol";
 
 declare module "puppeteer-core" {
@@ -1224,17 +1225,29 @@ async function targetIdForPage(page: Page): Promise<string> {
 
 async function createTrackedPage(
 	browser: Browser,
-	options: { background: boolean; nearTargetId?: string },
+	relay: { nearTargetId?: string } | undefined,
 	reportTarget: (targetId: string) => void,
 ): Promise<Page> {
-	// `nearTargetId` is the omp relay's own parameter (the browser to open in); only relay creates carry it.
-	const params: Protocol.Target.CreateTargetRequest & { nearTargetId?: string } = {
-		url: "about:blank",
-		background: options.background || undefined,
-		nearTargetId: options.nearTargetId,
-	};
-	const { targetId } = await browserConnection(browser).send("Target.createTarget", params);
-	reportTarget(targetId);
+	let targetId: string;
+	if (relay) {
+		// The omp relay has no attachable browser target, so its tab is created over the root connection:
+		// unselected, in the browser of `nearTargetId` (the relay's own parameter) when given.
+		const params: Protocol.Target.CreateTargetRequest & { nearTargetId?: string } = {
+			url: "about:blank",
+			background: true,
+			nearTargetId: relay.nearTargetId,
+		};
+		({ targetId } = await browserConnection(browser).send("Target.createTarget", params));
+		reportTarget(targetId);
+	} else {
+		const session = await browser.target().createCDPSession();
+		try {
+			({ targetId } = await session.send("Target.createTarget", { url: "about:blank" }));
+			reportTarget(targetId);
+		} finally {
+			await session.detach().catch(() => undefined);
+		}
+	}
 	const existing = browser.targets().find(target => privateTargetId(target) === targetId);
 	const target =
 		existing ??
@@ -1666,7 +1679,7 @@ export class WorkerCore {
 	async #init(payload: WorkerInitPayload): Promise<void> {
 		try {
 			this.#mode = payload.mode;
-			this.#ownsPage = payload.mode === "headless" || payload.page.kind !== "borrowed";
+			this.#ownsPage = ownsPage(payload);
 			this.#uploads = new UploadStaging(payload.uploadDir);
 			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
 			registerSemanticQueryHandlers(puppeteer);
@@ -1684,15 +1697,11 @@ export class WorkerCore {
 				// Create the target directly so its id is reportable before
 				// Puppeteer waits for target/page initialization. If that wait
 				// wedges, the supervisor can still close the created target.
-				// In a browser the user drives, the tab opens without being selected.
-				const create =
-					payload.mode === "attach"
-						? {
-								background: true,
-								nearTargetId: payload.page.kind === "create" ? payload.page.nearTargetId : undefined,
-							}
-						: { background: false };
-				this.#page = await createTrackedPage(this.#browser, create, targetId => {
+				const relay =
+					payload.mode === "attach" && payload.page.kind === "create"
+						? { nearTargetId: payload.page.nearTargetId }
+						: undefined;
+				this.#page = await createTrackedPage(this.#browser, relay, targetId => {
 					this.#transport.send({ type: "page-created", targetId });
 				});
 				this.#observeDialogs();
