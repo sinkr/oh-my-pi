@@ -161,10 +161,13 @@ describe("detectTerminalId", () => {
 
 describe("tmux client terminal resolution", () => {
 	const CLIENT_QUERY = "display-message -p #{client_termtype}\t#{client_termname}";
+	// Kitty graphics inside tmux also require pane passthrough; these tests
+	// exercise identity resolution, so the fake tmux forwards it.
+	const PASSTHROUGH_QUERY = "show-options -Apqv allow-passthrough";
 
 	async function resolveInsideFakeTmux(clientReport: string, replyDelayMs?: number): Promise<string> {
 		return withFakeTmux(
-			{ [CLIENT_QUERY]: clientReport },
+			{ [CLIENT_QUERY]: clientReport, [PASSTHROUGH_QUERY]: "on" },
 			async binDir => {
 				const proc = Bun.spawn({
 					cmd: [
@@ -182,6 +185,7 @@ console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyPro
 						TERM_PROGRAM_VERSION: "3.6b",
 						COLORTERM: "truecolor",
 						TMUX: "/tmp/tmux-1000/default,4242,0",
+						TMUX_PANE: undefined,
 						SSH_CONNECTION: "client 1 server 22",
 						PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
 					}),
