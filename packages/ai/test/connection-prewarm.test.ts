@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { buildAnthropicClientOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { buildAnthropicClientOptions, resolveAnthropicPrewarmTarget } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { prewarmModelConnection, resetConnectionPrewarmForTesting } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { resetDispatchOriginsForTesting, transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
@@ -107,6 +107,23 @@ describe("prewarmModelConnection", () => {
 		await prewarmModelConnection(model("anthropic", "anthropic-messages", "https://opencode.ai/zen"), { fetch });
 		await withEnv({ ANTHROPIC_BASE_URL: "https://llm-gateway.corp.example" }, () =>
 			prewarmModelConnection(ANTHROPIC, { fetch }),
+		);
+
+		expect(calls).toHaveLength(0);
+	});
+
+	it("settles quietly when resolving Anthropic's TLS options throws", async () => {
+		const { calls, fetch } = captureFetch();
+		await withEnv(
+			{
+				CLAUDE_CODE_USE_FOUNDRY: "1",
+				FOUNDRY_BASE_URL: undefined,
+				CLAUDE_CODE_CLIENT_CERT: "/nonexistent/client.pem",
+			},
+			async () => {
+				expect(() => resolveAnthropicPrewarmTarget(ANTHROPIC)).toThrow();
+				await expect(prewarmModelConnection(ANTHROPIC, { fetch })).resolves.toBeUndefined();
+			},
 		);
 
 		expect(calls).toHaveLength(0);

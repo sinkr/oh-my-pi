@@ -46,14 +46,18 @@ function resolvePrewarmTarget(model: Model<Api>): { origin: string; init: Reques
  * Throttled per origin; best effort, never throws.
  */
 export async function prewarmModelConnection(model: Model<Api>, options?: { fetch?: FetchImpl }): Promise<void> {
-	const target = resolvePrewarmTarget(model);
-	if (!target) return;
-	const now = Date.now();
-	const last = prewarmedAt.get(target.origin);
-	if (last !== undefined && now - last < PREWARM_INTERVAL_MS) return;
-	prewarmedAt.set(target.origin, now);
+	let origin: string | undefined;
 	try {
-		const response = await transportFetch(model, options?.fetch)(target.origin, {
+		// Inside the boundary: resolving Anthropic's TLS options throws on an
+		// unusable CA or client-certificate setup, which the real request reports.
+		const target = resolvePrewarmTarget(model);
+		if (!target) return;
+		origin = target.origin;
+		const now = Date.now();
+		const last = prewarmedAt.get(origin);
+		if (last !== undefined && now - last < PREWARM_INTERVAL_MS) return;
+		prewarmedAt.set(origin, now);
+		const response = await transportFetch(model, options?.fetch)(origin, {
 			...target.init,
 			method: "HEAD",
 			headers: {},
@@ -62,7 +66,7 @@ export async function prewarmModelConnection(model: Model<Api>, options?: { fetc
 		await response.body?.cancel();
 	} catch (error) {
 		logger.debug("Model connection prewarm failed", {
-			origin: target.origin,
+			origin,
 			error: error instanceof Error ? error.message : String(error),
 		});
 	}
