@@ -374,7 +374,7 @@ fn legacy_capture(request: CaptureRequest) -> CoreResult<RgbaImage> {
 		if super::capture_permission() {
 			DesktopError::capture_failed("CoreGraphics returned no screenshot")
 		} else {
-			DesktopError::permission_denied("macOS Screen Recording permission was revoked")
+			permission::denied(permission::screen_recording_pane())
 		}
 	})?;
 	rgba_image(&image)

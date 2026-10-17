@@ -1,5 +1,6 @@
 //! macOS privacy permissions. TCC charges each grant to the responsible
-//! process: the app that launched omp (a terminal or IDE), not omp itself.
+//! process: the app that launched omp (a terminal or IDE), or omp itself when
+//! no app did.
 
 use std::{
 	ffi::{CStr, OsStr},
@@ -45,12 +46,13 @@ pub(super) fn screen_recording_pane() -> &'static str {
 	}
 }
 
-/// A denial naming the app to enable in the Privacy & Security `pane`.
+/// A denial naming the app to enable in the Privacy & Security `pane`: the
+/// terminal or IDE that launched omp, or omp itself when nothing did.
 pub(super) fn denied(pane: &str) -> DesktopError {
 	let message = match responsible_app(RESPONSIBLE_PID) {
 		Some(app) => format!(
-			"macOS {pane} permission is not granted to {app}, the app that launched omp; enable \
-			 {app} in System Settings > Privacy & Security > {pane}"
+			"macOS {pane} permission is not granted to {app}, which macOS holds responsible for omp; \
+			 enable {app} in System Settings > Privacy & Security > {pane}"
 		),
 		None => format!(
 			"macOS {pane} permission is not granted to the app that launched omp; enable that \
