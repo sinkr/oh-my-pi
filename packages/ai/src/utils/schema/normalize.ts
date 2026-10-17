@@ -6,11 +6,11 @@
  * exposes one option-driven core plus thin dispatchers that pin the option set
  * for each target.
  */
+import { parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import { dereferenceJsonSchema } from "./dereference";
 import { upgradeJsonSchemaTo202012 } from "./draft";
-import { parseLocalRefPointer } from "./local-ref";
 import { areJsonValuesEqual, mergeCompatibleEnumSchemas, mergePropertySchemas } from "./equality";
 import {
 	ALL_CCA_TYPE_SPECIFIC_KEYS,

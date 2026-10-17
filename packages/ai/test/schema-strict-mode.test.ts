@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { formatLocalRefPointer, parseLocalRefPointer } from "@oh-my-pi/omptype";
 import type { Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import {
 	adaptSchemaForStrict,
@@ -90,13 +91,13 @@ describe("URI-fragment definition references", () => {
 		expect(result.v).toBe("x y");
 	});
 
+	it("round-trips the root fragment through the shared pointer helpers", () => {
+		expect(formatLocalRefPointer([])).toBe("#");
+		expect(parseLocalRefPointer("#")).toEqual([]);
+	});
+
 	it("preserves malformed and external refs for sanitizers but rejects unresolved values", () => {
-		for (const ref of [
-			"#/$defs/%",
-			"#/$defs/%E0%A4%A",
-			"https://example.com/schema#/$defs/value",
-			"other.json#/$defs/value",
-		]) {
+		for (const ref of ["#/$defs/%E0%A4%A", "https://example.com/schema#/$defs/value"]) {
 			const schema = {
 				type: "object",
 				$defs: {

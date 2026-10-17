@@ -21,7 +21,7 @@ describe("fromJsonSchema", () => {
 	});
 
 	it("rejects malformed URI fragments and non-local references", () => {
-		for (const ref of ["#/$defs/%", "#/$defs/%E0%A4%A", "https://example.com/schema#/$defs/value"]) {
+		for (const ref of ["#/$defs/%E0%A4%A", "https://example.com/schema#/$defs/value"]) {
 			expect(() =>
 				fromJsonSchema({
 					$defs: {

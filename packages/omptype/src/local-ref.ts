@@ -1,7 +1,8 @@
 /**
  * Shared parsing for local `$ref` URI fragments (RFC 6901 JSON Pointers).
- * Every schema resolver in this package decodes refs through these helpers so
- * percent-encoded, pointer-escaped, and empty tokens resolve identically.
+ * omptype's JSON Schema importer and pi-ai's schema resolvers decode refs
+ * through these helpers so percent-encoded, pointer-escaped, and empty tokens
+ * resolve identically everywhere.
  */
 
 /**
@@ -30,6 +31,7 @@ export function parseLocalRefPointer(ref: string): string[] | undefined {
  * inverse of {@link parseLocalRefPointer}.
  */
 export function formatLocalRefPointer(tokens: readonly string[]): string {
+	if (tokens.length === 0) return "#";
 	// `$` and the other URI sub-delims `encodeURIComponent` escapes are legal
 	// in fragments, so keep `$defs` readable; `%` stays encoded to round-trip.
 	const encoded = tokens

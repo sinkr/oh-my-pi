@@ -1,6 +1,6 @@
+import { formatLocalRefPointer, parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { areJsonValuesEqual } from "./equality";
 import { epochNext, once } from "./stamps";
-import { formatLocalRefPointer, parseLocalRefPointer } from "./local-ref";
 import { isJsonObject, type JsonObject } from "./types";
 
 export const JSON_SCHEMA_DRAFT_2020_12_URI = "https://json-schema.org/draft/2020-12/schema";

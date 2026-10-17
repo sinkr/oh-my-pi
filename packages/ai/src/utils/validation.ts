@@ -12,11 +12,11 @@
  */
 
 import { type Type, type } from "@oh-my-pi/omptype";
+import { parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Tool, ToolCall } from "../types";
 import { upgradeJsonSchemaTo202012 } from "./schema/draft";
-import { parseLocalRefPointer } from "./schema/local-ref";
 import {
 	getTagSelectedUnionBranch,
 	isJsonSchemaValueValid,
