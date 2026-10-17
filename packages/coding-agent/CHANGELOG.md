@@ -135,6 +135,9 @@
 
 - Added `statusLine.segmentOptions.pi.showProfile`: set it to `false` to hide the profile name next to the `π` brand, for example when each profile already has its own theme ([#16063](https://github.com/can1357/oh-my-pi/pull/16063) by [@shgew](https://github.com/shgew))
 - Added `sharpshooter.minPromptLength` (default 16, minimum 2) to control the shortest prompt Sharpshooter extracts decisions from ([#16043](https://github.com/can1357/oh-my-pi/pull/16043) by [@bigHippoZz](https://github.com/bigHippoZz))
+### Added
+
+- Added `/mcp reauth <name>` support for ACP and text-mode clients (emacs via agent-shell, Zed, `omp -p`): it opens the default browser on the same OAuth callback flow and persistence policy as the TUI instead of refusing with "only available in the TUI client" — omp runs on the user's machine even when driven over ACP, and the auth URL is also emitted as text for copy-paste when no browser can open ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ### Changed
 
