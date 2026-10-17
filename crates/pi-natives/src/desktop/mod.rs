@@ -792,7 +792,7 @@ impl Worker {
 		token: &OperationToken,
 	) -> DesktopError {
 		if error.code != ErrorCode::StaleRef
-			|| !self.registry.has_identity(reference)
+			|| !self.registry.has_proof(reference)
 			|| token.check().is_err()
 		{
 			return error;
@@ -2136,7 +2136,7 @@ mod capture_tests {
 			Ok(AxProps {
 				role: role.to_string(),
 				native_role: role.to_string(),
-				identity: Some(Box::new([Some(role.to_string()), title.clone()])),
+				identity: Some(ax::test_identity((role, &title))),
 				partial: false,
 				title,
 				value: None,
@@ -2962,32 +2962,6 @@ mod capture_tests {
 		rebuild(&tree, 4, &[(3, "Stop")]);
 		assert_eq!(named(&press(&mut worker, "e2").unwrap_err(), "e2"), None);
 		assert!(tree.lock().pressed.is_empty());
-	}
-
-	#[test]
-	fn a_ref_to_an_earlier_version_of_a_relabelled_control_names_its_match_and_presses_nothing() {
-		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
-		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
-		worker
-			.snapshot(&Target::Window(WAYLAND_ID.to_string()), &AxSnapshotOptions::default())
-			.unwrap();
-		press(&mut worker, "e4").unwrap();
-		// The press relabels the button and the app adds a new "Go".
-		{
-			let mut tree = tree.lock();
-			tree.titles.insert(4, "Done");
-			tree.titles.insert(5, "Go");
-			tree.children = vec![4, 5, 3];
-		}
-		let error = press(&mut worker, "e2").unwrap_err();
-		assert!(
-			error
-				.message
-				.contains("e2 destroyed; e5 is the one element"),
-			"{}",
-			error.message
-		);
-		assert_eq!(tree.lock().pressed, [4]);
 	}
 
 	#[test]

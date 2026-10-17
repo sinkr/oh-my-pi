@@ -5,6 +5,7 @@ mod popup;
 use std::{
 	collections::VecDeque,
 	ffi::c_void,
+	hash::{DefaultHasher, Hash, Hasher},
 	mem,
 	ops::Range,
 	ptr::{self, NonNull},
@@ -21,9 +22,7 @@ use objc2_core_foundation::{
 
 use super::{
 	super::{
-		ax::{
-			AxBounds, AxHandle, AxIdentity, AxProps, UNKNOWN_FIELD, WalkBounds, normalize_role_macos,
-		},
+		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
 		backend::AxBackend,
 		control,
 		error::{CoreResult, DesktopError},
@@ -852,7 +851,7 @@ fn element_props(
 	let title = nonempty(string(TITLE));
 	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
 	let description = nonempty(string(DESCRIPTION));
-	let identity = read_identity(values, &native_role);
+	let identity = read_identity(values, &native_role, [&title, &value, &description]);
 	Ok(AxProps {
 		role: normalize_role_macos(&native_role),
 		native_role,
@@ -874,39 +873,51 @@ fn element_props(
 	})
 }
 
-/// The [`NODE_ATTRIBUTES`] that, after `AXRole`, make up an element's
-/// [`AxIdentity`], in its order.
+/// The [`NODE_ATTRIBUTES`] that, with `AXRole`, tell an element apart in its
+/// window.
 const IDENTIFYING: [usize; 9] =
 	[SUBROLE, ROLE_DESCRIPTION, TITLE, DESCRIPTION, VALUE, VALUE_DESCRIPTION, HELP, IDENTIFIER, URL];
 
-/// The element's [`AxIdentity`], or `None` when the app did not get to answer
-/// one of the [`IDENTIFYING`] attributes, as when it was too busy to reply:
-/// the walk that met it then can't vouch for any identity. A read that fails
-/// outright is [`UNKNOWN_FIELD`]: the element itself is never re-found, and
-/// it counts as a twin of any element agreeing with its other fields, since
-/// `AppKit` fails some attributes on every read, a checkbox's `AXSubrole`
-/// among them, and a window holding one must stay readable.
-fn read_identity(values: &NodeValues, native_role: &str) -> Option<AxIdentity> {
-	let mut identity = Vec::with_capacity(IDENTIFYING.len() + 1);
-	identity.push(Some(native_role.to_owned()));
+/// The element's [`AxProps::identity`], hashed from its role and
+/// [`IDENTIFYING`] attributes, its title, value and description as
+/// [`element_props`] reads them. `None` when the app did not get to answer
+/// one of them, as when it was too busy to reply: the walk that met it then
+/// can't vouch for any identity. A read that fails outright counts as its own
+/// value, since `AppKit` fails some attributes on every read, a checkbox's
+/// `AXSubrole` among them.
+fn read_identity(
+	values: &NodeValues,
+	native_role: &str,
+	[title, value, description]: [&Option<String>; 3],
+) -> Option<u64> {
+	let mut hasher = DefaultHasher::new();
+	native_role.hash(&mut hasher);
 	for index in IDENTIFYING {
-		let value = match values.get(index) {
-			Err(error) if error == AXError::Failure => {
-				identity.push(Some(UNKNOWN_FIELD.to_owned()));
-				continue;
-			},
-			value if answered(&value) => value.ok().flatten(),
-			_ => return None,
-		};
-		let text = match index {
-			VALUE | URL => value.map(|value| stringify_value(&value)),
-			_ => value
-				.and_then(|value| value.downcast::<CFString>().ok())
-				.map(|value| value.to_string()),
-		};
-		identity.push(nonempty(text));
+		let read = values.get(index);
+		if read.as_ref().err() == Some(&AXError::Failure) {
+			hasher.write_u8(0);
+			continue;
+		}
+		if !answered(&read) {
+			return None;
+		}
+		hasher.write_u8(1);
+		match index {
+			TITLE => title.hash(&mut hasher),
+			VALUE => value.hash(&mut hasher),
+			DESCRIPTION => description.hash(&mut hasher),
+			URL => nonempty(read.ok().flatten().map(|url| stringify_value(&url))).hash(&mut hasher),
+			_ => nonempty(
+				read
+					.ok()
+					.flatten()
+					.and_then(|value| value.downcast::<CFString>().ok())
+					.map(|value| value.to_string()),
+			)
+			.hash(&mut hasher),
+		}
 	}
-	Some(identity.into_boxed_slice())
+	Some(hasher.finish())
 }
 
 /// Whether an attribute read got the element's answer: a value, or the
@@ -1873,27 +1884,19 @@ mod tests {
 				|_| unreachable!("an answered batch needs no lone reads"),
 			)
 		};
-		// Missing and unsupported attributes are answers.
-		let identity = read_identity(&walk(&no_value), "AXButton").unwrap();
-		assert_eq!(identity.len(), 10);
-		assert_eq!(identity[0].as_deref(), Some("AXButton"));
-		assert_eq!(identity[3].as_deref(), Some("Go"));
-		assert_eq!(
-			identity
-				.iter()
-				.skip(1)
-				.filter(|field| field.is_some())
-				.count(),
-			1
-		);
+		let go = Some("Go".to_string());
+		let identity = |values: &NodeValues| read_identity(values, "AXButton", [&go, &None, &None]);
+		// Missing and unsupported attributes are the same answer.
+		let answered_none = identity(&walk(&no_value)).unwrap();
+		assert_eq!(identity(&walk(&unsupported)), Some(answered_none));
 		assert!(answered(&walk(&no_value).get(CHILDREN)));
-		// A read that failed outright leaves the identity, with that field
-		// unknown.
-		let failing = read_identity(&walk(&failed), "AXButton").unwrap();
-		assert_ne!(failing, identity);
-		assert_eq!(read_identity(&walk(&failed), "AXButton").unwrap(), failing);
-		// One the app was too busy to answer is unknown.
-		assert!(read_identity(&walk(&busy), "AXButton").is_none());
+		// A read that failed outright is an answer of its own, the same on
+		// every read.
+		let failing = identity(&walk(&failed)).unwrap();
+		assert_ne!(failing, answered_none);
+		assert_eq!(identity(&walk(&failed)), Some(failing));
+		// One the app was too busy to answer leaves no identity.
+		assert!(identity(&walk(&busy)).is_none());
 
 		// A batch that fails as a whole falls back to lone reads without the
 		// identity-only attributes, so the element has no identity.
@@ -1908,7 +1911,7 @@ mod tests {
 				_ => Err(AXError::NoValue),
 			},
 		);
-		assert!(read_identity(&lone, "AXButton").is_none());
+		assert!(identity(&lone).is_none());
 		assert!(!answered(&lone.get(CHILDREN)));
 	}
 

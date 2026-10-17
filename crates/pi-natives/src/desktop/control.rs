@@ -572,16 +572,15 @@ pub(crate) fn grant_for_test(source: &CancellationSource) {
 	*source.0.state.lock() = Some(Arc::new(owner));
 }
 
-/// Removes this process's private kernel lock (see `KernelLease::path`).
-#[cfg(test)]
-pub(crate) fn remove_test_lock() {
-	#[cfg(unix)]
-	let _ = std::fs::remove_file(KernelLease::path());
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Removes this process's private kernel lock (see `KernelLease::path`).
+	fn remove_test_lock() {
+		#[cfg(unix)]
+		let _ = std::fs::remove_file(KernelLease::path());
+	}
 
 	#[test]
 	fn task_lease_survives_retirement_but_abort_and_release_revoke_it() {

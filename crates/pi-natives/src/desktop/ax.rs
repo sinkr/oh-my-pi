@@ -102,41 +102,14 @@ pub struct AxProps {
 	pub bounds:      Option<AxBounds>,
 	pub actions:     Vec<String>,
 	pub child_count: u32,
-	/// What tells the element apart from the others in its window, compared
-	/// whole to re-find it once the app has destroyed it; `None` where the
-	/// backend reads none or could not read every identifying field.
-	pub identity:    Option<AxIdentity>,
+	/// Hash of the fields that tell the element apart in its window, compared
+	/// to name the one element left with them once the app has destroyed it;
+	/// `None` where the backend reads none or could not read them all.
+	pub identity:    Option<u64>,
 	/// The backend failed to read an identifying field or the children of an
 	/// element that is still there, so a read that met it cannot tell whether
 	/// an identity is unique in the window.
 	pub partial:     bool,
-}
-
-/// An element's identifying fields, in a fixed backend-defined order; two
-/// elements match only when every field is equal. A field holding
-/// [`UNKNOWN_FIELD`] could hold anything.
-pub type AxIdentity = Box<[Option<String>]>;
-
-/// Stands in an [`AxIdentity`] for a field the app failed to report, as
-/// `AppKit` does with a checkbox's `AXSubrole` on every read: the element
-/// can't be re-found by it, and it could be a twin of any element that agrees
-/// with its other fields.
-pub const UNKNOWN_FIELD: &str = "\0unknown";
-
-fn has_unknown(identity: &AxIdentity) -> bool {
-	identity
-		.iter()
-		.any(|field| field.as_deref() == Some(UNKNOWN_FIELD))
-}
-
-/// Whether an element with identity `candidate` could be one with `target`:
-/// every field is equal or unknown in `candidate`.
-fn could_be(candidate: &AxIdentity, target: &AxIdentity) -> bool {
-	candidate.len() == target.len()
-		&& candidate
-			.iter()
-			.zip(target)
-			.all(|(field, wanted)| field.as_deref() == Some(UNKNOWN_FIELD) || field == wanted)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,13 +128,34 @@ pub enum WalkBounds {
 	Skip,
 }
 
-/// A walk of a window: the window element it read and the limits it read
-/// within.
+/// What one read says about an element's identity.
+pub(crate) enum Uniqueness<'a> {
+	/// No other element of this walk of the whole window shares it.
+	Proven(&'a WholeWalk),
+	/// Another element of the walk shares it.
+	Shared,
+	/// A read that cannot tell, of the element alone or of part of the
+	/// window: an earlier proof stands while the identity is unchanged.
+	Unknown,
+}
+
+/// A walk that read every element of the window element `root` still there,
+/// within these limits. A window id the system has since given to another
+/// window is not the window to search, and a search reads as far as the walk
+/// that proved the identity did.
 #[derive(Clone)]
-struct WindowWalk {
+pub(crate) struct WholeWalk {
 	root:      AxHandle,
 	max_nodes: u32,
 	max_depth: u32,
+}
+
+/// Why a ref's identity can name its element's one copy: it was unique in
+/// `walk`.
+#[derive(Clone)]
+struct Proof {
+	identity: u64,
+	walk:     WholeWalk,
 }
 
 struct Registered {
@@ -171,14 +165,7 @@ struct Registered {
 	/// Role and label at registration. An identity read again with another
 	/// role or label gets a new ref.
 	fingerprint: u64,
-	/// The element's [`AxIdentity`], kept only when no other element read
-	/// with it shared it, so a `StaleRef` can name the one element left with
-	/// it.
-	identity:    Option<AxIdentity>,
-	/// The walk that proved `identity`: a window id the system has since
-	/// given to another window, of this process or another, is not the window
-	/// to search, and a search reads as far as that walk did.
-	window:      Option<WindowWalk>,
+	proof:       Option<Proof>,
 }
 
 pub struct AxRegistry {
@@ -188,8 +175,6 @@ pub struct AxRegistry {
 	/// Ref of each element registered under each target, so an element read
 	/// again keeps its ref.
 	refs:        HashMap<String, HashMap<AxHandle, u64>>,
-	/// Each target's last walk.
-	roots:       HashMap<String, WindowWalk>,
 }
 
 impl Default for AxRegistry {
@@ -199,7 +184,6 @@ impl Default for AxRegistry {
 			generations: HashMap::new(),
 			entries:     HashMap::new(),
 			refs:        HashMap::new(),
-			roots:       HashMap::new(),
 		}
 	}
 }
@@ -210,16 +194,6 @@ impl AxRegistry {
 		let generation = self.generations.entry(target.to_string()).or_default();
 		*generation = generation.saturating_add(1);
 		*generation
-	}
-
-	/// Notes the walk of `target`'s window element `root`, for the identities
-	/// it proves.
-	fn note_window(&mut self, target: &str, root: &AxHandle, state: &WalkState) {
-		self.roots.insert(target.to_string(), WindowWalk {
-			root:      root.clone(),
-			max_nodes: state.max_nodes,
-			max_depth: state.max_depth,
-		});
 	}
 
 	/// Ends `target`'s snapshot `generation` once it has registered its
@@ -240,9 +214,9 @@ impl AxRegistry {
 	/// read again with another role or label, or whose element from the last
 	/// read is gone, gets a new ref; the old ref keeps the element it was read
 	/// from until it expires like any ref not read again. An element without an
-	/// identity gets a new ref on every read. `unique` says whether any other
-	/// element of this read shares the element's [`AxIdentity`]; `None` for a
-	/// read of the element alone, which keeps what an earlier read found.
+	/// identity gets a new ref on every read. `uniqueness` says whether the
+	/// element's [`AxProps::identity`] can name its one copy once the app has
+	/// destroyed it.
 	pub(crate) fn register(
 		&mut self,
 		backend: &mut dyn AxBackend,
@@ -250,7 +224,7 @@ impl AxRegistry {
 		generation: u64,
 		handle: AxHandle,
 		props: &AxProps,
-		unique: Option<bool>,
+		uniqueness: Uniqueness,
 	) -> String {
 		let mut hasher = DefaultHasher::new();
 		props.role.hash(&mut hasher);
@@ -284,31 +258,22 @@ impl AxRegistry {
 			}
 			id
 		});
-		let (identity, window) = match unique {
-			Some(true) => (
-				props
-					.identity
-					.clone()
-					.filter(|identity| !has_unknown(identity)),
-				self
-					.roots
-					.get(target)
-					.filter(|walk| walk.root.identified())
-					.cloned(),
-			),
-			Some(false) => (None, None),
-			None => renewed
-				.and_then(|id| self.entries.get(&id))
-				.filter(|entry| entry.identity.is_some() && entry.identity == props.identity)
-				.map_or((None, None), |entry| (entry.identity.clone(), entry.window.clone())),
+		let proof = match uniqueness {
+			Uniqueness::Proven(walk) => props
+				.identity
+				.map(|identity| Proof { identity, walk: walk.clone() }),
+			Uniqueness::Shared => None,
+			Uniqueness::Unknown => renewed
+				.and_then(|id| self.entries.remove(&id))
+				.and_then(|entry| entry.proof)
+				.filter(|proof| props.identity == Some(proof.identity)),
 		};
 		self.entries.insert(id, Registered {
 			handle,
 			target_key: target.to_string(),
 			generation,
 			fingerprint,
-			identity,
-			window,
+			proof,
 		});
 		self.enforce_cap();
 		format!("e{id}")
@@ -328,12 +293,12 @@ impl AxRegistry {
 		self.entry(reference).map(|entry| entry.target_key.clone())
 	}
 
-	/// Whether `reference` was read with fields that told its element apart
-	/// in its window, so [`refind`] can search for them.
-	pub(crate) fn has_identity(&self, reference: &str) -> bool {
+	/// Whether `reference` was read with an identity that can name its
+	/// element's one copy, so [`refind`] can search for it.
+	pub(crate) fn has_proof(&self, reference: &str) -> bool {
 		self
 			.entry(reference)
-			.is_ok_and(|entry| entry.identity.is_some())
+			.is_ok_and(|entry| entry.proof.is_some())
 	}
 
 	/// Drops expired refs. An identity a newer ref took over keeps pointing at
@@ -397,8 +362,8 @@ struct WalkState {
 	/// The skipped nodes the app destroyed before the walk read them, as
 	/// Activity Monitor does with its rows while the walk is under way.
 	vanished:    u32,
-	/// Nodes read with [`AxProps::partial`] set.
-	partial:     u32,
+	/// Whether a node was read with [`AxProps::partial`] set.
+	partial:     bool,
 	max_nodes:   u32,
 	max_depth:   u32,
 	truncated:   bool,
@@ -413,7 +378,7 @@ impl WalkState {
 			visited: 0,
 			skipped: 0,
 			vanished: 0,
-			partial: 0,
+			partial: false,
 			max_nodes,
 			max_depth,
 			truncated: false,
@@ -428,11 +393,19 @@ impl WalkState {
 		self
 	}
 
-	/// Whether the walk read every element of the window that still exists, so
-	/// it can vouch that an identity is unique there. An element the app
-	/// destroyed under the walk hides none.
-	const fn whole(&self) -> bool {
-		!self.truncated && self.skipped == self.vanished && self.partial == 0
+	/// The walk of the window element `root`, when it read every element of
+	/// the window that still exists, so it can vouch that an identity is unique
+	/// there. An element the app destroyed under the walk hides none. A root
+	/// without an identity of its own could be any window.
+	fn whole(&self, root: &AxHandle) -> Option<WholeWalk> {
+		if self.truncated || self.skipped != self.vanished || self.partial || !root.identified() {
+			return None;
+		}
+		Some(WholeWalk {
+			root:      root.clone(),
+			max_nodes: self.max_nodes,
+			max_depth: self.max_depth,
+		})
 	}
 }
 
@@ -461,10 +434,8 @@ fn walk_raw(
 		},
 		Err(error) => return Err(error),
 	};
+	state.partial |= props.partial;
 	let mut children = Vec::new();
-	if props.partial {
-		state.partial = state.partial.saturating_add(1);
-	}
 	for child in child_handles {
 		if let Some(child) = walk_raw(backend, child, depth + 1, state)? {
 			children.push(child);
@@ -598,8 +569,9 @@ fn format_tree(
 	text: &mut String,
 	nodes: &mut u32,
 ) {
-	let unique = identities.unique(&node.props);
-	let reference = registry.register(backend, target, generation, node.handle, &node.props, unique);
+	let uniqueness = identities.of(&node.props);
+	let reference =
+		registry.register(backend, target, generation, node.handle, &node.props, uniqueness);
 	if !text.is_empty() {
 		text.push('\n');
 	}
@@ -665,10 +637,9 @@ pub fn snapshot(
 		options.max_depth.unwrap_or(24),
 		WalkBounds::Skip,
 	);
-	registry.note_window(target, &root, &state);
-	let root = walk_raw(backend, root, 0, &mut state)?;
-	let identities = ReadIdentities::new(root.as_ref(), &state);
-	let root = root.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
+	let tree = walk_raw(backend, root.clone(), 0, &mut state)?;
+	let identities = ReadIdentities::new(&root, tree.as_ref(), &state);
+	let root = tree.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
 	let mut text = String::new();
 	let mut node_count = 0;
 	if let Some(root) = root {
@@ -711,17 +682,16 @@ pub fn query(
 	let generation = registry.current_generation(target);
 	let root = backend.window_root(window)?;
 	let mut state = WalkState::new(5_000, 24, WalkBounds::Read);
-	registry.note_window(target, &root, &state);
-	let Some(root) = walk_raw(backend, root, 0, &mut state)? else {
+	let Some(tree) = walk_raw(backend, root.clone(), 0, &mut state)? else {
 		return Ok(Vec::new());
 	};
-	let identities = ReadIdentities::new(Some(&root), &state);
+	let identities = ReadIdentities::new(&root, Some(&tree), &state);
 	let role = query.role.as_deref().map(str::to_lowercase);
 	let title = query.title.as_deref().map(str::to_lowercase);
 	let value = query.value.as_deref().map(str::to_lowercase);
 	let limit = query.limit.unwrap_or(100).min(5_000) as usize;
 	let mut result = Vec::new();
-	let mut stack = vec![root];
+	let mut stack = vec![tree];
 	while let Some(node) = stack.pop() {
 		stack.extend(node.children.iter().rev().cloned());
 		let contains = |actual: Option<&str>, expected: Option<&String>| {
@@ -732,9 +702,9 @@ pub fn query(
 			&& contains(label(&node.props), title.as_ref())
 			&& contains(node.props.value.as_deref(), value.as_ref())
 		{
-			let unique = identities.unique(&node.props);
+			let uniqueness = identities.of(&node.props);
 			let reference =
-				registry.register(backend, target, generation, node.handle, &node.props, unique);
+				registry.register(backend, target, generation, node.handle, &node.props, uniqueness);
 			result.push(node_to_napi(reference, node.props));
 			if result.len() >= limit {
 				break;
@@ -752,7 +722,8 @@ pub fn register_node(
 ) -> CoreResult<AxNode> {
 	let props = backend.props(&handle)?;
 	let generation = registry.current_generation(target);
-	let reference = registry.register(backend, target, generation, handle, &props, None);
+	let reference =
+		registry.register(backend, target, generation, handle, &props, Uniqueness::Unknown);
 	Ok(node_to_napi(reference, props))
 }
 pub fn element_at_node(
@@ -768,68 +739,53 @@ pub fn element_at_node(
 	register_node(backend, registry, target, handle).map(Some)
 }
 
-/// What one tree walk can say about whether an identity is unique in its
+/// What one tree walk can say about whether each identity is unique in its
 /// window.
 struct ReadIdentities {
 	/// The identities more than one element of the walk shares.
-	shared:  HashSet<AxIdentity>,
-	/// The identities of the walk with an unknown field, each a possible twin
-	/// of any identity that agrees with its other fields.
-	unknown: Vec<AxIdentity>,
-	/// Whether the walk read the whole window; see [`WalkState::whole`].
-	whole:   bool,
+	shared: HashSet<u64>,
+	/// The walk, when it read the whole window.
+	whole:  Option<WholeWalk>,
 }
 
 impl ReadIdentities {
-	fn new(root: Option<&WalkNode>, state: &WalkState) -> Self {
+	fn new(root: &AxHandle, tree: Option<&WalkNode>, state: &WalkState) -> Self {
 		let mut seen = HashSet::new();
-		let mut read = Self { shared: HashSet::new(), unknown: Vec::new(), whole: state.whole() };
-		let mut stack: Vec<_> = root.into_iter().collect();
+		let mut shared = HashSet::new();
+		let mut stack: Vec<_> = tree.into_iter().collect();
 		while let Some(node) = stack.pop() {
 			stack.extend(&node.children);
-			let Some(identity) = &node.props.identity else {
-				continue;
-			};
-			if has_unknown(identity) {
-				read.unknown.push(identity.clone());
-			} else if !seen.insert(identity) {
-				read.shared.insert(identity.clone());
+			if let Some(identity) = node.props.identity
+				&& !seen.insert(identity)
+			{
+				shared.insert(identity);
 			}
 		}
-		read
+		Self { shared, whole: state.whole(root) }
 	}
 
-	/// The `unique` verdict [`AxRegistry::register`] takes for `props`: a
-	/// possible twin anywhere in the walk rules re-finding out, but only a walk
-	/// of the whole window can rule it in; a walk that missed part of it keeps
-	/// what an earlier read found.
-	fn unique(&self, props: &AxProps) -> Option<bool> {
-		let twinned = props.identity.as_ref().is_some_and(|identity| {
-			has_unknown(identity)
-				|| self.shared.contains(identity)
-				|| self.unknown.iter().any(|other| could_be(other, identity))
-		});
-		if twinned {
-			Some(false)
-		} else if self.whole {
-			Some(true)
-		} else {
-			None
+	/// A twin anywhere in the walk rules naming out, but only a walk of the
+	/// whole window can rule it in.
+	fn of(&self, props: &AxProps) -> Uniqueness<'_> {
+		match (props.identity, &self.whole) {
+			(Some(identity), _) if self.shared.contains(&identity) => Uniqueness::Shared,
+			(Some(_), Some(walk)) => Uniqueness::Proven(walk),
+			_ => Uniqueness::Unknown,
 		}
 	}
 }
 
-/// The one element of `window` with the [`AxIdentity`] `reference` was read
-/// with, registered under the ref's target, for a `StaleRef` to name once the
-/// app has destroyed the ref's element, as apps do when they rebuild a row or
-/// a control in place. The ref itself keeps naming the destroyed element:
-/// equal fields do not prove the match is the same control. `None` when the
-/// ref has no identity, or none unique in the read that registered it, the
-/// window id now names another window, the walk could not read the whole
-/// window, zero or several elements match, or the registry cap evicted the
-/// match as it was registered. The walk reads as far as the one that proved
-/// the identity did, and at least as far as `find()` does; it stops with
-/// `Cancelled` once the current operation is cancelled.
+/// The one element of `window` with the identity `reference` was read with,
+/// registered under the ref's target, for a `StaleRef` to name once the app
+/// has destroyed the ref's element, as apps do when they rebuild a row or a
+/// control in place. The ref itself keeps naming the destroyed element: equal
+/// fields do not prove the match is the same control. `None` when the ref's
+/// identity was not unique in a walk of the whole window, the window id now
+/// names another window, this walk could not read the whole window, zero or
+/// several elements match, or the registry cap evicted the match as it was
+/// registered. The walk reads as far as the one that proved the identity did,
+/// and at least as far as `find()` does; it stops with `Cancelled` once the
+/// current operation is cancelled.
 pub fn refind(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -837,49 +793,50 @@ pub fn refind(
 	reference: &str,
 ) -> CoreResult<Option<String>> {
 	let entry = registry.entry(reference)?;
-	let Some(identity) = entry.identity.clone() else {
+	let (Some(proof), target) = (entry.proof.clone(), entry.target_key.clone()) else {
 		return Ok(None);
 	};
 	let root = backend.window_root(window)?;
 	// The window id may now name another window, of this app or another.
-	let Some(proof) = entry.window.as_ref().filter(|walk| walk.root == root) else {
-		return Ok(None);
-	};
-	let mut state =
-		WalkState::new(proof.max_nodes.max(5_000), proof.max_depth.max(24), WalkBounds::Skip)
-			.cancellable();
-	let target = entry.target_key.clone();
-	// The match is proved by this walk, so a search for it reads as far.
-	registry.note_window(&target, &root, &state);
-	let Some(root) = walk_raw(backend, root, 0, &mut state)? else {
-		return Ok(None);
-	};
-	// A twin in a part the walk could not read would make the match ambiguous.
-	if !state.whole() {
+	if root != proof.walk.root {
 		return Ok(None);
 	}
-	let mut found = None;
-	let mut stack = vec![root];
+	let mut state = WalkState::new(
+		proof.walk.max_nodes.max(5_000),
+		proof.walk.max_depth.max(24),
+		WalkBounds::Skip,
+	)
+	.cancellable();
+	let tree = walk_raw(backend, root.clone(), 0, &mut state)?;
+	// A copy in a part the walk could not read would make the match ambiguous.
+	let Some(walk) = state.whole(&root) else {
+		return Ok(None);
+	};
+	let mut matches = Vec::new();
+	let mut stack: Vec<_> = tree.into_iter().collect();
 	while let Some(node) = stack.pop() {
 		stack.extend(node.children);
-		if let Some(candidate) = &node.props.identity
-			&& could_be(candidate, &identity)
-		{
-			// An element with an unknown field may or may not be the one.
-			if has_unknown(candidate) || found.is_some() {
-				return Ok(None);
-			}
-			found = Some((node.handle, node.props));
+		if node.props.identity == Some(proof.identity) {
+			matches.push((node.handle, node.props));
 		}
 	}
-	let Some((handle, props)) = found else {
+	let Ok([(handle, props)]) = <[_; 1]>::try_from(matches) else {
 		return Ok(None);
 	};
 	let generation = registry.current_generation(&target);
-	let found = registry.register(backend, &target, generation, handle, &props, Some(true));
+	let found =
+		registry.register(backend, &target, generation, handle, &props, Uniqueness::Proven(&walk));
 	// At the registry cap, registering it can evict its own generation: name
 	// no ref that already expired.
 	Ok(registry.resolve(&found).is_ok().then_some(found))
+}
+
+/// An [`AxProps::identity`] hashed from `fields`, as a backend hashes its own.
+#[cfg(test)]
+pub(crate) fn test_identity(fields: impl Hash) -> u64 {
+	let mut hasher = DefaultHasher::new();
+	fields.hash(&mut hasher);
+	hasher.finish()
 }
 
 pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()> {
@@ -1075,7 +1032,7 @@ mod tests {
 			bounds:      None,
 			actions:     Vec::new(),
 			child_count: 0,
-			identity:    Some(Box::new([Some(role.to_string()), title.map(str::to_string)])),
+			identity:    Some(test_identity((role, title))),
 			partial:     false,
 		}
 	}
@@ -1098,7 +1055,8 @@ mod tests {
 		let mut r = AxRegistry::default();
 		for g in 1..=3 {
 			let generation = r.begin_snapshot("x");
-			r.register(&mut m, "x", generation, AxHandle::Test(g), &p("button", None), None);
+			let button = p("button", None);
+			r.register(&mut m, "x", generation, AxHandle::Test(g), &button, Uniqueness::Unknown);
 			r.end_snapshot("x", generation);
 		}
 		assert!(r.resolve("e1").is_err());
@@ -1329,59 +1287,6 @@ mod tests {
 		);
 	}
 	#[test]
-	fn a_field_the_app_failed_to_report_matches_nothing_for_certain() {
-		let unknown = |role: &str| {
-			let mut props = p(role, None);
-			props.identity = Some(Box::new([Some(role.to_string()), Some(UNKNOWN_FIELD.into())]));
-			props
-		};
-		let mock = |children: Vec<u64>| Mock {
-			props: [
-				(1, p("window", Some("Title"))),
-				(2, p("button", Some("Go"))),
-				(3, p("button", Some("Stop"))),
-				(4, p("button", Some("Go"))),
-				(5, unknown("checkbox")),
-				(6, unknown("button")),
-				(7, unknown("button")),
-			]
-			.into(),
-			children: [(1, children)].into(),
-			..Default::default()
-		};
-		let refound = |m: &mut Mock, registry: &mut AxRegistry, reference: &str| {
-			refind(m, registry, &window(), reference)
-				.unwrap()
-				.map(|found| matches!(registry.resolve(&found).unwrap(), AxHandle::Test(4)))
-		};
-		// An element with an unknown field of another role blocks nothing.
-		let mut m = mock(vec![2, 3, 5]);
-		let mut registry = AxRegistry::default();
-		snapshot(&mut m, &mut registry, &window(), &AxSnapshotOptions::default()).unwrap();
-		m.children.insert(1, vec![4, 3, 5]);
-		assert_eq!(refound(&mut m, &mut registry, "e2"), Some(true));
-		// One whose other fields agree could be the copy, so nothing is.
-		m.children.insert(1, vec![4, 3, 6]);
-		assert_eq!(refound(&mut m, &mut registry, "e2"), None);
-		// It could also be a twin when the ref is read.
-		let mut m = mock(vec![2, 3, 6]);
-		let mut registry = AxRegistry::default();
-		snapshot(&mut m, &mut registry, &window(), &AxSnapshotOptions::default()).unwrap();
-		m.children.insert(1, vec![4, 3]);
-		assert_eq!(refound(&mut m, &mut registry, "e2"), None);
-		// Nor is an element with an unknown field re-found by it, even when
-		// its replacement fails the same read.
-		let mut m = mock(vec![6, 3]);
-		let mut registry = AxRegistry::default();
-		snapshot(&mut m, &mut registry, &window(), &AxSnapshotOptions::default()).unwrap();
-		m.children.insert(1, vec![7, 3]);
-		assert!(
-			refind(&mut m, &mut registry, &window(), "e2")
-				.unwrap()
-				.is_none()
-		);
-	}
-	#[test]
 	fn a_window_id_now_naming_another_window_is_not_searched() {
 		let mut m = Mock {
 			props: [
@@ -1445,25 +1350,6 @@ mod tests {
 			.unwrap()
 			.expect("the one copy");
 		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(101)));
-	}
-	#[test]
-	fn a_match_a_deep_search_found_is_searched_as_deep() {
-		let mut m = deep_go();
-		let mut registry = AxRegistry::default();
-		let deep = AxSnapshotOptions { max_depth: Some(40), ..Default::default() };
-		snapshot(&mut m, &mut registry, &window(), &deep).unwrap();
-		// A read within the default depth misses the button.
-		let read = snapshot(&mut m, &mut registry, &window(), &AxSnapshotOptions::default()).unwrap();
-		assert!(read.truncated, "{}", read.text);
-		rebuild_deep(&mut m, 100, 101);
-		let found = refind(&mut m, &mut registry, &window(), "e2")
-			.unwrap()
-			.expect("the one copy");
-		rebuild_deep(&mut m, 101, 102);
-		let again = refind(&mut m, &mut registry, &window(), &found)
-			.unwrap()
-			.expect("the one copy of the copy");
-		assert!(matches!(registry.resolve(&again).unwrap(), AxHandle::Test(102)));
 	}
 	#[test]
 	fn a_read_that_missed_part_of_the_window_cannot_make_a_ref_refindable() {
@@ -1554,10 +1440,13 @@ mod tests {
 		let mut r = AxRegistry::default();
 		let go = p("button", Some("Go"));
 		let desktop = r.current_generation("desktop");
-		assert_eq!(r.register(&mut m, "desktop", desktop, AxHandle::Test(5), &go, None), "e1");
+		let mut register = |r: &mut AxRegistry, target: &str, generation: u64| {
+			r.register(&mut m, target, generation, AxHandle::Test(5), &go, Uniqueness::Unknown)
+		};
+		assert_eq!(register(&mut r, "desktop", desktop), "e1");
 		for _ in 0..2 {
 			let generation = r.begin_snapshot("7");
-			assert_eq!(r.register(&mut m, "7", generation, AxHandle::Test(5), &go, None), "e2");
+			assert_eq!(register(&mut r, "7", generation), "e2");
 			r.end_snapshot("7", generation);
 		}
 		for _ in 0..2 {
@@ -1573,7 +1462,8 @@ mod tests {
 		let mut r = AxRegistry::default();
 		let g = r.current_generation("x");
 		for n in 0..5_001 {
-			r.register(&mut m, "x", g, AxHandle::Test(n), &p("button", None), None);
+			let button = p("button", None);
+			r.register(&mut m, "x", g, AxHandle::Test(n), &button, Uniqueness::Unknown);
 		}
 		assert!(r.entries.len() <= 5_000);
 		assert!(r.resolve("e1").is_err());
