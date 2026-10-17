@@ -727,7 +727,9 @@ export function queryRows(
 	table: string,
 	opts: { limit: number; offset: number; order?: string; where?: string },
 ): { columns: string[]; rows: Record<string, unknown>[]; totalCount: number } {
-	const columns = getTableColumns(db, table);
+	getTableMasterRow(db, table);
+	// table_info omits generated columns; use the columns SELECT * actually returns.
+	const columns = db.query<SqliteRow, []>(`SELECT * FROM ${quoteSqliteIdentifier(table)} LIMIT 0`).columnNames;
 	const validatedWhere = validateWhereClause(opts.where);
 	const whereClause = validatedWhere ? ` WHERE ${validatedWhere}` : "";
 	const orderClause = resolveOrderClause(opts.order, columns);
