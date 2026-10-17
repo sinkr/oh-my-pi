@@ -819,6 +819,19 @@ function isEvalActivity(message: AgentMessage): boolean {
 	);
 }
 
+/** A retry supersedes a failed operation only when its intent matches, allowing a missing append phase to be supplied. */
+function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string, unknown>): boolean {
+	if (Bun.deepEquals(failed, retry)) return true;
+	if (failed.op !== "append" || Object.hasOwn(failed, "phase") || typeof retry.phase !== "string") return false;
+	for (const key in failed) {
+		if (!Object.hasOwn(retry, key) || !Bun.deepEquals(failed[key], retry[key])) return false;
+	}
+	for (const key in retry) {
+		if (key !== "phase" && !Object.hasOwn(failed, key)) return false;
+	}
+	return true;
+}
+
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -3971,6 +3984,51 @@ export class AgentSession implements SettingsScope {
 		this.tokenRate.reset();
 	}
 
+	#todoCallArguments(toolCallId: string): Record<string, unknown> | undefined {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message?.role !== "assistant") continue;
+			const call = message.content.find(
+				(part): part is ToolCall => part.type === "toolCall" && part.id === toolCallId && part.name === "todo",
+			);
+			if (call) return call.arguments;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call.
+	 * Exact retries (or an `append` that only supplies the missing phase) clear
+	 * every matching failure. Otherwise the call is treated as a corrected retry
+	 * of the oldest outstanding failure with the same op (placeholder task text,
+	 * missing items, ...); failures of other ops stay queued.
+	 */
+	#dropSupersededTodoReminders(retry: Record<string, unknown>, op: string | undefined): void {
+		const reminders: Array<{ message: CustomMessage; details: Record<string, unknown> }> = [];
+		for (const message of this.#pendingNextTurnMessages) {
+			if (message.customType === "todo-error-reminder" && isRecord(message.details)) {
+				reminders.push({ message, details: message.details });
+			}
+		}
+		const exact = reminders.filter(({ details }) => {
+			const failed = details.attemptedArgs;
+			return isRecord(failed) && todoRetryMatches(failed, retry);
+		});
+		const superseded =
+			exact.length > 0
+				? exact
+				: reminders
+						.filter(({ details }) => {
+							const failedOp = stringProperty(details, "attemptedOp");
+							return failedOp === undefined || failedOp === op;
+						})
+						.slice(0, 1);
+		if (superseded.length === 0) return;
+		const dropped = new Set(superseded.map(({ message }) => message));
+		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !dropped.has(message));
+	}
+
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
 		const eventPromptGeneration = this.#promptGeneration;
 		if (event.type === "agent_end" && this.#activeAgentContinue) {
@@ -4314,12 +4372,22 @@ export class AgentSession implements SettingsScope {
 				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
 					this.#scheduleReplanTitleRefresh();
 				}
+				if (toolName === "todo" && !isError && details?.op !== "view") {
+					const retry = this.#todoCallArguments(toolCallId);
+					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
+				}
 				if (toolName === "todo" && isError) {
 					const errorText = content.find(part => part.type === "text")?.text;
+					const attemptedArgs = this.#todoCallArguments(toolCallId);
+					// The tool result already contains the full snapshot. Only carry the
+					// failure reason into a deferred reminder: another mutation can change
+					// the list while this specific failed operation remains outstanding.
+					const summaryEnd = errorText?.startsWith("Errors: ") ? errorText.indexOf("\n") : -1;
+					const failureReason = summaryEnd === -1 ? errorText : errorText?.slice(0, summaryEnd);
 					const reminderText = [
 						"<system-reminder>",
 						"todo failed, so todo progress is not visible to the user.",
-						errorText ? `Failure: ${errorText}` : "Failure: todo returned an error.",
+						failureReason ? `Failure: ${failureReason}` : "Failure: todo returned an error.",
 						"Fix the todo payload and call todo again before continuing.",
 						"</system-reminder>",
 					].join("\n");
@@ -4328,7 +4396,14 @@ export class AgentSession implements SettingsScope {
 							customType: "todo-error-reminder",
 							content: reminderText,
 							display: false,
-							details: { toolName, errorText },
+							details: {
+								toolName,
+								errorText: failureReason,
+								attemptedArgs,
+								attemptedOp:
+									(details && stringProperty(details, "op")) ??
+									(attemptedArgs && stringProperty(attemptedArgs, "op")),
+							},
 						},
 						{ deliverAs: "nextTurn" },
 					);
