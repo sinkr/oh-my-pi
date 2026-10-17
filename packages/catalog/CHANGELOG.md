@@ -6,6 +6,8 @@
 
 - Fixed OpenCode Zen bringing back its retired bundled models after a failed refresh: the retry-backoff write no longer drops the cached snapshot's retention, so the pruned catalog survives the retry window and offline launches. ([#16054](https://github.com/can1357/oh-my-pi/pull/16054) by [@adi-IL](https://github.com/adi-IL))
 - Fixed `providers.cacheWarming` never arming for Claude on Google Antigravity: Claude models there now declare Vertex Anthropic's five-minute prompt-cache lifetime; Gemini models stay unwarmed because Google's implicit cache has no fixed lifetime ([#15764](https://github.com/can1357/oh-my-pi/issues/15764), [#16025](https://github.com/can1357/oh-my-pi/pull/16025) by [@harshaygadekar](https://github.com/harshaygadekar))
+- Scoped Jev image bounds to the selected models instead of applying them to unrelated native judges ([#16002](https://github.com/can1357/oh-my-pi/pull/16002) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Fixed Bedrock sessions rejecting replayed tool names over 64 characters after a model switch ([#15839](https://github.com/can1357/oh-my-pi/issues/15839))
 
 ## [18.11.3] - 2026-10-16
 
@@ -32,7 +34,6 @@
 
 ### Fixed
 
-- Scoped Jev image bounds to the selected models instead of applying them to unrelated native judges ([#16002](https://github.com/can1357/oh-my-pi/pull/16002) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed OpenCode Zen Gemini 4 Argon failing with an unsupported protocol; it now uses the native Gemini endpoint ([#15977](https://github.com/can1357/oh-my-pi/issues/15977)).
 
 ## [18.11.1] - 2026-10-15
@@ -45,7 +46,6 @@
 - Removed Google Antigravity's Gemini 3.5 Flash and its `gemini-3-flash` alias from the model list; Antigravity retired them and answers every request with a retirement notice instead of a reply ([#15445](https://github.com/can1357/oh-my-pi/pull/15445) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `xai-oauth` Grok 4.20 models (`grok-4.20-0309-reasoning`, `-non-reasoning`, `grok-4.20-multi-agent-0309`) advertising a 2M context window when the SuperGrok API rejects prompts over 1M; auto-compaction and context usage now work from the 1M window ([#15443](https://github.com/can1357/oh-my-pi/pull/15443) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed trailing-dot `localhost.` and `*.local.` custom endpoints losing local-backend compatibility settings ([#15798](https://github.com/can1357/oh-my-pi/issues/15798)).
-- Fixed Bedrock sessions rejecting replayed tool names over 64 characters after a model switch ([#15839](https://github.com/can1357/oh-my-pi/issues/15839))
 
 ## [18.11.0] - 2026-10-14
 
