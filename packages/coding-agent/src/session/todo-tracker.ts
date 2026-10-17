@@ -39,8 +39,10 @@ const ADDRESSEE_RE = /\b(?:you|your)\b/i;
 // Imperatives ("tell me", "message me") and conditional permission ("If you confirm, I'll…").
 const USER_RESPONSE_CUE_RE =
 	/^(?:please\s+)?(?:confirm|reply|choose|pick|decide|advise|answer|approve)\b|^(?:please\s+)?(?:let\s+me\s+know|(?:tell|message|ping)\s+me)\b|^(?:if|once|when)\s+you\s+(?:confirm|approve|agree|allow|okay|ok|give)\b/i;
-// Connectives that open a cue sentence without changing it: "Separately, tell me…", "Then message me…".
-const LEADING_CONNECTIVE_RE = /^(?:and|or|so|then|also|otherwise|alternatively|separately|finally)\b,?\s*/i;
+// Strip a connective only before an explicit address/permission cue; bare response
+// words can be nouns ("Finally, answer validation is complete.").
+const LEADING_CONNECTIVE_RE =
+	/^(?:and|or|so|then|also|otherwise|alternatively|separately|finally)\b,?\s*(?=(?:please\b|let\s+me\s+know\b|(?:tell|message|ping)\s+me\b|(?:if|once|when)\s+you\b))/i;
 // Western terminators need trailing whitespace (so `foo?: string` stays whole); CJK ones do not.
 const SENTENCE_BREAK_RE = /(?<=[.!?…])\s+|(?<=[。！？])/;
 /**

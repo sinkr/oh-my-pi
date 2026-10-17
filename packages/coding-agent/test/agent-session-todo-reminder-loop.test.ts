@@ -321,6 +321,7 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		"Let me continue with slice 82.",
 		// A one-line paragraph after a question may be its answer.
 		"Do you need to update anything?\n\nNo, the configuration remains compatible.",
+		"Finally, answer validation is complete.",
 	])("still resumes when no request is left open: %s", async text => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
