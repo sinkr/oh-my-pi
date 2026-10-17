@@ -440,6 +440,41 @@ Average Latency: 1,240 ms
 			expect(lines.some(line => line.includes("Second"))).toBe(false);
 		});
 
+		it("keeps a held streaming cell's visible lines when its column is one cell wide", () => {
+			const markdown = new Markdown(
+				"| a | b |\n| --- | --- |\n| 1 | 2 |\n| x<br>y<br>z | defgh",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(12).map(line => stripVTControlCharacters(line).trimEnd());
+			clearRenderCache();
+			// Only the last held line gives way to the marker; the lines above it fit and stay.
+			expect(lines.slice(-4, -1)).toEqual(["| x | d |", "| y | e |", "| z | … |"]);
+		});
+
+		it("keeps a held streaming cell's marker inside a two-cell column holding wide glyphs", () => {
+			const markdown = new Markdown(
+				"| a | bb |\n| --- | --- |\n| 1 | 22 |\n| x<br>y | 漢字漢",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(12);
+			clearRenderCache();
+			const widths = new Set(lines.map(line => visibleWidth(line)));
+			// Every row, the held one included, keeps the table's border column.
+			expect(widths.size).toBe(1);
+			expect(lines.map(line => stripVTControlCharacters(line).trimEnd()).slice(-3, -1)).toEqual([
+				"| x | 漢 |",
+				"| y | …  |",
+			]);
+		});
+
 		it("measures a streaming table's finished last row even without its trailing newline", () => {
 			// Assistant text reaches Markdown trimmed, so a finished row is told apart by its closing `|`.
 			const text =
