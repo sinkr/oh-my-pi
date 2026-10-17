@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pi.showProfile` to `StatusLineSegmentOptions`: `false` keeps the `pi` segment's bare glyph under a named profile, in the rendered bar and in `describe` ([#16063](https://github.com/can1357/oh-my-pi/pull/16063) by [@shgew](https://github.com/shgew))
+
 ## [18.11.3] - 2026-10-16
 
 ### Added
