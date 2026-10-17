@@ -238,7 +238,7 @@ class TreeList implements Component {
 		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
 		| undefined;
 	#pickerOrder: { rows: readonly TreeRow<TreeSelectorNode, string>[]; order: string[] } | undefined;
-	/** Shift+Left/Right targets for one filtered rows snapshot; filtering replaces the rows array. */
+	/** Branch-navigation targets for one filtered rows snapshot; filtering replaces the rows array. */
 	#branchTargets:
 		| {
 				rows: readonly TreeRow<TreeSelectorNode, string>[];

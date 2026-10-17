@@ -8,7 +8,6 @@
 - Entry and dynamic schema: `packages/coding-agent/src/tools/eval.ts`
 - Backend enablement: `packages/coding-agent/src/tools/eval-backends.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/eval.md`
-- Code Mode transport (enabled Codex Code Mode sessions demote non-essential tools into an eval bridge): `packages/tui/src/tools/eval-format/code-mode-declarations.ts`, prompt `packages/coding-agent/src/prompts/tools/eval-code-mode.md`
 - Shared contracts: `packages/coding-agent/src/eval/backend.ts`, `types.ts`, `executor-base.ts`, `kernel-base.ts`
 - Host bridges: `packages/coding-agent/src/eval/agent-bridge.ts`, `completion-bridge.ts`, `handle-bridge.ts`, `workpool-bridge.ts`, `judgment-bridge.ts`, `judgment-batch-bridge.ts`, `budget-bridge.ts`
 - File/percent-command preparation: `packages/coding-agent/src/eval/input.ts`; extension preludes: `packages/coding-agent/src/eval/preludes.ts`
@@ -151,7 +150,7 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `agent(...)`, `workpool(...)` when spawning is allowed
 - `log(message)`, `phase(title)`, `budget`
 
-JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
+JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. A bare `read("artifact://<id>")` returns the artifact file's full text, with `offset`/`limit` selecting lines, whichever session's artifacts dir holds it; selector forms such as `artifact://<id>:raw:5-9` go to the read tool. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
 
 `display()` captures JSON-compatible structures, images, markdown, or text according to the backend.
 

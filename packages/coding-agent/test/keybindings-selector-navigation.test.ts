@@ -22,6 +22,12 @@ const TEST_KEYBINDINGS = KeybindingsManager.inMemory({
 	"tui.select.down": "ctrl+n",
 });
 
+// Branch navigation ships unbound; traversal tests opt into the documented Shift+arrow bindings.
+const BRANCH_KEYBINDINGS = KeybindingsManager.inMemory({
+	"app.tree.previousBranch": "shift+left",
+	"app.tree.nextBranch": "shift+right",
+});
+
 const tempDirs: TempDir[] = [];
 
 beforeAll(() => {
@@ -296,6 +302,7 @@ describe("selector navigation keybindings", () => {
 	});
 
 	it("uses Shift+Left and Shift+Right to cycle visible branches through filtered heads", () => {
+		setKeybindings(BRANCH_KEYBINDINGS);
 		const root = createMessageNode("root", null, "Root");
 		const activeBranch = createMessageNode("active-branch", "root", "Active branch");
 		const filteredBranch = createModelNode("filtered-branch", "root");
@@ -322,6 +329,7 @@ describe("selector navigation keybindings", () => {
 	});
 
 	it("wraps Shift+Left past a branch head that is itself a fork", () => {
+		setKeybindings(BRANCH_KEYBINDINGS);
 		const root = createMessageNode("root", null, "Root");
 		const forkA = createMessageNode("a", "root", "Branch A");
 		const a1 = createMessageNode("a1", "a", "Branch A1");
@@ -346,7 +354,7 @@ describe("selector navigation keybindings", () => {
 		expect(selected).toEqual(["a", "b", "a2", "a1", "a"]);
 	});
 
-	it("follows rebound and unbound branch keybindings", () => {
+	it("leaves branch navigation unbound by default and follows configured bindings", () => {
 		const root = createMessageNode("root", null, "Root");
 		const activeBranch = createMessageNode("active-branch", "root", "Active branch");
 		const siblingBranch = createMessageNode("sibling-branch", "root", "Sibling branch");
@@ -367,15 +375,15 @@ describe("selector navigation keybindings", () => {
 			return selected;
 		};
 
-		setKeybindings(KeybindingsManager.inMemory({ "app.tree.nextBranch": "ctrl+n" }));
-		// Shift+Right no longer jumps (it lands back on the selection); the rebound key does.
-		expect(navigate(["\x1b[1;2C", CTRL_N])).toEqual(["active-branch", "sibling-branch"]);
-
-		setKeybindings(KeybindingsManager.inMemory({ "app.tree.previousBranch": [], "app.tree.nextBranch": [] }));
+		// Default registry: Shift+arrows do nothing, so Enter re-selects the starting row.
 		expect(navigate(["\x1b[1;2C", "\x1b[1;2D"])).toEqual(["active-branch", "active-branch"]);
+
+		setKeybindings(KeybindingsManager.inMemory({ "app.tree.nextBranch": "ctrl+n" }));
+		expect(navigate([CTRL_N])).toEqual(["sibling-branch"]);
 	});
 
 	it("recomputes branch targets after the filter changes", () => {
+		setKeybindings(BRANCH_KEYBINDINGS);
 		const root = createMessageNode("root", null, "Root");
 		const activeBranch = createMessageNode("active-branch", "root", "Active branch");
 		const modelBranch = createModelNode("model-branch", "root");
@@ -401,6 +409,7 @@ describe("selector navigation keybindings", () => {
 	});
 
 	it("continues branch navigation across nested fork depths", () => {
+		setKeybindings(BRANCH_KEYBINDINGS);
 		const root = createMessageNode("root", null, "Root");
 		const outerActive = createMessageNode("outer-active", "root", "Outer active branch");
 		const outerSibling = createMessageNode("outer-sibling", "root", "Outer sibling branch");

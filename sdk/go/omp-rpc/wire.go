@@ -2645,12 +2645,13 @@ func (v *FastModeResult) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type CompactionResult struct {
-	Summary          string                     `json:"summary"`
-	FirstKeptEntryID string                     `json:"firstKeptEntryId"`
-	TokensBefore     int64                      `json:"tokensBefore"`
-	ShortSummary     *string                    `json:"shortSummary,omitempty"`
-	Details          json.RawMessage            `json:"details,omitempty"`
-	PreserveData     map[string]json.RawMessage `json:"preserveData,omitempty"`
+	Summary                      string                     `json:"summary"`
+	FirstKeptEntryID             string                     `json:"firstKeptEntryId"`
+	TokensBefore                 int64                      `json:"tokensBefore"`
+	ShortSummary                 *string                    `json:"shortSummary,omitempty"`
+	Details                      json.RawMessage            `json:"details,omitempty"`
+	PreserveData                 map[string]json.RawMessage `json:"preserveData,omitempty"`
+	ProviderReplayThroughEntryID *string                    `json:"providerReplayThroughEntryId,omitempty"`
 }
 
 func (v *CompactionResult) UnmarshalJSON(data []byte) error {
@@ -2666,6 +2667,7 @@ func (v *CompactionResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("shortSummary", &out.ShortSummary)
 	d.optional("details", &out.Details)
 	d.optional("preserveData", &out.PreserveData)
+	d.optional("providerReplayThroughEntryId", &out.ProviderReplayThroughEntryID)
 	if d.err != nil {
 		return d.err
 	}
@@ -3516,7 +3518,10 @@ func (v *NotifyType) UnmarshalJSON(data []byte) error {
 	return unknownValue("NotifyType", s)
 }
 
-type AgentStartEvent struct{}
+type AgentStartEvent struct {
+	// Calls of an unpaired assistant tail a continued run executes before its first model request.
+	ResumedToolCallIds []string `json:"resumedToolCallIds,omitempty"`
+}
 
 func (v *AgentStartEvent) UnmarshalJSON(data []byte) error {
 	return decodeWith(data, "AgentStartEvent", v.decodeFrom)
@@ -3526,6 +3531,7 @@ func (v *AgentStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	var out AgentStartEvent
 	d := fieldDecoder{raw: raw, owner: "AgentStartEvent"}
 	d.constant("type", "agent_start")
+	d.optional("resumedToolCallIds", &out.ResumedToolCallIds)
 	if d.err != nil {
 		return d.err
 	}
