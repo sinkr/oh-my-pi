@@ -601,6 +601,55 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.output).toBe(report);
 	});
 
+	it("returns only the text after Cursor's last tool call in a completed turn", async () => {
+		const report = "## Result\nThe auth lookup is complete.";
+		const session = createMockSession(({ emit, state }) => {
+			const final: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				api: "cursor-agent",
+				provider: "cursor",
+				content: [
+					{ type: "text", text: "Checking auth." },
+					{ type: "toolCall", id: "tool-edit", name: "edit", arguments: { path: "src/auth.ts" } },
+					{ type: "toolCall", id: "tool-read", name: "read", arguments: { path: "src/auth.ts" } },
+					{ type: "text", text: report },
+				],
+			};
+			state.messages.push(final);
+			emit({ type: "message_end", message: final });
+			emit({ type: "agent_end", messages: [final] });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-cursor-final", structured: false });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe(report);
+	});
+
+	it("rejects a Cursor stop turn whose only text precedes its last tool call", async () => {
+		const session = createMockSession(({ emit, state }) => {
+			const unfinished: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				api: "cursor-agent",
+				provider: "cursor",
+				content: [
+					{ type: "text", text: "Checking auth." },
+					{ type: "toolCall", id: "tool-read", name: "read", arguments: { path: "src/auth.ts" } },
+				],
+			};
+			state.messages.push(unfinished);
+			emit({ type: "message_end", message: unfinished });
+			emit({ type: "agent_end", messages: [unfinished] });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-cursor-no-report", structured: false });
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_EMPTY_MESSAGE);
+	});
+
 	it("fails an unstructured run that ends without a final message", async () => {
 		const prompts: string[] = [];
 		const session = createMockSession(({ text, emit, state }) => {
