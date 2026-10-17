@@ -4,15 +4,18 @@ import type { StatusLineHost, StatusLineSession } from "../src/status-line/host"
 import type { StatusLineSettings } from "../src/status-line/types";
 import { initTheme } from "../src/theme";
 
-function createComponent(settings?: StatusLineSettings) {
-	const session = {
+function createSession(isStreaming = false) {
+	return {
 		sessionFile: undefined,
-		isStreaming: false,
+		isStreaming,
 		state: { model: undefined, messages: [] },
 		isFastModeActive: () => false,
 		getAsyncJobSnapshot: () => ({ running: [] }),
 	} as unknown as StatusLineSession;
-	const host = {
+}
+
+function createHost(settings?: StatusLineSettings) {
+	return {
 		getSettings: () => settings ?? {},
 		gitEnabled: () => false,
 		codexResetFireworksEnabled: () => false,
@@ -29,7 +32,10 @@ function createComponent(settings?: StatusLineSettings) {
 		lookupPullRequest: () => Promise.resolve({ stdout: "", exitCode: 0 }),
 		resolveActiveRepo: () => null,
 	} as unknown as StatusLineHost<StatusLineSession>;
-	const component = new StatusLineComponent(session, host);
+}
+
+function createComponent(settings?: StatusLineSettings) {
+	const component = new StatusLineComponent(createSession(), createHost(settings));
 	const repaint = vi.fn();
 	component.watchBranch(repaint);
 	return { component, repaint };
@@ -88,25 +94,29 @@ describe("status line active-window repaint ticker", () => {
 		expect(repaint.mock.calls.length).toBe(3);
 	});
 
-	it("renders an advancing spinner glyph while a turn window is open and freezes once idle", () => {
+	it("re-arms when focus returns to a session whose turn is still running", () => {
 		vi.useFakeTimers();
-		const { component } = createComponent({ leftSegments: ["pi"], rightSegments: [] });
+		const main = createSession(true);
+		const component = new StatusLineComponent(main, createHost());
+		const repaint = vi.fn();
+		component.watchBranch(repaint);
 
 		component.markActivityStart();
 		vi.advanceTimersByTime(250);
-		const activeA = Bun.stripANSI(component.renderBottomBar(80, "full"));
-		vi.advanceTimersByTime(250);
-		const activeB = Bun.stripANSI(component.renderBottomBar(80, "full"));
-		// 250 ms spans at least three 80 ms spinner frames, so the rendered
-		// bar must differ while the turn window is open.
-		expect(activeB).not.toBe(activeA);
+		expect(repaint.mock.calls.length).toBe(1);
 
-		component.markActivityEnd();
-		vi.advanceTimersByTime(1000); // settle the brand fade past its 450 ms window
-		const idleA = Bun.stripANSI(component.renderBottomBar(80, "full"));
-		vi.advanceTimersByTime(250);
-		const idleB = Bun.stripANSI(component.renderBottomBar(80, "full"));
-		expect(idleB).toBe(idleA);
+		// Focus an idle subagent: its tick sees no open window and the
+		// ticker stops itself.
+		component.setSession(createSession());
+		vi.advanceTimersByTime(2000);
+		expect(repaint.mock.calls.length).toBe(1);
+
+		// Refocus the still-running main session: its window never closed,
+		// so the synthesized agent_start is a no-op — the ticker must
+		// re-arm on its own.
+		component.setSession(main);
+		vi.advanceTimersByTime(2000);
+		expect(repaint.mock.calls.length).toBe(9);
 
 		component.dispose();
 	});

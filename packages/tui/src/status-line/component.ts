@@ -937,6 +937,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#invalidateSessionCaches();
 			this.#closeStaleActiveWindow();
 		}
+		// The ticker self-stops once its tick sees no open window for the
+		// newly-attached session; re-pointing focus at a session whose turn
+		// is still running must re-arm it, and no other path reliably fires
+		// here (closeStaleActiveWindow returns early while streaming, and
+		// the synthesized agent_start no-ops on an already-open window).
+		this.#syncActiveWindowRepaint();
 		this.invalidate();
 	}
 
@@ -955,7 +961,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (meter.activeStartedAt === null) return;
 		if (this.session.isStreaming) return;
 		meter.activeStartedAt = null;
-		this.#syncActiveWindowRepaint();
 	}
 
 	updateSettings(settings: StatusLineSettings): void {
