@@ -1,0 +1,77 @@
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { logger } from "@oh-my-pi/pi-utils";
+import type { Api, FetchImpl, Model } from "../types";
+import { isLocalOrMetadataHost } from "../utils/proxy";
+import { transportFetch } from "../utils/transport-fetch";
+import { resolveAnthropicPrewarmTarget } from "./anthropic";
+
+/**
+ * Minimum gap between warm-ups of one origin. Idle pooled sockets outlive it
+ * by minutes (Copilot drops them after ~2.5–5 min, most hosts later), so a
+ * tighter cadence would only add requests.
+ */
+const PREWARM_INTERVAL_MS = 30_000;
+const PREWARM_TIMEOUT_MS = 10_000;
+
+const prewarmedAt = new Map<string, number>();
+
+/**
+ * Where a warm-up for {@link model} goes, or `undefined` when it must not be
+ * probed. First-party Anthropic resolves its effective endpoint and TLS
+ * options; every other catalog provider warms the HTTPS origin of its
+ * `baseUrl`. Custom providers (no catalog entry) and loopback, private, or
+ * metadata hosts are never probed: a user-configured gateway gets no
+ * unsolicited traffic, and a local server has no handshake worth saving.
+ */
+function resolvePrewarmTarget(model: Model<Api>): { origin: string; init: RequestInit } | undefined {
+	if (model.provider === "anthropic") {
+		const target = resolveAnthropicPrewarmTarget(model);
+		return target && { origin: new URL(target.url).origin, init: target.init };
+	}
+	if (!providerEntry(model.provider) || !model.baseUrl) return undefined;
+	let url: URL;
+	try {
+		url = new URL(model.baseUrl);
+	} catch {
+		return undefined;
+	}
+	if (url.protocol !== "https:" || isLocalOrMetadataHost(url.hostname)) return undefined;
+	return { origin: url.origin, init: {} };
+}
+
+/**
+ * Opens, or keeps alive, a pooled connection to {@link model}'s API host so
+ * the next turn skips DNS + TCP + TLS. Sends a credential-less `HEAD` (nothing
+ * is billed; hosts answer 401/404/405) through the same transport — proxy,
+ * extra CA, Cowork profile, TLS options — as real requests, because sockets
+ * pool per transport configuration and a warm-up made any other way (e.g.
+ * `fetch.preconnect`, which also throws on Windows) is never reused.
+ * Throttled per origin; best effort, never throws.
+ */
+export async function prewarmModelConnection(model: Model<Api>, options?: { fetch?: FetchImpl }): Promise<void> {
+	const target = resolvePrewarmTarget(model);
+	if (!target) return;
+	const now = Date.now();
+	const last = prewarmedAt.get(target.origin);
+	if (last !== undefined && now - last < PREWARM_INTERVAL_MS) return;
+	prewarmedAt.set(target.origin, now);
+	try {
+		const response = await transportFetch(model, options?.fetch)(target.origin, {
+			...target.init,
+			method: "HEAD",
+			headers: {},
+			signal: AbortSignal.timeout(PREWARM_TIMEOUT_MS),
+		});
+		await response.body?.cancel();
+	} catch (error) {
+		logger.debug("Model connection prewarm failed", {
+			origin: target.origin,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
+/** Test hook: forgets every warm-up so the next call is not throttled. */
+export function resetConnectionPrewarmForTesting(): void {
+	prewarmedAt.clear();
+}
