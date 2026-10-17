@@ -63,12 +63,22 @@ export interface FindHit {
 	truncated: boolean;
 }
 
+/**
+ * How much of a search the judge actually covered. `unavailable`: every judge
+ * request failed, so an empty result is not evidence of absence. `partial`:
+ * some requests failed. `complete`: none failed (or none were needed).
+ */
+export type FindCoverage = "complete" | "partial" | "unavailable";
+
 /** Search accounting reported alongside the hits. */
 export interface FindStats {
 	/** Eligible files under the root. */
 	listed: number;
 	requests: number;
-	errors: number;
+	/** Judge requests that failed outright; decides {@link FindCoverage}. */
+	failed: number;
+	/** Questions a successful response left without a usable answer. */
+	unanswered: number;
 	/** Entries judged by name. */
 	judged: number;
 	/** Files whose content was read and sent. */
@@ -93,6 +103,7 @@ export interface FindToolDetails {
 	/** Verified-passage probability at or above which a file is a hit. */
 	threshold: number;
 	hits: FindHit[];
+	coverage: FindCoverage;
 	stats: FindStats;
 	elapsedMs: number;
 	/** Session cwd; hit paths are relative to it. */
@@ -287,16 +298,21 @@ export const findToolRenderer = {
 			`$${stats.cost.toFixed(4)}`,
 			formatDuration(details.elapsedMs),
 		];
-		if (stats.errors > 0) meta.push(uiTheme.fg("warning", `${stats.errors} failed`));
+		const failed = stats.failed > 0 ? `${stats.failed}/${stats.requests} requests failed` : undefined;
+		if (failed) meta.push(uiTheme.fg("warning", failed));
 
 		if (hits.length === 0) {
 			const emptyMeta = ["0 hits", ...scope, `$${stats.cost.toFixed(4)}`, formatDuration(details.elapsedMs)];
-			if (stats.errors > 0) emptyMeta.push(uiTheme.fg("warning", `${stats.errors} failed`));
+			if (failed) emptyMeta.push(uiTheme.fg("warning", failed));
 			const header = renderStatusLine(
 				{ icon: "warning", title: "Find", titleColor: "toolTitle", description, meta: emptyMeta },
 				uiTheme,
 			);
-			const lines = [header, formatEmptyMessage("No relevant passages found", uiTheme)];
+			const empty =
+				details.coverage === "partial"
+					? "No relevant passages found in the judged files"
+					: "No relevant passages found";
+			const lines = [header, formatEmptyMessage(empty, uiTheme)];
 			for (const failure of stats.failures) lines.push(uiTheme.fg("warning", failure));
 			return new Text(lines.join("\n"), 1, 0);
 		}
@@ -377,7 +393,8 @@ export const findToolRenderer = {
 		const { hits, stats, threshold } = details;
 		const linkTargets = findLinkTargets(details, options.renderContext?.rawDetails);
 		const scope = details.scopePath === undefined ? undefined : `in ${details.scopePath}`;
-		const failed = stats.errors > 0 ? [span(`${stats.errors} failed`, "warning")] : undefined;
+		const failed =
+			stats.failed > 0 ? [span(`${stats.failed}/${stats.requests} requests failed`, "warning")] : undefined;
 		const accounting = [
 			`${stats.filesRead} files read`,
 			`τ ${threshold.toFixed(2)}`,

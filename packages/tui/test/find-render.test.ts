@@ -37,10 +37,12 @@ const details: FindToolDetails = {
 			ranges: [{ start: 1, end: 5, p: 0.3, snippet: "x" }],
 		},
 	],
+	coverage: "partial",
 	stats: {
 		listed: 2,
 		requests: 3,
-		errors: 1,
+		failed: 1,
+		unanswered: 0,
 		judged: 2,
 		filesRead: 2,
 		fileBytes: 100,
@@ -146,7 +148,7 @@ describe("findToolRenderer", () => {
 		expect(collapsed).toContain(":10-20");
 		expect(collapsed).not.toContain(":30-40");
 		expect(collapsed).not.toContain("verification: boom");
-		expect(collapsed).toContain("1 failed");
+		expect(collapsed).toContain("1/3 requests failed");
 		expect(expanded).toContain(":30-40");
 		expect(expanded).toContain("const attempts = 3;");
 		expect(expanded).not.toContain("\t");
