@@ -32,6 +32,7 @@
 
 ### Fixed
 
+- Scoped Jev image bounds to the selected models instead of applying them to unrelated native judges ([#16002](https://github.com/can1357/oh-my-pi/pull/16002) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed OpenCode Zen Gemini 4 Argon failing with an unsupported protocol; it now uses the native Gemini endpoint ([#15977](https://github.com/can1357/oh-my-pi/issues/15977)).
 
 ## [18.11.1] - 2026-10-15
