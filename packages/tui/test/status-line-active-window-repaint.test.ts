@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { setNativeRendering } from "../src/native/state";
 import { StatusLineComponent } from "../src/status-line/component";
 import type { StatusLineHost, StatusLineSession } from "../src/status-line/host";
 import type { StatusLineSettings } from "../src/status-line/types";
@@ -51,6 +52,7 @@ function createComponent(settings?: StatusLineSettings) {
 describe("status line active-window repaint ticker", () => {
 	afterEach(() => {
 		vi.useRealTimers();
+		setNativeRendering(false);
 	});
 	beforeAll(async () => {
 		await initTheme();
@@ -117,6 +119,26 @@ describe("status line active-window repaint ticker", () => {
 		component.setSession(main);
 		vi.advanceTimersByTime(2000);
 		expect(repaint.mock.calls.length).toBe(9);
+
+		component.dispose();
+	});
+
+	it("re-arms when a native surface that suppressed the ticker is revoked mid-turn", () => {
+		vi.useFakeTimers();
+		const { component, repaint } = createComponent();
+
+		// The turn starts while a TSP surface renders the status area, so
+		// arm attempts stand down.
+		setNativeRendering(true);
+		component.markActivityStart();
+		vi.advanceTimersByTime(2000);
+		expect(repaint.mock.calls.length).toBe(0);
+
+		// The surface is revoked and rendering falls back to rows without
+		// any activity transition; the still-open window must resume.
+		setNativeRendering(false);
+		vi.advanceTimersByTime(250);
+		expect(repaint.mock.calls.length).toBe(1);
 
 		component.dispose();
 	});

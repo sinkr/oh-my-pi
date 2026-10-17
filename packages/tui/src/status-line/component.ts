@@ -43,7 +43,7 @@ import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, node, span } from "../native/describe";
 import { getContextMeterThresholds } from "../chrome/context-thresholds";
-import { isNativeRendering } from "../native/state";
+import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
@@ -694,6 +694,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
+	/** Unsubscribe for the native-rendering feed; re-arms the turn-window ticker when a TSP surface is revoked. */
+	#unwatchNativeRendering: (() => void) | undefined;
 	#autoCompactEnabled: boolean = true;
 	/** Pulse timer for the running-speculation indicator; live only while speculation runs. */
 	#speculationBlinkTimer: NodeJS.Timeout | undefined;
@@ -831,6 +833,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		private readonly host: StatusLineHost<TSession>,
 	) {
 		this.#settings = host.getSettings();
+		this.#unwatchNativeRendering = onNativeRenderingChange(() => this.#syncActiveWindowRepaint());
 	}
 
 	#gitEnabled(): boolean {
@@ -1298,8 +1301,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#stopSpeculationBlink();
 		this.#stopBrandFadeTimer();
 		this.#stopActiveWindowRepaint();
-		this.#stopPricingTimer();
-		this.#clearUsageStartTimer();
+		this.#unwatchNativeRendering?.();
+		this.#unwatchNativeRendering = undefined;
 		this.#onCodexResetFireworks = undefined;
 		this.#onResetExpiryNotice = undefined;
 		this.#codexResetSnapshots.clear();
