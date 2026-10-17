@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed pasting sometimes inserting a block of base64 text instead of the pasted text in terminals that deliver pastes through the Kitty clipboard protocol (OSC 5522), most often with dictation apps that paste for you; a slow paste now arrives whole, and keys typed while a paste never finishes are given back instead of lost ([#16170](https://github.com/can1357/oh-my-pi/pull/16170) by [@H4vC](https://github.com/H4vC))
+- Fixed inline images in iTerm2 being sized for 9x18-pixel cells: iTerm2 never answers `CSI 16 t`, so OMP now also asks with `OSC 1337 ; ReportCellSize` and uses the reported cell size and backing scale. Charts reserved the wrong number of rows, and copies cropped after a figure partly scrolled off landed offset over the original.
 
 ## [18.12.1] - 2026-10-17
 

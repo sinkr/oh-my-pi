@@ -2562,6 +2562,9 @@ export class TUI extends Container {
 		// Query terminal for cell size in pixels: CSI 16 t
 		// Response format: CSI 6 ; height ; width t
 		this.terminal.write("\x1b[16t");
+		// iTerm2 never answers CSI 16 t. Without a size, rows reserved for an image
+		// and crops of a partly scrolled one assume 9x18 cells and land offset.
+		if (TERMINAL.imageProtocol === ImageProtocol.Iterm2) this.terminal.write("\x1b]1337;ReportCellSize\x1b\\");
 	}
 
 	/**
@@ -3053,12 +3056,17 @@ export class TUI extends Container {
 	#consumeCellSizeResponse(data: string): boolean {
 		// Response format: ESC [ 6 ; height ; width t
 		const match = data.match(/^\x1b\[6;(\d+);(\d+)t$/);
-		if (!match) {
+		// iTerm2: OSC 1337 ; ReportCellSize = height ; width [; scale] ST, in points.
+		const iterm2 = match
+			? null
+			: /^\x1b\]1337;ReportCellSize=(\d+(?:\.\d+)?);(\d+(?:\.\d+)?)(?:;(\d+(?:\.\d+)?))?(?:\x07|\x1b\\)$/.exec(data);
+		if (!match && !iterm2) {
 			return false;
 		}
 
-		const heightPx = parseInt(match[1], 10);
-		const widthPx = parseInt(match[2], 10);
+		const scale = iterm2?.[3] ? Number(iterm2[3]) : 1;
+		const heightPx = match ? parseInt(match[1], 10) : Math.round(Number(iterm2![1]) * scale);
+		const widthPx = match ? parseInt(match[2], 10) : Math.round(Number(iterm2![2]) * scale);
 		if (heightPx <= 0 || widthPx <= 0) {
 			return true;
 		}
