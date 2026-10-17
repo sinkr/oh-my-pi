@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.12.1] - 2026-10-17
+
 ### Fixed
 
 - Anthropic's `request-encoding-rejection` now also matches the API's "request body is not valid JSON" 400, which a gzip body gets when a proxy drops its `Content-Encoding` header ([#16108](https://github.com/can1357/oh-my-pi/pull/16108) by [@alphastorm](https://github.com/alphastorm))
