@@ -610,7 +610,7 @@ export interface InteractiveModeContext {
 	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
 	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
 	openPlanReview(options?: { fromExtension?: boolean }): Promise<boolean>;
-	readonly modes: ExtensionModeControls;
+	readonly sessionModes: ExtensionModeControls;
 
 	// Hook UI methods
 	initHooksAndCustomTools(): Promise<void>;

@@ -435,11 +435,11 @@ const contrasting = ctx.models
   .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
 
-### Built-in session modes (`ctx.modes`)
+### Built-in session modes (`ctx.sessionModes`)
 
-Use `ctx.modes.getState()` to discover the current session's modes and supported operations, including after loading or reconnecting. It returns a detached snapshot with `sessionId`, `revision`, `plan`, `vibe`, `goal`, `loop`, and `capabilities`. Changing a returned object does not change the session.
+Use `ctx.sessionModes.getState()` to discover the current session's modes and supported operations, including after loading or reconnecting. It returns a detached snapshot with `sessionId`, `revision`, `plan`, `vibe`, `goal`, `loop`, and `capabilities`. Changing a returned object does not change the session.
 
-`await ctx.modes.set(request)` performs an explicit lifecycle operation, not a toggle or slash-command dispatch. Entering a mode does not submit a prompt. Submit the extension's request separately with `pi.sendUserMessage(request)`.
+`await ctx.sessionModes.set(request)` performs an explicit lifecycle operation, not a toggle or slash-command dispatch. Entering a mode does not submit a prompt. Submit the extension's request separately with `pi.sendUserMessage(request)`.
 
 |Mode|Direct operations|Existing control before this API|Coverage|
 |---|---|---|---|
@@ -481,7 +481,7 @@ bun packages/coding-agent/src/cli.ts -e packages/coding-agent/examples/extension
 
 #### Inventory exclusions
 
-These controls are not additional session modes and are intentionally not new `ctx.modes` operations:
+These controls are not additional session modes and are intentionally not new `ctx.sessionModes` operations:
 
 - `/plan-review`: review lifecycle, already directly controlled by the existing review API.
 - `/guided-goal`: a one-shot interview that sets up goal mode.

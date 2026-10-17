@@ -56,41 +56,10 @@ export interface ExtensionModeControls {
 	getState(): ModeSnapshot;
 	/** Explicit idempotent transition; never submits a user prompt or opens a dialog. */
 	set(request: ModeRequest): Promise<ModeResult>;
-
-	/**
-	 * Host-only guard: invoked by the session before a session-changing operation
-	 * (new/switch/fork/branch) commits. Throwing refuses the transition while an
-	 * extension-driven mode change is still in flight, so teardown cannot land in
-	 * a session the caller no longer owns. Optional — controllers without
-	 * long-running transitions may omit it.
-	 */
-	assertCanChangeSession?(): void;
 }
 
 export interface ModeChangedEvent {
 	type: "mode_changed";
 	previous: ModeSnapshot;
 	state: ModeSnapshot;
-}
-
-/** Unbound extension hosts expose no operations rather than reporting successful no-ops. */
-export function unsupportedModeControls(sessionId: () => string): ExtensionModeControls {
-	const getState = (): ModeSnapshot => ({
-		sessionId: sessionId(),
-		revision: 0,
-		plan: { status: "inactive" },
-		vibe: { status: "inactive" },
-		goal: { status: "inactive" },
-		loop: { status: "inactive" },
-		capabilities: { plan: [], vibe: [], goal: [], loop: [] },
-	});
-	return {
-		getState,
-		set: async request => ({
-			ok: false,
-			code: "unsupported",
-			message: `This host has no ${request.mode} lifecycle controller.`,
-			state: getState(),
-		}),
-	};
 }

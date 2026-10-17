@@ -647,7 +647,7 @@ export interface ExtensionContext {
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
 	/** Direct built-in session mode lifecycle; independent of prompt submission. */
-	modes: ExtensionModeControls;
+	sessionModes: ExtensionModeControls;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
@@ -2146,7 +2146,7 @@ export interface ExtensionContextActions {
 	) => boolean;
 	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
 	openPlanReview?: () => Promise<boolean>;
-	modes?: ExtensionModeControls;
+	sessionModes?: ExtensionModeControls;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];

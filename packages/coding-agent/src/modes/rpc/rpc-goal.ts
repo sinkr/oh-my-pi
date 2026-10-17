@@ -85,6 +85,8 @@ export class RpcGoalController {
 	/** Reconciles queued or running. */
 	#reconcilesPending = 0;
 	#reconciledSessionId: string | undefined;
+	/** Bumps at every change begin; a reconcile commits its dedup mark only if unchanged. */
+	#changeGeneration = 0;
 	/**
 	 * The in-progress change began while a reconcile was queued or running, so that
 	 * reconcile may have read a transcript this change later replaced or rolled back:
@@ -151,6 +153,7 @@ export class RpcGoalController {
 	 * {@link endSessionChange}.
 	 */
 	async beginSessionChange(): Promise<void> {
+		this.#changeGeneration++;
 		if (this.#sessionChanges++ === 0) {
 			// The transcript id, not `session.sessionId`: a host-pinned provider session id
 			// (`--provider-session-id`) does not change when the transcript does.
@@ -385,13 +388,20 @@ export class RpcGoalController {
 	 */
 	async reconcile(options?: { preserveActiveGoal?: boolean }): Promise<void> {
 		this.#reconcilesPending++;
-		const run = this.#reconcileTask.then(() => this.#reconcileOnce(options));
-		this.#reconcileTask = run
-			.then(() => {
+		const run = this.#reconcileTask.then(() => {
+			// Snapshot at run start, not queue start: this may sit behind another
+			// reconcile while a change lands, so it must restore the journal it reads.
+			const sessionId = this.#session.sessionManager.getSessionId();
+			const generation = this.#changeGeneration;
+			return this.#reconcileOnce(options).then(() => {
 				// Mark only after the whole restore completed: a failed reconcile
-				// stays eligible so the next caller re-runs it.
-				this.#reconciledSessionId = this.#session.sessionManager.getSessionId();
-			})
+				// stays eligible so the next caller re-runs it. A change that began
+				// during the run invalidates it — its own reconcile must not dedupe
+				// against an id this run observed mid-switch.
+				if (this.#changeGeneration === generation) this.#reconciledSessionId = sessionId;
+			});
+		});
+		this.#reconcileTask = run
 			.catch(reportControllerError)
 			.finally(() => {
 				this.#reconcilesPending--;

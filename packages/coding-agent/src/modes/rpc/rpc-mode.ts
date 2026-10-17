@@ -1398,6 +1398,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const modeController = session.modes;
 	if (modeController instanceof SessionModeController) {
 		modeController.setHost({
+			// RPC set_mode drives the lifecycle; journaled modes must reattach.
+			restoresSessionModes: true,
 			goal: request => goalController.applyModeRequest(request),
 			settled: () => goalController.settled(),
 			reconcile: options => goalController.reconcile(options),

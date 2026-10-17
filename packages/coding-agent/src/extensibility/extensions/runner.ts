@@ -42,7 +42,8 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
-import { type ExtensionModeControls, unsupportedModeControls } from "./mode-api";
+import type { ExtensionModeControls } from "./mode-api";
+import { unsupportedModeControls } from "./mode-internals";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
@@ -837,7 +838,7 @@ export class ExtensionRunner {
 		if (contextActions.resolvePlanReview) this.#resolvePlanReviewFn = contextActions.resolvePlanReview;
 		if (contextActions.getPendingPlanReview) this.#getPendingPlanReviewFn = contextActions.getPendingPlanReview;
 		if (contextActions.openPlanReview) this.#openPlanReviewFn = contextActions.openPlanReview;
-		this.#modeControls = contextActions.modes;
+		this.#modeControls = contextActions.sessionModes;
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
@@ -1415,7 +1416,7 @@ export class ExtensionRunner {
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
-			modes: {
+			sessionModes: {
 				getState: () =>
 					(this.#modeControls ?? unsupportedModeControls(() => this.sessionManager.getSessionId())).getState(),
 				set: request =>

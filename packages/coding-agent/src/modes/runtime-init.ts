@@ -148,7 +148,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			getContextUsage: () => session.getContextUsage(),
 			getSystemPrompt: () => session.systemPrompt,
 			runEphemeralTurn: args => session.runEphemeralTurn(args),
-			modes: {
+			sessionModes: {
 				getState: () => session.modes.getState(),
 				set: request => session.modes.set(request),
 			},

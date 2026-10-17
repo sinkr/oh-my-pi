@@ -1857,7 +1857,16 @@ export class AcpAgent implements Agent {
 		if (!this.#getAvailableModes(session).some(mode => mode.id === modeId)) {
 			throw new Error(`Unsupported ACP mode: ${modeId}`);
 		}
-		const result = await session.modes.set({ mode: "plan", action: modeId === ACP_PLAN_MODE_ID ? "enter" : "exit" });
+		const controls = session.modes;
+		// Host-initiated, not extension-initiated: ACP set_mode switched instantly
+		// (no busy gate) before mode controls existed — keep that contract.
+		const result =
+			controls instanceof SessionModeController
+				? await controls.applyHostRequest({
+						mode: "plan",
+						action: modeId === ACP_PLAN_MODE_ID ? "enter" : "exit",
+					})
+				: await controls.set({ mode: "plan", action: modeId === ACP_PLAN_MODE_ID ? "enter" : "exit" });
 		if (!result.ok) throw new Error(`${result.code}: ${result.message}`);
 	}
 
@@ -2519,6 +2528,8 @@ export class AcpAgent implements Agent {
 		const modeController = record.session.modes;
 		if (modeController instanceof SessionModeController) {
 			modeController.setHost({
+				// session/set_mode drives the lifecycle; journaled modes must reattach.
+				restoresSessionModes: true,
 				usePlanRole: false,
 				onPlanEntered: () =>
 					record.session.setPlanProposalHandler(title => this.#handleAcpPlanProposal(record.session, title)),
@@ -2605,7 +2616,7 @@ export class AcpAgent implements Agent {
 				},
 				hasPendingMessages: () => record.session.queuedMessageCount > 0,
 				shutdown: () => {},
-				modes: {
+				sessionModes: {
 					getState: () => record.session.modes.getState(),
 					set: request => record.session.modes.set(request),
 				},

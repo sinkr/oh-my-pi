@@ -95,13 +95,14 @@ import type {
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import type {
-	ExtensionModeControls,
-	ModeRequest,
-	ModeResult,
-	ModeSnapshot,
-	ModeOperation,
+import {
+	type ModeRequest,
+	type ModeResult,
+	type ModeSnapshot,
+	type ModeOperation,
+	type SessionModeName,
 } from "../extensibility/extensions/mode-api";
+import { ModeRequestError, modeChangeKey } from "../extensibility/extensions/mode-internals";
 import type { GoalModeState } from "../goals/state";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
@@ -136,6 +137,7 @@ import { sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
+	type SessionModeGate,
 	type DroppedPrompt,
 	type ResolvedRoleModel,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
@@ -1261,7 +1263,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#modeReconciliationPrevious: ModeSnapshot | undefined;
 	#lastCommittedModeSnapshot: ModeSnapshot | undefined;
 	#modeLastNotifiedRevision = -1;
-	readonly modes: ExtensionModeControls = {
+	readonly sessionModes: SessionModeGate = {
 		getState: () => this.#getModeSnapshot(),
 		set: request => this.#setMode(request),
 		// The owned-controller gate only covers headless hosts; the TUI's
@@ -1583,6 +1585,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#previousGoalContinuationActivity: string | undefined;
 	#goalSuppressNextContinuation = false;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+	/** The model plan mode actually switched to — exit restores only while the live model still matches it. */
+	#planModeAppliedModel: Model | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
@@ -1792,7 +1796,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		subagentEventBus?: EventBus,
 	) {
 		this.session = session;
-		this.session.setModeControls(this.modes);
+		this.session.setModeControls(this.sessionModes);
 		this.sessionManager = session.sessionManager;
 		this.#getModeSnapshot();
 		this.settings = session.settings;
@@ -2950,7 +2954,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				loop: ["enter", "exit", "pause", "resume", "configure"],
 			} satisfies Record<"plan" | "vibe" | "goal" | "loop", readonly ModeOperation[]>,
 		};
-		const key = JSON.stringify(value);
+		// Keyed on mode-level fields only: goal accounting ticks (tokensUsed /
+		// timeUsedSeconds) would otherwise bump the revision — and fire
+		// mode_changed — on every tool completion.
+		const key = modeChangeKey(value);
 		if (key !== this.#modeSnapshotKey) {
 			this.#modeSnapshotKey = key;
 			this.#modeRevision++;
@@ -3026,7 +3033,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = previous.sessionId;
 		this.#modeTransitionActive = true;
 		let changed = false;
-		let failure: { code: Extract<ModeResult, { ok: false }>["code"]; message: string } | undefined;
+		let failure:
+			| {
+					code: Extract<ModeResult, { ok: false }>["code"];
+					message: string;
+					conflictingMode?: SessionModeName;
+			  }
+			| undefined;
 		try {
 			if (this.sessionManager.getSessionId() !== sessionId) {
 				failure = { code: "session_changed", message: "The session changed before the mode transition could run." };
@@ -3034,14 +3047,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				changed = await this.#applyModeRequest(request);
 			}
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			const match = /^MODE_(conflict|disabled|invalid_request|unsupported|busy|session_changed):\s*(.*)$/.exec(
-				message,
-			);
-			failure = {
-				code: (match?.[1] ?? "failed") as Extract<ModeResult, { ok: false }>["code"],
-				message: match?.[2] ?? message,
-			};
+			if (error instanceof ModeRequestError) {
+				failure = { code: error.code, message: error.message, conflictingMode: error.conflictingMode };
+			} else {
+				const message = error instanceof Error ? error.message : String(error);
+				failure = { code: "failed", message };
+			}
 		} finally {
 			this.#modeTransitionActive = false;
 		}
@@ -3052,8 +3063,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #applyModeRequest(request: ModeRequest): Promise<boolean> {
 		const snapshot = this.#getModeSnapshot();
-		const fail: (code: Extract<ModeResult, { ok: false }>["code"], message: string) => never = (code, message) => {
-			throw new Error(`MODE_${code}: ${message}`);
+		const fail: (
+			code: Extract<ModeResult, { ok: false }>["code"],
+			message: string,
+			conflictingMode?: SessionModeName,
+		) => never = (code, message, conflictingMode) => {
+			throw new ModeRequestError(code, message, conflictingMode);
 		};
 		const rejectBusy = (): void => {
 			if (
@@ -3099,8 +3114,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (!cfgPlanEnabled.get(this.session.settings))
 					fail("disabled", "Plan mode is disabled in settings (plan.enabled).");
 				if (this.goalModeEnabled || this.goalModePaused)
-					fail("conflict", "Exit goal mode before entering plan mode.");
-				if (this.vibeModeEnabled) fail("conflict", "Exit vibe mode before entering plan mode.");
+					fail("conflict", "Exit goal mode before entering plan mode.", "goal");
+				if (this.vibeModeEnabled) fail("conflict", "Exit vibe mode before entering plan mode.", "vibe");
 				if (request.workflow && request.workflow !== "parallel" && request.workflow !== "iterative") {
 					fail("invalid_request", "Plan workflow must be parallel or iterative.");
 				}
@@ -3116,9 +3131,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				if (this.vibeModeEnabled) return false;
 				if (this.planModeEnabled || this.planModePaused)
-					fail("conflict", "Exit plan mode before entering vibe mode.");
+					fail("conflict", "Exit plan mode before entering vibe mode.", "plan");
 				if (this.goalModeEnabled || this.goalModePaused)
-					fail("conflict", "Exit goal mode before entering vibe mode.");
+					fail("conflict", "Exit goal mode before entering vibe mode.", "goal");
 				rejectBusy();
 				await this.#enterVibeMode();
 				return this.vibeModeEnabled;
@@ -3130,8 +3145,8 @@ export class InteractiveMode implements InteractiveModeContext {
 						if (!cfgGoalEnabled.get(this.session.settings))
 							fail("disabled", "Goal mode is disabled in settings (goal.enabled).");
 						if (this.planModeEnabled || this.planModePaused)
-							fail("conflict", "Exit plan mode before entering goal mode.");
-						if (this.vibeModeEnabled) fail("conflict", "Exit vibe mode before entering goal mode.");
+							fail("conflict", "Exit plan mode before entering goal mode.", "plan");
+						if (this.vibeModeEnabled) fail("conflict", "Exit vibe mode before entering goal mode.", "vibe");
 						rejectBusy();
 						if (goalState?.goal.status === "paused")
 							fail("invalid_request", "Resume or drop the paused goal before entering a new goal.");
@@ -3154,8 +3169,8 @@ export class InteractiveMode implements InteractiveModeContext {
 							fail("invalid_request", "Resume the paused goal before replacing it.");
 						}
 						if (this.planModeEnabled || this.planModePaused)
-							fail("conflict", "Exit plan mode before replacing the goal.");
-						if (this.vibeModeEnabled) fail("conflict", "Exit vibe mode before replacing the goal.");
+							fail("conflict", "Exit plan mode before replacing the goal.", "plan");
+						if (this.vibeModeEnabled) fail("conflict", "Exit vibe mode before replacing the goal.", "vibe");
 						if (typeof request.objective !== "string" || !request.objective.trim())
 							fail("invalid_request", "A non-empty objective is required.");
 						if (
@@ -3195,8 +3210,8 @@ export class InteractiveMode implements InteractiveModeContext {
 						if (this.goalModeEnabled) return false;
 						if (!this.#getPausedGoalState()) fail("invalid_request", "There is no paused goal to resume.");
 						if (this.planModeEnabled || this.planModePaused)
-							fail("conflict", "Exit plan mode before resuming a goal.");
-						if (this.vibeModeEnabled) fail("conflict", "Exit vibe mode before resuming a goal.");
+							fail("conflict", "Exit plan mode before resuming a goal.", "plan");
+						if (this.vibeModeEnabled) fail("conflict", "Exit vibe mode before resuming a goal.", "vibe");
 						rejectBusy();
 						await this.#enterGoalMode({ resume: true, silent: true });
 						return this.goalModeEnabled;
@@ -5231,6 +5246,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const resolved = this.session.resolveRoleModelWithThinking("plan");
 		if (!resolved.model) {
 			this.#clearPendingPlanModelSwitch();
+			this.#planModeAppliedModel = undefined;
 			return;
 		}
 		await this.#applyPlanModelTransition(this.session.model, resolved);
@@ -5255,8 +5271,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		switch (transition.kind) {
 			case "none":
+				this.#planModeAppliedModel = resolved.model ?? undefined;
 				return;
 			case "thinking":
+				this.#planModeAppliedModel = resolved.model ?? undefined;
 				this.session.setThinkingLevel(transition.thinkingLevel);
 				return;
 			case "apply":
@@ -5268,6 +5286,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.#pendingPlanModelSwitch = true;
 					return;
 				}
+				this.#planModeAppliedModel = transition.model;
 				try {
 					await this.session.setModelTemporary(transition.model, transition.thinkingLevel);
 				} catch (error) {
@@ -5282,9 +5301,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Apply any deferred model switch after the current stream ends. */
 	async flushPendingModelSwitch(): Promise<void> {
 		const pending = this.#pendingModelSwitch;
+		const wasPlanSwitch = this.#pendingPlanModelSwitch;
 		this.#pendingModelSwitch = undefined;
 		this.#pendingPlanModelSwitch = false;
 		if (!pending) return;
+		if (wasPlanSwitch) this.#planModeAppliedModel = pending.model;
 		try {
 			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
 		} catch (error) {
@@ -5311,11 +5332,12 @@ export class InteractiveMode implements InteractiveModeContext {
 					);
 				}
 			} finally {
-				this.session.setPlanProposalHandler?.(null);
+				this.#planModeAppliedModel = undefined;
 				this.planModeEnabled = false;
 				this.planModePaused = false;
 				this.planModePlanFilePath = undefined;
 				this.planModeWorkflow = undefined;
+				this.#planModePreviousToolPresentation = undefined;
 				this.#planModePreviousModelState = undefined;
 				this.#pendingModelSwitch = undefined;
 				this.#pendingPlanModelSwitch = false;
@@ -5665,7 +5687,13 @@ export class InteractiveMode implements InteractiveModeContext {
 					previousPresentation.mounted,
 				);
 			}
-			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
+			if (
+				this.#planModePreviousModelState &&
+				!options?.deferModelRestore &&
+				// Restore only while the live model is still the one plan mode
+				// applied — an explicit mid-plan model pick is preserved.
+				(this.#planModeAppliedModel === undefined || modelsAreEqual(this.session.model, this.#planModeAppliedModel))
+			) {
 				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
 			}
 			// If #applyPlanModeModel queued a deferred switch to the plan-role model
@@ -5723,7 +5751,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.planModeWorkflow = undefined;
 		}
 		this.#planModePreviousToolPresentation = undefined;
-		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
+		if (!options?.deferModelRestore) {
+			this.#planModePreviousModelState = undefined;
+			this.#planModeAppliedModel = undefined;
+		}
 		this.#updatePlanModeStatus();
 		this.sessionManager.appendModeChange(
 			paused ? "plan_paused" : "none",
@@ -7591,7 +7622,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// controller stays aborted: approvals still queued behind the approval
 		// mutex deny on arrival instead of prompting a torn-down UI. `init`
 		// installs a fresh one.
-		this.session.setModeControls(undefined, this.modes);
+		this.session.setModeControls(undefined, this.sessionModes);
 		this.#dialogLifetime.abort();
 		this.#streamPublisher?.dispose();
 		this.#streamPublisher = undefined;

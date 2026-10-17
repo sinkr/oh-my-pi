@@ -157,6 +157,7 @@ import type {
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
 import type { ExtensionModeControls } from "../extensibility/extensions/mode-api";
+
 import { SessionModeController } from "../modes/session-mode-controller";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
@@ -808,6 +809,21 @@ function ephemeralMaxTokensRejection(model: Model): string | undefined {
 	return undefined;
 }
 
+/**
+ * Host-internal extension of {@link ExtensionModeControls}: a host-installed
+ * controller may guard session changes while its transition is in flight.
+ * Not part of the extension-facing contract.
+ */
+export interface SessionModeGate extends ExtensionModeControls {
+	/**
+	 * Invoked by the session before a session-changing operation
+	 * (new/switch/fork/branch) commits. Throwing refuses the transition while an
+	 * extension-driven mode change is still in flight, so teardown cannot land in
+	 * a session the caller no longer owns.
+	 */
+	assertCanChangeSession?(): void;
+}
+
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1016,7 +1032,7 @@ export class AgentSession implements SettingsScope {
 	#adoptedResetMarkers = new Map<string, number>();
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
-	#modeControls: ExtensionModeControls | undefined;
+	#modeControls: SessionModeGate | undefined;
 	#modeController: SessionModeController | undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
@@ -3124,15 +3140,27 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Async-scoped while an extension slash-command handler dispatched through
 	 * {@link prompt} is executing. Mode controls consult this so a handler that
-	 * calls `ctx.modes.set()` from inside its own admitted submission (the
+	 * calls `ctx.sessionModes.set()` from inside its own admitted submission (the
 	 * `/mission` pattern) is not rejected as busy before its turn ever starts.
 	 * A second concurrent admission (count > 1) means another prompt is
 	 * mid-flight and stays a busy signal even inside a command handler.
+	 *
+	 * The store carries a per-dispatch token rather than `true`: async context
+	 * propagates into `setTimeout`/`setInterval` callbacks scheduled by the
+	 * handler, and those fire after the handler returned. A stale token no
+	 * longer matches {@link #extensionCommandDispatchToken}, so a deferred
+	 * callback correctly sees `busy` instead of inheriting the exemption.
 	 */
-	readonly #extensionCommandDispatch = new AsyncLocalStorage<true>();
+	readonly #extensionCommandDispatch = new AsyncLocalStorage<object>();
+	#extensionCommandDispatchToken: object | undefined;
 
 	get isInSoleExtensionCommandDispatch(): boolean {
-		return this.#extensionCommandDispatch.getStore() === true && this.#admittedSubmissionCount === 1;
+		const store = this.#extensionCommandDispatch.getStore();
+		return (
+			store !== undefined &&
+			store === this.#extensionCommandDispatchToken &&
+			this.#admittedSubmissionCount === 1
+		);
 	}
 
 	/** True while a submission has been admitted but has not yet started a turn, queued, or bailed. */
@@ -8264,7 +8292,15 @@ export class AgentSession implements SettingsScope {
 		const ctx = runner.createCommandContext();
 
 		try {
-			await this.#extensionCommandDispatch.run(true, () => runner.runScoped(() => command.handler(args, ctx)));
+			const token = {};
+			this.#extensionCommandDispatchToken = token;
+			try {
+				await this.#extensionCommandDispatch.run(token, () =>
+					runner.runScoped(() => command.handler(args, ctx)),
+				);
+			} finally {
+				if (this.#extensionCommandDispatchToken === token) this.#extensionCommandDispatchToken = undefined;
+			}
 			return true;
 		} catch (err) {
 			// Emit error via extension runner
@@ -8283,7 +8319,7 @@ export class AgentSession implements SettingsScope {
 		}
 
 		return {
-			modes: this.modes,
+			sessionModes: this.modes,
 			ui: noOpUIContext,
 			mode: "print",
 			hasUI: false,
@@ -13963,8 +13999,8 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Refuse a session change while any installed mode controls have a transition
 	 * in flight. Covers both the owned controller (RPC/ACP/SDK hosts) and a
-	 * host-installed implementation (the TUI), whose `modes` object guards the
-	 * same hazard through {@link ExtensionModeControls.assertCanChangeSession}.
+	 * host-installed implementation (the TUI), whose controls object guards the
+	 * same hazard through {@link SessionModeGate.assertCanChangeSession}.
 	 */
 	#assertModeChangeGate(): void {
 		if (this.#modeControls) {
@@ -13979,7 +14015,7 @@ export class AgentSession implements SettingsScope {
 		return this.#modeControls ? undefined : this.#modeController;
 	}
 
-	setModeControls(controls: ExtensionModeControls | undefined, expectedOwner?: ExtensionModeControls): void {
+	setModeControls(controls: SessionModeGate | undefined, expectedOwner?: ExtensionModeControls): void {
 		if (expectedOwner && this.#modeControls !== expectedOwner) return;
 		this.#modeControls = controls;
 	}

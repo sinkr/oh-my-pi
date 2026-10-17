@@ -3,6 +3,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { logger } from "@oh-my-pi/pi-utils";
 import { formatModelString } from "../config/model-resolver";
+import { ModeRequestError, modeChangeKey } from "../extensibility/extensions/mode-internals";
 import type {
 	ExtensionModeControls,
 	ModeOperation,
@@ -26,6 +27,15 @@ export interface SessionModeHost {
 	settled?: () => Promise<void>;
 	usePlanRole?: boolean;
 	reconcile?: (options?: { preserveActiveGoal?: boolean }) => Promise<void>;
+	/**
+	 * Journaled plan/vibe live-restore is opt-in: only a host that drives the mode
+	 * lifecycle (RPC `set_mode`, ACP `session/set_mode`) may reactivate a stored
+	 * plan/vibe session — otherwise print/JSON/task sessions that never used
+	 * modes would silently inherit a journaled read-only toolset they cannot exit.
+	 * Goal restore stays unconditional: hosts without a mode surface still carry
+	 * journaled goal accounting on resume.
+	 */
+	restoresSessionModes?: boolean;
 }
 
 const OPERATIONS: Record<SessionModeName, readonly ModeOperation[]> = {
@@ -49,6 +59,7 @@ export class SessionModeController implements ExtensionModeControls {
 	#planDraft: string | undefined;
 	#planWorkflow: "parallel" | "iterative" | undefined;
 	#planPrevious: { tools: string[]; mounted: string[]; model?: Model; thinking?: ConfiguredThinkingLevel } | undefined;
+	#planAppliedModel: Model | undefined;
 	#goalPrevious: string[] | undefined;
 	#vibePrevious: string[] | undefined;
 	#vibeScope: VibeOwnerScope | undefined;
@@ -82,7 +93,9 @@ export class SessionModeController implements ExtensionModeControls {
 			revision: this.#revision,
 			plan: {
 				status: plan?.enabled ? "active" : this.#planPaused ? "paused" : "inactive",
-				planFilePath: plan?.planFilePath ?? this.#planDraft,
+				// Draft/workflow persist only for a paused plan; an exited plan is
+				// fully torn down, so an inactive snapshot reports no path.
+				planFilePath: plan?.planFilePath ?? (this.#planPaused ? this.#planDraft : undefined),
 				workflow: plan?.workflow ?? (this.#planPaused ? this.#planWorkflow : undefined),
 			},
 			vibe: { status: this.#session.getVibeModeState()?.enabled ? "active" : "inactive" },
@@ -96,6 +109,20 @@ export class SessionModeController implements ExtensionModeControls {
 	}
 
 	async set(request: ModeRequest): Promise<ModeResult> {
+		return this.#run(request, { allowBusy: false });
+	}
+
+	/**
+	 * Host-initiated transition (ACP `session/set_mode` and other non-extension
+	 * protocol owners): identical validation, but the host is not busy-gated —
+	 * mid-turn protocol mode changes switched immediately before this layer
+	 * existed, and the TUI's own keybind path is not busy-gated either.
+	 */
+	async applyHostRequest(request: ModeRequest): Promise<ModeResult> {
+		return this.#run(request, { allowBusy: true });
+	}
+
+	async #run(request: ModeRequest, options: { allowBusy: boolean }): Promise<ModeResult> {
 		const before = this.getState();
 		const fail = (
 			code: Extract<ModeResult, { ok: false }>["code"],
@@ -106,32 +133,33 @@ export class SessionModeController implements ExtensionModeControls {
 			return fail("invalid_request", "Choose plan, vibe, goal, or loop and an explicit action.");
 		if (!before.capabilities[request.mode].includes(request.action))
 			return fail("unsupported", `${request.mode}.${request.action} is not supported by this host.`);
-		if (
+		// TUI ordering: shape/state rejections and no-ops are detected before the
+		// busy gate, so a repeated or meaningless request reports itself rather
+		// than "busy" while a turn runs.
+		const precheck = this.#precheck(request, before);
+		if (precheck) return precheck.ok ? { ok: true, changed: false, state: before } : precheck;
+		if (!options.allowBusy) {
+			if (
+				this.#transitioning ||
+				this.#session.isSessionTransitioning ||
+				// Full snapshot-busy predicate (TUI parity): covers streaming, bash/eval,
+				// compaction, handoff, and retry — not just streaming.
+				this.#session.isBusyForSnapshot ||
+				// goal_updated handlers run inside the accounting lock; a nested
+				// mutation would wait on the same tail and deadlock.
+				this.#session.goalRuntime.mutationInFlight ||
+				// An admitted submission about to start a turn is busy — except when the
+				// admitted work IS this extension's command handler, which legitimately
+				// runs `ctx.sessionModes.set()` before its own turn (`/mission` pattern).
+				(this.#session.hasAdmittedSubmission && !this.#session.isInSoleExtensionCommandDispatch)
+			)
+				return fail("busy", "Wait for the current turn or mode/session transition to finish, then retry.");
+		} else if (
 			this.#transitioning ||
 			this.#session.isSessionTransitioning ||
-			// Full snapshot-busy predicate (TUI parity): covers streaming, bash/eval,
-			// compaction, handoff, and retry — not just streaming.
-			this.#session.isBusyForSnapshot ||
-			// goal_updated handlers run inside the accounting lock; a nested
-			// mutation would wait on the same tail and deadlock.
-			this.#session.goalRuntime.mutationInFlight ||
-			// An admitted submission about to start a turn is busy — except when the
-			// admitted work IS this extension's command handler, which legitimately
-			// runs `ctx.modes.set()` before its own turn (`/mission` pattern).
-			(this.#session.hasAdmittedSubmission && !this.#session.isInSoleExtensionCommandDispatch)
-		)
-			return fail("busy", "Wait for the current turn or mode/session transition to finish, then retry.");
-		const validation = this.#validate(request);
-		if (validation) return fail("invalid_request", validation);
-		if (request.action === "enter" || request.action === "resume" || request.action === "replace") {
-			if (request.mode === "plan" && !cfgPlanEnabled.get(this.#session.settings))
-				return fail("disabled", "Enable plan.enabled before entering plan mode.");
-			if (request.mode === "goal" && !cfgGoalEnabled.get(this.#session.settings))
-				return fail("disabled", "Enable goal.enabled before entering goal mode.");
-			for (const other of ["plan", "vibe", "goal"] as const) {
-				if (other !== request.mode && before[other].status !== "inactive")
-					return fail("conflict", `Exit ${other} mode before entering ${request.mode}.`, other);
-			}
+			this.#session.goalRuntime.mutationInFlight
+		) {
+			return fail("busy", "Wait for the current mode or session transition to finish, then retry.");
 		}
 		this.#transitioning = true;
 		let error: unknown;
@@ -148,51 +176,135 @@ export class SessionModeController implements ExtensionModeControls {
 				"session_changed",
 				"The session changed during the transition; inspect current state before retrying.",
 			);
-		if (error !== undefined) return fail("failed", error instanceof Error ? error.message : String(error));
+		if (error !== undefined) {
+			if (error instanceof ModeRequestError) return fail(error.code, error.message, error.conflictingMode);
+			return fail("failed", error instanceof Error ? error.message : String(error));
+		}
 		const state = committed;
 		return {
 			ok: true,
-			changed: JSON.stringify({ ...before, revision: 0 }) !== JSON.stringify({ ...state, revision: 0 }),
+			changed: modeChangeKey(before) !== modeChangeKey(state),
 			state,
 		};
 	}
 
-	#validate(request: ModeRequest): string | undefined {
-		if (request.mode === "goal") {
-			const state = this.#session.getGoalModeState();
-			if (request.action === "resume" && !state?.enabled && state?.goal.status !== "paused")
-				return "No paused goal to resume.";
-			if (request.action === "replace" && !state?.enabled) return "No active goal to replace.";
-			if (request.action === "budget" && !state) return "No current goal to budget.";
-			if (request.action === "enter" && state?.goal.status === "paused")
-				return "Resume or drop the paused goal before entering a new objective.";
-			if (
-				(request.action === "enter" || request.action === "replace") &&
-				(typeof request.objective !== "string" || !request.objective.trim())
-			)
-				return "A non-empty objective is required.";
-			if (
-				"tokenBudget" in request &&
-				request.tokenBudget != null &&
-				(!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget <= 0)
-			)
-				return "tokenBudget must be a positive safe integer, or null to clear a budget.";
+	/**
+	 * Pre-busy checks in the TUI's order: state no-ops and invalid requests
+	 * first, then settings gates, then mode conflicts. Returns a result to
+	 * surface (success means no-op), or undefined to proceed to the busy gate.
+	 */
+	#precheck(request: ModeRequest, before: ModeSnapshot): ModeResult | undefined {
+		const fail = (
+			code: Extract<ModeResult, { ok: false }>["code"],
+			message: string,
+			conflictingMode?: SessionModeName,
+		): ModeResult => ({ ok: false, code, message, state: this.getState(), conflictingMode });
+		const noop: ModeResult = { ok: true, changed: false, state: before };
+		const status = before[request.mode].status;
+		const goal = this.#session.getGoalModeState();
+		switch (request.mode) {
+			case "plan": {
+				if (request.action === "pause") {
+					if (status === "paused") return noop;
+					if (status === "inactive") return noop;
+					return undefined;
+				}
+				if (request.action === "exit") {
+					if (status === "inactive") return noop;
+					return undefined;
+				}
+				if (status === "active") return noop;
+				if (request.action === "resume" && status !== "paused")
+					return fail("invalid_request", "Plan mode is not paused.");
+				if (status === "paused" && request.action === "enter") return noop;
+				if (!cfgPlanEnabled.get(this.#session.settings))
+					return fail("disabled", "Enable plan.enabled before entering plan mode.");
+				if (
+					"workflow" in request &&
+					request.workflow !== undefined &&
+					request.workflow !== "parallel" &&
+					request.workflow !== "iterative"
+				)
+					return fail("invalid_request", "workflow must be parallel or iterative.");
+				return this.#conflictsFor(request.mode, before, fail);
+			}
+			case "vibe": {
+				if (request.action === "exit") {
+					if (status === "inactive") return noop;
+					return undefined;
+				}
+				if (status === "active") return noop;
+				return this.#conflictsFor(request.mode, before, fail);
+			}
+			case "goal": {
+				switch (request.action) {
+					case "enter":
+						if (status === "active") return noop;
+						if (!cfgGoalEnabled.get(this.#session.settings))
+							return fail("disabled", "Enable goal.enabled before entering goal mode.");
+						{
+							const conflict = this.#conflictsFor("goal", before, fail);
+							if (conflict) return conflict;
+						}
+						if (goal?.goal.status === "paused")
+							return fail("invalid_request", "Resume or drop the paused goal before entering a new objective.");
+						if (typeof request.objective !== "string" || !request.objective.trim())
+							return fail("invalid_request", "A non-empty objective is required.");
+						if (request.tokenBudget !== undefined && request.tokenBudget !== null)
+							if (!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget <= 0)
+								return fail("invalid_request", "tokenBudget must be a positive safe integer.");
+						return undefined;
+					case "replace":
+						if (!goal?.enabled) return fail("invalid_request", "Resume the paused goal before replacing it.");
+						{
+							const conflict = this.#conflictsFor("goal", before, fail);
+							if (conflict) return conflict;
+						}
+						if (typeof request.objective !== "string" || !request.objective.trim())
+							return fail("invalid_request", "A non-empty objective is required.");
+						if (request.tokenBudget !== undefined && request.tokenBudget !== null)
+							if (!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget <= 0)
+								return fail("invalid_request", "tokenBudget must be a positive safe integer.");
+						return undefined;
+					case "pause":
+					case "exit":
+						return status === "active" ? undefined : noop;
+					case "resume":
+						if (status === "active") return noop;
+						if (goal?.goal.status !== "paused")
+							return fail("invalid_request", "There is no paused goal to resume.");
+						return this.#conflictsFor("goal", before, fail);
+					case "drop":
+						return goal ? undefined : noop;
+					case "budget":
+						if (!goal) return fail("invalid_request", "There is no goal with a budget to update.");
+						if (request.tokenBudget !== null)
+							if (!Number.isSafeInteger(request.tokenBudget) || request.tokenBudget <= 0)
+								return fail(
+									"invalid_request",
+									"tokenBudget must be a positive safe integer, or null to clear.",
+								);
+						return undefined;
+				}
+				return undefined;
+			}
+			case "loop":
+				return undefined;
 		}
-		if (request.mode === "plan") {
-			const active = this.#session.getPlanModeState()?.enabled === true;
-			// TUI parity: pause needs an active (or already paused, idempotent)
-			// plan, resume needs the paused state. Without this, `pause` from
-			// inactive journals a synthetic plan_paused and `resume`/`enter`
-			// semantics diverge from the interactive host.
-			if (request.action === "pause" && !active && !this.#planPaused) return "No active plan to pause.";
-			if (request.action === "resume" && !this.#planPaused) return "Plan mode is not paused.";
-			if (
-				"workflow" in request &&
-				request.workflow !== undefined &&
-				request.workflow !== "parallel" &&
-				request.workflow !== "iterative"
-			)
-				return "workflow must be parallel or iterative.";
+	}
+
+	#conflictsFor(
+		entering: SessionModeName,
+		before: ModeSnapshot,
+		fail: (
+			code: Extract<ModeResult, { ok: false }>["code"],
+			message: string,
+			conflictingMode?: SessionModeName,
+		) => ModeResult,
+	): ModeResult | undefined {
+		for (const other of ["plan", "vibe", "goal"] as const) {
+			if (other !== entering && before[other].status !== "inactive")
+				return fail("conflict", `Exit ${other} mode before entering ${entering}.`, other);
 		}
 		return undefined;
 	}
@@ -200,8 +312,10 @@ export class SessionModeController implements ExtensionModeControls {
 	async #apply(request: ModeRequest): Promise<void> {
 		switch (request.mode) {
 			case "plan":
+				// Workflow is an entry-only option; resume reuses the paused workflow.
 				if (request.action === "enter" && this.#planPaused) break;
-				if (request.action === "enter" || request.action === "resume") await this.#enterPlan(request.workflow);
+				if (request.action === "enter" || request.action === "resume")
+					await this.#enterPlan(request.action === "enter" ? request.workflow : undefined);
 				else await this.#exitPlan(request.action === "pause");
 				break;
 			case "vibe":
@@ -213,18 +327,16 @@ export class SessionModeController implements ExtensionModeControls {
 				else await this.#applyGoal(request);
 				break;
 			case "loop":
-				throw new Error("Loop requires an interactive continuation driver.");
+				throw new ModeRequestError("unsupported", "Loop requires an interactive continuation driver.");
 		}
 	}
 
 	async #enterPlan(workflow?: "parallel" | "iterative", restored = false): Promise<void> {
 		if (this.#session.getPlanModeState()?.enabled) return;
 		const session = this.#session;
-		const previous = {
+		const previous: { tools: string[]; mounted: string[]; model?: Model; thinking?: ConfiguredThinkingLevel } = {
 			tools: session.getEnabledToolNames(),
 			mounted: session.getMountedXdevToolNames(),
-			model: session.model,
-			thinking: session.configuredThinkingLevel(),
 		};
 		const oldState = session.getPlanModeState();
 		const planFilePath = this.#planDraft ?? oldState?.planFilePath ?? "local://PLAN.md";
@@ -235,6 +347,7 @@ export class SessionModeController implements ExtensionModeControls {
 			workflow: planWorkflow,
 			reentry: this.#planDraft !== undefined,
 		});
+		let applied: Model | undefined;
 		try {
 			// Filter `write` out of the prior set and re-add it only when the live
 			// entry is the built-in tool: a shadowing extension `write` has no
@@ -250,7 +363,19 @@ export class SessionModeController implements ExtensionModeControls {
 			);
 			if (!restored && this.#host.usePlanRole !== false) {
 				const role = session.resolveRoleModelWithThinking("plan");
-				if (role.model) await session.setModelTemporary(role.model, role.thinkingLevel);
+				// Pre-plan model state is recorded only when a plan-role switch is
+				// actually applied — otherwise exit would "restore" a model the user
+				// may have changed mid-plan (the TUI never records without applying).
+				if (role.model) {
+					previous.model = session.model;
+					previous.thinking = session.configuredThinkingLevel();
+					applied = role.model;
+					if (modelsAreEqual(session.model, role.model)) {
+						if (role.thinkingLevel !== previous.thinking) session.setThinkingLevel(role.thinkingLevel);
+					} else {
+						await session.setModelTemporary(role.model, role.thinkingLevel);
+					}
+				}
 			}
 		} catch (error) {
 			session.setPlanModeState(oldState);
@@ -259,6 +384,7 @@ export class SessionModeController implements ExtensionModeControls {
 			throw error;
 		}
 		this.#planPrevious = previous;
+		this.#planAppliedModel = applied;
 		this.#planPaused = false;
 		this.#planDraft = planFilePath;
 		this.#planWorkflow = planWorkflow;
@@ -302,10 +428,18 @@ export class SessionModeController implements ExtensionModeControls {
 				// Session-change teardown passes restoreModel:false: the destination
 				// journal ends on the plan-role change, and writing the pre-plan model
 				// here would corrupt the recorded active model for a later restore.
-				if (options?.restoreModel !== false) {
-					if (this.#planPrevious.model && !modelsAreEqual(session.model, this.#planPrevious.model)) {
-						await session.setModelTemporary(this.#planPrevious.model, this.#planPrevious.thinking);
-					} else session.setThinkingLevel(this.#planPrevious.thinking);
+				// Restore only when the live model is still the one plan mode applied —
+				// a mid-plan model pick by the user is kept (and with no role applied,
+				// no previous model was recorded at all).
+				const applied = this.#planAppliedModel;
+				if (options?.restoreModel !== false && this.#planPrevious.model) {
+					if (applied === undefined || modelsAreEqual(session.model, applied)) {
+						if (!modelsAreEqual(session.model, this.#planPrevious.model)) {
+							await session.setModelTemporary(this.#planPrevious.model, this.#planPrevious.thinking);
+						} else {
+							session.setThinkingLevel(this.#planPrevious.thinking);
+						}
+					}
 				}
 			}
 		} catch (error) {
@@ -316,7 +450,12 @@ export class SessionModeController implements ExtensionModeControls {
 		}
 		session.setPlanProposalHandler(null);
 		this.#planPrevious = undefined;
+		this.#planAppliedModel = undefined;
 		this.#planPaused = paused;
+		if (!paused) {
+			this.#planDraft = undefined;
+			this.#planWorkflow = undefined;
+		}
 		if (options?.persist !== false)
 			session.sessionManager.appendModeChange(
 				paused ? "plan_paused" : "none",
@@ -384,7 +523,10 @@ export class SessionModeController implements ExtensionModeControls {
 			case "enter":
 				if (state?.enabled) return;
 				if (state?.goal.status === "paused")
-					throw new Error("Resume or drop the paused goal before entering a new objective.");
+					throw new ModeRequestError(
+						"invalid_request",
+						"Resume or drop the paused goal before entering a new objective.",
+					);
 				await this.#enterGoal(() =>
 					runtime.createGoal({ objective: request.objective, tokenBudget: request.tokenBudget }),
 				);
@@ -396,7 +538,8 @@ export class SessionModeController implements ExtensionModeControls {
 				break;
 			case "resume":
 				if (state?.enabled) return;
-				if (state?.goal.status !== "paused") throw new Error("No paused goal to resume.");
+				if (state?.goal.status !== "paused")
+					throw new ModeRequestError("invalid_request", "No paused goal to resume.");
 				await this.#enterGoal(() => runtime.resumeGoal());
 				break;
 			case "pause":
@@ -412,7 +555,7 @@ export class SessionModeController implements ExtensionModeControls {
 				break;
 			case "budget":
 				if (!state || state.goal.status === "complete" || state.goal.status === "dropped")
-					throw new Error("No current goal to budget.");
+					throw new ModeRequestError("invalid_request", "No current goal to budget.");
 				if (state.goal.tokenBudget === (request.tokenBudget ?? undefined)) return;
 				await runtime.onBudgetMutated(request.tokenBudget ?? undefined);
 		}
@@ -448,8 +591,11 @@ export class SessionModeController implements ExtensionModeControls {
 
 	#publish(): ModeSnapshot {
 		const current = this.getState();
-		if (JSON.stringify({ ...this.#last, revision: 0 }) === JSON.stringify({ ...current, revision: 0 }))
-			return current;
+		// Dedup on mode-level fields only: goal accounting ticks mutate the
+		// embedded goal state every tool completion (tokensUsed, timeUsedSeconds)
+		// and would fire mode_changed per tick — and, via onChanged, a duplicated
+		// ACP current_mode_update/config push each time.
+		if (modeChangeKey(this.#last) === modeChangeKey(current)) return current;
 		const previous = this.#last;
 		this.#revision++;
 		const state = this.getState();
@@ -514,7 +660,7 @@ export class SessionModeController implements ExtensionModeControls {
 		this.#planDraft = typeof context.modeData?.planFilePath === "string" ? context.modeData.planFilePath : undefined;
 		const workflow = context.modeData?.workflow;
 		this.#planWorkflow = workflow === "parallel" || workflow === "iterative" ? workflow : undefined;
-		if (context.mode === "plan" && cfgPlanEnabled.get(this.#session.settings)) {
+		if (context.mode === "plan" && this.#host.restoresSessionModes && cfgPlanEnabled.get(this.#session.settings)) {
 			const restoredWorkflow = context.modeData?.workflow;
 			await this.#enterPlan(
 				restoredWorkflow === "parallel" || restoredWorkflow === "iterative" ? restoredWorkflow : undefined,
@@ -532,11 +678,15 @@ export class SessionModeController implements ExtensionModeControls {
 					this.#planPrevious.model = this.#session
 						.getAvailableModels()
 						.find(model => formatModelString(model) === data.previousModel);
+					// A journaled previousModel means entry applied a plan-role switch:
+					// the restored live model is that applied model, so exit restores
+					// the journal's previous model unless the user switched meanwhile.
+					this.#planAppliedModel = this.#session.model;
 				}
 				const thinking = data.previousThinking;
 				if (typeof thinking === "string") this.#planPrevious.thinking = thinking as ConfiguredThinkingLevel;
 			}
-		} else if (context.mode === "vibe") {
+		} else if (context.mode === "vibe" && this.#host.restoresSessionModes) {
 			await VibeSessionRegistry.global().rehydrate(this.#vibeParent());
 			await this.#enterVibe(true);
 			if (Array.isArray(context.modeData?.previousTools))

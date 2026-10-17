@@ -15,7 +15,7 @@ export default function mission(pi: ExtensionAPI): void {
 				ctx.ui.notify("Usage: /mission <request>", "warning");
 				return;
 			}
-			const result = await ctx.modes.set({ mode: "plan", action: "enter" });
+			const result = await ctx.sessionModes.set({ mode: "plan", action: "enter" });
 			if (!result.ok) {
 				report(ctx, result);
 				return;
@@ -25,13 +25,13 @@ export default function mission(pi: ExtensionAPI): void {
 	});
 	pi.registerCommand("mission-exit", {
 		description: "Leave planning without approving, executing, or deleting the draft",
-		handler: async (_args, ctx) => report(ctx, await ctx.modes.set({ mode: "plan", action: "exit" })),
+		handler: async (_args, ctx) => report(ctx, await ctx.sessionModes.set({ mode: "plan", action: "exit" })),
 	});
 	pi.registerCommand("mission-modes", {
 		description: 'Query modes, or pass a typed transition as JSON: {"mode":"vibe","action":"enter"}',
 		handler: async (args, ctx) => {
 			if (!args.trim()) {
-				ctx.ui.notify(JSON.stringify(ctx.modes.getState()), "info");
+				ctx.ui.notify(JSON.stringify(ctx.sessionModes.getState()), "info");
 				return;
 			}
 			let request: ModeRequest;
@@ -41,7 +41,7 @@ export default function mission(pi: ExtensionAPI): void {
 				ctx.ui.notify("Expected a mode transition JSON object.", "error");
 				return;
 			}
-			report(ctx, await ctx.modes.set(request));
+			report(ctx, await ctx.sessionModes.set(request));
 		},
 	});
 	pi.on("mode_changed", (event, ctx) => {
@@ -51,7 +51,7 @@ export default function mission(pi: ExtensionAPI): void {
 		);
 	});
 	pi.on("session_start", (_event, ctx) => {
-		const state = ctx.modes.getState();
+		const state = ctx.sessionModes.getState();
 		ctx.ui.setStatus(
 			"mission",
 			`plan:${state.plan.status} vibe:${state.vibe.status} goal:${state.goal.status} loop:${state.loop.status}`,
