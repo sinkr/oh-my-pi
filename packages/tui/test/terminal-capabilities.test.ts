@@ -163,39 +163,43 @@ describe("tmux client terminal resolution", () => {
 	const CLIENT_QUERY = "display-message -p #{client_termtype}\t#{client_termname}";
 
 	async function resolveInsideFakeTmux(clientReport: string, replyDelayMs?: number): Promise<string> {
-		return withFakeTmux({ [CLIENT_QUERY]: clientReport }, async binDir => {
-			const proc = Bun.spawn({
-				cmd: [
-					process.execPath,
-					"--eval",
-					`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+		return withFakeTmux(
+			{ [CLIENT_QUERY]: clientReport },
+			async binDir => {
+				const proc = Bun.spawn({
+					cmd: [
+						process.execPath,
+						"--eval",
+						`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
 console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyProtocol, imageProtocol: TERMINAL.imageProtocol }));`,
-				],
-				env: subprocessEnv({
-					PI_TEST_RUNTIME: undefined,
-					BUN_ENV: undefined,
-					NODE_ENV: undefined,
-					TERM: "tmux-256color",
-					TERM_PROGRAM: "tmux",
-					TERM_PROGRAM_VERSION: "3.6b",
-					COLORTERM: "truecolor",
-					TMUX: "/tmp/tmux-1000/default,4242,0",
-					SSH_CONNECTION: "client 1 server 22",
-					PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
-				}),
-				stdout: "pipe",
-				stderr: "pipe",
-			});
-			const [stdout, stderr, exitCode] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-				proc.exited,
-			]);
+					],
+					env: subprocessEnv({
+						PI_TEST_RUNTIME: undefined,
+						BUN_ENV: undefined,
+						NODE_ENV: undefined,
+						TERM: "tmux-256color",
+						TERM_PROGRAM: "tmux",
+						TERM_PROGRAM_VERSION: "3.6b",
+						COLORTERM: "truecolor",
+						TMUX: "/tmp/tmux-1000/default,4242,0",
+						SSH_CONNECTION: "client 1 server 22",
+						PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
+					}),
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(proc.stdout).text(),
+					new Response(proc.stderr).text(),
+					proc.exited,
+				]);
 
-			expect(stderr).toBe("");
-			expect(exitCode).toBe(0);
-			return stdout;
-		}, { replyDelayMs });
+				expect(stderr).toBe("");
+				expect(exitCode).toBe(0);
+				return stdout;
+			},
+			{ replyDelayMs },
+		);
 	}
 
 	it.skipIf(process.platform === "win32")("uses the attached client's terminal profile", async () => {
