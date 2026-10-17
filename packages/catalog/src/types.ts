@@ -1080,6 +1080,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		cacheControlFormat?: OpenAICompat["cacheControlFormat"];
 		thinkingKeep?: OpenAICompat["thinkingKeep"];
 		streamIdleTimeoutMs?: number;
+		/** The configured `baseUrl` is the official OpenAI API (provider `openai`); unset otherwise. */
+		officialEndpoint?: boolean;
 		toolStrictMode: ResolvedToolStrictMode;
 		/** The model sits behind Vercel AI Gateway. */
 		isVercelGatewayHost: boolean;
