@@ -73,6 +73,11 @@ export interface ReadToolDetails {
 	fileSize?: number;
 	/** Full source line count when the read reached EOF and the count is exact. */
 	totalLines?: number;
+	/**
+	 * Whether the text's rows carry line-number prefixes (`N:` hashline, `N|` line numbers). Set where a
+	 * file read is formatted; a raw read sets `false`. Snapcompact reads it to tell a `12:` prefix from content.
+	 */
+	rowPrefixes?: boolean;
 	/** Raw text + start line for user-visible TUI rendering, set when content is text-like.
 	 * Mirrors the same lines the model receives but without hashline/line-number prefixes,
 	 * so the TUI can render the file content with its own gutter without re-parsing the formatted text. */
@@ -84,7 +89,10 @@ export interface ReadToolDetails {
 	summary?: { lines: number; elidedSpans: number; elidedLines: number };
 	/** Number of unresolved git conflicts surfaced by this read (TUI uses for inline `⚠ N` badge). */
 	conflictCount?: number;
-	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
+	/**
+	 * Paths recovered from a delimited read argument. The TUI renders one call as multiple read rows; snapcompact
+	 * keeps such a composite result as text.
+	 */
 	displayReadTargets?: string[];
 	/**
 	 * Resolved filesystem link target for each {@link displayReadTargets} entry, aligned by index; `null` when a
