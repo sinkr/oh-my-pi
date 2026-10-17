@@ -25,7 +25,6 @@ import {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
-import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -402,8 +401,7 @@ interface QueuedMessageClaim {
 export class Agent {
 	#state: AgentState = {
 		systemPrompt: [],
-		// Placeholder until the host sets a model: the catalog's google default.
-		model: getBundledModel("google", providerEntry("google")?.defaultModel ?? ""),
+		model: getBundledModel("google", "gemini-2.5-flash-lite-preview-06-17"),
 		thinkingLevel: undefined,
 		disableReasoning: false,
 		tools: [],
