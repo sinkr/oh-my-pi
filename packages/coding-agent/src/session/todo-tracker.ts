@@ -426,14 +426,16 @@ function isResponseCueLine(line: string): boolean {
 }
 
 /**
- * How a closing span hands control back: `request` asks the user outright (cue,
- * labelled or user-addressed question, non-English question); `question` is only
- * question-shaped ("What's next?") and may be a heading the agent answers itself.
+ * How a closing span hands control back, strongest first: `cue` instructs the user
+ * ("tell me…", "If you confirm, I'll…") and no later prose can answer it; `request`
+ * asks outright (labelled, user-addressed, or non-English question) but the agent may
+ * still answer it itself; `question` is only question-shaped ("What's next?") and may
+ * be a heading.
  */
-type ClosingAsk = "none" | "question" | "request";
+type ClosingAsk = "none" | "question" | "request" | "cue";
 
 function askOf(span: string): ClosingAsk {
-	if (isResponseCueLine(span)) return "request";
+	if (isResponseCueLine(span)) return "cue";
 	if (!isQuestionPromptLine(span)) return "none";
 	const candidate = promptLine(span);
 	return candidate.hadPromptLabel || ADDRESSEE_RE.test(candidate.text) || NON_ASCII_TEXT_RE.test(candidate.text)
@@ -462,6 +464,7 @@ function closingAsk(paragraph: string): ClosingAsk {
 	// recognizes a non-English self-answer either; an open request is the costlier miss.
 	const foreignQuestion =
 		sentences.length === 2 && NON_ASCII_TEXT_RE.test(sentences[0]) && isQuestionPromptLine(sentences[0]);
+	if (asks.includes("cue")) return "cue";
 	if (foreignQuestion || asks.includes("request")) return "request";
 	return asks.includes("question") ? "question" : "none";
 }
@@ -472,14 +475,15 @@ function isAwaitingUserAnswer(message: AssistantMessage): boolean {
 	const paragraphs = text.split(/\r?\n\s*\r?\n/);
 	const lastParagraph = paragraphs.at(-1)?.trim() ?? "";
 	if (closingAsk(lastParagraph) !== "none") return true;
-	// A one-line closing note ("Repository unchanged, no commits.") does not answer an
-	// outright request in the paragraph before it.
+	// A one-line closing note ("Repository unchanged, no commits.") does not withdraw an
+	// instruction in the paragraph before it. A question there may be self-answered by
+	// that note ("Do you need…?\n\nNo, …"), so it does not count.
 	const previousParagraph = paragraphs.at(-2)?.trim();
 	if (
 		previousParagraph &&
 		!lastParagraph.includes("\n") &&
 		!OPTION_LINE_RE.test(lastParagraph) &&
-		closingAsk(previousParagraph) === "request"
+		closingAsk(previousParagraph) === "cue"
 	) {
 		return true;
 	}

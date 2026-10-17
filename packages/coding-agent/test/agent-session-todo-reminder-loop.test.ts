@@ -301,7 +301,6 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		"Revert them or keep them in the working tree? Separately, tell me whether to commit the docs.",
 		"The migration is staged. Once you allow it, I'll run the backfill.",
 		"Blocked on credentials. Then message me, I'll continue from step 1.",
-		"Do you want me to dispatch the remaining slices?\n\nNo files changed.",
 		// Non-English: a question one sentence from the end, followed by an imperative the
 		// detector has no lexicon for.
 		"Три агента остановлены, правки не проверены. Откатить их или оставить в рабочей копии? Отдельно скажите, коммитить ли документацию.",
@@ -320,6 +319,8 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		"**What's next?**\n\nI'll continue with slice 82.",
 		"Which configuration should this use? Use the existing default; the todo items still need work.",
 		"Let me continue with slice 82.",
+		// A one-line paragraph after a question may be its answer.
+		"Do you need to update anything?\n\nNo, the configuration remains compatible.",
 	])("still resumes when no request is left open: %s", async text => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
