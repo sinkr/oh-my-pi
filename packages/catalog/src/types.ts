@@ -1672,6 +1672,8 @@ export interface Model<TApi extends Api = Api> {
 	contextWindow: number | null;
 	/** Preserve the host's supplied window instead of applying inferred expansion or reference-price caps. */
 	contextWindowAuthoritative?: boolean;
+	/** The long-context price tier does not cap the runtime context window when extended context is off. */
+	longContextWindowUncapped?: boolean;
 	/** Optional larger prompt window available when extended context is enabled. */
 	maxContextWindow?: number;
 	maxTokens: number | null;

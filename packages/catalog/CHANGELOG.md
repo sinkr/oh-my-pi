@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Bundled GPT-5.4 rows on OpenAI, Azure, OpenCode Zen, and Command Code report a 1M context window, the window the coding agent already applied at runtime; GitHub Copilot and Factory Droid keep their own windows ([#16094](https://github.com/can1357/oh-my-pi/pull/16094) by [@H4vC](https://github.com/H4vC))
+
 ### Fixed
 
 - Fixed custom providers that declare a built-in `providerType` (Azure, GitHub Copilot, OpenCode, ClinePass, DeepSeek, NVIDIA) missing that provider's wire quirks, such as strict Responses pairing and the ClinePass reasoning field: they now follow the same catalog rules as the built-in provider ([#16093](https://github.com/can1357/oh-my-pi/pull/16093) by [@H4vC](https://github.com/H4vC))

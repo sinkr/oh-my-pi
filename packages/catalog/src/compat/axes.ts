@@ -409,6 +409,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: [true, false],
 	},
+	/**
+	 * The model's long-context price tier does not bound its runtime context
+	 * window: with extended context off, the window is not capped at the
+	 * tier's input threshold (subscription hosts carrying API-equivalent tier
+	 * prices, or a model served at its full window). Explicit user context
+	 * overrides still apply.
+	 */
+	"long-context-window-uncapped": {
+		key: "longContextWindowUncapped",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
 	/**

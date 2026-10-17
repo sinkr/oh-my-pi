@@ -221,6 +221,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
 
+`long-context-window-uncapped #true` keeps a model's `long-context-cost` tier from capping its runtime context window while extended context is off: the coding agent normally lowers the window to the tier's input threshold so compaction fires before a request crosses into premium pricing. Use it where the tier is an API-equivalent estimate on a subscription host (`xai-oauth`) or where the model is served at its full window regardless (GPT-5.4, except on GitHub Copilot). `buildModel` materializes it as `Model.longContextWindowUncapped`; explicit user context overrides still apply.
+
 `max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it). Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
 
 `inline-image-byte-budget` caps retained base64 image characters for a deployment's request body. It leaves room for tool schemas and text beneath the provider's body-size limit; the coding agent reads it through `resolveInlineImageByteBudget` before sending live history, and snapcompact gives its archive frames half of it (`frameDataBytesBudget`). The budget applies only while the request reaches the official endpoint (the Anthropic API, first-party OpenAI, or the Codex backend at its default URL), which callers decide with pi-ai's `reachesOfficialEndpoint`: `compat.officialEndpoint` for the configured `baseUrl`, and for first-party Anthropic models also the `ANTHROPIC_BASE_URL` or Foundry `FOUNDRY_BASE_URL` reroute applied at request time. A custom or rerouted endpoint imposes its own body limit.
@@ -333,10 +335,16 @@ behavior {
     pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
         alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
     }
+    role-defaults "smol" {
+        model "claude-haiku-5-5"
+        model "openai-codex/gpt-5.3-codex-spark"
+    }
 }
 ```
 
 `exclude-discovery-modes` takes one or more exact, case-sensitive upstream mode strings plus `provider=`; discovery mappers preserve missing, malformed, and unknown modes unless the provider policy explicitly lists them. Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
+
+`role-defaults "<role>"` declares one agent role's built-in default model selector chain, one `model "<selector>"` child per entry, most preferred first. Selectors are copied verbatim (`provider/id`, bare ids, fuzzy fragments such as `-mini`, and `@role` references); duplicates within a role and repeated roles are compile errors. `roleDefaultModels()` returns every chain keyed by role in declaration order.
 
 ## Auth grammar
 
