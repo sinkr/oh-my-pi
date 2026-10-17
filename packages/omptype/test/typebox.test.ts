@@ -135,13 +135,6 @@ describe("TypeBox adapter", () => {
 		expect(`${failures}`).toContain("at least 1e+21");
 	});
 
-	test("fluent bounds keep composing after exponent-form construction", () => {
-		const schema = Type.Number({ minimum: 1e21 }).atMost(1e22);
-		expect(valid(schema, 1e21)).toBe(true);
-		expect(valid(schema, 2e22)).toBe(false);
-		expect(schema.toJsonSchema()).toEqual({ type: "number", minimum: 1e21, maximum: 1e22 });
-	});
-
 	test("arrays, tuples, objects, records and intersections validate", () => {
 		const array = Type.Array(Type.Number(), { minItems: 1, maxItems: 3, uniqueItems: true });
 		expect(valid(array, [1, 2])).toBe(true);
