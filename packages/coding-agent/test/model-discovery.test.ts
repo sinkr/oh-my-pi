@@ -9,8 +9,13 @@ import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shar
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import {
+	cursorModelManagerOptions,
+	resolveModelCacheProviderId,
+	resolveOllamaModelCacheProviderId,
+} from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
@@ -3960,6 +3965,43 @@ describe("ModelRegistry runtime discovery", () => {
 		await registry.hydrateCredentialScopedModelCaches();
 
 		expect(registry.find("github-copilot", "gpt-5.6-sol-1m")?.headers).toEqual(bundledBase.headers);
+	});
+
+	test("Cursor startup hydration reads the row discovery wrote after the access token expired", async () => {
+		// Cursor rows are keyed on the token's account subject, so a rotated token
+		// keys the same row. Startup hydration reads offline, where peek drops an
+		// expired token; without the credential the read could not key that row and
+		// discovery-only Cursor models stayed missing until a refresh minted a token.
+		const jwt = (claims: Record<string, unknown>) =>
+			`${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
+		const bundledBase = getBundledModel("cursor", "claude-opus-5-5");
+		if (!bundledBase) {
+			throw new Error("Expected bundled Cursor claude-opus-5-5 model to exist");
+		}
+		const discovered = buildModel({
+			...(bundledBase as ModelSpec<"cursor-agent">),
+			id: "claude-opus-5-5-1m",
+			name: "Claude Opus 5.5 (1M)",
+			contextWindow: 1_000_000,
+		});
+		const tokenAtWrite = jwt({ sub: "auth0|user_a", iat: 1_800_000_000, exp: 1_800_003_600 });
+		const expiredStoredToken = jwt({ sub: "auth0|user_a", iat: 1_800_086_400, exp: 1_800_090_000 });
+		const writeKey = cursorModelManagerOptions({ apiKey: tokenAtWrite }).cacheProviderId;
+		if (!writeKey) throw new Error("Expected Cursor manager options to name a cache namespace");
+		// Cursor discovery is authoritative: the row carries the manager's static fingerprint.
+		const fingerprint = fingerprintStaticModels(getBundledModels("cursor"), true);
+		writeModelCache(writeKey, Date.now(), [discovered], true, fingerprint, cacheDbPath);
+		await authStorage.credentials.set("cursor", {
+			type: "oauth",
+			access: expiredStoredToken,
+			refresh: "cursor-refresh",
+			expires: Date.now() - 60_000,
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		await registry.hydrateCredentialScopedModelCaches();
+
+		expect(registry.find("cursor", "claude-opus-5-5-1m")?.contextWindow).toBe(1_000_000);
 	});
 
 	test("startup drops a current Copilot alias whose headers differ from its bundled base", () => {

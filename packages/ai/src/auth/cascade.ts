@@ -10,6 +10,7 @@ import type { CredentialPool } from "./pool";
 import type { CredentialSelector, OAuthResolutionResult } from "./select";
 import type {
 	AuthApiKeyOptions,
+	AuthPeekOptions,
 	AuthCredential,
 	AuthSource,
 	AuthSourceOptions,
@@ -254,7 +255,7 @@ export class KeyCascade implements KeysApi {
 	 * peek returns the same one, so credential-scoped discovery caches stay on
 	 * one namespace.
 	 */
-	async peek(provider: string): Promise<string | undefined> {
+	async peek(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {
 		const runtimeKey = this.#deps.overrides.runtimeKey(provider);
 		if (runtimeKey) {
 			return runtimeKey;
@@ -269,14 +270,17 @@ export class KeyCascade implements KeysApi {
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
-		// Peek never refreshes, so only an unexpired OAuth access token is usable.
+		// Peek never refreshes, so only an unexpired OAuth access token is usable
+		// unless the caller only needs the account it names.
 		const now = Date.now();
-		const oauthSelection = this.#deps.selector.selectByType(
-			provider,
-			"oauth",
-			undefined,
-			credential => credential.type === "oauth" && Number.isFinite(credential.expires) && credential.expires > now,
-		);
+		const oauthSelection =
+			this.#deps.selector.selectByType(
+				provider,
+				"oauth",
+				undefined,
+				credential =>
+					credential.type === "oauth" && Number.isFinite(credential.expires) && credential.expires > now,
+			) ?? (options?.includeExpired ? this.#deps.selector.selectByType(provider, "oauth") : undefined);
 		if (oauthSelection) {
 			if (provider === "github-copilot") {
 				return JSON.stringify({
