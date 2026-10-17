@@ -513,9 +513,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"endpoint-hosts": { key: "endpointHosts", set: "catalog", shape: "array" },
 	/**
-	 * Pattern of the 400/415 error body the host returns when it cannot decode
-	 * a compressed request body. Unassigned: every 400/415 is a possible
-	 * rejection and is re-checked with an uncompressed resend.
+	 * Pattern of the JSON 400/415 error body the host returns when it cannot
+	 * decode a compressed request body. Unassigned: every JSON 400/415 is a
+	 * possible rejection and is re-checked with an uncompressed resend. Either
+	 * way, a 400/403/415 whose body is not JSON (presumed a proxy's answer, not
+	 * the host's) is re-checked too.
 	 */
 	"request-encoding-rejection": { key: "requestEncodingRejection", set: "catalog", shape: "scalar" },
 	/**
