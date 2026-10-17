@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `tui.completeScrollback`: rows a growing HUD or dialog pushes off screen go straight to terminal scrollback, so tmux copy mode no longer skips them ([#15692](https://github.com/can1357/oh-my-pi/pull/15692) by [@Ilm-Alan](https://github.com/Ilm-Alan))
+- Added `tui.completeScrollback`: rows a growing HUD or dialog pushes off screen go straight to scrollback instead of missing from it until it shrinks ([#15692](https://github.com/can1357/oh-my-pi/pull/15692) by [@Ilm-Alan](https://github.com/Ilm-Alan))
 
 ### Changed
 

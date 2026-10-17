@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `ComposerPreferences.completeScrollback` (default `false`): retirement bills below-transcript chrome at its current height instead of its smallest height, so rows a growing HUD or dialog displaces reach native scrollback at once rather than being held live until it shrinks ([#15692](https://github.com/can1357/oh-my-pi/pull/15692) by [@Ilm-Alan](https://github.com/Ilm-Alan))
+- Added `ComposerPreferences.completeScrollback` (default `false`): bills below-transcript chrome at its current height, so rows a growing HUD or dialog displaces reach native scrollback at once ([#15692](https://github.com/can1357/oh-my-pi/pull/15692) by [@Ilm-Alan](https://github.com/Ilm-Alan))
 
 ### Fixed
 
