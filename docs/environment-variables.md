@@ -175,7 +175,7 @@ Loopback, link-local, private-range (`10/8`, `172.16/12`, `192.168/16`), and
 
 ### Request body compression
 
-Request bodies of 1 KiB or more are compressed when sent to first-party endpoints known to decode them, as declared by the `request-encodings` / `request-encoding-hosts` catalog rules: the official Anthropic API (gzip), the ChatGPT Codex backend (zstd), and the GitHub Copilot API at `api[.individual|.business|.enterprise].githubcopilot.com` (zstd, falling back to gzip). Proxies, relays, and every other host receive uncompressed JSON. If an endpoint rejects an encoding and the uncompressed resend succeeds, that encoding stays off for the host for the rest of the process.
+Request bodies of 1 KiB or more are compressed when sent to a provider's own endpoint that decodes them, as declared by the `request-encodings` / `endpoint-hosts` catalog rules: the official Anthropic API (gzip), the ChatGPT Codex backend (zstd), and the GitHub Copilot API at `api[.individual|.business|.enterprise].githubcopilot.com` (zstd, falling back to gzip). Proxies, relays, models.yml gateways (even under a built-in provider id), and every other host receive uncompressed JSON. If an endpoint rejects an encoding and the uncompressed resend succeeds, that encoding stays off for the host for the rest of the process.
 
 | Variable                 | Behavior                                                                          |
 | ------------------------ | --------------------------------------------------------------------------------- |

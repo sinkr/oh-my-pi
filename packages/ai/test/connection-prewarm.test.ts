@@ -77,9 +77,12 @@ describe("prewarmModelConnection", () => {
 		]);
 	});
 
-	it("never probes custom providers, local hosts, or Anthropic gateways", async () => {
+	it("never probes custom providers, built-in ids pointed at a gateway, local hosts, or Anthropic gateways", async () => {
 		const { calls, fetch } = captureFetch();
 		await prewarmModelConnection(model("corp-gateway", "openai-completions", "https://llm.corp.example/v1"), {
+			fetch,
+		});
+		await prewarmModelConnection(model("openai", "openai-responses", "https://gateway.internal.example/v1"), {
 			fetch,
 		});
 		await prewarmModelConnection(model("ollama", "openai-completions", "http://127.0.0.1:11434/v1"), { fetch });

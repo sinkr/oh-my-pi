@@ -1,7 +1,6 @@
-import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { isCatalogEndpointUrl } from "@oh-my-pi/pi-catalog/compat/catalog-endpoint";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Api, FetchImpl, Model } from "../types";
-import { isLocalOrMetadataHost } from "../utils/proxy";
 import { transportFetch } from "../utils/transport-fetch";
 import { resolveAnthropicPrewarmTarget } from "./anthropic";
 
@@ -17,26 +16,20 @@ const prewarmedAt = new Map<string, number>();
 
 /**
  * Where a warm-up for {@link model} goes, or `undefined` when it must not be
- * probed. First-party Anthropic resolves its effective endpoint and TLS
- * options; every other catalog provider warms the HTTPS origin of its
- * `baseUrl`. Custom providers (no catalog entry) and loopback, private, or
- * metadata hosts are never probed: a user-configured gateway gets no
- * unsolicited traffic, and a local server has no handshake worth saving.
+ * probed. First-party Anthropic resolves its effective endpoint (following
+ * `ANTHROPIC_BASE_URL`/Foundry reroutes) and TLS options; every other model
+ * warms its `baseUrl` origin only while that is the provider's own endpoint.
+ * A custom provider, or a catalog provider id whose `baseUrl` a models.yml
+ * entry or provider override points at a gateway, proxy, or local server, is
+ * never probed.
  */
 function resolvePrewarmTarget(model: Model<Api>): { origin: string; init: RequestInit } | undefined {
 	if (model.provider === "anthropic") {
 		const target = resolveAnthropicPrewarmTarget(model);
 		return target && { origin: new URL(target.url).origin, init: target.init };
 	}
-	if (!providerEntry(model.provider) || !model.baseUrl) return undefined;
-	let url: URL;
-	try {
-		url = new URL(model.baseUrl);
-	} catch {
-		return undefined;
-	}
-	if (url.protocol !== "https:" || isLocalOrMetadataHost(url.hostname)) return undefined;
-	return { origin: url.origin, init: {} };
+	if (!isCatalogEndpointUrl(model, model.baseUrl)) return undefined;
+	return { origin: new URL(model.baseUrl).origin, init: {} };
 }
 
 /**

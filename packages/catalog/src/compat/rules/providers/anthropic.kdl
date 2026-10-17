@@ -95,7 +95,6 @@ provider "anthropic" {
 	// The Messages API decodes gzip request bodies and rejects zstd and br
 	// with a 400 (`request_body_encoding_invalid`).
 	request-encodings "gzip"
-	request-encoding-hosts "api.anthropic.com"
 	request-encoding-rejection "request_body_encoding_invalid|Unsupported Content-Encoding"
 	class "anthropic" {
 		revision "<4.6" {

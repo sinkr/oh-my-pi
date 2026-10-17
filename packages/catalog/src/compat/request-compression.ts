@@ -1,4 +1,5 @@
 import type { Model } from "../types";
+import { isCatalogEndpointUrl } from "./catalog-endpoint";
 import { resolveCatalogPolicy } from "./catalog-policy";
 
 /** `Content-Encoding` values a host may accept on request bodies. */
@@ -20,22 +21,15 @@ const rejectionPatterns = new Map<string, RegExp>();
 /**
  * Compression contract for a request from {@link model} to {@link url}, or
  * `undefined` when the body must go uncompressed. The `request-encodings` axis
- * applies only while the URL is HTTPS to one of `request-encoding-hosts`: a
- * proxy, relay, or rerouted base URL never receives bytes it cannot read.
+ * applies only while the URL reaches the provider's own endpoint
+ * ({@link isCatalogEndpointUrl}): a proxy, relay, or rerouted base URL never
+ * receives bytes it cannot read.
  */
 export function resolveRequestCompression(model: Model, url: string): RequestCompressionPolicy | undefined {
 	const policy = resolveCatalogPolicy(model);
-	// The rule compiler validates both arrays: encodings against the axis vocabulary, hosts as strings.
+	// The rule compiler validates encodings against the axis vocabulary.
 	const encodings = policy.requestEncodings as readonly RequestBodyEncoding[] | undefined;
-	const hosts = policy.requestEncodingHosts as readonly string[] | undefined;
-	if (!encodings?.length || !hosts?.length) return undefined;
-	let parsed: URL;
-	try {
-		parsed = new URL(url);
-	} catch {
-		return undefined;
-	}
-	if (parsed.protocol !== "https:" || !hosts.includes(parsed.hostname)) return undefined;
+	if (!encodings?.length || !isCatalogEndpointUrl(model, url)) return undefined;
 	const source = policy.requestEncodingRejection;
 	if (typeof source !== "string") return { encodings, rejection: undefined };
 	let rejection = rejectionPatterns.get(source);

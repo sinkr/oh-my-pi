@@ -78,10 +78,11 @@ async function mayBeEncodingRejection(response: Response, policy: RequestCompres
 }
 
 /**
- * Compresses request bodies from {@link model} to hosts its catalog rules
- * declare able to decode them (`request-encodings` / `request-encoding-hosts`
- * KDL axes). Long sessions resend multi-MB transcripts every turn, so upload
- * time dominates time-to-first-token on ordinary uplinks.
+ * Compresses request bodies from {@link model} to its provider's own endpoint
+ * when its catalog rules declare encodings the endpoint decodes
+ * (`request-encodings` / `endpoint-hosts` KDL axes). Long sessions resend
+ * multi-MB transcripts every turn, so upload time dominates time-to-first-token
+ * on ordinary uplinks.
  *
  * Install it beneath any body rewriter or signer (e.g. the cch attestation
  * patch): those must see the uncompressed bytes. Other hosts, small bodies,
