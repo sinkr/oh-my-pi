@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { type Api, type Model, modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -39,7 +40,6 @@ import { loadCapability } from "../discovery";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import { replaceFileAtomically } from "../utils/atomic-file";
-import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { isRegisteredSearchEngine } from "../web/search/provider";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
@@ -3362,7 +3362,9 @@ export class Settings {
 			if (orderedWebSelectors.length > 0 || excludedWebProviders.size > 0) {
 				setRoleChain(
 					"web",
-					dedupe([...orderedWebSelectors, ...MODEL_PRIO.web]).filter(selector => !isWebSelectorExcluded(selector)),
+					dedupe([...orderedWebSelectors, ...roleDefaultModels().web]).filter(
+						selector => !isWebSelectorExcluded(selector),
+					),
 				);
 			}
 
@@ -3392,7 +3394,7 @@ export class Settings {
 				typeof value === "string" ? (imageSelector(value) ?? []) : [],
 			);
 			if (orderedImageSelectors.length > 0) {
-				setRoleChain("image", dedupe([...orderedImageSelectors, ...MODEL_PRIO.image]));
+				setRoleChain("image", dedupe([...orderedImageSelectors, ...roleDefaultModels().image]));
 			}
 
 			const legacyTtsProvider = legacy(providerSettings, "tts", "providers.tts");

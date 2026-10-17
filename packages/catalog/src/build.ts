@@ -54,6 +54,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	} else {
 		delete model.contextWindowAuthoritative;
 	}
+	if (catalog.longContextWindowUncapped === true) {
+		model.longContextWindowUncapped = true;
+	} else {
+		delete model.longContextWindowUncapped;
+	}
 	const webSearch = catalog.webSearch;
 	if (
 		webSearch === "gemini" ||

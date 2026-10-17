@@ -29,6 +29,15 @@ provider "github-copilot" {
 	on-api "openai-completions" {
 		supports-reasoning-params #false
 	}
+	// Copilot caps GPT-5.4 below the lineage's 1M window (model-limits in
+	// runtime/behavior.kdl), so the class-wide window patch and uncapped
+	// window do not apply here.
+	class "openai" {
+		models "gpt-5.4" {
+			limits-patch {}
+			long-context-window-uncapped #false
+		}
+	}
 	class "anthropic" {
 		revision ">=4 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
