@@ -12,8 +12,8 @@ export interface RequestCompressionPolicy {
 	/**
 	 * Pattern of a JSON 400/415 error body that rejects the encoding;
 	 * `undefined` treats every JSON 400/415 as a possible rejection. A
-	 * 400/403/415 whose body is not JSON (a proxy's answer, not the host's) is
-	 * a possible rejection either way.
+	 * 400/403/415 whose body is not JSON (presumed a proxy's answer, not the
+	 * host's) is a possible rejection either way.
 	 */
 	readonly rejection: RegExp | undefined;
 }

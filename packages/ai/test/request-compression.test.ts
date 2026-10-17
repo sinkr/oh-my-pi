@@ -131,6 +131,18 @@ describe("wrapFetchForRequestCompression", () => {
 		},
 	);
 
+	it("stops resending once a proxy refuses the uncompressed body with the same status", async () => {
+		const blocked = () => new Response("<html><body>Access denied.</body></html>", { status: 403 });
+		const { calls, fetch } = captureFetch([blocked(), blocked(), blocked()]);
+		const toAnthropic = wrapFetchForRequestCompression(fetch, anthropic);
+
+		const first = await toAnthropic(ANTHROPIC_URL, post());
+		const second = await toAnthropic(ANTHROPIC_URL, post());
+
+		expect([first.status, second.status]).toEqual([403, 403]);
+		expect(calls.map(call => call.headers["Content-Encoding"])).toEqual(["gzip", undefined, "gzip"]);
+	});
+
 	it("resends uncompressed when a proxy drops Content-Encoding and Anthropic cannot parse the gzip bytes", async () => {
 		const unparsed = new Response(
 			JSON.stringify({

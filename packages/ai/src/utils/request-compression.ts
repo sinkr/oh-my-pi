@@ -32,6 +32,17 @@ const ZSTD_LEVEL = 3;
  */
 const rejectedEncodings = new Set<string>();
 
+/**
+ * `<origin> <status>` pairs where a non-JSON refusal of a compressed body
+ * recurred on the uncompressed resend: something in front of the host refuses
+ * every request (a blocking proxy, an edge challenge), not the encoding. Later
+ * refusals with that status skip the resend instead of doubling each attempt.
+ */
+const encodingUnrelatedRefusals = new Set<string>();
+
+/** Why a failed compressed request may be an encoding rejection. */
+type RejectionSuspect = "host" | "proxy";
+
 type RequestHeaders = RequestInit["headers"];
 
 function requestUrl(input: string | URL | Request): string | undefined {
@@ -67,24 +78,31 @@ function compress(body: string | ArrayBufferView, encoding: RequestBodyEncoding)
 	return encoding === "zstd" ? Bun.zstdCompress(bytes, { level: ZSTD_LEVEL }) : gzip(bytes, { level: GZIP_LEVEL });
 }
 
-async function mayBeEncodingRejection(response: Response, policy: RequestCompressionPolicy): Promise<boolean> {
-	if (response.status !== 400 && response.status !== 403 && response.status !== 415) return false;
+/**
+ * `host`: a JSON 400/415 matching the host's rejection pattern (or any JSON
+ * 400/415 when none is assigned). `proxy`: a 400/403/415 whose body is not JSON,
+ * empty included — provider APIs answer errors in JSON, so the body is presumed
+ * to come from a proxy or TLS-inspecting gateway that may refuse a compressed
+ * upload the host itself decodes.
+ */
+async function suspectEncodingRejection(
+	response: Response,
+	policy: RequestCompressionPolicy,
+): Promise<RejectionSuspect | undefined> {
+	if (response.status !== 400 && response.status !== 403 && response.status !== 415) return undefined;
 	let body: string;
 	try {
 		body = await response.clone().text();
 	} catch {
-		return false;
+		return undefined;
 	}
 	try {
 		JSON.parse(body);
 	} catch {
-		// Provider APIs answer errors in JSON. Any other body came from a proxy or
-		// TLS-inspecting gateway in front of the host, which may refuse a
-		// compressed upload the host itself decodes.
-		return true;
+		return "proxy";
 	}
-	if (response.status === 403) return false;
-	return policy.rejection?.test(body) ?? true;
+	if (response.status === 403) return undefined;
+	return (policy.rejection?.test(body) ?? true) ? "host" : undefined;
 }
 
 /**
@@ -100,7 +118,9 @@ async function mayBeEncodingRejection(response: Response, policy: RequestCompres
  * pass through untouched. A possible rejection — the host's decode error, or a
  * non-JSON 400/403/415 from a proxy in front of it — is resent uncompressed
  * once; only when that resend succeeds is the encoding latched off for the
- * host, so a genuine 400 never disables compression.
+ * host, so a genuine 400 never disables compression. When a non-JSON refusal
+ * recurs uncompressed with the same status, that status stops being re-checked
+ * for the host.
  */
 export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): FetchImpl {
 	const wrapped: FetchImpl = async (input, init) => {
@@ -139,7 +159,10 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 			body: compressed,
 			headers: withContentEncoding(init?.headers, encoding),
 		});
-		if (!(await mayBeEncodingRejection(response, policy))) return response;
+		const suspect = await suspectEncodingRejection(response, policy);
+		if (!suspect) return response;
+		const refusal = `${origin} ${response.status}`;
+		if (suspect === "proxy" && encodingUnrelatedRefusals.has(refusal)) return response;
 
 		await response.body?.cancel().catch(() => {});
 		const plain = await base(input, init);
@@ -150,6 +173,8 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 				encoding,
 				status: response.status,
 			});
+		} else if (suspect === "proxy" && plain.status === response.status) {
+			encodingUnrelatedRefusals.add(refusal);
 		}
 		return plain;
 	};
@@ -157,7 +182,8 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 	return wrapped;
 }
 
-/** Test hook: clears every per-host rejection latch. */
+/** Test hook: clears every per-host latch. */
 export function resetRequestCompressionForTesting(): void {
 	rejectedEncodings.clear();
+	encodingUnrelatedRefusals.clear();
 }
