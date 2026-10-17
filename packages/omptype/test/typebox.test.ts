@@ -136,7 +136,7 @@ describe("TypeBox adapter", () => {
 	});
 
 	test("fluent bounds keep composing after exponent-form construction", () => {
-		const schema = type.raw("number").atLeast(1e21).atMost(1e22);
+		const schema = Type.Number({ minimum: 1e21 }).atMost(1e22);
 		expect(valid(schema, 1e21)).toBe(true);
 		expect(valid(schema, 2e22)).toBe(false);
 		expect(schema.toJsonSchema()).toEqual({ type: "number", minimum: 1e21, maximum: 1e22 });
