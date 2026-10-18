@@ -1,4 +1,5 @@
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
 import { isColdReplayableResponsesTurn } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -418,6 +419,12 @@ export class Tokenizer {
 				// reaches the wire then (the payload items replay instead); a turn whose
 				// backend reported no reasoning tokens keeps the signature as its price.
 				const replayedReasoning = this.#replayedReasoningTokens(message);
+				const ollamaReader = this.#reasoningReader?.api === "ollama-chat" ? this.#reasoningReader : undefined;
+				const ownOllamaTurn =
+					ollamaReader !== undefined &&
+					message.api === ollamaReader.api &&
+					message.provider === ollamaReader.provider &&
+					message.model === ollamaReader.id;
 				if (typeof replayedReasoning === "number") extra += replayedReasoning;
 				const signaturesPriced = this.thinkingReplayTokens === "signature";
 				// The replay's signature rule (`transformMessages`): an aborted or
@@ -444,7 +451,13 @@ export class Tokenizer {
 					if (block.type === "text") {
 						fragments.push(block.text);
 					} else if (block.type === "thinking") {
-						if (this.#dropsOllamaThinking) continue;
+						// Foreign turns are demoted to visible text by transformMessages;
+						// only the reader's own thinking stays native and is stripped.
+						if (ollamaReader && !ownOllamaTurn) {
+							fragments.push(renderDemotedThinking(ollamaReader.id, block.thinking));
+							continue;
+						}
+						if (this.#dropsOllamaThinking && ownOllamaTurn) continue;
 						fragments.push(block.thinking);
 						// Providers charge for the opaque signature/reasoning payload that
 						// rides alongside the thinking text (OpenAI Responses encrypted

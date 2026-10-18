@@ -467,10 +467,11 @@ describe("Ollama chat sampling options", () => {
 
 // #9693: preserve verified cloud history while retaining the legacy guard for other cloud models.
 describe("Ollama assistant thinking history", () => {
-	for (const { provider, id, expectedThinking, compat } of [
+	for (const { provider, id, expectedThinking, compat, foreign } of [
 		{ provider: "ollama-cloud", id: "glm-5.2", expectedThinking: true },
 		{ provider: "ollama-cloud", id: "glm-5.2:cloud", expectedThinking: true },
 		{ provider: "ollama-cloud", id: "deepseek-v4-flash", expectedThinking: false },
+		{ provider: "ollama-cloud", id: "deepseek-v4-flash", expectedThinking: false, foreign: true },
 		{ provider: "ollama", id: "deepseek-v4-flash", expectedThinking: true },
 		{ provider: "ollama-cloud", id: "glm-5.2", expectedThinking: false, compat: { stripThinkingHistory: true } },
 		{
@@ -480,7 +481,7 @@ describe("Ollama assistant thinking history", () => {
 			compat: { stripThinkingHistory: false },
 		},
 	]) {
-		it(`replays ${provider}/${id} plain and tool-call history with thinking=${expectedThinking}`, async () => {
+		it(`replays ${provider}/${id} ${foreign ? "foreign" : "own"} plain and tool-call history with thinking=${expectedThinking}`, async () => {
 			const model =
 				provider === "ollama-cloud" && id === "glm-5.2" && compat === undefined
 					? getBundledModel<"ollama-chat">("ollama-cloud", id)
@@ -496,9 +497,9 @@ describe("Ollama assistant thinking history", () => {
 			};
 			const history: AssistantMessage = {
 				role: "assistant",
-				api: "ollama-chat",
-				provider,
-				model: id,
+				api: foreign ? "anthropic-messages" : "ollama-chat",
+				provider: foreign ? "anthropic" : provider,
+				model: foreign ? "claude-sonnet" : id,
 				content: [
 					{ type: "thinking", thinking: "Return the requested letter." },
 					{ type: "text", text: "A" },
@@ -539,7 +540,12 @@ describe("Ollama assistant thinking history", () => {
 					? ["Return the requested letter.", "Look up the capital before answering."]
 					: [undefined, undefined],
 			);
-			expect(assistantMessages?.[0]?.content).toBe("A");
+			if (foreign) {
+				expect(assistantMessages?.[0]?.content).toContain("Return the requested letter.");
+				expect(assistantMessages?.[1]?.content).toContain("Look up the capital before answering.");
+			} else {
+				expect(assistantMessages?.[0]?.content).toBe("A");
+			}
 			expect(assistantMessages?.[1]?.tool_calls).toEqual([
 				{ type: "function", function: { name: "lookup", arguments: { q: "capital of France" } } },
 			]);

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Ollama chat history estimates counting assistant thinking that the request strips, which could trigger compaction early ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
+- Fixed Ollama chat history estimates counting stripped native thinking and missing foreign thinking replayed as text, which skewed compaction after model switches ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
 
 ## [18.12.0] - 2026-10-17
 
