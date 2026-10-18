@@ -18,7 +18,7 @@ use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError},
-		macos::{application_windows, has_onscreen_window, has_open_window},
+		macos::{application_windows, has_onscreen_window, has_open_window, window_on_another_space},
 		types::DesktopWindow,
 	},
 	Application, OpenedApplication,
@@ -338,6 +338,7 @@ fn show_in_background(pid: u32, path: &str) -> bool {
 		// stay valid for the synchronous setter.
 		|| unsafe { app.set_attribute_value(&hidden, CFBoolean::new(false)) == AXError::Success },
 		|| has_open_window(pid) != Some(false),
+		|| window_on_another_space(pid),
 		|| launch(path, false).is_ok(),
 	)
 }
@@ -345,11 +346,15 @@ fn show_in_background(pid: u32, path: &str) -> bool {
 /// Asks for a window: a `hidden` application is unhidden through `unhide`,
 /// which shows only the windows it still has open (`open_window`); one whose
 /// last window was closed, or whose windows are all minimized, also gets the
-/// reopen event (`reopen`), as an application that is not hidden does.
+/// reopen event (`reopen`), as an application that is not hidden does. One
+/// with a window on another Space (`elsewhere`), which on-screen window lists
+/// leave out, already has a window: the reopen event would only risk
+/// bringing it to the front, so `false`.
 fn ask_for_window(
 	hidden: bool,
 	unhide: impl FnOnce() -> bool,
 	open_window: impl FnOnce() -> bool,
+	elsewhere: impl FnOnce() -> bool,
 	reopen: impl FnOnce() -> bool,
 ) -> bool {
 	if hidden {
@@ -359,6 +364,9 @@ fn ask_for_window(
 		if open_window() {
 			return true;
 		}
+	}
+	if elsewhere() {
+		return false;
 	}
 	reopen()
 }
@@ -568,14 +576,31 @@ mod tests {
 			reopened.set(true);
 			true
 		};
-		assert!(ask_for_window(true, || true, || false, reopen));
+		let here = || false;
+		assert!(ask_for_window(true, || true, || false, here, reopen));
 		assert!(reopened.get());
 		// One with a window open shows it; the reopen event is not sent.
 		reopened.set(false);
-		assert!(ask_for_window(true, || true, || true, reopen));
+		assert!(ask_for_window(true, || true, || true, here, reopen));
 		assert!(!reopened.get());
 		// An app that is not hidden gets the reopen event at once.
-		assert!(ask_for_window(false, || panic!("not hidden"), || panic!("not read"), reopen));
+		assert!(ask_for_window(false, || panic!("not hidden"), || panic!("not read"), here, reopen));
 		assert!(reopened.get());
+	}
+
+	#[test]
+	fn an_application_with_a_window_on_another_space_is_not_reopened() {
+		// Notes with its only window on another Space shows nothing on screen
+		// here, but the reopen event could bring it in front of the user.
+		let reopen = || -> bool { panic!("the reopen event was sent") };
+		assert!(!ask_for_window(
+			false,
+			|| panic!("not hidden"),
+			|| panic!("not read"),
+			|| true,
+			reopen
+		));
+		// Hidden, unhiding shows no window here: the one elsewhere still stands.
+		assert!(!ask_for_window(true, || true, || false, || true, reopen));
 	}
 }

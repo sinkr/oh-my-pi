@@ -13,6 +13,7 @@ pub(super) use capture::{application_windows, has_onscreen_window};
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use session::screen_state;
+pub(super) use spaces::window_on_another_space;
 
 use self::{ax::MacAx, capture::MacCapture, input::MacInput};
 use super::{

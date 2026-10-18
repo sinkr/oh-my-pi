@@ -128,6 +128,18 @@ fn unique<'a>(
 	Ok(first)
 }
 
+/// `app`, read from an explicit path, with the running state of the listed
+/// application at its resolved bundle path: a bundle read alone says it is
+/// not running, so a symlink to a running application would be launched
+/// again, which reopens it.
+fn with_listed_state(apps: &[Application], app: Application) -> Application {
+	apps
+		.iter()
+		.find(|listed| listed.path == app.path)
+		.cloned()
+		.unwrap_or(app)
+}
+
 pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<OpenedApplication> {
 	if input.is_empty() || input.contains('\0') {
 		return Err(DesktopError::invalid_target(
@@ -147,7 +159,7 @@ pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<O
 			|| input.contains(std::path::MAIN_SEPARATOR)
 			|| Path::new(input).exists()
 		{
-			platform::from_path(Path::new(input))?
+			with_listed_state(&apps, platform::from_path(Path::new(input))?)
 		} else {
 			resolve(&apps, input)?.cloned().ok_or_else(|| {
 				DesktopError::invalid_target(format!(
@@ -203,5 +215,16 @@ mod tests {
 		assert!(resolve(&apps, "EDITOR").is_err());
 		assert!(resolve(&apps, "same").is_err());
 		assert_eq!(resolve(&apps, "/B.app").unwrap().unwrap().path, "/B.app");
+	}
+
+	#[test]
+	fn an_explicit_path_to_a_running_application_keeps_its_running_state() {
+		// A symlink resolved to /Applications/Notes.app, which is running.
+		let running = Application { running: true, pid: Some(42), ..app("notes", "Notes", "/N.app") };
+		let apps = [app("other", "Other", "/O.app"), running];
+		let opened = with_listed_state(&apps, app("notes", "Notes", "/N.app"));
+		assert_eq!((opened.running, opened.pid), (true, Some(42)));
+		let unlisted = with_listed_state(&apps, app("x", "X", "/X.app"));
+		assert_eq!((unlisted.running, unlisted.pid), (false, None));
 	}
 }
