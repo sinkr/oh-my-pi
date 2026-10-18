@@ -89,6 +89,19 @@ function recorderDefinition(session: ToolSession, calls: unknown[]): EvalPrelude
 	};
 }
 
+function recordingFacade() {
+	const calls: unknown[] = [];
+	const context = createContext({
+		__omp_log__: () => {},
+		__omp_prelude__: async (_name: string, parameters: unknown) => {
+			calls.push(parameters);
+			return responseFor(parameters);
+		},
+	});
+	runInContext(createBrowserPrelude(makeSession()).javascript, context);
+	return { calls, context };
+}
+
 afterAll(async () => {
 	await Promise.all([disposeAllVmContexts(), disposeAllKernelSessions()]);
 });
@@ -181,15 +194,7 @@ describe("browser JavaScript facade", () => {
 	});
 
 	it("refuses run args it would drop before anything runs, and still runs empty or null args", async () => {
-		const calls: unknown[] = [];
-		const context = createContext({
-			__omp_log__: () => {},
-			__omp_prelude__: async (_name: string, parameters: unknown) => {
-				calls.push(parameters);
-				return responseFor(parameters);
-			},
-		});
-		runInContext(createBrowserPrelude(makeSession()).javascript, context);
+		const { calls, context } = recordingFacade();
 
 		await expect(
 			runInContext(
@@ -209,19 +214,6 @@ describe("browser JavaScript facade", () => {
 			{ name: "docs", fn: "async () => 1", args: [], action: "run" },
 		]);
 	});
-
-	function recordingFacade() {
-		const calls: unknown[] = [];
-		const context = createContext({
-			__omp_log__: () => {},
-			__omp_prelude__: async (_name: string, parameters: unknown) => {
-				calls.push(parameters);
-				return responseFor(parameters);
-			},
-		});
-		runInContext(createBrowserPrelude(makeSession()).javascript, context);
-		return { calls, context };
-	}
 
 	it("tells tab.run given an args array to wrap it in { args }", async () => {
 		const { calls, context } = recordingFacade();
