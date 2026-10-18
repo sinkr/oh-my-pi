@@ -45,12 +45,6 @@ export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
 export type ExtToRelayMessage =
 	| {
 			t: "hello";
-			/**
-			 * Random per browser session: kept across extension reloads, replaced when the browser starts. Chrome
-			 * reuses tab ids after a restart, so the relay scopes target ids and saved tab closes to it. Absent in
-			 * older extensions.
-			 */
-			browserSession?: string;
 			userAgent: string;
 			browserVersion: string;
 			tabs: TabSnapshot[];

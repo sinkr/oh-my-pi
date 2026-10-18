@@ -13,15 +13,12 @@
  * Binds loopback only: anything that can reach this port can drive the
  * user's logged-in browser.
  */
-import { fileCloseStore, relayPendingClosesFile } from "./pending-closes";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { RelayBridge } from "./bridge";
 
 /** Options for {@link startRelayServer}. */
 export interface RelayServerOptions {
 	port: number;
-	/** File keeping tab closes that wait for an offline browser past this relay process (default: the relay's directory). */
-	pendingClosesFile?: string;
 	/** Shared secret the extension must present as `?token=`; unset disables the check. */
 	token?: string;
 	/** Group tabs the agent actively drives under one per-window Chrome tab group (default on); `false` disables. */
@@ -82,7 +79,6 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const bridge = new RelayBridge({ log, group });
 	const sockets = new Set<RelayWebSocket>();
 	const startedAt = Date.now();
-	bridge.keepPendingClosesIn(fileCloseStore(opts.pendingClosesFile ?? relayPendingClosesFile(opts.port)));
 
 	const server = Bun.serve({
 		hostname: "127.0.0.1",

@@ -1,11 +1,7 @@
-import { describe, expect, it, jest, setSystemTime } from "bun:test";
+import { describe, expect, it, jest } from "bun:test";
 import { createHash } from "node:crypto";
 import { closeRelayTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
-import {
-	RelayBridge,
-	type RelayPendingClose,
-	type RelaySocket,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
+import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
 import type {
 	RelayRpcRequest,
 	RelayToExtMessage,
@@ -14,9 +10,8 @@ import type {
 import type { CDPSession } from "puppeteer-core";
 
 /** Same derivation as the bridge: target ids embed this per-instance code. */
-function instanceCode(instanceId: string, browserSession?: string): string {
-	const scope = browserSession === undefined ? instanceId : `${instanceId}\n${browserSession}`;
-	return createHash("sha256").update(scope).digest("base64url").slice(0, 8);
+function instanceCode(instanceId: string): string {
+	return createHash("sha256").update(instanceId).digest("base64url").slice(0, 8);
 }
 
 const ANON = instanceCode("anon");
@@ -1468,55 +1463,6 @@ describe("RelayBridge multiple extension instances", () => {
 		expect(chrome.rpcs("createTab")).toHaveLength(0);
 	});
 
-	it("refuses to open a new tab in another browser while the browser of nearTargetId is offline", async () => {
-		const bridge = new RelayBridge({});
-		const chrome = new FakeExtSocket();
-		const edge = new FakeExtSocket();
-		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
-		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
-		bridge.extClosed(edge);
-		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		const createId = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({
-				id: createId,
-				method: "Target.createTarget",
-				params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
-			}),
-		);
-		await flush();
-		expect(chrome.rpcs("createTab")).toHaveLength(0);
-		expect(cdp.messages.find(message => message.id === createId)).toHaveProperty("error");
-	});
-
-	it("opens a new tab in another browser once the browser of nearTargetId has been offline past the hold", async () => {
-		const bridge = new RelayBridge({});
-		const chrome = new FakeExtSocket();
-		const edge = new FakeExtSocket();
-		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
-		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
-		bridge.extClosed(edge);
-		// The user quit Edge for good: its service worker would have reconnected within the minute.
-		setSystemTime(Date.now() + 60_000);
-		try {
-			const connId = bridge.cdpConnected(new FakeCdpSocket());
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({
-					id: ++msgSeq,
-					method: "Target.createTarget",
-					params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
-				}),
-			);
-			await flush();
-			expect(chrome.rpcs("createTab")).toHaveLength(1);
-		} finally {
-			setSystemTime();
-		}
-	});
-
 	it("closes a tab Chrome creates after the createTab RPC timed out", async () => {
 		jest.useFakeTimers();
 		try {
@@ -1538,35 +1484,6 @@ describe("RelayBridge multiple extension instances", () => {
 		} finally {
 			jest.useRealTimers();
 		}
-	});
-
-	it("closes a tab Chrome creates after its extension socket closed mid-create, answered on the next socket", async () => {
-		const bridge = new RelayBridge({});
-		const ext = new FakeExtSocket();
-		connectInstance(bridge, ext, "chrome", []);
-		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		const createId = ++msgSeq;
-		bridge.cdpMessage(connId, JSON.stringify({ id: createId, method: "Target.createTarget", params: {} }));
-		await flush();
-		const [create] = ext.rpcs("createTab");
-		bridge.extClosed(ext);
-		await flush();
-		expect(cdp.messages.find(message => message.id === createId)).toHaveProperty("error");
-		const back = new FakeExtSocket();
-		connectInstance(bridge, back, "chrome", [tab({ tabId: 9 })]);
-		bridge.extMessage(
-			back,
-			JSON.stringify({ t: "rpcResult", id: create!.id, ok: true, result: { tab: tab({ tabId: 9 }) } }),
-		);
-		await flush();
-		expect(back.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([9]);
-		// That close drops with the socket too: the next reconnect sends it again.
-		bridge.extClosed(back);
-		await flush();
-		const again = new FakeExtSocket();
-		connectInstance(bridge, again, "chrome", [tab({ tabId: 9 })]);
-		expect(again.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([9]);
 	});
 
 	it("forgets a timed-out createTab once its late window passes, so a wedged extension cannot grow the relay", async () => {
@@ -1646,183 +1563,22 @@ describe("closeRelayTarget", () => {
 		expect(back.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
 	});
 
+	it("does not close a tab whose id now shows another page when its browser reconnects", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 7 })]);
+		bridge.extClosed(chrome);
+		expect(await closeRelayTarget(channel(bridge), `PAGE${instanceCode("chrome")}.7`)).toBeFalse();
+		// Chrome restarted meanwhile: tab 7 is a page the user opened.
+		const back = new FakeExtSocket();
+		connectInstance(bridge, back, "chrome", [tab({ tabId: 7, url: "https://mail.example/" })]);
+		expect(back.rpcs("removeTab")).toHaveLength(0);
+	});
+
 	it("reports a tab the relay no longer knows as closed", async () => {
 		const bridge = new RelayBridge({});
 		connectInstance(bridge, new FakeExtSocket(), "chrome", [tab({ tabId: 7 })]);
 		expect(await closeRelayTarget(channel(bridge), `PAGE${instanceCode("chrome")}.8`)).toBeTrue();
-	});
-});
-
-describe("RelayBridge pending closes across relay processes", () => {
-	/** An extension hello in browser session `browserSession`. */
-	function helloIn(bridge: RelayBridge, socket: FakeExtSocket, browserSession: string, tabs: TabSnapshot[]): void {
-		bridge.extConnected(socket);
-		bridge.extMessage(
-			socket,
-			JSON.stringify({
-				t: "hello",
-				instanceId: "chrome",
-				browserSession,
-				userAgent: "test",
-				browserVersion: "Chrome/151.0.0.0",
-				discardedTabsProtocol: 1,
-				tabs,
-				attachedTabIds: [],
-			}),
-		);
-	}
-
-	/** A relay that closes tab 7 while its browser is offline, then stops; returns what it kept. */
-	async function closeWhileOffline(): Promise<RelayPendingClose[]> {
-		let kept: RelayPendingClose[] = [];
-		const bridge = new RelayBridge({});
-		bridge.keepPendingClosesIn({ load: () => [], save: closes => (kept = closes) });
-		const chrome = new FakeExtSocket();
-		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
-		bridge.extClosed(chrome);
-		const connId = bridge.cdpConnected(new FakeCdpSocket());
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({
-				id: ++msgSeq,
-				method: "Target.closeTarget",
-				params: { targetId: `PAGE${instanceCode("chrome", "session-1")}.7` },
-			}),
-		);
-		await flush();
-		return kept;
-	}
-
-	it("closes a tab an earlier relay could not once the browser reconnects in the same session, keeping it until confirmed", async () => {
-		const kept = await closeWhileOffline();
-		expect(kept).toEqual([
-			{ key: `${instanceCode("chrome", "session-1")}:7`, instanceId: "chrome", url: "https://example.com/" },
-		]);
-		// A new relay process loads what the stopped one kept.
-		let left: RelayPendingClose[] = kept;
-		const bridge = new RelayBridge({});
-		bridge.keepPendingClosesIn({ load: () => kept, save: closes => (left = closes) });
-		const chrome = new FakeExtSocket();
-		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
-		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
-		// Still kept while the retry is unanswered: a relay stopping now leaves it for the next.
-		expect(left).toEqual(kept);
-		ack(bridge, chrome, "removeTab");
-		await flush();
-		expect(left).toEqual([]);
-	});
-
-	it("drops a kept close once Chrome restarted, since tab 7 may now be another tab", async () => {
-		const kept = await closeWhileOffline();
-		let left: RelayPendingClose[] = kept;
-		const bridge = new RelayBridge({});
-		bridge.keepPendingClosesIn({ load: () => kept, save: closes => (left = closes) });
-		const chrome = new FakeExtSocket();
-		helloIn(bridge, chrome, "session-2", [tab({ tabId: 7 })]);
-		expect(chrome.rpcs("removeTab")).toHaveLength(0);
-		expect(left).toEqual([]);
-	});
-
-	it("drops a kept close whose tab now shows another page, even in the same browser session", async () => {
-		// An extension disabled across a Chrome restart keeps its session id, and tab 7 is a restored user tab.
-		const kept = await closeWhileOffline();
-		let left: RelayPendingClose[] = kept;
-		const bridge = new RelayBridge({});
-		bridge.keepPendingClosesIn({ load: () => kept, save: closes => (left = closes) });
-		const chrome = new FakeExtSocket();
-		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7, url: "https://mail.example/" })]);
-		expect(chrome.rpcs("removeTab")).toHaveLength(0);
-		expect(left).toEqual([]);
-	});
-
-	it("keeps a close while the extension has not answered it, so a relay stopping meanwhile leaves it to the next", async () => {
-		let kept: RelayPendingClose[] = [];
-		const bridge = new RelayBridge({});
-		bridge.keepPendingClosesIn({ load: () => [], save: closes => (kept = closes) });
-		const chrome = new FakeExtSocket();
-		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
-		const connId = bridge.cdpConnected(new FakeCdpSocket());
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({
-				id: ++msgSeq,
-				method: "Target.closeTarget",
-				params: { targetId: `PAGE${instanceCode("chrome", "session-1")}.7` },
-			}),
-		);
-		await flush();
-		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
-		expect(kept).toEqual([
-			{ key: `${instanceCode("chrome", "session-1")}:7`, instanceId: "chrome", url: "https://example.com/" },
-		]);
-		ack(bridge, chrome, "removeTab");
-		await flush();
-		expect(kept).toEqual([]);
-	});
-
-	it("retires a browser's targets once it restarted, so a reused tab id is not closed by the old target id", async () => {
-		const bridge = new RelayBridge({});
-		const before = new FakeExtSocket();
-		helloIn(bridge, before, "session-1", [tab({ tabId: 7 })]);
-		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		bridge.extClosed(before);
-		// Chrome restarted: tab 7 is now a tab the user opened.
-		const after = new FakeExtSocket();
-		helloIn(bridge, after, "session-2", [tab({ tabId: 7 })]);
-		const closeId = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({
-				id: closeId,
-				method: "Target.closeTarget",
-				params: { targetId: `PAGE${instanceCode("chrome", "session-1")}.7` },
-			}),
-		);
-		await flush();
-		expect(after.rpcs("removeTab")).toHaveLength(0);
-		expect(cdp.messages.find(message => message.id === closeId)).toHaveProperty("error");
-		const listId = ++msgSeq;
-		bridge.cdpMessage(connId, JSON.stringify({ id: listId, method: "Target.getTargets" }));
-		const listed = cdp.messages.find(message => message.id === listId)?.result as {
-			targetInfos: Array<{ targetId: string }>;
-		};
-		expect(listed.targetInfos.map(info => info.targetId)).toEqual([`PAGE${instanceCode("chrome", "session-2")}.7`]);
-	});
-
-	it("keeps a browser's targets and kept closes when only its extension reloaded", async () => {
-		const kept = await closeWhileOffline();
-		const bridge = new RelayBridge({});
-		bridge.keepPendingClosesIn({ load: () => kept, save: () => {} });
-		const chrome = new FakeExtSocket();
-		// The reloaded extension names the same browser session.
-		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
-		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
-	});
-});
-
-describe("RelayBridge RPC ids", () => {
-	it("numbers RPCs above every id a relay started earlier sent", () => {
-		const firstCreateId = (startedAt: number, creates: number): number => {
-			setSystemTime(startedAt);
-			try {
-				const bridge = new RelayBridge({});
-				const ext = new FakeExtSocket();
-				connect(bridge, ext, []);
-				const connId = bridge.cdpConnected(new FakeCdpSocket());
-				for (let i = 0; i < creates; i++) {
-					bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
-				}
-				const ids = ext.rpcs("createTab").map(rpc => rpc.id);
-				return creates === 1 ? ids[0]! : ids.at(-1)!;
-			} finally {
-				setSystemTime();
-			}
-		};
-		// An earlier relay that sent many RPCs, and one started a millisecond later: the later one's ids never collide.
-		const earlierLast = firstCreateId(1_800_000_000_000, 50);
-		const laterFirst = firstCreateId(1_800_000_000_001, 1);
-		expect(laterFirst).toBeGreaterThan(earlierLast);
 	});
 });
 
@@ -1854,19 +1610,6 @@ describe("RelayBridge last-hello fallback and offline instance pruning", () => {
 		await flush();
 		expect(bridge.versionInfo("ws://relay").Browser).toBe("Chrome/151.0.0.0");
 		expect(bridge.listTargets().map(t => t.title)).toContain("Created");
-	});
-
-	it("falls back to the live instance whose hello ran most recently, not the first connected", () => {
-		const bridge = new RelayBridge({});
-		const [first, second, third] = [new FakeExtSocket(), new FakeExtSocket(), new FakeExtSocket()];
-		connectInstance(bridge, first, "first", [tab({ tabId: 1 })]);
-		connectInstance(bridge, second, "second", [tab({ tabId: 1 })]);
-		connectInstance(bridge, third, "third", [tab({ tabId: 1 })]);
-		bridge.extClosed(third);
-		const connId = bridge.cdpConnected(new FakeCdpSocket());
-		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
-		expect(second.rpcs("createTab")).toHaveLength(1);
-		expect(first.rpcs("createTab")).toHaveLength(0);
 	});
 
 	it("hides tabs of an instance whose socket went offline", () => {

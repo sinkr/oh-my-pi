@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a tab the extension opened for an open omp had already given up on (its relay connection dropped or moved mid-open) staying open; the extension now closes it, trying again on its next connection if Chrome refuses. A tab close Chrome refuses for a moment is retried ([#16119](https://github.com/can1357/oh-my-pi/pull/16119) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a relay tab close failing when Chrome refuses it for a moment (a tab being dragged); the extension retries it ([#16119](https://github.com/can1357/oh-my-pi/pull/16119) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.8] - 2026-10-10
 

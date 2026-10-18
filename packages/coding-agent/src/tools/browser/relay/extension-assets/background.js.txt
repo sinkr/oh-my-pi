@@ -35,77 +35,6 @@ async function ensureInstanceId() {
   await chrome.storage.local.set({ [key]: instanceId });
   return instanceId;
 }
-var BROWSER_SESSION_KEY = "relayBrowserSession";
-var SESSION_SETTLED_KEY = "relayBrowserSessionSettled";
-var SESSION_EVENT_WAIT_MS = 2000;
-var sessionEvent = Promise.withResolvers();
-var sessionDecided = false;
-var sawInstalled = false;
-var sessionCreatedHere = false;
-async function settleSession(replace) {
-  if (sessionDecided)
-    return;
-  if (replace)
-    await chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() });
-  sessionDecided = true;
-  sessionEvent.resolve();
-}
-setTimeout(() => {
-  chrome.storage.session.get({ [SESSION_SETTLED_KEY]: false }).then((settled) => settleSession(settled[SESSION_SETTLED_KEY] !== true && !sawInstalled), () => settleSession(true));
-}, SESSION_EVENT_WAIT_MS);
-async function ensureBrowserSession() {
-  const settled = await chrome.storage.session.get({ [SESSION_SETTLED_KEY]: false });
-  if (settled[SESSION_SETTLED_KEY] !== true) {
-    await sessionEvent.promise;
-    await chrome.storage.session.set({ [SESSION_SETTLED_KEY]: true });
-  }
-  const stored = await chrome.storage.local.get({ [BROWSER_SESSION_KEY]: "" });
-  const existing = stored[BROWSER_SESSION_KEY];
-  if (typeof existing === "string" && existing.length > 0)
-    return existing;
-  const created = crypto.randomUUID();
-  sessionCreatedHere = true;
-  await chrome.storage.local.set({ [BROWSER_SESSION_KEY]: created });
-  return created;
-}
-var ORPHAN_TABS_KEY = "relayOrphanTabs";
-function isOrphanTab(value) {
-  return typeof value === "object" && value !== null && "id" in value && typeof value.id === "number" && "urls" in value && Array.isArray(value.urls) && value.urls.every((url) => typeof url === "string");
-}
-var orphanEdits = Promise.resolve([]);
-function editOrphanTabs(edit) {
-  orphanEdits = orphanEdits.catch(() => []).then(async () => {
-    const session = await ensureBrowserSession();
-    const stored = (await chrome.storage.local.get({ [ORPHAN_TABS_KEY]: null }))[ORPHAN_TABS_KEY];
-    const current = typeof stored === "object" && stored !== null && "session" in stored && stored.session === session;
-    const listed = current && "tabs" in stored && Array.isArray(stored.tabs) ? stored.tabs : [];
-    const before = listed.filter(isOrphanTab);
-    const tabs = edit(before);
-    if (tabs.length !== before.length || tabs.some((tab, i) => tab !== before[i])) {
-      await chrome.storage.local.set({ [ORPHAN_TABS_KEY]: { session, tabs } });
-    }
-    return tabs;
-  });
-  return orphanEdits;
-}
-async function isStillOrphan(orphan) {
-  try {
-    const tab = await chrome.tabs.get(orphan.id);
-    return [tab.url, tab.pendingUrl].some((url) => url !== undefined && url !== "" && orphan.urls.includes(url));
-  } catch {
-    return false;
-  }
-}
-async function closeOrphanTabs(added) {
-  try {
-    const tabs = await editOrphanTabs((tabs) => added === undefined || tabs.some((tab) => tab.id === added.id) ? tabs : [...tabs, added]);
-    for (const orphan of tabs) {
-      const done = await isStillOrphan(orphan) ? await removeTab(orphan.id).then(() => true, () => false) : true;
-      if (done)
-        await editOrphanTabs((list) => list.filter((tab) => tab.id !== orphan.id));
-    }
-  } catch {}
-}
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
   const port = Number(stored.port);
@@ -186,28 +115,7 @@ async function restoreGroups() {
       await chrome.tabs.ungroup(ids).catch(() => {});
   }
 }
-var rpcOrigins = new Map;
-function trackOrigin(msg, origin) {
-  if (msg.t === "rpc") {
-    rpcOrigins.set(msg.id, { socket: origin, op: msg.op, url: msg.op === "createTab" ? msg.url : undefined });
-  }
-  return msg;
-}
-function isCreatedTab(result) {
-  return typeof result === "object" && result !== null && "tab" in result;
-}
 function post(msg) {
-  if (msg.t === "rpcResult") {
-    const origin = rpcOrigins.get(msg.id);
-    rpcOrigins.delete(msg.id);
-    if (origin && (origin.socket !== ws || origin.socket.readyState !== WebSocket.OPEN)) {
-      if (origin.op === "createTab" && msg.ok && isCreatedTab(msg.result)) {
-        const urls = [origin.url, msg.result.tab.url].filter((url) => !!url);
-        closeOrphanTabs({ id: msg.result.tab.tabId, urls });
-      }
-      return;
-    }
-  }
   if (ws?.readyState === WebSocket.OPEN)
     ws.send(JSON.stringify(msg));
 }
@@ -234,7 +142,6 @@ async function setBadge(connected) {
   } catch {}
 }
 async function buildHello() {
-  const browserSession = await ensureBrowserSession();
   const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
   const snapshots = [];
   for (const tab of tabs) {
@@ -247,7 +154,6 @@ async function buildHello() {
   return {
     t: "hello",
     instanceId: await ensureInstanceId(),
-    browserSession,
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     discardedTabsProtocol: 1,
@@ -294,10 +200,10 @@ async function runRpc(msg) {
       return {};
   }
 }
-function handleRelayMessage(raw, origin) {
+function handleRelayMessage(raw) {
   let msg;
   try {
-    msg = trackOrigin(JSON.parse(raw), origin);
+    msg = JSON.parse(raw);
   } catch {
     return;
   }
@@ -322,17 +228,13 @@ async function connect() {
   socket.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
-    closeOrphanTabs();
-    buildHello().then((hello) => {
-      if (ws === socket && socket.readyState === WebSocket.OPEN)
-        socket.send(JSON.stringify(hello));
-    });
+    buildHello().then((hello) => post(hello));
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
   };
   socket.onmessage = (event) => {
     if (typeof event.data === "string")
-      handleRelayMessage(event.data, socket);
+      handleRelayMessage(event.data);
   };
   socket.onclose = () => {
     if (ws !== socket)
@@ -383,34 +285,16 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== "omp-relay-keepalive")
-    return;
-  connect();
-  closeOrphanTabs();
+  if (alarm.name === "omp-relay-keepalive")
+    connect();
 });
-chrome.storage.onChanged.addListener((changes, areaName) => {
+chrome.storage.onChanged.addListener((_changes, areaName) => {
   if (areaName !== "local")
-    return;
-  if (Object.keys(changes).every((key) => key === BROWSER_SESSION_KEY || key === ORPHAN_TABS_KEY))
     return;
   ws?.close();
   connect();
 });
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
-chrome.runtime.onInstalled.addListener(() => {
-  sawInstalled = true;
-  connect();
-});
-chrome.runtime.onStartup.addListener(() => {
-  if (!sessionDecided) {
-    settleSession(true);
-    return;
-  }
-  if (sessionCreatedHere)
-    return;
-  chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() }).then(() => {
-    ws?.close();
-    connect();
-  });
-});
+chrome.runtime.onInstalled.addListener(() => void connect());
+chrome.runtime.onStartup.addListener(() => void connect());
 connect();
