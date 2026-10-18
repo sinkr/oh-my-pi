@@ -605,6 +605,17 @@ fn window_records_of(windows: &[CFRetained<AXUIElement>]) -> Vec<AxWindowRecord>
 		.collect()
 }
 
+/// Whether `pid` has a window, among its `AXWindows`, that is not minimized:
+/// one that unhiding the application shows. `None` when nothing can be read.
+pub(in crate::desktop) fn has_open_window(pid: libc::pid_t) -> Option<bool> {
+	let records = window_records(pid)?;
+	Some(
+		records
+			.iter()
+			.any(|record| record.id.is_some() && record.minimized != Some(true)),
+	)
+}
+
 /// Hit-tests the global point `(x, y)` the way the pointer would, returning
 /// the process and window that own the frontmost surface there.
 pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
