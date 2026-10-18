@@ -18,6 +18,7 @@ import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./ses
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { enotdir } from "./session-storage-errors";
 import {
 	parseTitleSlotFromContent,
 	parseTitleSlotLine,
@@ -450,21 +451,21 @@ async function loadWithKnownSize(
 
 /**
  * Windows reports ENOENT when a path component is a regular file, where POSIX
- * yields ENOTDIR. Climbing to the first existing ancestor distinguishes that
- * path error from a genuinely missing file.
+ * yields ENOTDIR. Inspecting the leaf itself and then climbing to the first
+ * existing ancestor distinguishes that path error from a genuinely missing
+ * file.
  */
-function hasFileAsPathComponent(filePath: string): boolean {
-	if (process.platform !== "win32") return false;
+export async function hasFileAsPathComponent(filePath: string): Promise<boolean> {
 	let current = path.resolve(filePath);
 	for (;;) {
+		try {
+			return !(await fs.promises.stat(current)).isDirectory();
+		} catch {
+			// Missing component: climb to the first existing ancestor.
+		}
 		const parent = path.dirname(current);
 		if (parent === current) return false;
 		current = parent;
-		try {
-			return !fs.statSync(current).isDirectory();
-		} catch {
-			// Missing ancestor: keep climbing to the first existing one.
-		}
 	}
 }
 
@@ -485,10 +486,12 @@ export async function loadSessionFile(
 		if (isEnoent(err)) {
 			// Keep the ENOTDIR rejection POSIX produces so a path-component
 			// error is not masked as a missing session.
-			if (storage instanceof FileSessionStorage && hasFileAsPathComponent(filePath)) {
-				const notDir = new Error(`ENOTDIR: not a directory, open '${filePath}'`) as Error & { code?: string };
-				notDir.code = "ENOTDIR";
-				throw notDir;
+			if (
+				process.platform === "win32" &&
+				storage instanceof FileSessionStorage &&
+				(await hasFileAsPathComponent(filePath))
+			) {
+				throw enotdir(filePath);
 			}
 			return {
 				entries: [],
