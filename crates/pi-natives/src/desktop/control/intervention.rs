@@ -3,7 +3,7 @@
 //! A user who steps into an app the agent drives changes what the agent last
 //! read there. Input aimed at an app the user has used since the session last
 //! read it waits for them to pause, then fails without sending, so the agent
-//! reads the window again before acting; keys already being typed stop at the
+//! reads the window again before acting; input already being sent stops at the
 //! user's first key or click.
 use std::{
 	cell::RefCell,
@@ -189,9 +189,9 @@ pub(crate) fn input_goes_to(pid: libc::pid_t) {
 	});
 }
 
-/// Before a key press of the current input call: refuses once the user has
-/// pressed a key or clicked in its app since the call was admitted, so at most
-/// the press already under way lands after theirs.
+/// Before a key or pointer press of the current input call: refuses once the
+/// user has pressed a key or clicked in its app since the call was admitted, so
+/// at most the press already under way lands after theirs.
 pub(crate) fn check_press() -> CoreResult<()> {
 	WATCH.with_borrow(|watch| {
 		let Some(watch) = watch else {

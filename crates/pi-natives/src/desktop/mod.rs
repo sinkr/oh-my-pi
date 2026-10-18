@@ -4491,6 +4491,7 @@ mod capture_tests {
 		};
 		let error = worker.execute(&typed, &source.token()).err().unwrap();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("still using"), "{}", error.message);
 	}
 
 	#[test]
