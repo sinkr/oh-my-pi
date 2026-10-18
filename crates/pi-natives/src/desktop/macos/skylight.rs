@@ -395,12 +395,11 @@ pub(super) fn after_cleanup<T>(result: CoreResult<T>, cleanup: CoreResult<()>) -
 	}
 }
 
-/// Hardware mouse presses (left, right, other `CGEventType`s): a click is how a
-/// user picks a window, while typing in their own window is not. Presses posted
-/// to the HID event tap advance these counters, omp's own included; events
-/// posted to a pid do not.
-const POINTER_PRESS_TYPES: [u32; 3] = [1, 3, 25];
-
+/// How many presses of `event_type` the HID system has counted. Hardware
+/// mouse presses ([`control::POINTER_PRESS_TYPES`]) are how a user picks a
+/// window, while typing in their own window is not. Presses posted to the HID
+/// event tap advance these counters, omp's own included; events posted to a
+/// pid do not.
 fn hid_counter(event_type: u32) -> u32 {
 	// SAFETY: HIDSystemState (1) and these public CGEventType values are
 	// defined by CGEventSource.h / CGEventTypes.h; this is a read-only query.
@@ -412,7 +411,7 @@ fn hid_counter(event_type: u32) -> u32 {
 /// restoration; yielding control is safer than fighting a deliberate switch.
 fn activation_activity() -> [u32; 5] {
 	// Pointer presses, key press, and modifiers can change activation.
-	let [left, right, other] = POINTER_PRESS_TYPES;
+	let [left, right, other] = control::POINTER_PRESS_TYPES;
 	[left, right, other, 10, 12].map(hid_counter)
 }
 
@@ -423,7 +422,7 @@ static OWN_POINTER_PRESSES: AtomicU32 = AtomicU32::new(0);
 /// before the event is posted to the HID event tap, so a reader never sees
 /// the HID counter move ahead of this count.
 pub(super) fn note_hid_post(event_type: CGEventType) {
-	if POINTER_PRESS_TYPES.contains(&(event_type as u32)) {
+	if control::is_pointer_press(event_type as u32) {
 		OWN_POINTER_PRESSES.fetch_add(1, Ordering::AcqRel);
 	}
 }
@@ -442,7 +441,7 @@ impl PointerPresses {
 		// Own first: a press of omp's posted between the two reads then looks
 		// like the user's, which only stands the hand-back down.
 		let own = OWN_POINTER_PRESSES.load(Ordering::Acquire);
-		Self { hid: POINTER_PRESS_TYPES.map(hid_counter), own }
+		Self { hid: control::POINTER_PRESS_TYPES.map(hid_counter), own }
 	}
 
 	/// Whether the HID counters show more presses since `baseline` than omp
@@ -853,8 +852,9 @@ fn hand_back_confirmed(
 /// Whether focus goes back to `previous_key`, given the previous front
 /// process's key window now. Another window there was the user's choice. The
 /// target itself is still key after the focus record within one process, so
-/// there only a hardware click marks it as the user's choice. Typing in their
-/// own window never stops the hand-back: background input watches no keys.
+/// there only a hardware click marks it as the user's choice; so does a click
+/// while the key window cannot be read. Typing in their own window never stops
+/// the hand-back: background input watches no keys.
 const fn hands_back(
 	same_process: bool,
 	key: Option<u32>,
@@ -866,7 +866,7 @@ const fn hands_back(
 		Some(key) if key == previous_key => true,
 		Some(key) if same_process && key == wid => !clicked,
 		Some(_) => false,
-		None => true,
+		None => !clicked,
 	}
 }
 
@@ -916,8 +916,9 @@ pub(super) fn with_foreground<T>(
 	})?;
 	let restore = |preparation_failed: bool| {
 		// Keys the user types while takeover holds the front land in the target
-		// without them choosing it, so only a click or Command shortcut of
-		// theirs, or a switch elsewhere, leaves the front application alone.
+		// without them choosing it, so only a click, Command shortcut or Control
+		// navigation chord of theirs, or a switch elsewhere, leaves the front
+		// application alone.
 		// The HID counters are read synchronously, unlike the monitor's count,
 		// which can trail a click.
 		let still_ours = || {
@@ -1238,6 +1239,12 @@ mod tests {
 		assert!(hands_back(false, Some(user), user, target, false));
 		assert!(hands_back(true, Some(user), user, target, true), "a click in their own window");
 		assert!(hands_back(true, None, user, target, false));
+		// An unreadable key window after a click may hide the user's pick.
+		assert!(
+			!hands_back(true, None, user, target, true),
+			"a click while the key window is unknown"
+		);
+		assert!(!hands_back(false, None, user, target, true));
 		// A sibling target still key after the focus record is ours to hand back,
 		// unless the user clicked it.
 		assert!(hands_back(true, Some(target), user, target, false));

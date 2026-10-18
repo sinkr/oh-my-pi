@@ -73,25 +73,64 @@ const fn physical_escape(kind: u32, key: i64, pid: i64, tag: i64) -> bool {
 
 const FLAGS_CHANGED: u32 = 12;
 const COMMAND_FLAG: u64 = 0x0010_0000;
+const CONTROL_FLAG: u64 = 0x0004_0000;
+
+/// Mouse presses (left, right, other `CGEventType`s): the one list both the
+/// takeover monitor and the HID press counters classify presses by.
+pub(crate) const POINTER_PRESS_TYPES: [u32; 3] = [1, 3, 25];
+
+pub(crate) const fn is_pointer_press(kind: u32) -> bool {
+	let mut i = 0;
+	while i < POINTER_PRESS_TYPES.len() {
+		if POINTER_PRESS_TYPES[i] == kind {
+			return true;
+		}
+		i += 1;
+	}
+	false
+}
+
+/// Keys that, held with Control, are macOS's Mission Control and Space
+/// shortcuts: the arrows (Mission Control, application windows, moving a
+/// Space) and the top-row digits (switching to Desktop 1-9).
+const fn control_navigation_key(key: i64) -> bool {
+	matches!(key, 123..=126 | 18..=23 | 25 | 26 | 28)
+}
+
+/// The event types the takeover monitor's tap listens to: keys, modifiers and
+/// every pointer press.
+const fn monitor_mask() -> u64 {
+	let mut mask = (1 << KEY_DOWN) | (1 << FLAGS_CHANGED);
+	let mut i = 0;
+	while i < POINTER_PRESS_TYPES.len() {
+		mask |= 1 << POINTER_PRESS_TYPES[i];
+		i += 1;
+	}
+	mask
+}
 
 /// What a physical event means for takeover's hand-back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserInput {
-	/// A mouse press or a Command shortcut (Command-Tab, Spotlight): it picks
-	/// an app or window, so the hand-back stands down.
+	/// A mouse press, a Command shortcut (Command-Tab, Spotlight) or a Control
+	/// navigation chord (Mission Control, a Space switch): it picks an app,
+	/// window or Space, so the hand-back stands down.
 	Choice,
 	/// Plain typing, which reaches the takeover target only because takeover
 	/// holds the front.
 	Typing,
 }
 
-const fn user_input(kind: u32, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
+const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
 	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
 		return None;
 	}
 	match kind {
-		1 | 3 | 25 => Some(UserInput::Choice),
+		kind if is_pointer_press(kind) => Some(UserInput::Choice),
 		KEY_DOWN if flags & COMMAND_FLAG != 0 => Some(UserInput::Choice),
+		KEY_DOWN if flags & CONTROL_FLAG != 0 && control_navigation_key(key) => {
+			Some(UserInput::Choice)
+		},
 		KEY_DOWN | FLAGS_CHANGED => Some(UserInput::Typing),
 		_ => None,
 	}
@@ -130,7 +169,7 @@ unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> R
 				CGEventGetFlags(event),
 			)
 		};
-		match user_input(kind, flags, pid, tag) {
+		match user_input(kind, key, flags, pid, tag) {
 			Some(UserInput::Choice) => {
 				super::USER_CHOICES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 			},
@@ -172,7 +211,7 @@ impl EscapeMonitor {
 						1,
 						0,
 						1,
-						(1 << KEY_DOWN) | (1 << 1) | (1 << 3) | (1 << 25) | (1 << 12),
+						monitor_mask(),
 						observe,
 						ptr::from_mut(&mut context).cast(),
 					)
@@ -282,23 +321,58 @@ mod tests {
 
 	#[test]
 	fn clicks_and_command_shortcuts_choose_while_plain_typing_does_not() {
-		for kind in [1, 3, 25] {
-			assert_eq!(user_input(kind, 0, 0, 0), Some(UserInput::Choice));
-			assert_eq!(user_input(kind, 0, 0, SYNTHETIC_EVENT_TAG), None);
-			assert_eq!(user_input(kind, 0, 42, 0), None);
+		for kind in POINTER_PRESS_TYPES {
+			assert_eq!(user_input(kind, 0, 0, 0, 0), Some(UserInput::Choice));
+			assert_eq!(user_input(kind, 0, 0, 0, SYNTHETIC_EVENT_TAG), None);
+			assert_eq!(user_input(kind, 0, 0, 42, 0), None);
 		}
 		// Command-Tab and Command-Space pick an app; Shift-typing does not.
-		assert_eq!(user_input(KEY_DOWN, COMMAND_FLAG, 0, 0), Some(UserInput::Choice));
-		assert_eq!(user_input(KEY_DOWN, COMMAND_FLAG | 0x2_0000, 0, 0), Some(UserInput::Choice));
-		assert_eq!(user_input(KEY_DOWN, 0x2_0000, 0, 0), Some(UserInput::Typing));
-		assert_eq!(user_input(KEY_DOWN, 0, 0, 0), Some(UserInput::Typing));
-		assert_eq!(user_input(FLAGS_CHANGED, 0x2_0000, 0, 0), Some(UserInput::Typing));
+		assert_eq!(user_input(KEY_DOWN, 48, COMMAND_FLAG, 0, 0), Some(UserInput::Choice));
+		assert_eq!(user_input(KEY_DOWN, 49, COMMAND_FLAG | 0x2_0000, 0, 0), Some(UserInput::Choice));
+		assert_eq!(user_input(KEY_DOWN, 0, 0x2_0000, 0, 0), Some(UserInput::Typing));
+		assert_eq!(user_input(KEY_DOWN, 0, 0, 0, 0), Some(UserInput::Typing));
+		assert_eq!(user_input(FLAGS_CHANGED, 56, 0x2_0000, 0, 0), Some(UserInput::Typing));
 		// omp's own keys and those another process posts are not the user's.
-		assert_eq!(user_input(KEY_DOWN, COMMAND_FLAG, 0, SYNTHETIC_EVENT_TAG), None);
-		assert_eq!(user_input(KEY_DOWN, 0, 42, 0), None);
+		assert_eq!(user_input(KEY_DOWN, 48, COMMAND_FLAG, 0, SYNTHETIC_EVENT_TAG), None);
+		assert_eq!(user_input(KEY_DOWN, 0, 0, 42, 0), None);
 		// Releases mean nothing on their own.
 		for kind in [11, 2, 4, 26] {
-			assert_eq!(user_input(kind, COMMAND_FLAG, 0, 0), None);
+			assert_eq!(user_input(kind, 48, COMMAND_FLAG, 0, 0), None);
+		}
+	}
+
+	#[test]
+	fn control_mission_control_and_space_chords_choose_while_control_typing_does_not() {
+		// Arrow keydowns also carry the fn and numeric-pad flags.
+		let arrow_flags = CONTROL_FLAG | 0x0080_0000 | 0x0020_0000;
+		for arrow in 123..=126 {
+			assert_eq!(user_input(KEY_DOWN, arrow, arrow_flags, 0, 0), Some(UserInput::Choice));
+			assert_eq!(
+				user_input(KEY_DOWN, arrow, 0x0080_0000 | 0x0020_0000, 0, 0),
+				Some(UserInput::Typing)
+			);
+		}
+		// Control-1 through Control-9 switch Desktops.
+		for digit in [18, 19, 20, 21, 23, 22, 26, 28, 25] {
+			assert_eq!(user_input(KEY_DOWN, digit, CONTROL_FLAG, 0, 0), Some(UserInput::Choice));
+		}
+		// Control-A, Control-E and Control-C in a terminal are typing.
+		for key in [0, 14, 8] {
+			assert_eq!(user_input(KEY_DOWN, key, CONTROL_FLAG, 0, 0), Some(UserInput::Typing));
+		}
+		assert_eq!(user_input(KEY_DOWN, 126, CONTROL_FLAG, 0, SYNTHETIC_EVENT_TAG), None);
+	}
+
+	#[test]
+	fn the_monitor_watches_every_pointer_press_the_counters_classify() {
+		for kind in POINTER_PRESS_TYPES {
+			assert!(is_pointer_press(kind));
+			assert_ne!(monitor_mask() & (1 << kind), 0);
+		}
+		assert_ne!(monitor_mask() & (1 << KEY_DOWN), 0);
+		assert_ne!(monitor_mask() & (1 << FLAGS_CHANGED), 0);
+		for kind in [0, 2, 4, 5, 6, KEY_DOWN, FLAGS_CHANGED, 22, 26] {
+			assert!(!is_pointer_press(kind));
 		}
 	}
 }

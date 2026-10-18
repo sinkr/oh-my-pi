@@ -26,7 +26,7 @@ mod macos;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "macos")]
-pub(crate) use macos::{SYNTHETIC_EVENT_TAG, uptime_ns};
+pub(crate) use macos::{POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, is_pointer_press, uptime_ns};
 
 #[derive(Default)]
 struct CancellationState {
@@ -278,9 +278,10 @@ pub(crate) fn with_token_for_test<T>(token: &OperationToken, action: impl FnOnce
 #[cfg(target_os = "macos")]
 static USER_CHOICES: AtomicU64 = AtomicU64::new(0);
 
-/// Mouse buttons and Command shortcuts (Command-Tab, Spotlight) the user
-/// pressed while the takeover monitor ran: the input that picks an app or
-/// window, so takeover leaves the front application to the user.
+/// Mouse buttons, Command shortcuts (Command-Tab, Spotlight) and Control
+/// navigation chords (Mission Control, a Space switch) the user pressed while
+/// the takeover monitor ran: the input that picks an app, window or Space, so
+/// takeover leaves the front application to the user.
 #[cfg(target_os = "macos")]
 pub(crate) fn user_choices() -> u64 {
 	USER_CHOICES.load(Ordering::Acquire)
