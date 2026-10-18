@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, Context, Tool, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
-import { streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
+import { ollamaChatDropsOwnThinking, streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -485,6 +485,8 @@ describe("Ollama assistant thinking history", () => {
 				provider === "ollama-cloud" && id === "glm-5.2" && compat === undefined
 					? getBundledModel<"ollama-chat">("ollama-cloud", id)
 					: buildModel({ ...createReasoningOllamaModel(), provider, id, compat });
+			if (!model) throw new Error(`Expected bundled ${provider}/${id}`);
+			expect(ollamaChatDropsOwnThinking(model)).toBe(!expectedThinking);
 			let payload: OllamaChatRequestPayload | undefined;
 			const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 				const parsed: unknown = JSON.parse(String(init?.body));
