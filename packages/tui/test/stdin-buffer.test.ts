@@ -5,7 +5,7 @@
  * MIT License - Copyright (c) 2025 opentui
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { StdinBuffer } from "@oh-my-pi/pi-tui/stdin-buffer";
 
@@ -816,56 +816,36 @@ describe("StdinBuffer", () => {
 		});
 	});
 
-	describe("Torn String Sequences (kitty OSC 5522 paste spam)", () => {
-		it("swallows a torn kitty OSC 5522 packet instead of typing its base64 tail", async () => {
-			// Regression: a stall past the incomplete-sequence flush window mid
-			// packet during a kitty OSC 5522 clipboard read (image paste) tore
-			// the packet — the flushed head reached the editor as an unknown
-			// escape and the packet's remaining base64 was typed into the
-			// composer as plain text, while the read state machine still
-			// completed and inserted the corrupt image: image chip + base64
-			// spam.
-			setKittyProtocolActive(true);
-			buffer.destroy();
-			buffer = new StdinBuffer({ timeout: 5, partialHoldTimeout: 5 });
-			buffer.on("data", (sequence: string) => {
-				emittedSequences.push(sequence);
-			});
+	describe("Stalled String Sequences (OSC 5522 paste)", () => {
+		const head = "\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;SGVsbG8s";
 
-			const okPacket = "\x1b]5522;type=read:status=OK\x1b\\";
-			processInput(`${okPacket}\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;${"A".repeat(512)}`);
-			expect(emittedSequences).toEqual([okPacket]);
-
-			// Stall past timeout + partial hold: the torn head is dropped, not
-			// delivered as a key.
-			await waitUntil(() => buffer.getBuffer().length === 0);
-			expect(emittedSequences).toEqual([okPacket]);
-
-			// The packet tail (base64 + ST) arrives after the stall: swallowed,
-			// not typed. The next packet is delivered intact.
-			processInput(`${"B".repeat(512)}\x1b\\`);
-			const donePacket = "\x1b]5522;type=read:status=DONE\x1b\\";
-			processInput(donePacket);
-			expect(emittedSequences).toEqual([okPacket, donePacket]);
+		afterEach(() => {
+			vi.useRealTimers();
 		});
 
-		it("detects a split ST terminator while discarding a torn string tail", async () => {
-			setKittyProtocolActive(true);
-			buffer.destroy();
-			buffer = new StdinBuffer({ timeout: 5, partialHoldTimeout: 5 });
-			buffer.on("data", (sequence: string) => {
-				emittedSequences.push(sequence);
-			});
-
-			processInput("\x1b]5522;type=read:status=DATA:mime=Lg==;partial");
-			await waitUntil(() => buffer.getBuffer().length === 0);
+		it("completes an OSC 5522 packet however long its payload stalls", () => {
+			// Regression: a packet stalled past the flush window (a dictation
+			// app serving the clipboard slowly) was torn, and its base64 payload
+			// was typed into the composer as text.
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(60_000);
 			expect(emittedSequences).toEqual([]);
 
-			// Terminator split across reads: trailing ESC held, backslash in
-			// the next chunk completes ST and what follows resumes as keys.
-			processInput("tail\x1b");
-			processInput("\\ok");
-			expect(emittedSequences).toEqual(["o", "k"]);
+			processInput("IHdvcmxkIQ==\x1b");
+			processInput("\\");
+			expect(emittedSequences).toEqual([`${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it.each([
+			["Enter", "\r"],
+			["Up arrow", "\x1b[A"],
+			["space in a base64 payload", " "],
+		])("drops an abandoned string head when %s arrives and delivers that key", (_name, key) => {
+			processInput(head);
+			processInput(`${key}a`);
+			expect(emittedSequences).toEqual([key, "a"]);
+			expect(buffer.getBuffer()).toBe("");
 		});
 	});
 
