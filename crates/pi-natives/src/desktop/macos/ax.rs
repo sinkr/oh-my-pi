@@ -1304,7 +1304,7 @@ fn perform_choosing(
 						drawn.unwrap_or_default(),
 						skylight::front_pid,
 						|| visit.happened(),
-						control::check,
+						|| Ok(()),
 					)
 				};
 				open_menu::settle(menu_pid, pid, before, path, open_menu::CONTROL_MENU_TIMEOUT, holds)
