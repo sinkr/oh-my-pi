@@ -78,7 +78,9 @@ beforeAll(async () => {
 		<button><span style="visibility:hidden">x</span>Keep</button>
 		<button><span style="visibility:hidden">Hid<b style="visibility:visible">Shown</b></span></button>
 		<button>Pick <select><option>Red</option><option selected>Blue</option></select></button>
-		<label for="quantity">Size <input value="10"></label><input id="quantity">`;
+		<label for="quantity">Size <input value="10"></label><input id="quantity">
+		<button aria-labelledby="draft-label"></button><span id="draft-label" style="visibility:hidden"><b>Save draft</b></span>
+		<ul role="tree"><li role="treeitem"><input type="checkbox">Node</li></ul>`;
 	await invoke({ action: "open", name: namesTab, url: `data:text/html,${encodeURIComponent(namesHtml)}` });
 });
 
@@ -116,6 +118,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		["visible text inside a visibility: hidden parent stays", "button", "Shown"],
 		["a nested select contributes its selected option", "button", "Pick Blue"],
 		["a label contributes another field's value", "textbox", "Size 10"],
+		["aria-labelledby points at hidden text", "button", "Save draft"],
+		["a checkbox's value is not its text", "treeitem", "Node"],
 	])("matches role/ exact names to the name observe() shows when %s", async (_, role, elementName) => {
 		const result = (await invoke({
 			action: "run",
@@ -135,13 +139,23 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 			return await tab.evaluate(() => {
 				const kit = globalThis.__ompTernKit;
 				return kit.observe({}).elements
-					.filter(entry => entry.name && ["button", "textbox"].includes(entry.role))
+					.filter(entry => entry.name && ["button", "textbox", "treeitem"].includes(entry.role))
 					.map(entry => [entry.name, kit.count({ engine: "role", query: entry.role + '[name="' + entry.name + '" exact]' })]);
 			});`,
 		})) as { details?: { value?: [string, number][] } };
 		const named = result.details?.value ?? [];
 		expect(named.map(([observed]) => observed)).toEqual(
-			expect.arrayContaining(["Cart", "Settings", "Keep", "Shown", "Pick Blue", "Size 10", "Search records"]),
+			expect.arrayContaining([
+				"Cart",
+				"Settings",
+				"Keep",
+				"Shown",
+				"Pick Blue",
+				"Size 10",
+				"Search records",
+				"Save draft",
+				"Node",
+			]),
 		);
 		expect(named.filter(([, matched]) => matched !== 1)).toEqual([]);
 	});

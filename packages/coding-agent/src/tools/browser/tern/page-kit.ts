@@ -469,7 +469,9 @@ const idrefText = (el, attribute) => {
 	const lookup = id => (root.getElementById ? root.getElementById(id) : null) || document.getElementById(id);
 	return normalizeSpace(ids.map(id => {
 		const target = lookup(id);
-		return target ? contentText(target, null) : "";
+		if (!target) return "";
+		// A hidden target is read whole, as the accessibility tree reads one aria-labelledby names.
+		return contentText(target, null, getComputedStyle(target).visibility === "visible" ? "visible" : "any");
 	}).join(" "));
 };
 const hiddenForA11y = el => {
@@ -481,13 +483,14 @@ const hiddenForA11y = el => {
 	return style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse";
 };
 // Text an element contributes as name-from-content: text nodes, embedded image alts, nested labels.
-// Text under visibility: hidden is left out, as Chromium's accessibility tree leaves it out.
-const contentText = (el, skip) => {
+// Text under visibility: hidden is left out, as Chromium's accessibility tree leaves it out, unless
+// visibility is "any".
+const contentText = (el, skip, visibility = "visible") => {
 	let out = "";
 	const walk = (node, visibility) => {
 		for (let child = node.firstChild; child; child = child.nextSibling) {
 			if (child.nodeType === Node.TEXT_NODE) {
-				if (visibility === "visible") out += child.nodeValue || "";
+				if (visibility === "visible" || visibility === "any") out += child.nodeValue || "";
 				continue;
 			}
 			if (child.nodeType !== Node.ELEMENT_NODE || child === skip || SKIP_TAGS.has(child.localName)) continue;
@@ -496,19 +499,22 @@ const contentText = (el, skip) => {
 			if (style.display === "none") continue;
 			const block = style.display !== "inline" && style.display !== "contents";
 			if (block) out += " ";
-			const shown = style.visibility === "visible";
+			const shown = visibility === "any" || style.visibility === "visible";
+			const inner = visibility === "any" ? "any" : style.visibility;
 			const label = child.getAttribute("aria-label");
 			if (label) out += shown ? label : "";
 			else if (child.localName === "img") out += shown ? child.getAttribute("alt") || "" : "";
 			else if (child.localName === "input" || child.localName === "select" || child.localName === "textarea") {
-				if (shown) out += child.localName === "select" ? (child.selectedOptions[0] ? child.selectedOptions[0].text : "") : child.value || "";
-			} else if (child.shadowRoot) walk(child.shadowRoot, style.visibility);
-			else walk(child, style.visibility);
+				// A checkbox's or radio's value ("on" by default) is not text it shows.
+				const valueIsText = child.localName !== "input" || !["checkbox", "radio", "file", "hidden"].includes(inputType(child));
+				if (shown && valueIsText) out += child.localName === "select" ? (child.selectedOptions[0] ? child.selectedOptions[0].text : "") : child.value || "";
+			} else if (child.shadowRoot) walk(child.shadowRoot, inner);
+			else walk(child, inner);
 			if (block) out += " ";
 		}
 	};
-	if (el.shadowRoot) walk(el.shadowRoot, "visible");
-	else walk(el, "visible");
+	if (el.shadowRoot) walk(el.shadowRoot, visibility);
+	else walk(el, visibility);
 	return normalizeSpace(out);
 };
 const accessibleName = (el, role) => {

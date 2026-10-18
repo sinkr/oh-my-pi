@@ -147,14 +147,17 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		);
 	// Text as the accessibility tree reads it (as the Tern kit's `contentText`): hidden subtrees and
 	// `visibility: hidden` text skipped, block children spaced apart, a child's `aria-label`, an image's `alt`
-	// or a nested control's value in place of its content. `skip` is the element being named, so a label
-	// around a field does not repeat the field's own value.
-	const contentText = (start: Pick<Element, "childNodes">, skip: Element | null): string => {
+	// or a text field's value in place of its content. `skip` is the element being named, so a label around a
+	// field does not repeat the field's own value. `visibility` "any" reads a hidden `aria-labelledby` target
+	// whole, as the accessibility tree does.
+	const contentText = (start: Pick<Element, "childNodes">, skip: Element | null, visibility: unknown): string => {
 		let text = "";
 		const walk = (element: Pick<Element, "childNodes">, visibility: unknown): void => {
 			for (const child of Array.from(element.childNodes)) {
 				// 3 = Node.TEXT_NODE, 1 = Node.ELEMENT_NODE
-				if (child.nodeType === 3 && visibility === "visible") text += child.nodeValue ?? "";
+				if (child.nodeType === 3 && (visibility === "visible" || visibility === "any")) {
+					text += child.nodeValue ?? "";
+				}
 				if (child.nodeType !== 1 || child === skip) continue;
 				const childElement = child as Element;
 				const tag = childElement.tagName.toLocaleLowerCase();
@@ -163,23 +166,29 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				const style = getComputedStyle(childElement);
 				if (style.display === "none") continue;
 				const gap = style.display === "inline" || style.display === "contents" ? "" : " ";
-				const shown = style.visibility === "visible";
+				const shown = visibility === "any" || style.visibility === "visible";
 				const label = normalizeSpace(childElement.getAttribute("aria-label") ?? "");
-				// Form controls expose `value` and `selectedOptions`, which the element type here does not declare.
+				// Form controls expose `type`, `value` and `selectedOptions`, which the element type here does not declare.
 				const control = childElement as unknown as {
+					type?: string;
 					value?: string;
 					selectedOptions?: ArrayLike<{ text: string }>;
 				};
+				// A checkbox's or radio's `value` ("on" by default) is not text it shows.
+				const valueIsText =
+					tag === "textarea" ||
+					(tag === "input" &&
+						!["checkbox", "radio", "file", "hidden"].includes((control.type ?? "").toLocaleLowerCase()));
 				text += gap;
 				if (label) text += shown ? label : "";
 				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
 				else if (tag === "select") text += shown ? (control.selectedOptions?.[0]?.text ?? "") : "";
-				else if (tag === "input" || tag === "textarea") text += shown ? (control.value ?? "") : "";
-				else walk(childElement, style.visibility);
+				else if (tag === "input" || tag === "textarea") text += shown && valueIsText ? (control.value ?? "") : "";
+				else walk(childElement, visibility === "any" ? "any" : style.visibility);
 				text += gap;
 			}
 		};
-		walk(start, "visible");
+		walk(start, visibility);
 		return text;
 	};
 	const accessibleName = (element: Element): string => {
@@ -192,7 +201,12 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 					.split(/\s+/)
 					.map(id => {
 						const target = element.ownerDocument?.getElementById(id);
-						return target ? contentText(target, null) : "";
+						if (!target) return "";
+						return contentText(
+							target,
+							null,
+							getComputedStyle(target).visibility === "visible" ? "visible" : "any",
+						);
 					})
 					.join(" "),
 			);
@@ -200,11 +214,11 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		}
 		if (element.id) {
 			for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
-				if (label.getAttribute("for") === element.id) return normalizeSpace(contentText(label, element));
+				if (label.getAttribute("for") === element.id) return normalizeSpace(contentText(label, element, "visible"));
 			}
 		}
 		const wrappingLabel = element.closest("label");
-		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element));
+		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
 		const tag = element.tagName.toLocaleLowerCase();
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
@@ -217,7 +231,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			inputType === "button" || inputType === "submit" || inputType === "reset"
 				? normalizeSpace(input?.value ?? "") ||
 					(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "")
-				: normalizeSpace(contentText(element, null));
+				: normalizeSpace(contentText(element, null, "visible"));
 		if (content && namedByContent) return content;
 		return normalizeSpace(
 			element.getAttribute("title") ||
