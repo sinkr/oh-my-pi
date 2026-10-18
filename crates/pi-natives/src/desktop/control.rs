@@ -648,6 +648,22 @@ pub(crate) fn shared_ownership() -> Option<(std::os::fd::OwnedFd, HandedOwnershi
 	Some((duplicate.into(), HandedOwnership { lease: published.lease }))
 }
 
+/// Whether a release helper handed this process's ownership has not been
+/// reaped: one an earlier operation stopped waiting for may still post its
+/// releases, which would cut short what a new operation presses.
+#[cfg(target_os = "macos")]
+fn release_helper_running() -> bool {
+	SHARED_OWNERSHIP
+		.lock()
+		.as_ref()
+		.is_some_and(|published| published.unreaped > 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn release_helper_running() -> bool {
+	false
+}
+
 pub(crate) struct InputLease {
 	_scope:  OperationScope,
 	owner:   Arc<ControlLease>,
@@ -672,6 +688,11 @@ impl InputLease {
 			.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
 			.map_err(|_| busy())?;
 		let lease = Self { _scope: token.enter(), owner, _thread: PhantomData };
+		// Held control keeps ownership between operations, so the kernel lock
+		// a lingering helper shares does not keep the next one out.
+		if release_helper_running() {
+			return Err(busy());
+		}
 		token.check()?;
 		Ok(lease)
 	}
@@ -1282,6 +1303,29 @@ mod tests {
 		child_probe(&KernelLease::path(), true);
 		drop(copy.stdin.take());
 		assert!(copy.wait().expect("copy exits").success());
+		remove_test_lock();
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn held_control_refuses_input_until_an_earlier_operations_helper_is_reaped() {
+		use crate::desktop::error::ErrorCode;
+
+		if !alone(
+			"desktop::control::tests::held_control_refuses_input_until_an_earlier_operations_helper_is_reaped",
+		) {
+			return;
+		}
+		let source = CancellationSource::default();
+		grant_for_test(&source);
+		// An earlier operation stopped waiting for its helper, which still holds
+		// its share of ownership.
+		let (_descriptor, handed) = shared_ownership().expect("held lock is shared");
+		let refused = InputLease::acquire(&source.token(), false).map(drop);
+		assert_eq!(refused.map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		drop(handed);
+		drop(InputLease::acquire(&source.token(), false).expect("input once the helper is reaped"));
+		source.release_control();
 		remove_test_lock();
 	}
 }
