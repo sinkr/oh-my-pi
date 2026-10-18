@@ -1414,22 +1414,23 @@ fn background_pointer(
 /// posts. The probes that chose where it goes can block, and the user may
 /// bring the target forward meanwhile, or come to it and leave again
 /// (`visited`): the input then refuses, whether or not it first made the
-/// window key (`prepared`, [`recheck_background`]). A target that was
-/// already the user's own front app as the input began (`entry_front`) still
-/// takes it.
+/// window key (`prepared`, [`recheck_background`]), as it does when the
+/// front process cannot be read. A target that was already the user's own
+/// front app as the input began (`entry_front`) still takes it.
 fn pointer_recheck(
 	prepared: bool,
 	entry_front: EntryFront,
 	pid: libc::pid_t,
 	wid: u32,
-	front: impl Fn() -> Option<libc::pid_t>,
+	front: impl FnOnce() -> Option<libc::pid_t>,
 	visited: impl Fn() -> bool,
 ) -> CoreResult<()> {
-	entry_front.require_behind(front(), pid, wid)?;
+	let now = front();
+	entry_front.require_behind(now, pid, wid)?;
 	if visited() {
 		return Err(came_forward_refusal(wid));
 	}
-	recheck_background(prepared, pid, wid, &front, &visited, || Ok(()))
+	recheck_background(prepared || now.is_none(), pid, wid, || now, &visited, || Ok(()))
 }
 
 /// Where background pointer `event` goes: `owner`'s answer, with whether
@@ -3020,7 +3021,7 @@ mod tests {
 		let done = inserts_first("", || {
 			panic!("an empty AXSelectedText write deletes the field's selection")
 		});
-		assert!(done.unwrap(), "empty text falls through to keys");
+		assert!(done.unwrap(), "empty text must be done without keys");
 		// Other text tries the insertion, and keys follow only when it was not
 		// attempted.
 		assert!(inserts_first("x", || Ok(true)).unwrap());
@@ -3485,8 +3486,18 @@ mod tests {
 		// Still behind the user, or the user's own front app from the start.
 		pointer_recheck(false, user, 7, 42, || Some(9), || false).unwrap();
 		pointer_recheck(false, EntryFront(Some(7)), 7, 42, || Some(7), || false).unwrap();
-		// A left click that made the window key refuses once the target is front.
+		// A left click that made the window key refuses once the front process
+		// cannot be read.
 		assert!(pointer_recheck(true, user, 7, 42, || None, || false).is_err());
+	}
+
+	#[test]
+	fn a_pointer_event_refuses_when_the_front_process_cannot_be_read() {
+		// A right click, move or scroll was never prepared, but an unknown front
+		// process may be the target the user just picked, as on the left-click
+		// path.
+		let error = pointer_recheck(false, EntryFront(Some(9)), 7, 42, || None, || false);
+		assert_eq!(error.unwrap_err().code, crate::desktop::error::ErrorCode::BackgroundUnavailable);
 	}
 
 	#[test]
