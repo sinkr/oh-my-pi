@@ -5,13 +5,16 @@ use std::{
 	ptr,
 	sync::{
 		LazyLock,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicU32, Ordering},
 	},
 	thread,
 	time::{Duration, Instant},
 };
 
-use core_graphics::{event::CGEvent, geometry::CGPoint};
+use core_graphics::{
+	event::{CGEvent, CGEventType},
+	geometry::CGPoint,
+};
 use foreign_types::ForeignType;
 use libc::pid_t;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFString};
@@ -393,8 +396,9 @@ pub(super) fn after_cleanup<T>(result: CoreResult<T>, cleanup: CoreResult<()>) -
 }
 
 /// Hardware mouse presses (left, right, other `CGEventType`s): a click is how a
-/// user picks a window, while typing in their own window is not. Events posted
-/// to a pid do not advance these counters.
+/// user picks a window, while typing in their own window is not. Presses posted
+/// to the HID event tap advance these counters, omp's own included; events
+/// posted to a pid do not.
 const POINTER_PRESS_TYPES: [u32; 3] = [1, 3, 25];
 
 fn hid_counter(event_type: u32) -> u32 {
@@ -412,8 +416,42 @@ fn activation_activity() -> [u32; 5] {
 	[left, right, other, 10, 12].map(hid_counter)
 }
 
-fn pointer_presses() -> [u32; 3] {
-	POINTER_PRESS_TYPES.map(hid_counter)
+/// Pointer presses omp posted to the HID event tap ([`note_hid_post`]).
+static OWN_POINTER_PRESSES: AtomicU32 = AtomicU32::new(0);
+
+/// Counts `event_type` as omp's own pointer press when it is one; called just
+/// before the event is posted to the HID event tap, so a reader never sees
+/// the HID counter move ahead of this count.
+pub(super) fn note_hid_post(event_type: CGEventType) {
+	if POINTER_PRESS_TYPES.contains(&(event_type as u32)) {
+		OWN_POINTER_PRESSES.fetch_add(1, Ordering::AcqRel);
+	}
+}
+
+/// The HID pointer-press counters next to omp's own presses posted to the HID
+/// event tap, so a baseline taken before omp's own clicks still tells the
+/// user's presses apart from them.
+#[derive(Clone, Copy, Debug)]
+struct PointerPresses {
+	hid: [u32; 3],
+	own: u32,
+}
+
+impl PointerPresses {
+	fn now() -> Self {
+		// Own first: a press of omp's posted between the two reads then looks
+		// like the user's, which only stands the hand-back down.
+		let own = OWN_POINTER_PRESSES.load(Ordering::Acquire);
+		Self { hid: POINTER_PRESS_TYPES.map(hid_counter), own }
+	}
+
+	/// Whether the HID counters show more presses since `baseline` than omp
+	/// posted: one of them, at least, is the user's.
+	fn user_pressed_since(self, baseline: Self) -> bool {
+		let hid =
+			(0..3).fold(0u32, |sum, i| sum.wrapping_add(self.hid[i].wrapping_sub(baseline.hid[i])));
+		hid > self.own.wrapping_sub(baseline.own)
+	}
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -606,17 +644,6 @@ enum FrontRequest {
 	UserActed,
 }
 
-/// Now on the clock `WindowServer` compares a front-process request's
-/// timestamp with: nanoseconds of `CLOCK_UPTIME_RAW`.
-fn event_clock_now() -> u64 {
-	let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-	// SAFETY: `time` is writable for the call; CLOCK_UPTIME_RAW is a clock
-	// every supported macOS provides, and the call retains no pointer.
-	unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &raw mut time) };
-	u64::try_from(time.tv_sec).unwrap_or(0) * 1_000_000_000
-		+ u64::try_from(time.tv_nsec).unwrap_or(0)
-}
-
 /// Runs `request` with a timestamp taken from `now` before `still_ours`
 /// confirms the hand-back is still wanted; `None` when it no longer is.
 /// `WindowServer` refuses the request if the user pressed a key or clicked
@@ -663,7 +690,7 @@ fn hand_back_through_typing(
 }
 
 /// Makes `psn` the front process unless the user pressed a key or clicked
-/// after `since` ([`event_clock_now`]). `WindowServer` decides on its own
+/// after `since` ([`control::uptime_ns`]). `WindowServer` decides on its own
 /// event clock, so polling delays cannot hide that input. It counts keys and
 /// clicks posted to the HID event tap, takeover input included, but not
 /// events posted to a process. Where the conditional request is unavailable,
@@ -714,7 +741,7 @@ pub(super) fn with_focus_without_raise<T>(
 	action: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
-	let presses = pointer_presses();
+	let presses = PointerPresses::now();
 	let spi = required()?;
 	let previous = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::background_unavailable(format!(
@@ -778,7 +805,7 @@ fn restore_focus_after_without_raise(
 	previous_key: u32,
 	target: ProcessSerialNumber,
 	wid: u32,
-	presses: [u32; 3],
+	presses: PointerPresses,
 ) -> CoreResult<()> {
 	let front = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::input_failed("cannot establish current focus for background restoration")
@@ -793,7 +820,7 @@ fn restore_focus_after_without_raise(
 		previous_key,
 		wid,
 		|| previous.pid.and_then(ax::key_window_id),
-		|| pointer_presses() != presses,
+		|| PointerPresses::now().user_pressed_since(presses),
 		|| front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn),
 	) {
 		return Ok(());
@@ -858,6 +885,10 @@ pub(super) fn with_foreground<T>(
 ) -> CoreResult<T> {
 	control::check()?;
 	let choices = control::user_choices();
+	// Read with `choices`, before takeover posts anything: a click of the
+	// user's at any later point, even one the monitor has not counted yet,
+	// then shows as a press beyond takeover's own.
+	let presses = PointerPresses::now();
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::input_failed("exact-window takeover SPI is unavailable; no input was sent")
 	})?;
@@ -887,13 +918,11 @@ pub(super) fn with_foreground<T>(
 		// Keys the user types while takeover holds the front land in the target
 		// without them choosing it, so only a click or Command shortcut of
 		// theirs, or a switch elsewhere, leaves the front application alone.
-		// Takeover's own clicks are over, so a pointer press the HID counters
-		// show after this point is the user's; they are read synchronously,
-		// unlike the monitor's count, which can trail a click.
-		let presses = pointer_presses();
+		// The HID counters are read synchronously, unlike the monitor's count,
+		// which can trail a click.
 		let still_ours = || {
 			control::user_choices() == choices
-				&& pointer_presses() == presses
+				&& !PointerPresses::now().user_pressed_since(presses)
 				// A user-selected third app or sibling window must not be
 				// overwritten.
 				&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
@@ -908,7 +937,7 @@ pub(super) fn with_foreground<T>(
 		// timestamp; user input after it refuses the hand-back, and the
 		// make-key records below are then never posted.
 		let handed_back = hand_back_through_typing(
-			event_clock_now,
+			control::uptime_ns,
 			still_ours,
 			|since| control::last_user_typing() >= since,
 			|since| set_front_unless_user_acted(spi, previous.psn, previous_key, since),
@@ -1122,6 +1151,44 @@ fn attach_keyboard_authentication(pid: pid_t, event: &CGEvent) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_user_click_before_the_hand_back_stands_out_from_takeovers_own_presses() {
+		// Baseline taken before takeover's action posts anything.
+		let before = PointerPresses { hid: [7, 2, u32::MAX], own: u32::MAX };
+		// Takeover's own left click, counted by the HID counters too.
+		let own_click = PointerPresses { hid: [8, 2, u32::MAX], own: 0 };
+		assert!(!own_click.user_pressed_since(before));
+		// A press noted but not yet counted by the HID counters.
+		assert!(!PointerPresses { hid: [7, 2, u32::MAX], own: 0 }.user_pressed_since(before));
+		// The user's click after the action, before the cleanup runs and before
+		// the monitor counts it.
+		let user_click = PointerPresses { hid: [8, 2, 0], own: 0 };
+		assert!(user_click.user_pressed_since(before));
+		assert!(PointerPresses { hid: [7, 3, u32::MAX], own: u32::MAX }.user_pressed_since(before));
+	}
+
+	#[test]
+	fn only_pointer_presses_posted_to_the_hid_tap_count_as_omps() {
+		let before = OWN_POINTER_PRESSES.load(Ordering::Acquire);
+		for kind in [
+			CGEventType::LeftMouseDown,
+			CGEventType::RightMouseDown,
+			CGEventType::OtherMouseDown,
+			CGEventType::LeftMouseUp,
+			CGEventType::MouseMoved,
+			CGEventType::KeyDown,
+			CGEventType::ScrollWheel,
+		] {
+			note_hid_post(kind);
+		}
+		assert_eq!(
+			OWN_POINTER_PRESSES
+				.load(Ordering::Acquire)
+				.wrapping_sub(before),
+			3
+		);
+	}
 
 	#[test]
 	fn user_focus_changes_permanently_disarm_background_restoration() {

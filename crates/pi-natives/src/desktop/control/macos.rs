@@ -97,7 +97,10 @@ const fn user_input(kind: u32, flags: u64, pid: i64, tag: i64) -> Option<UserInp
 	}
 }
 
-fn uptime_ns() -> u64 {
+/// Now in nanoseconds of `CLOCK_UPTIME_RAW`: the clock `WindowServer` compares
+/// a front-process request's timestamp with, and the one the takeover monitor
+/// stamps the user's typing with, so the two compare directly.
+pub(crate) fn uptime_ns() -> u64 {
 	let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
 	// SAFETY: `time` is writable for the call, which retains no pointer.
 	unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &raw mut time) };

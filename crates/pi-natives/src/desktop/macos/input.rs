@@ -1618,6 +1618,7 @@ fn post_global_mouse(
 fn post_global(event: &CGEvent) -> CoreResult<()> {
 	control::check()?;
 	event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, control::SYNTHETIC_EVENT_TAG);
+	skylight::note_hid_post(event.get_type());
 	event.post(CGEventTapLocation::HID);
 	Ok(())
 }

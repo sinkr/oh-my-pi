@@ -26,7 +26,7 @@ mod macos;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "macos")]
-pub(crate) use macos::SYNTHETIC_EVENT_TAG;
+pub(crate) use macos::{SYNTHETIC_EVENT_TAG, uptime_ns};
 
 #[derive(Default)]
 struct CancellationState {
