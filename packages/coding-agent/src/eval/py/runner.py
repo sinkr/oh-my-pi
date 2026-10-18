@@ -1329,25 +1329,29 @@ def _has_pip() -> bool:
         return False
 
 
-def _run_pip(argv: list[str], args: str) -> None:
-    cmd = [sys.executable, "-m", "pip", *argv]
-    env: dict[str, str] | None = None
-    if not _has_pip():
-        # Environments made by `uv venv` ship without pip. uv installs into
-        # them directly; without uv, bootstrap pip from the stdlib wheel.
-        uv = shutil.which("uv")
-        if uv is not None:
-            cmd = [uv, "pip", *argv]
-            env = {**os.environ, "UV_PYTHON": sys.executable}
-        else:
-            bootstrap = subprocess.Popen(
-                [sys.executable, "-m", "ensurepip"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            _stream_process_output(bootstrap)
-            bootstrap.wait()
+# `uv pip` subcommands that take pip's arguments. Anything else (`--version`,
+# `download`, `wheel`, `config`) needs pip itself.
+_UV_PIP_SUBCOMMANDS = frozenset(
+    {"install", "uninstall", "list", "freeze", "show", "check"}
+)
+# pip flags that do nothing under uv, which rejects them.
+_PIP_ONLY_NOOP_FLAGS = frozenset(
+    {"--disable-pip-version-check", "--no-input", "--no-warn-script-location"}
+)
+
+
+def _uv_pip_argv(argv: list[str]) -> list[str] | None:
+    subcommand = next((arg for arg in argv if not arg.startswith("-")), None)
+    if subcommand not in _UV_PIP_SUBCOMMANDS:
+        return None
+    return [arg for arg in argv if arg not in _PIP_ONLY_NOOP_FLAGS]
+
+
+def _run_installer(
+    cmd: list[str],
+    on_text: Callable[[str], None] | None = None,
+    env: dict[str, str] | None = None,
+) -> int:
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
@@ -1356,6 +1360,32 @@ def _run_pip(argv: list[str], args: str) -> None:
         stderr=subprocess.STDOUT,
         env=env,
     )
+    try:
+        _stream_process_output(proc, on_text)
+        return proc.wait()
+    except BaseException:
+        # Cancelling the cell interrupts only the kernel: stop the installer too.
+        proc.kill()
+        proc.wait()
+        raise
+
+
+def _run_pip(argv: list[str], args: str) -> None:
+    cmd = [sys.executable, "-m", "pip", *argv]
+    env: dict[str, str] | None = None
+    if not _has_pip():
+        # Environments made by `uv venv` ship without pip. uv installs into
+        # them directly; otherwise bootstrap pip from the stdlib wheel.
+        uv = shutil.which("uv")
+        uv_argv = _uv_pip_argv(argv) if uv is not None else None
+        if uv is not None and uv_argv is not None:
+            cmd = [uv, "pip", *uv_argv]
+            env = {**os.environ, "UV_PYTHON": sys.executable}
+        else:
+            code = _run_installer([sys.executable, "-m", "ensurepip"])
+            if code != 0:
+                _emit_status("pip", args=args, installed=[], exit_code=code)
+                return
     installed_packages: list[str] = []
 
     def scan_pip_line(raw_line: str) -> None:
@@ -1366,15 +1396,16 @@ def _run_pip(argv: list[str], args: str) -> None:
                 pkg = token.rsplit("-", 1)[0]
                 installed_packages.append(pkg.replace("_", "-"))
             return
+        if env is None:
+            return
         # uv lists each installed distribution as ` + name==version`.
         m = re.match(r" \+ ([A-Za-z0-9][A-Za-z0-9._-]*)(?:==| @ )", raw_line)
         if m:
             installed_packages.append(m.group(1).replace("_", "-"))
 
     scanner = _BoundedLineScanner(_PIP_LINE_SCAN_CHARS, scan_pip_line)
-    _stream_process_output(proc, scanner.add)
+    returncode = _run_installer(cmd, scanner.add, env)
     scanner.finish()
-    proc.wait()
     if installed_packages:
         import importlib
 
@@ -1385,7 +1416,7 @@ def _run_pip(argv: list[str], args: str) -> None:
             if head in prefixes:
                 sys.modules.pop(mod_name, None)
     _emit_status(
-        "pip", args=args, installed=installed_packages, exit_code=proc.returncode
+        "pip", args=args, installed=installed_packages, exit_code=returncode
     )
 
 

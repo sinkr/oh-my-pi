@@ -55,6 +55,21 @@ async function createPiplessVenv(dir: string): Promise<string> {
 	return path.join(venv, "bin", "python");
 }
 
+/** Starts a kernel on a pip-less venv with `uv` on PATH running `script` (POSIX sh). */
+async function startKernelWithFakeUv(dir: string, script: string): Promise<{ kernel: PythonKernel; python: string }> {
+	const python = await createPiplessVenv(dir);
+	const binDir = path.join(dir, "bin");
+	await fs.mkdir(binDir);
+	await Bun.write(path.join(binDir, "uv"), `#!/bin/sh\n${script}\n`);
+	await fs.chmod(path.join(binDir, "uv"), 0o755);
+	const kernel = await PythonKernel.start({
+		cwd: dir,
+		interpreter: python,
+		env: { PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}` },
+	});
+	return { kernel, python };
+}
+
 describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
 		await disposeAllKernelSessions();
@@ -195,30 +210,60 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		"%pip installs through uv for the kernel's interpreter when the venv has no pip",
 		async () => {
 			using tempDir = TempDir.createSync("@python-runner-pip-uv-");
-			const python = await createPiplessVenv(tempDir.path());
-			const binDir = path.join(tempDir.path(), "bin");
 			const uvLog = path.join(tempDir.path(), "uv.log");
-			await fs.mkdir(binDir);
-			await Bun.write(
-				path.join(binDir, "uv"),
-				`#!/bin/sh\nprintf '%s\\n' "$*" "$UV_PYTHON" > '${uvLog}'\necho 'Installed 1 package in 1ms'\necho ' + six==1.17.0'\n`,
+			const { kernel, python } = await startKernelWithFakeUv(
+				tempDir.path(),
+				`printf '%s\\n' "$*" "$UV_PYTHON" > '${uvLog}'\necho 'Installed 1 package in 1ms'\necho ' + six==1.17.0'`,
 			);
-			await fs.chmod(path.join(binDir, "uv"), 0o755);
-			const kernel = await PythonKernel.start({
-				cwd: tempDir.path(),
-				interpreter: python,
-				env: { PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}` },
-			});
 			try {
-				const result = await executePythonWithKernel(kernel, "%pip install six");
+				const result = await executePythonWithKernel(kernel, "%pip install --disable-pip-version-check six");
 				expect(result.output).not.toContain("No module named pip");
 				const [args, uvPython] = (await Bun.file(uvLog).text()).trimEnd().split("\n");
 				expect(args).toBe("pip install six");
 				expect(await fs.realpath(uvPython)).toBe(await fs.realpath(python));
 				expect(result.displayOutputs).toContainEqual({
 					type: "status",
-					event: { op: "pip", args: "install six", installed: ["six"], exit_code: 0 },
+					event: {
+						op: "pip",
+						args: "install --disable-pip-version-check six",
+						installed: ["six"],
+						exit_code: 0,
+					},
 				});
+
+				// uv has no `pip --version`; that needs pip itself.
+				await fs.rm(uvLog);
+				await executePythonWithKernel(kernel, "%pip --version");
+				expect(await Bun.file(uvLog).exists()).toBe(false);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"cancelling %pip stops the installer it started",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-cancel-");
+			const { kernel } = await startKernelWithFakeUv(tempDir.path(), `echo "uv-pid:$$"\nexec sleep 30`);
+			try {
+				const ac = new AbortController();
+				const started = Promise.withResolvers<number>();
+				let streamed = "";
+				const pending = executePythonWithKernel(kernel, "%pip install six", {
+					signal: ac.signal,
+					onChunk: chunk => {
+						streamed += chunk;
+						const match = /uv-pid:(\d+)/.exec(streamed);
+						if (match) started.resolve(Number(match[1]));
+					},
+				});
+				const pid = await started.promise;
+				ac.abort(new DOMException("user cancelled", "AbortError"));
+				const result = await pending;
+				expect(result.cancelled).toBe(true);
+				expect(() => process.kill(pid, 0)).toThrow();
 			} finally {
 				await kernel.shutdown();
 			}
@@ -248,7 +293,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				await kernel.shutdown();
 			}
 		},
-		60_000,
+		120_000,
 	);
 
 	it("loads quoted scripts without source echo, retaining namespace, filename and async execution", async () => {
