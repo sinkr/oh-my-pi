@@ -164,8 +164,30 @@ const fn monitor_mask() -> u64 {
 }
 
 /// Events of each [`MONITORED_TYPES`] type the takeover monitor has seen and
-/// classified, whoever posted them.
+/// classified, among those `WindowServer`'s HID counters also count (see
+/// [`seen_index`]).
 static SEEN: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
+
+/// Where an event the tap sees goes in [`SEEN`]: only hardware input (no
+/// source pid) and omp's own tagged events, which omp posts only to the HID
+/// event tap, so every seen event is one the HID counters count too. Another
+/// process's event may have been posted to the session, which the tap sees
+/// but the HID counters skip; counting it would let it stand in for a user
+/// click still in the tap's queue. One posted to the HID tap leaves the
+/// monitor behind instead, which only stands the hand-back down.
+const fn seen_index(kind: u32, pid: i64, tag: i64) -> Option<usize> {
+	if pid != 0 && tag != SYNTHETIC_EVENT_TAG {
+		return None;
+	}
+	let mut i = 0;
+	while i < MONITORED_TYPES.len() {
+		if MONITORED_TYPES[i] == kind {
+			return Some(i);
+		}
+		i += 1;
+	}
+	None
+}
 
 /// [`SEEN`] now. Next to `WindowServer`'s HID counters for the same types, it
 /// tells whether the monitor has caught up with every event counted so far,
@@ -245,7 +267,7 @@ unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> R
 		}
 		// After the classification above, so a reader that sees this count
 		// also sees what the event meant.
-		if let Some(index) = MONITORED_TYPES.iter().position(|&watched| watched == kind) {
+		if let Some(index) = seen_index(kind, pid, tag) {
 			SEEN[index].fetch_add(1, Ordering::AcqRel);
 		}
 		if physical_escape(kind, key, pid, tag) {
@@ -461,6 +483,19 @@ mod tests {
 			assert_eq!(user_input(FLAGS_CHANGED, key, 0, 0, 0), Some(UserInput::Choice), "{key}");
 		}
 		assert_eq!(user_input(FLAGS_CHANGED, 63, SECONDARY_FN_FLAG, 0, SYNTHETIC_EVENT_TAG), None);
+	}
+
+	#[test]
+	fn the_monitor_counts_only_events_the_hid_counters_count() {
+		for (index, kind) in MONITORED_TYPES.into_iter().enumerate() {
+			// Hardware input and omp's own HID-tap posts.
+			assert_eq!(seen_index(kind, 0, 0), Some(index));
+			assert_eq!(seen_index(kind, 4242, SYNTHETIC_EVENT_TAG), Some(index));
+			// Another process's event, perhaps posted to the session, which the
+			// HID counters skip: it must not cover a click still queued.
+			assert_eq!(seen_index(kind, 4242, 0), None);
+		}
+		assert_eq!(seen_index(11, 0, 0), None, "key releases are not watched");
 	}
 
 	#[test]
