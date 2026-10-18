@@ -1,3 +1,6 @@
+// ../coding-agent/src/tools/browser/relay/protocol.ts
+var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
+
 // extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
   const owned = await Promise.all(targets.map(async (target) => {
@@ -173,7 +176,7 @@ async function buildHello() {
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     discardedTabsProtocol: 1,
     ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
-    reloadProtocol: 1,
+    reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
     tabs: snapshots,
     attachedTabIds
   };

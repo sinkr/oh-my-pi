@@ -9,7 +9,12 @@
  * worker alive while connected (Chrome 116+); a chrome.alarms tick revives it
  * and re-dials after Chrome reaps it while disconnected.
  */
-import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import {
+	EXTENSION_RELOAD_PROTOCOL_VERSION,
+	type ExtToRelayMessage,
+	type RelayToExtMessage,
+	type TabSnapshot,
+} from "../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "./debugger-ownership";
 
 const DEFAULT_PORT = 9224;
@@ -215,7 +220,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
-		reloadProtocol: 1, // Keep in sync with EXTENSION_RELOAD_PROTOCOL_VERSION.
+		reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
 		tabs: snapshots,
 		attachedTabIds,
 	};
