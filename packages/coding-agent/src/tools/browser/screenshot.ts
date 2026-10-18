@@ -5,6 +5,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { CDPSession, ElementHandle, ElementScreenshotOptions, Page } from "puppeteer-core";
 import type { ScreenshotArea } from "../../utils/image-resize";
 import { encodeRawPng } from "../../utils/png-encode";
+import { untilAbortedOrReleased } from "./op-timeouts";
 
 /** Options accepted by tab.screenshot(). */
 export interface ScreenshotOptions {
@@ -174,12 +175,7 @@ export async function whileDrawing<T>(
 	let session: CDPSession | undefined;
 	try {
 		try {
-			const creating = page.createCDPSession();
-			const screencast = await untilAborted(signal, creating).catch((error: unknown) => {
-				// A session that attaches after the abort is detached once it arrives.
-				void creating.then(late => late.detach()).catch(() => undefined);
-				throw error;
-			});
+			const screencast = await untilAbortedOrReleased(signal, page.createCDPSession(), late => late.detach());
 			session = screencast;
 			await untilAborted(signal, () =>
 				screencast.send("Page.startScreencast", { format: "jpeg", quality: 1, maxWidth: 1, maxHeight: 1 }),
