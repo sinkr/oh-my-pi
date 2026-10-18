@@ -33,6 +33,12 @@ the PTY, emulated screen, and reported size use the same effective dimensions.
 `OMP_TUI_DEBUG` server. Renderer queries (`info`, `tree`, `values`, and `frame`)
 require an omp/pi-tui host.
 
+`send` accepts literal text and `\e`, `\r`, `\n`, `\t`, and `\xNN` escapes.
+On Windows, each payload must contain complete, valid UTF-8; invalid or truncated
+sequences are rejected before any input is written. Arbitrary non-UTF-8 bytes
+(such as `\x9b` 8-bit CSI) are not supported by the Windows PTY string API.
+Use the UTF-8-compatible `\e[` CSI sequence instead. macOS/Linux preserve raw bytes.
+
 Install the tool's dependencies with `bun install --cwd .omp/tools`.
 Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`.
 

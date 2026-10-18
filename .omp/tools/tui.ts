@@ -996,6 +996,7 @@ async function startWindowsPty(
 	onData: (chunk: Uint8Array) => void,
 ): Promise<Child> {
 	const pty = new PtySession();
+	const inputDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 	const started = Promise.withResolvers<number>();
 	let running = true;
 	const exited = pty
@@ -1030,15 +1031,20 @@ async function startWindowsPty(
 			kill,
 			terminal: {
 				write(data) {
-					pty.write(
-						typeof data === "string"
-							? data
-							: Buffer.from(
-									data.buffer,
-									data.byteOffset,
-									data.byteLength,
-								).toString(),
-					);
+					let text: string;
+					if (typeof data === "string") {
+						text = data;
+					} else {
+						try {
+							text = inputDecoder.decode(data);
+						} catch (error) {
+							throw new Error(
+								"Windows PTY input must be valid UTF-8; raw non-UTF-8 bytes are not supported",
+								{ cause: error },
+							);
+						}
+					}
+					pty.write(text);
 				},
 				resize(cols, rows) {
 					pty.resize(cols, rows);

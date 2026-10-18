@@ -68,6 +68,44 @@ process.stdin.on("data", chunk => {
 		expect(await sessionDirs(name)).toEqual([]);
 	}, 15_000);
 
+	it("rejects non-UTF-8 input on Windows without writing a prefix and preserves valid input bytes", async () => {
+		using dir = TempDir.createSync("@omp-tui-input-fixture-");
+		const file = dir.join("input.ts");
+		await Bun.write(
+			file,
+			`
+process.stdin.setRawMode(true);
+process.stdin.resume();
+let input = Buffer.alloc(0);
+process.stdin.on("data", chunk => {
+  input = Buffer.concat([input, chunk]);
+  if (input.includes(13)) process.stdout.write("\\r\\nINPUT=" + input.toString("hex") + "\\r\\n");
+});
+process.stdout.write("READY\\r\\n");
+`,
+		);
+		const name = `input-${crypto.randomUUID()}`;
+		await execute({ op: "start", name, file, timeout: 0.2 });
+		await waitForScreen(name, "READY");
+		for (const text of ["prefix\\x9b", "\\xc3"]) {
+			const sent = execute({ op: "send", name, text, quiet: true });
+			if (process.platform === "win32") {
+				await expect(sent).rejects.toThrow(/Windows.*UTF-8/);
+			} else {
+				await sent;
+			}
+		}
+		await execute({
+			op: "send",
+			name,
+			text: "\\xef\\xbb\\xbf中文\\r",
+			quiet: true,
+		});
+		const expected = process.platform === "win32" ? "efbbbfe4b8ade696870d" : "7072656669789bc3efbbbfe4b8ade696870d";
+		expect(await waitForScreen(name, `INPUT=${expected}`)).toContain(`INPUT=${expected}`);
+		await execute({ op: "stop", name });
+	}, 15_000);
+
 	it.skipIf(process.platform !== "win32")(
 		"keeps the Windows PTY, screen, and reported size aligned with native dimensions",
 		async () => {
