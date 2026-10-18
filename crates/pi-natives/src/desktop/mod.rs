@@ -3269,7 +3269,7 @@ mod capture_tests {
 		let free = Arc::new(AtomicBool::new(false));
 		let (other, seen) = (source.clone(), Arc::clone(&free));
 		tree.lock().on_call = Some(Box::new(move |_| {
-			seen.store(InputLease::acquire(&other.token()).is_ok(), Ordering::SeqCst);
+			seen.store(InputLease::acquire(&other.token(), false).is_ok(), Ordering::SeqCst);
 		}));
 		let error = call(&mut worker, press_request("e2"), &source)
 			.err()
