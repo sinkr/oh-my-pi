@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
@@ -438,6 +439,88 @@ describe("ChainJudge", () => {
 		const [, part] = state as [string, { image_url: { url: string } }];
 		const sent = await new Bun.Image(Buffer.from(part.image_url.url.split(",")[1], "base64")).metadata();
 		expect([sent.width, sent.height]).toEqual([280, 280]);
+	});
+
+	it("measures box answers on the source image its question names, not the padded fit sent", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}` },
+			"retry.fallbackChains": { judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`] },
+		});
+		const registry = makeRegistry([OPENROUTER_JEV, VISION_CHAT], {
+			openrouter: "or-key",
+			[VISION_CHAT.provider]: "vision-key",
+		});
+		let questions: unknown;
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				questions = JSON.parse(String(init?.body)).questions;
+				return Response.json({
+					model: OPENROUTER_JEV.id,
+					answers: {
+						toolbar: { type: "box", box: { top: 0.25, bottom: 0.9, left: 0.1, right: 0.5 }, confidence: 0.8 },
+						photo: { type: "box", box: { top: 0.25, bottom: 0.9, left: 0.1, right: 0.5 }, confidence: 0.7 },
+					},
+					usage: { input_tokens: 8, output_tokens: 0 },
+				});
+			}),
+		);
+		const chat = vi.spyOn(ai, "completeSimple");
+		// 401x41 fits as 1568x160 centered on a 1568x280 canvas: source rows span canvas 60–220.
+		const strip: ImageContent = {
+			type: "image",
+			data: encodeRawPng(new Uint8Array(401 * 41 * 4).fill(255), 401, 41, 4).toBase64(),
+			mimeType: "image/png",
+		};
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "look at these",
+			questions: {
+				toolbar: { type: "box", instructions: "the save button in the first image", image: 0 },
+				photo: { type: "box", instructions: "the save button in the second image", image: 1 },
+			},
+			images: [strip, JEV_IMAGE],
+		});
+
+		expect(chat).not.toHaveBeenCalled();
+		// `image` is local: the wire carries System One's two Box fields only.
+		expect(questions).toEqual({
+			toolbar: { type: "box", instructions: "the save button in the first image" },
+			photo: { type: "box", instructions: "the save button in the second image" },
+		});
+		const toolbar = result.answers.toolbar;
+		expect(toolbar.box.top).toBeCloseTo((70 - 60) / 160, 10);
+		// Canvas row 252 lies in the bottom padding, so the edge clamps onto the source.
+		expect(toolbar.box.bottom).toBe(1);
+		expect(toolbar.box.left).toBeCloseTo(0.1, 10);
+		expect(toolbar.box.right).toBeCloseTo(0.5, 10);
+		expect(toolbar.confidence).toBe(0.8);
+		// JEV_IMAGE was sent as is, so its box already measures the source.
+		expect(result.answers.photo.box).toEqual({ top: 0.25, bottom: 0.9, left: 0.1, right: 0.5 });
+	});
+
+	it("routes box questions only to natives that forward them, and rejects a dangling image index first", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${OPENAI_DECISIONS.provider}/${OPENAI_DECISIONS.id}` },
+			"retry.fallbackChains": { judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`] },
+		});
+		const registry = makeRegistry([OPENAI_DECISIONS, VISION_CHAT], {
+			[OPENAI_DECISIONS.provider]: "openai-key",
+			[VISION_CHAT.provider]: "vision-key",
+		});
+		const fetch = vi.spyOn(globalThis, "fetch");
+		const chat = vi.spyOn(ai, "completeSimple");
+		const judge = new ChainJudge({ settings, registry, purpose: "test" });
+		const ask = (image: number) =>
+			judge.judge({
+				state: "look at this",
+				questions: { button: { type: "box", instructions: "the save button", image } },
+				images: [JEV_IMAGE],
+			});
+
+		await expect(ask(1)).rejects.toThrow('box question "button" names image 1, but the request has 1 images');
+		await expect(ask(0)).rejects.toThrow("judgment: no judge candidate answers box questions");
+		expect(fetch).not.toHaveBeenCalled();
+		expect(chat).not.toHaveBeenCalled();
 	});
 
 	it("reports an explicit error when no candidate supports image judgments", async () => {

@@ -432,16 +432,21 @@ describe("fitImage", () => {
 	}
 
 	it("downscales past the max side keeping the aspect ratio", async () => {
-		const result = await fitImage({ type: "image", data: await makeRedPng(2000, 1000), mimeType: "image/png" }, JEV);
+		const { image, content } = await fitImage(
+			{ type: "image", data: await makeRedPng(2000, 1000), mimeType: "image/png" },
+			JEV,
+		);
 
-		expect(await size(result.data)).toEqual([1568, 784]);
-		expect(result.mimeType).toBe("image/png");
+		expect(await size(image.data)).toEqual([1568, 784]);
+		expect(image.mimeType).toBe("image/png");
+		// Scaling alone keeps the source on the whole canvas, so fractions of it still measure the source.
+		expect(content).toEqual({ top: 0, bottom: 1, left: 0, right: 1 });
 	});
 
 	it("upscales a tiny image to the min side", async () => {
-		const result = await fitImage({ type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" }, JEV);
+		const { image } = await fitImage({ type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" }, JEV);
 
-		expect(await size(result.data)).toEqual([280, 280]);
+		expect(await size(image.data)).toEqual([280, 280]);
 	});
 
 	it("pads a strip the max side stops short of the min with its top-left pixel, content centered", async () => {
@@ -451,28 +456,34 @@ describe("fitImage", () => {
 		pixels.set([0, 0, 255, 255], 0);
 		const strip = encodeRawPng(pixels, 401, 41, 4).toBase64();
 
-		const result = await fitImage({ type: "image", data: strip, mimeType: "image/png" }, JEV);
+		const { image, content } = await fitImage({ type: "image", data: strip, mimeType: "image/png" }, JEV);
 
-		const { width, height, pixels: out } = decodePng(Buffer.from(result.data, "base64"));
+		const { width, height, pixels: out } = decodePng(Buffer.from(image.data, "base64"));
 		expect([width, height]).toEqual([1568, 280]);
 		const pixel = (x: number, y: number) => [...out.subarray((y * width + x) * 4, (y * width + x) * 4 + 4)];
 		expect(pixel(784, 0)).toEqual([0, 0, 255, 255]);
 		expect(pixel(784, 279)).toEqual([0, 0, 255, 255]);
 		expect(pixel(784, 140)).toEqual([255, 0, 0, 255]);
+		// The content edges bound exactly the source rows: padding just outside, source just inside.
+		expect(content).toEqual({ top: 60 / 280, bottom: 220 / 280, left: 0, right: 1 });
+		expect(pixel(784, 59)).toEqual([0, 0, 255, 255]);
+		expect(pixel(784, 60)).toEqual([255, 0, 0, 255]);
+		expect(pixel(784, 219)).toEqual([255, 0, 0, 255]);
+		expect(pixel(784, 220)).toEqual([0, 0, 255, 255]);
 	});
 
 	it("falls back to JPEG when the PNG exceeds the byte cap", async () => {
 		const noise = makeNoisePng(400, 400);
 		const maxBytes = noise.length / 2;
 
-		const result = await fitImage(
+		const { image } = await fitImage(
 			{ type: "image", data: noise.toBase64(), mimeType: "image/png" },
 			{ ...JEV, maxBytes },
 		);
 
-		expect(result.mimeType).toBe("image/jpeg");
-		expect(Buffer.byteLength(result.data, "base64")).toBeLessThanOrEqual(maxBytes);
-		expect(await size(result.data)).toEqual([400, 400]);
+		expect(image.mimeType).toBe("image/jpeg");
+		expect(Buffer.byteLength(image.data, "base64")).toBeLessThanOrEqual(maxBytes);
+		expect(await size(image.data)).toEqual([400, 400]);
 	});
 
 	it("throws when no encoding fits the byte cap", async () => {

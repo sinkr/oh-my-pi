@@ -66,6 +66,11 @@ export function nativeJudgmentSupportsImages(model: Model): boolean {
 	return isJudgmentApi(model.api) && JUDGMENT_WIRES[model.api].images !== undefined && model.input.includes("image");
 }
 
+/** Whether `model`'s native judgment takes images and its wire forwards box questions. The model itself may still refuse them (Box needs Jev 1.14+). */
+export function nativeJudgmentSupportsBoxes(model: Model): boolean {
+	return nativeJudgmentSupportsImages(model) && isJudgmentApi(model.api) && JUDGMENT_WIRES[model.api].boxes === true;
+}
+
 /**
  * Every image bound `model`'s native judgment enforces: its wire's transport limits tightened by the
  * catalog's model bounds. `undefined` when it takes no images. Native APIs reject images outside these
@@ -127,6 +132,23 @@ export function checkNativeJudgmentImages(
 		);
 	} else if ((request.images?.length ?? 0) > 0 || Object.keys(imageAssets ?? {}).length > 0) {
 		throw new AIError.ValidationError(`Native judgment backend ${label} does not support image inputs`);
+	}
+}
+
+/**
+ * Reject box questions whose `image` is not an index into `request.images`: nothing would say which
+ * image their edges measure.
+ * @throws {AIError.ValidationError} naming the question.
+ */
+export function checkBoxQuestions(request: JudgmentRequest): void {
+	const count = request.images?.length ?? 0;
+	for (const id in request.questions) {
+		const question = request.questions[id];
+		if (question.type !== "box") continue;
+		if (Number.isInteger(question.image) && question.image >= 0 && question.image < count) continue;
+		throw new AIError.ValidationError(
+			`judgment: box question "${id}" names image ${question.image}, but the request has ${count} images`,
+		);
 	}
 }
 
@@ -342,6 +364,13 @@ export class NativeJudge implements Judge {
 			options?.imageAssets,
 			this.#imageInput,
 		);
+		checkBoxQuestions(request);
+		if (this.#wire.boxes !== true) {
+			for (const id in request.questions) {
+				if (request.questions[id].type !== "box") continue;
+				throw new AIError.ValidationError(`Native judgment backend ${this.label} does not answer box questions`);
+			}
+		}
 		const ids = Object.keys(request.questions);
 		const cap = this.#maxQuestions;
 		if (cap !== undefined && ids.length > cap) return this.#judgeChunked(request, ids, cap, options);
