@@ -1186,8 +1186,10 @@ export class ComputerWorkerCore {
 					const context = getContext();
 					guardRun(context, "apps.open");
 					validateString(id, "apps.open(id)", { nonEmpty: true });
-					const opened = await nativeCall(context.signal, () => session.openApplication(id, options));
-					return { ...opened.application, window: opened.window ? makeWin(opened.window) : null };
+					const { window: shown, ...application } = await nativeCall(context.signal, () =>
+						session.openApplication(id, options),
+					);
+					return { ...application, window: shown ? makeWin(shown) : null };
 				},
 			},
 			control: {

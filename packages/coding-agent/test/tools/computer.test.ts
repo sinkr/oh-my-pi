@@ -176,7 +176,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async openApplication(id: string) {
 		this.operations.push(`open:${id}`);
-		return { application: (await this.listApplications())[0]!, window: windowFixture };
+		return { ...(await this.listApplications())[0]!, window: windowFixture };
 	}
 	async menuItems(_target: string, path: string[] = []) {
 		return [{ title: "Save", path: [...path, "Save"], enabled: true, checked: false, hasSubmenu: false }];

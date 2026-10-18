@@ -263,7 +263,7 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 			|| show_in_background(pid, &app.path),
 			wait,
 		)?;
-		return Ok(OpenedApplication { application: app, window });
+		return Ok(OpenedApplication::new(app, window));
 	}
 	let application = launch(&app.path, activate)?;
 	let window = match application.pid {
@@ -277,7 +277,7 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 		)?,
 		None => None,
 	};
-	Ok(OpenedApplication { application, window })
+	Ok(OpenedApplication::new(application, window))
 }
 
 /// The application's frontmost window, given until `timeout` to show its
