@@ -28,6 +28,9 @@
 - Fixed macOS `openApplication` leaving a hidden running app without a window and bringing Notes or Contacts to the front; it now shows the app behind yours and returns its first window ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background and takeover input refusing while your front app showed no window, as Finder does after a click on the desktop ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a macOS background AX action that failed yet brought its app forward, such as `AXOpen` in Chrome's Open panel, leaving that app in front of yours ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed your typing landing in the macOS app a background action targets when that app brings itself to the front while you type ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background input sending you back to your previous app after you opened the target app from Spotlight during the action ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed an app that a macOS background action opens something in, such as TextEdit after a background ⌘O in Finder, staying in front of your app; it is sent back like the target ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.1] - 2026-10-17
 
