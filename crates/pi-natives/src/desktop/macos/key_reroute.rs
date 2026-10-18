@@ -406,7 +406,7 @@ impl Theft {
 	/// Makes this the latest action, unless a newer one already is. A newer
 	/// action on the same target takes over its predecessor's theft, which
 	/// no notification repeats while the target keeps the keyboard.
-	fn register(&mut self, registry: &mut Registry) {
+	const fn register(&mut self, registry: &mut Registry) {
 		if registry.latest.0 >= self.generation {
 			return;
 		}
@@ -1111,7 +1111,7 @@ mod tests {
 		let mut keys = vec![held(TARGET), held(OTHER_TARGET)];
 		forget_lifted(&mut keys, TARGET, |_| true, t0);
 		forget_lifted(&mut keys, TARGET, |_| false, t0 + ms(10));
-		forget_lifted(&mut keys, TARGET, |_| false, t0 + ms(10) + RELEASE_GRACE - ms(1));
+		forget_lifted(&mut keys, TARGET, |_| false, t0 + ms(9) + RELEASE_GRACE);
 		assert_eq!(keys.len(), 2, "the release may still be on its way");
 		forget_lifted(&mut keys, TARGET, |_| false, t0 + ms(10) + RELEASE_GRACE);
 		assert_eq!(keys.len(), 1);
