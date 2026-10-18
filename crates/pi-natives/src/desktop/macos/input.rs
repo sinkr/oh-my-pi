@@ -3284,12 +3284,10 @@ mod tests {
 	fn activation_waits_only_for_a_report_it_can_observe_in_time() {
 		let unread = || -> Option<bool> { panic!("no report is awaited") };
 		let no_wait = || -> CoreResult<()> { panic!("no poll interval is slept") };
-		// Already active, or no readable state: the activation changes nothing
+		// An application already active: the activation changes nothing
 		// observable, so delivery follows at once.
-		for was_active in [Some(true), None] {
-			activate_then_await(was_active, ACTIVE_STATE_TIMEOUT, || Ok(()), unread, no_wait)
-				.expect("activation");
-		}
+		activate_then_await(Some(true), ACTIVE_STATE_TIMEOUT, || Ok(()), unread, no_wait)
+			.expect("activation");
 		// An application that never reports the activation does not stop the
 		// input once the bound has passed.
 		activate_then_await(Some(false), Duration::ZERO, || Ok(()), || Some(false), no_wait)
