@@ -159,7 +159,6 @@ interface RegistryWithRejections extends ModelRegistry {
 		settings: Settings;
 		revision: number;
 		roleChain: RoleChainCandidate[];
-		list: RoleChainCandidate[];
 		expiresAt: number;
 	};
 }
@@ -173,7 +172,7 @@ interface RegistryWithRejections extends ModelRegistry {
 function cachedJudgeRoleChain(
 	settings: Settings,
 	registry: RegistryWithRejections,
-): { roleChain: RoleChainCandidate[]; list: RoleChainCandidate[] } {
+): { roleChain: RoleChainCandidate[] } {
 	const now = Date.now();
 	const revision = settings.revision;
 	const cached = registry[kRoleChain];
@@ -185,7 +184,6 @@ function cachedJudgeRoleChain(
 		settings,
 		revision,
 		roleChain,
-		list: textJudgeRoleChain(roleChain),
 		expiresAt: now + CANDIDATE_TTL_MS,
 	};
 	registry[kRoleChain] = entry;
@@ -238,34 +236,16 @@ function supportsImageJudgment(model: Model): boolean {
 }
 
 /**
- * The `judge` role's candidates in attempt order, drawn from credentialed
- * judge-capable models. From the first native candidate on, only native
- * candidates remain: a prompted model never stands in for a failed native
- * judgment, whose calibrated probabilities it cannot reproduce.
- */
-function textJudgeRoleChain(chain: RoleChainCandidate[]): RoleChainCandidate[] {
-	const firstNative = chain.findIndex(candidate => kindOf(candidate) === "native");
-	if (firstNative < 0) return chain;
-	return chain.filter((candidate, index) => index < firstNative || kindOf(candidate) === "native");
-}
-
-/**
- * Filter candidates that cannot take `images` before applying the native-only tail policy. A native
- * judge is checked against its dialect's documented bounds, which it never resizes to fit; prompted
- * chat models normalize images per model, so their image support alone decides.
+ * Filter candidates that cannot take `images`. A native judge is checked against its dialect's
+ * documented bounds, which it never resizes to fit; prompted chat models normalize images per
+ * model, so their image support alone decides.
  */
 function imageJudgeRoleChain(chain: RoleChainCandidate[], images: readonly ImageContent[]): RoleChainCandidate[] {
-	return textJudgeRoleChain(
-		chain.filter(candidate =>
-			kindOf(candidate) === "native"
-				? nativeJudgmentAcceptsImages(candidate.model, images)
-				: supportsImageJudgment(candidate.model),
-		),
+	return chain.filter(candidate =>
+		kindOf(candidate) === "native"
+			? nativeJudgmentAcceptsImages(candidate.model, images)
+			: supportsImageJudgment(candidate.model),
 	);
-}
-
-function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
-	return textJudgeRoleChain(resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry)));
 }
 
 /**
@@ -275,7 +255,7 @@ function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainC
  * tool under `find.enabled: auto`.
  */
 export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boolean {
-	const [primary] = judgeRoleChain(settings, registry);
+	const [primary] = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
 	return primary !== undefined && kindOf(primary) === "native";
 }
 
@@ -354,9 +334,15 @@ export class ChainJudge implements Judge {
 		let lastUnavailable: string | undefined;
 		let compatibleCandidate = false;
 		let unsupportedCandidate = false;
+		// A prompted model never stands in for a native judgment that failed on its merits: it cannot
+		// reproduce calibrated probabilities. A native candidate the account cannot use (no key, 401/402/403)
+		// never answered, so the prompted candidates after it stay eligible.
+		let nativeFailed = false;
 		const candidates = this.#resolveCandidates(images);
 		const rejections = this.#rejections();
 		for (const candidate of candidates) {
+			const kind = kindOf(candidate);
+			if (nativeFailed && kind !== "native") continue;
 			if (signal?.aborted) {
 				throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 			}
@@ -381,7 +367,7 @@ export class ChainJudge implements Judge {
 					continue;
 				}
 				compatibleCandidate = true;
-				return await run(judge, kindOf(candidate), candidate.model);
+				return await run(judge, kind, candidate.model);
 			} catch (error) {
 				if (signal?.aborted) {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
@@ -389,6 +375,7 @@ export class ChainJudge implements Judge {
 				if (isAbortOrTimeout(error)) throw error;
 				const rejected = isAccountRejection(error);
 				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
+				else if (kind === "native") nativeFailed = true;
 				lastFailure = error instanceof Error ? error.message : String(error);
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
@@ -434,8 +421,8 @@ export class ChainJudge implements Judge {
 
 	#resolveCandidates(images: readonly ImageContent[] = []): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
-		const { roleChain, list: chain } = cachedJudgeRoleChain(settings, registry);
-		if (images.length > 0) return withSessionFallback(imageJudgeRoleChain(roleChain, images), sessionModel, true);
+		const { roleChain: chain } = cachedJudgeRoleChain(settings, registry);
+		if (images.length > 0) return withSessionFallback(imageJudgeRoleChain(chain, images), sessionModel, true);
 		if (chain === this.#candidates?.chain) return this.#candidates.list;
 		const list = withSessionFallback(chain, sessionModel);
 		this.#candidates = { chain, list };
