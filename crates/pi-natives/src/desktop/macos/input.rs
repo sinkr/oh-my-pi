@@ -230,8 +230,9 @@ impl MacInput {
 		element: Option<&AXUIElement>,
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
-		let remote = process::remote_screen(pid);
+		// Read before anything about the target ([`EntryFront::before`]).
 		let entry_front = EntryFront::now();
+		let remote = process::remote_screen(pid);
 		// A takeover write goes to the window brought to the front for it.
 		let behind_user = || match mode {
 			DeliveryMode::Background => entry_front.require_behind(skylight::front_pid(), pid, wid),
@@ -318,12 +319,14 @@ impl MacInput {
 		element: Option<&AXUIElement>,
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
+		// Read before anything about the target ([`EntryFront::before`]): the
+		// layout lookup below may run a helper process.
+		let entry_front = EntryFront::now();
 		let remote = process::remote_screen(pid);
 		let gap = key_gap(remote);
 		let chord = chord_keys(window, keys, remote, layout_strokes)?;
 		match mode {
 			DeliveryMode::Background => {
-				let entry_front = EntryFront::now();
 				if remote == Some(RemoteScreen::KeyEvents)
 					&& chord.iter().any(|key| key.name.is_modifier())
 				{
@@ -395,12 +398,13 @@ impl MacInput {
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
+				// Read before anything about the target ([`EntryFront::before`]).
+				let entry_front = EntryFront::now();
 				let remote = process::remote_screen(pid);
 				let gap = key_gap(remote);
 				let held = chord_keys(&window, keys, remote, layout_strokes)?;
 				match mode {
 					DeliveryMode::Background => {
-						let entry_front = EntryFront::now();
 						if remote == Some(RemoteScreen::KeyEvents)
 							&& held.iter().any(|key| key.name.is_modifier())
 						{
@@ -699,7 +703,9 @@ fn unmapped_keyboard_refusal(wid: u32) -> DesktopError {
 /// Runs `send` at once without an `element`. With one, focuses it and runs
 /// `send` only once `pid` reports it as its focused element within
 /// [`ELEMENT_FOCUS_TIMEOUT`], read every [`ELEMENT_FOCUS_POLL`]
-/// ([`keys_after_focus`]).
+/// ([`keys_after_focus`]); nothing is focused once the user has pressed a key
+/// or clicked in the app since the call was admitted
+/// ([`control::intervention::check_press`]).
 fn element_keys(
 	pid: libc::pid_t,
 	element: Option<&AXUIElement>,
@@ -709,6 +715,7 @@ fn element_keys(
 		send()?;
 		return Ok(ElementDelivery::Delivered);
 	};
+	control::intervention::check_press()?;
 	let deadline = Instant::now() + ELEMENT_FOCUS_TIMEOUT;
 	keys_after_focus(
 		|| ax::set_focused(element),
@@ -3436,7 +3443,10 @@ fn layout_chord(
 			))
 		})?;
 		for (needed, modifier) in [(key.shift, KeyName::Shift), (key.option, KeyName::Alt)] {
-			if needed && !keys.contains(&modifier) {
+			// Once per chord: a second Shift would be released, in reverse,
+			// while the first character's key is still down.
+			if needed && !keys.contains(&modifier) && !chord.iter().any(|press| press.name == modifier)
+			{
 				chord.push(KeyPress { name: modifier, code: key_code(modifier)? });
 			}
 		}
@@ -3480,7 +3490,11 @@ fn hold_presses(
 		let mut cleanup = Ok(());
 		for &key in keys[..pressed].iter().rev() {
 			update_modifier(&mut active, key.name, false);
-			let release = post_code(source, key.code, false, modifier_flags(active), &mut post);
+			// A device that samples HID report state drops transitions closer
+			// than its report interval, so every release, the last included,
+			// is followed by `gap` before the next transition can go out.
+			let release = post_code(source, key.code, false, modifier_flags(active), &mut post)
+				.and_then(|()| control::wait(gap));
 			cleanup = skylight::after_cleanup(cleanup, release);
 		}
 		cleanup
@@ -4758,6 +4772,24 @@ mod tests {
 	}
 
 	#[test]
+	fn a_remote_chord_presses_a_modifier_two_characters_need_only_once() {
+		// US: ! is Shift-1 and € Shift-Option-2. A second Shift would be
+		// released, in reverse, while 1 is still down.
+		let press = |name, code| KeyPress { name, code };
+		let keys = [KeyName::Char('!'), KeyName::Char('€')];
+		let layout = || Ok(Some(us_stroke));
+		assert_eq!(
+			chord_keys(&screen_sharing(), &keys, Some(RemoteScreen::HidReports), layout).unwrap(),
+			[
+				press(KeyName::Shift, 56),
+				press(KeyName::Char('!'), 18),
+				press(KeyName::Alt, 58),
+				press(KeyName::Char('€'), 19),
+			]
+		);
+	}
+
+	#[test]
 	fn remote_text_takes_option_keys_and_refuses_text_no_key_types() {
 		assert_eq!(us_keys("€").unwrap(), [TypedKey::Layout(
 			Keystroke { code: 19, shift: true, option: true },
@@ -6015,6 +6047,31 @@ mod tests {
 	}
 
 	#[test]
+	fn a_chord_waits_its_gap_after_every_release() {
+		// iPhone Mirroring samples HID report state: a release and the next
+		// transition inside one interval merge, so a press of a right after
+		// this chord's a goes up would be lost.
+		let source = source().expect("Quartz event source");
+		let gap = Duration::from_millis(30);
+		let mut posted = Vec::new();
+		let chord = [KeyPress { name: KeyName::Shift, code: 56 }, KeyPress {
+			name: KeyName::Char('a'),
+			code: 0,
+		}];
+		press_chord(&source, &chord, gap, |_| {
+			posted.push(Instant::now());
+			Ok(())
+		})
+		.unwrap();
+		let returned = Instant::now();
+		assert_eq!(posted.len(), 4);
+		for pair in posted.windows(2) {
+			assert!(pair[1].duration_since(pair[0]) >= gap);
+		}
+		assert!(returned.duration_since(posted[3]) >= gap);
+	}
+
+	#[test]
 	fn failed_modifier_press_leaves_no_flag_on_cleanup_releases() {
 		let source = source().expect("Quartz event source");
 		let mut events = Vec::new();
@@ -6916,11 +6973,13 @@ mod tests {
 	}
 
 	#[test]
-	fn iphone_mirroring_taps_and_scrolls_stop_once_the_user_brings_it_forward() {
+	fn iphone_mirroring_taps_and_scrolls_stop_as_user_intervened_once_brought_forward() {
 		use crate::desktop::error::ErrorCode;
 		let (down, up) = (CGEventType::LeftMouseDown as u32, CGEventType::LeftMouseUp as u32);
 		// The user (9) brings iPhone Mirroring (7) forward after the first tap
 		// of a double tap: the second press would land in the window they took.
+		// The user stepped into the target, so the stop is `UserIntervened`,
+		// which computer.backgroundFallback never reruns in takeover.
 		let front = std::cell::Cell::new(9);
 		let before_post = || {
 			pointer_recheck(
@@ -6940,7 +6999,7 @@ mod tests {
 			Ok(())
 		})
 		.unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert_eq!(*posted.borrow(), [(down, 1), (up, 1)]);
 		// A scroll checks before its aiming release and again before it scrolls.
 		front.set(9);
@@ -6954,14 +7013,15 @@ mod tests {
 			Ok(())
 		};
 		let error = report_scroll(before_post, aim, scroll).unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(!scrolled.get(), "nothing scrolls once the user has the target");
 		let aimed = std::cell::Cell::new(false);
 		let aim = || {
 			aimed.set(true);
 			Ok(())
 		};
-		assert!(report_scroll(before_post, aim, || Ok(())).is_err());
+		let error = report_scroll(before_post, aim, || Ok(())).unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(!aimed.get(), "no aiming release once the user has the target");
 	}
 
