@@ -33,6 +33,7 @@
 
 - Fixed repeated status commands such as `/goal show` showing nothing after the first few times in a native terminal when the text had not changed
 - Fixed browser relay tabs that a browser already had open when its extension connected staying invisible to omp until they changed; opening such a tab by `app.target` could fail with "Selected tab did not become available before omp could attach"
+- Fixed agents' `computer.windows()` code failing on its first run by reading a `bounds` field or attributes the entries don't have (`undefined`, or `AttributeError` in Python): each entry is a plain record with flat `x`, `y`, `width` and `height`, a dict in Python
 - Fixed Ollama Cloud sessions compacting too early on stripped thinking or too late after switching from another model ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
 - Fixed Google sign-in rejecting the `/login perplexity` SSO browser window with "This browser or app may not be secure"; the sign-in browser no longer runs in automation mode ([#16141](https://github.com/can1357/oh-my-pi/issues/16141))
 - Fixed `task.softRequestBudget` never stopping Cursor subagents ([#16182](https://github.com/can1357/oh-my-pi/pull/16182) by [@joseotaviorf](https://github.com/joseotaviorf))
