@@ -1376,33 +1376,29 @@ fn background_pointer(
 	let prepare =
 		|| make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit);
 	let (prepared, (to, to_wid)) = pointer_owner(&event, prepare, owner)?;
+	// Every pointer kind goes through the same check right before it posts.
+	let before_post =
+		|| pointer_recheck(prepared, entry_front, pid, wid, skylight::front_pid, || visit.happened());
 	match event {
-		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			let before_press = || {
-				recheck_background(
-					prepared,
-					pid,
-					wid,
-					skylight::front_pid,
-					|| visit.happened(),
-					|| Ok(()),
-				)
-			};
-			background_left_click(
-				source,
-				to,
-				to_wid,
-				window,
-				(x, y, count),
-				before_press,
-				skylight::post_routed,
-			)
-		},
+		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => background_left_click(
+			source,
+			to,
+			to_wid,
+			window,
+			(x, y, count),
+			before_post,
+			skylight::post_routed,
+		),
 		PointerEvent::Click { x, y, button, count, .. } => {
+			before_post()?;
 			background_button_click(source, to, to_wid, window, x, y, button, count)
 		},
-		PointerEvent::Move { x, y } => post_hover(source, to, to_wid, window, x, y, click_group_id()),
+		PointerEvent::Move { x, y } => {
+			before_post()?;
+			post_hover(source, to, to_wid, window, x, y, click_group_id())
+		},
 		PointerEvent::Scroll { x, y, dx, dy } => {
+			before_post()?;
 			background_scroll(source, to, to_wid, window, x, y, dx, dy)
 		},
 		PointerEvent::Drag { .. } | PointerEvent::Hold { .. } => {
@@ -1412,6 +1408,28 @@ fn background_pointer(
 			)))
 		},
 	}
+}
+
+/// The check right before background pointer input for window `wid` of `pid`
+/// posts. The probes that chose where it goes can block, and the user may
+/// bring the target forward meanwhile, or come to it and leave again
+/// (`visited`): the input then refuses, whether or not it first made the
+/// window key (`prepared`, [`recheck_background`]). A target that was
+/// already the user's own front app as the input began (`entry_front`) still
+/// takes it.
+fn pointer_recheck(
+	prepared: bool,
+	entry_front: EntryFront,
+	pid: libc::pid_t,
+	wid: u32,
+	front: impl Fn() -> Option<libc::pid_t>,
+	visited: impl Fn() -> bool,
+) -> CoreResult<()> {
+	entry_front.require_behind(front(), pid, wid)?;
+	if visited() {
+		return Err(came_forward_refusal(wid));
+	}
+	recheck_background(prepared, pid, wid, &front, &visited, || Ok(()))
 }
 
 /// Where background pointer `event` goes: `owner`'s answer, with whether
@@ -3452,6 +3470,23 @@ mod tests {
 		.unwrap();
 		assert_eq!(entry, EntryFront(Some(9)));
 		assert_eq!(front_target(entry, Some(7), 7, 42, || Some(42)), FrontTarget::CameForward);
+	}
+
+	#[test]
+	fn a_pointer_event_that_never_made_its_window_key_refuses_once_the_user_came_to_it() {
+		use crate::desktop::error::ErrorCode;
+		let user = EntryFront(Some(9));
+		// A right click, move or scroll (never prepared) while the user (9)
+		// brought the target (7) forward during its owner lookup.
+		let error = pointer_recheck(false, user, 7, 42, || Some(7), || false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		// The user came to the target and left again.
+		assert!(pointer_recheck(false, user, 7, 42, || Some(9), || true).is_err());
+		// Still behind the user, or the user's own front app from the start.
+		pointer_recheck(false, user, 7, 42, || Some(9), || false).unwrap();
+		pointer_recheck(false, EntryFront(Some(7)), 7, 42, || Some(7), || false).unwrap();
+		// A left click that made the window key refuses once the target is front.
+		assert!(pointer_recheck(true, user, 7, 42, || None, || false).is_err());
 	}
 
 	#[test]
