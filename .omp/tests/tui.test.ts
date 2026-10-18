@@ -68,6 +68,46 @@ process.stdin.on("data", chunk => {
 		expect(await sessionDirs(name)).toEqual([]);
 	}, 15_000);
 
+	it.skipIf(process.platform !== "win32")(
+		"keeps the Windows PTY, screen, and reported size aligned with native dimensions",
+		async () => {
+			const name = `dimensions-${crypto.randomUUID()}`;
+			const started = await execute({
+				op: "start",
+				name,
+				file: "packages/tui/examples/debug-demo.ts",
+				cols: 10,
+				rows: 3,
+			});
+			expect(started).toContain("pty=20x5");
+			expect(JSON.parse(await execute({ op: "info", name }))).toMatchObject({ columns: 20, rows: 5 });
+			expect(await execute({ op: "screen", name })).toContain("screen 20x5");
+
+			for (const { size, columns, rows } of [
+				{ size: { cols: 401, rows: 201 }, columns: 400, rows: 200 },
+				{ size: { cols: 48.9, rows: 18.9 }, columns: 48, rows: 18 },
+				{ size: { rows: 3 }, columns: 48, rows: 5 },
+			]) {
+				expect(await execute({ op: "resize", name, ...size, quiet: true })).toContain(
+					`resized to ${columns}x${rows}`,
+				);
+				// ConPTY and child resizes run on an external OS event loop; poll actual dimensions instead of using fake timers.
+				const deadline = Date.now() + 5_000;
+				let info: { columns: number; rows: number };
+				do {
+					info = JSON.parse(await execute({ op: "info", name }));
+					if (info.columns === columns && info.rows === rows) break;
+					await Bun.sleep(50);
+				} while (Date.now() < deadline);
+				expect(info).toMatchObject({ columns, rows });
+				expect(await execute({ op: "screen", name })).toContain(`screen ${columns}x${rows}`);
+				expect(await execute({ op: "list" })).toContain(`${columns}x${rows}`);
+			}
+			await execute({ op: "stop", name });
+		},
+		15_000,
+	);
+
 	it("reports a fast bin target's exit code and output without leaving a session or temp directory", async () => {
 		const name = `finite-${crypto.randomUUID()}`;
 		await expect(

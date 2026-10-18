@@ -1055,6 +1055,12 @@ async function startWindowsPty(
 
 // ─── Tool ────────────────────────────────────────────────────────────────────
 
+function ptyDimension(value: number, min: number, max: number): number {
+	return process.platform === "win32"
+		? Math.min(max, Math.max(min, Math.trunc(value)))
+		: value;
+}
+
 const factory = (omp: ToolHost) => {
 	const startSession = async (params: TuiParams): Promise<string> => {
 		const name = params.name ?? "main";
@@ -1071,8 +1077,8 @@ const factory = (omp: ToolHost) => {
 			? [process.execPath, resolve(omp.cwd, file), ...(params.args ?? [])]
 			: [target, ...(params.args ?? [])];
 
-		const rows = params.rows ?? 30;
-		const cols = params.cols ?? 100;
+		const rows = ptyDimension(params.rows ?? 30, 5, 200);
+		const cols = ptyDimension(params.cols ?? 100, 20, 400);
 		const dir = mkdtempSync(join(tmpdir(), `omp-tui-${name}-`));
 		let screen: Screen | undefined;
 		let session: Session | undefined;
@@ -1477,8 +1483,8 @@ const factory = (omp: ToolHost) => {
 				}
 				case "resize": {
 					const session = need(params.name);
-					const rows = params.rows ?? session.rows;
-					const cols = params.cols ?? session.cols;
+					const rows = ptyDimension(params.rows ?? session.rows, 5, 200);
+					const cols = ptyDimension(params.cols ?? session.cols, 20, 400);
 					session.proc.terminal.resize(cols, rows);
 					session.screen.resize(cols, rows);
 					session.cols = cols;
