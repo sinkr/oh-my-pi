@@ -38,6 +38,8 @@ interface FakeSessionConfig {
 	hang?: boolean;
 	/** Returned from getLastAssistantMessage (salvage source). */
 	lastAssistantMessage?: unknown;
+	/** When true, events after abort() are never delivered, like a provider stream that stops on abort. */
+	stopOnAbort?: boolean;
 }
 
 interface FakeSessionHandle {
@@ -72,6 +74,15 @@ function yieldToolEnd(): AgentSessionEvent {
 
 function assistantMessageStart(): AgentSessionEvent {
 	return { type: "message_start", message: { role: "assistant", content: [] } } as unknown as AgentSessionEvent;
+}
+
+function yieldToolStart(): AgentSessionEvent {
+	return {
+		type: "tool_execution_start",
+		toolCallId: "tool-yield",
+		toolName: "yield",
+		args: {},
+	} as unknown as AgentSessionEvent;
 }
 
 function readToolEnd(toolCallId: string): AgentSessionEvent {
@@ -115,7 +126,10 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 			if (config.events?.length) {
 				const events = config.events;
 				queueMicrotask(() => {
-					for (const event of events) listener(event);
+					for (const event of events) {
+						if (config.stopOnAbort && abortCount > 0) break;
+						listener(event);
+					}
 				});
 			}
 			return () => {};
@@ -374,6 +388,35 @@ describe("runSubprocess request guards", () => {
 		expect(handle.steerCalls[0].content).toContain("used 2 requests");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(result.abortReason).toContain("request budget exceeded");
+	});
+
+	it("lets a pending yield land before a sibling step's budget check can abort the run", async () => {
+		// Parallel calls in one Cursor step: the yield is still validating while
+		// siblings finish and push the count past 1.5x. The yield is the run's
+		// terminal report; a budget abort in between would discard it.
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 0,
+			"task.softRequestBudget": 2,
+			"task.softRequestBudgetNotice": true,
+		});
+		const handle = createFakeSession({
+			hang: true,
+			stopOnAbort: true,
+			events: [
+				assistantMessageStart(),
+				yieldToolStart(),
+				readToolEnd("read-1"),
+				readToolEnd("read-2"),
+				readToolEnd("read-3"),
+				yieldToolEnd(),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-pending-yield", settings });
+
+		expect(result.abortReason ?? "").not.toContain("request budget exceeded");
+		expect(result.exitCode).toBe(0);
 	});
 
 	it("does not count tools run after the response ended as extra requests", async () => {

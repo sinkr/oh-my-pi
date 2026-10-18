@@ -1988,7 +1988,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				flushProgress = true;
 				if (assistantStreaming && !endsRun) {
 					progress.requests += 1;
-					evaluateSoftRequestBudget();
+					// A sibling yield still validating may be the run's terminal
+					// report; checking now could abort the response before it lands.
+					if (yieldCallPending) budgetCheckDeferred = true;
+					else evaluateSoftRequestBudget();
 				}
 				break;
 			}
