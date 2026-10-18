@@ -199,8 +199,8 @@ pub(crate) fn check_press() -> CoreResult<()> {
 		};
 		match watch.inputs.0.lock().apps.get(&watch.pid) {
 			Some(app) if app.inputs != watch.baseline => Err(DesktopError::user_intervened(format!(
-				"the user pressed a key or clicked in {} during this input; keys sent before that may \
-				 already have landed, and nothing more was sent; {READ_AGAIN}",
+				"the user pressed a key or clicked in {} during this input; input sent before that \
+				 may already have landed, and nothing more was sent; {READ_AGAIN}",
 				app.name,
 			))),
 			_ => Ok(()),
