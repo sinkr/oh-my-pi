@@ -305,7 +305,7 @@ enum KeyboardConflict {
 /// the process while it is the focused window or attached to a listed one.
 /// Keys for a system Open or Save panel go to the process that draws its
 /// content ([`key_process`]). Before every press the focus that proved this
-/// must still hold ([`keys_still_reach`]).
+/// must still hold ([`keys_still_reach`], [`owner_still_focused`]).
 fn with_background_keyboard<T>(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -343,9 +343,9 @@ fn with_background_keyboard<T>(
 		let prepared =
 			make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit)?;
 		let (to, focus) = await_key_destination(pid, wid, conflict)?;
-		let to =
+		let owner =
 			key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
-		deliver(to, &|| {
+		deliver(owner.0, &|| {
 			recheck_background(
 				prepared,
 				pid,
@@ -360,7 +360,8 @@ fn with_background_keyboard<T>(
 						focus,
 						|| ax::key_focus(pid),
 						skylight::window_parent,
-					)
+					)?;
+					owner_still_focused(pid, wid, owner, ax::focused_window_id)
 				},
 			)
 		})
@@ -498,21 +499,47 @@ fn await_key_destination(
 	}
 }
 
-/// The process to post background keys for window `wid` of `pid` to, once
-/// `focus` shows they would reach `wid`: [`input_owner`] of the window's
-/// `content`. A focused element that maps to `wid` itself shows the window's
-/// own process holds the focus, so the content is read only when it does not.
+/// The process to post background keys for window `wid` of `pid` to, and the
+/// window of it they go into, once `focus` shows they would reach `wid`:
+/// [`input_owner`] of the window's `content`. A focused element that maps to
+/// `wid` itself shows the window's own process holds the focus, so the content
+/// is read only when it does not.
 fn key_process(
 	pid: libc::pid_t,
 	wid: u32,
 	focus: &ax::KeyFocus,
 	content: impl FnOnce() -> ax::WindowContent,
 	focused_window_of: impl FnOnce(libc::pid_t) -> Option<u32>,
-) -> CoreResult<libc::pid_t> {
+) -> CoreResult<(libc::pid_t, u32)> {
 	if focus.window != ax::FocusedWindow::Id(wid) || focus.element_maps_to(wid) {
-		return Ok(pid);
+		return Ok((pid, wid));
 	}
-	input_owner(pid, wid, content(), focused_window_of).map(|(to, _)| to)
+	input_owner(pid, wid, content(), focused_window_of)
+}
+
+/// Before a background press for window `wid` of `pid` that goes to another
+/// process drawing it (`owner`, from [`key_process`]): that process must
+/// still report focus in its window, as `focused_window_of` reads it now. It
+/// routes the keys to its own key window, so once another of its windows
+/// becomes key the press would land there.
+fn owner_still_focused(
+	pid: libc::pid_t,
+	wid: u32,
+	(owner, window): (libc::pid_t, u32),
+	focused_window_of: impl FnOnce(libc::pid_t) -> Option<u32>,
+) -> CoreResult<()> {
+	// Keys the window's own process takes reach it through the focus checks.
+	if owner == pid {
+		return Ok(());
+	}
+	if focused_window_of(owner) == Some(window) {
+		return Ok(());
+	}
+	Err(DesktopError::input_failed(format!(
+		"process {owner}, which draws window {wid}, stopped reporting focus in its window {window} \
+		 during background input; keys sent before that may already have landed, and nothing more \
+		 was sent; inspect the window before retrying",
+	)))
 }
 
 /// The process and window that take background input for window `wid` of
@@ -3009,27 +3036,56 @@ mod tests {
 		// reports that window focused.
 		let open = focus(554, 556, true);
 		let drawn = |window| move || ax::WindowContent::Remote { pid: 7592, window };
-		assert_eq!(key_process(7581, 554, &open, drawn(556), |_| Some(556)).unwrap(), 7592);
+		assert_eq!(key_process(7581, 554, &open, drawn(556), |_| Some(556)).unwrap(), (7592, 556));
 		// Its Go to Folder sheet 561: the path field maps to no window, so the
 		// ascent ends at the sheet, and the service draws it in window 559.
 		let go_to = focus(561, 561, false);
-		assert_eq!(key_process(7581, 561, &go_to, drawn(559), |_| Some(559)).unwrap(), 7592);
+		assert_eq!(key_process(7581, 561, &go_to, drawn(559), |_| Some(559)).unwrap(), (7592, 559));
 		// While the service reports focus in another window, nothing is sent.
 		let error = key_process(7581, 554, &open, drawn(556), |_| Some(559))
 			.expect_err("keys the service would not take must refuse");
 		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
 		assert!(error.message.contains("process 7592"));
 		// A window drawn by its own process keeps the keys.
-		assert_eq!(key_process(7581, 554, &open, || ax::WindowContent::Own, unasked).unwrap(), 7581);
+		let own = key_process(7581, 554, &open, || ax::WindowContent::Own, unasked);
+		assert_eq!(own.unwrap(), (7581, 554));
 		// A focused element in the window itself, or Finder's rename overlay
 		// while Finder reports no focused window, never reads the content.
-		assert_eq!(key_process(7581, 543, &focus(543, 543, true), unread, unasked).unwrap(), 7581);
+		let element = key_process(7581, 543, &focus(543, 543, true), unread, unasked);
+		assert_eq!(element.unwrap(), (7581, 543));
 		let rename = ax::KeyFocus {
 			window:         ax::FocusedWindow::Unreported,
 			element_window: Some(41743),
 			element_mapped: true,
 		};
-		assert_eq!(key_process(7, 41732, &rename, unread, unasked).unwrap(), 7);
+		assert_eq!(key_process(7, 41732, &rename, unread, unasked).unwrap(), (7, 41732));
+	}
+
+	#[test]
+	fn background_keys_for_a_system_panel_stop_once_its_service_focuses_another_window() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		// Keys for TextEdit's Open panel 554 go to openAndSavePanelService
+		// (pid 7592), focused in its window 556; after a, another service
+		// window becomes key.
+		let focused = std::cell::Cell::new(Some(556));
+		let guard = || owner_still_focused(7581, 554, (7592, 556), |_| focused.get());
+		let mut typed = Vec::new();
+		let result = type_text(&source, "ab", |event| {
+			post_guarded(event, guard, |event| {
+				if matches!(event.get_type(), CGEventType::KeyUp) {
+					focused.set(Some(570));
+				}
+				typed.push(event.get_type() as u32);
+				Ok(())
+			})
+		});
+		assert_eq!(result.unwrap_err().code, ErrorCode::InputFailed);
+		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		assert_eq!(typed, [down, up, up]);
+		// Keys the window's own process takes need no such check.
+		let unasked = |_| -> Option<u32> { panic!("no other process is involved") };
+		assert!(owner_still_focused(7581, 543, (7581, 543), unasked).is_ok());
 	}
 
 	#[test]
