@@ -68,7 +68,7 @@
 
 ### Fixed
 
-- Fixed a tool call from a Claude model that declined mid-response still running after the server-side fallback model took over: the finished turn, including one that ends in an error, drops the declining model's tool calls and reasoning, and requests with server-side fallbacks enabled hold tool-call events until the response ends so a declined call never starts speculatively or reaches an auth-gateway client
+- Fixed a tool call from a Claude model that declined mid-response still running after the server-side fallback model took over: the finished turn, including one that ends in an error, drops the declining model's tool calls and reasoning, and requests with server-side fallbacks enabled hold tool-call events until the response ends so a declined call never starts speculatively or reaches an auth-gateway client ([#16250](https://github.com/can1357/oh-my-pi/pull/16250) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
