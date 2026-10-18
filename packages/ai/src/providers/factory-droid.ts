@@ -597,6 +597,51 @@ function streamWire(wire: FactoryDroidWire, a: Attempt): AssistantMessageEventSt
 	}
 }
 
+/** Wires that carry Factory's `generate_image` models. */
+export type FactoryDroidImageWire = Extract<FactoryDroidWire, "openai-responses" | "google-generate">;
+
+/** Endpoint, identity headers and system identity for one Factory image request. */
+export interface FactoryDroidImageRoute {
+	/** `openai-responses` rides the Images API beside Responses; `google-generate` the native Gemini route. */
+	wire: FactoryDroidImageWire;
+	baseUrl: string;
+	headers: Record<string, string>;
+	/** Droid identity the proxy requires: the Images `instructions` field or the Gemini system instruction. */
+	identity: string;
+}
+
+/**
+ * Bind an image request to the same client identity chat sends: the CLI's
+ * Images and Gemini image calls reuse its chat request headers for the
+ * model's upstream, and the proxy runs the same Droid identity check.
+ */
+export function factoryDroidImageRoute(
+	model: Model<"factory-droid-agent">,
+	token: string,
+	sessionId: string | undefined,
+): FactoryDroidImageRoute {
+	const registry = resolveFactoryDroidPolicy(model);
+	const wire = registry?.wire;
+	if (!registry?.image || (wire !== "openai-responses" && wire !== "google-generate")) {
+		throw new AIError.ValidationError(`Factory Droid ${model.id} is not an image generation model`);
+	}
+	const scope = scopeToAccount(model, registry, wire, undefined, token);
+	const requestId = crypto.randomUUID();
+	return {
+		wire,
+		baseUrl: scope.baseUrl,
+		headers: buildIdentityHeaders({
+			upstream: scope.upstream,
+			routingSource: model.factoryDroidRoutingSource ?? "registry_default",
+			sessionUuid: sessionId ? deterministicUuid(sessionId) : requestId,
+			requestId,
+			orgId: scope.orgId,
+			wire,
+		}),
+		identity: DROID_SYSTEM_PREFIX,
+	};
+}
+
 export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 	model: Model<"factory-droid-agent">,
 	context: Context,
