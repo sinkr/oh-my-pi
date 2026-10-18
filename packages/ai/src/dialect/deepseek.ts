@@ -230,6 +230,51 @@ const DSML_PARAMETER_CLOSE_TOKENS = [DSML_PARAMETER_CLOSE_FULLWIDTH, DSML_PARAME
 const BARE_DSML_OPEN = /<[｜|]DSML[｜|](?:invoke|parameter)\b/u;
 const VISIBLE_TAIL_LIMIT = 48;
 
+/**
+ * Markdown code the model has written in visible text, tracked so re-spelled
+ * template tokens it quotes (`` `<｜tool_calls_begin｜>` ``) stay prose. `fence`
+ * is the backtick run that opened the current span or block (0 outside code),
+ * `run` a backtick run still being read, `newline` whether the last
+ * non-blank character was a line break.
+ */
+interface CodeState {
+	readonly fence: number;
+	readonly run: number;
+	readonly newline: boolean;
+}
+const OUTSIDE_CODE: CodeState = { fence: 0, run: 0, newline: false };
+const BACKTICK = 0x60;
+const LINE_FEED = 0x0a;
+
+/** A finished backtick run opens code, or closes it when it matches the opening run. */
+function settleBacktickRun(fence: number, run: number): number {
+	if (run === 0) return fence;
+	if (fence === 0) return run;
+	return run === fence ? 0 : fence;
+}
+
+function advanceCodeState(state: CodeState, text: string): CodeState {
+	let { fence, run, newline } = state;
+	for (let i = 0; i < text.length; i++) {
+		const c = text.charCodeAt(i);
+		if (c === BACKTICK) {
+			run++;
+			newline = false;
+			continue;
+		}
+		fence = settleBacktickRun(fence, run);
+		run = 0;
+		if (c === LINE_FEED) {
+			// A blank line ends the paragraph and any inline span left open in it.
+			if (newline && fence < 3) fence = 0;
+			newline = true;
+		} else if (!/\s/.test(text[i]!)) {
+			newline = false;
+		}
+	}
+	return { fence, run, newline };
+}
+
 type State =
 	| "outside"
 	| "thinking"
@@ -267,6 +312,8 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#bareDsmlOpenVisible = false;
 	/** Last few visible characters, so a bare opener split across chunks is still seen. */
 	#visibleTail = "";
+	/** Markdown code state of the visible text emitted so far. */
+	#code = OUTSIDE_CODE;
 	readonly #closeWait = new TerminatorWait();
 
 	constructor(options: InbandScannerOptions = {}) {
@@ -413,6 +460,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		if (text.length === 0) return;
 		events.push({ type: "text", text });
 		this.#visibleTail = (this.#visibleTail + text).slice(-VISIBLE_TAIL_LIMIT);
+		this.#code = advanceCodeState(this.#code, text);
 		if (!this.#bareDsmlOpenVisible && BARE_DSML_OPEN.test(this.#visibleTail)) this.#bareDsmlOpenVisible = true;
 	}
 
@@ -729,10 +777,21 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	/**
 	 * Earliest outside-state token: a literal (`<think>`, DSML tags, canonical
 	 * template tokens) or a re-spelled template token. Ties keep the literal.
+	 * A re-spelled token inside code the model quoted is prose about the token,
+	 * not markup; canonical spellings keep their long-standing handling.
 	 */
 	#findOutsideToken(): DeepSeekTokenMatch | undefined {
 		const literal = findEarliestToken(this.#buffer, OUTSIDE_TOKENS);
-		const template = findDeepSeekTemplateToken(this.#buffer, OUTSIDE_TEMPLATE_TOKENS);
+		let template = findDeepSeekTemplateToken(this.#buffer, OUTSIDE_TEMPLATE_TOKENS);
+		while (template && template.raw !== template.token && (!literal || template.index < literal.index)) {
+			const code = advanceCodeState(this.#code, this.#buffer.slice(0, template.index));
+			if (settleBacktickRun(code.fence, code.run) === 0) break;
+			template = findDeepSeekTemplateToken(
+				this.#buffer,
+				OUTSIDE_TEMPLATE_TOKENS,
+				template.index + template.raw.length,
+			);
+		}
 		if (template && (!literal || template.index < literal.index)) return template;
 		return literal && { token: literal.token, raw: literal.token, index: literal.index };
 	}

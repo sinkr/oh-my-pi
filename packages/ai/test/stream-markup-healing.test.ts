@@ -635,6 +635,23 @@ describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
 		}
 	});
 
+	it("keeps re-spelled tokens the model quotes in code as prose, and still heals a call after them", () => {
+		const quoted =
+			"The leak starts with `<｜tool_calls_begin｜>` and a ``<tool_call_begin｜>`` opener:\n\n```\n<｜tool_call_begin｜>bash<｜tool_sep｜>{}\n```\n\n";
+		const call = `<｜tool_calls_begin｜><｜tool_call_begin｜>bash<｜tool_sep｜>${RESPELLED_TEMPLATE_ARGS}<｜tool_calls_end｜>`;
+		const input = quoted + call;
+		for (const step of [input.length, 1]) {
+			const healing = new StreamMarkupHealing({ pattern: "dsml" });
+			let visible = "";
+			for (let i = 0; i < input.length; i += step) visible += healing.feed(input.slice(i, i + step));
+			visible += healing.flushPending();
+			expect(visible).toBe(quoted);
+			expect(healing.drainCompleted().map(c => JSON.parse(c.arguments))).toEqual([
+				JSON.parse(RESPELLED_TEMPLATE_ARGS),
+			]);
+		}
+	});
+
 	it("leaves ASCII-pipe tokens from other templates visible", () => {
 		// Kimi's `<|tool_call_begin|>` shares a name with DeepSeek's token; without a
 		// fullwidth bar it is not DeepSeek markup and must not open a call.
