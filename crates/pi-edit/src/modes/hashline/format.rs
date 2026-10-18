@@ -1,5 +1,7 @@
 //! Hashline syntax constants and display helpers.
 
+use std::fmt::Write as _;
+
 use super::types::Cursor;
 
 /// File-header opening delimiter.
@@ -109,17 +111,15 @@ pub fn split_addressable_file_lines(text: &str) -> Vec<&str> {
 }
 /// Format every LF-delimited row, including a terminal blank sentinel.
 pub fn format_numbered_lines(text: &str, start_line: u32) -> String {
-	text
-		.split('\n')
-		.enumerate()
-		.map(|(index, line)| {
-			format_numbered_line(
-				start_line.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)),
-				line,
-			)
-		})
-		.collect::<Vec<_>>()
-		.join("\n")
+	let mut output = String::with_capacity(text.len());
+	for (index, line) in text.split('\n').enumerate() {
+		if index > 0 {
+			output.push('\n');
+		}
+		let number = start_line.saturating_add(u32::try_from(index).unwrap_or(u32::MAX));
+		write!(output, "{number}:{line}").expect("writing to a String cannot fail");
+	}
+	output
 }
 /// Compute the normalized four-hex content tag.
 pub use crate::store::file_hash as compute_file_hash;
