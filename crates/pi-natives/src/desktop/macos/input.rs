@@ -2675,7 +2675,7 @@ fn background_left_click(
 	for click_state in 1..=count {
 		before_press()?;
 		post(CGEventType::LeftMouseDown, target, local, 3, i64::from(click_state), flags)?;
-		let result = control::wait(Duration::from_millis(1));
+		let result = sent_gap_wait(Duration::from_millis(1), click_state == count);
 		let release = control::cleanup(|| {
 			post(CGEventType::LeftMouseUp, target, local, 3, i64::from(click_state), flags)
 		});
@@ -2713,7 +2713,7 @@ fn background_button_click(
 		release.set_flags(flags);
 		let result =
 			post_window_pointer(pid, wid, window, &press, x, y, i64::from(click_state), number, group)
-				.and_then(|()| control::wait(PRESS_GAP));
+				.and_then(|()| sent_gap_wait(PRESS_GAP, click_state == count));
 		let cleanup = control::cleanup(|| {
 			post_window_pointer(
 				pid,
@@ -2916,7 +2916,7 @@ fn report_taps(
 	for click_state in 1..=count {
 		before_press()?;
 		let result = post(CGEventType::LeftMouseDown, click_state)
-			.and_then(|()| key_gap_wait(TAP_HOLD, click_state == count));
+			.and_then(|()| sent_gap_wait(TAP_HOLD, click_state == count));
 		let release = control::cleanup(|| post(CGEventType::LeftMouseUp, click_state));
 		skylight::after_cleanup(result, release)?;
 		if click_state < count {
@@ -3152,10 +3152,10 @@ fn type_keys(
 			// Once the last key is pressed the text is out: a cancel then must
 			// not report it unsent.
 			let last = index + 1 == keys.len();
-			let result = post(&press).and_then(|()| key_gap_wait(gap, last));
+			let result = post(&press).and_then(|()| sent_gap_wait(gap, last));
 			let cleanup = control::cleanup(|| post(&release));
 			skylight::after_cleanup(result, cleanup)?;
-			key_gap_wait(gap, last)?;
+			sent_gap_wait(gap, last)?;
 		}
 		Ok(())
 	})();
@@ -3290,13 +3290,13 @@ fn hold_transitions(
 			guard()?;
 			held += 1;
 			post(key.code, true)?;
-			key_gap_wait(gap, held == keys.len())?;
+			sent_gap_wait(gap, held == keys.len())?;
 		}
 		body()?;
 		while let Some(key) = keys[..held].last() {
 			post(key.code, false)?;
 			held -= 1;
-			key_gap_wait(gap, true)?;
+			sent_gap_wait(gap, true)?;
 		}
 		Ok(())
 	})();
@@ -3337,7 +3337,7 @@ fn post_transitions(
 			}
 			post(code, down)?;
 			held[usize::from(code)] = down;
-			key_gap_wait(gap, sent)
+			sent_gap_wait(gap, sent)
 		});
 		if result.is_err() {
 			break;
@@ -3355,9 +3355,9 @@ fn post_transitions(
 	skylight::after_cleanup(result, cleanup)
 }
 
-/// The pause `gap` after a key transition. Once a call's last press is out
-/// (`sent`) it is a [`control::settle`].
-fn key_gap_wait(gap: Duration, sent: bool) -> CoreResult<()> {
+/// The pause `gap` after a key or button press. Once a call's last press is
+/// out (`sent`) it is a [`control::settle`].
+fn sent_gap_wait(gap: Duration, sent: bool) -> CoreResult<()> {
 	if sent {
 		control::settle(gap);
 		Ok(())
@@ -3500,7 +3500,7 @@ fn hold_presses(
 		pressed += 1;
 		if let Err(error) = control::check()
 			.and_then(|()| post_code(source, key.code, true, modifier_flags(active), &mut post))
-			.and_then(|()| key_gap_wait(gap, pressed == keys.len()))
+			.and_then(|()| sent_gap_wait(gap, pressed == keys.len()))
 		{
 			result = Err(error);
 			break;
@@ -3960,7 +3960,7 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 						number,
 						flags,
 					)?;
-					let result = control::wait(PRESS_GAP);
+					let result = sent_gap_wait(PRESS_GAP, click_state == count);
 					let release = control::cleanup(|| {
 						post_global_mouse(
 							source,
@@ -4639,6 +4639,36 @@ mod tests {
 		assert!(result.is_err());
 		assert_eq!(posted, [(55, true), (55, false)]);
 		assert_eq!(body_at, None);
+	}
+
+	#[test]
+	fn a_click_whose_last_press_is_out_is_not_reported_cancelled() {
+		use crate::desktop::error::ErrorCode;
+		let (down, up) = (CGEventType::LeftMouseDown as u32, CGEventType::LeftMouseUp as u32);
+		// A double tap cancelled as its `cancel_at`th press goes out.
+		let run = |cancel_at: i64| {
+			let source = control::CancellationSource::default();
+			let token = source.token();
+			let posted = std::cell::RefCell::new(Vec::new());
+			let result = control::with_token_for_test(&token, || {
+				report_taps(
+					2,
+					|| Ok(()),
+					|event, click_state| {
+						posted.borrow_mut().push((event as u32, click_state));
+						if event as u32 == down && click_state == cancel_at {
+							source.cancel();
+						}
+						Ok(())
+					},
+				)
+			});
+			(result.map_err(|error| error.code), posted.into_inner())
+		};
+		// Cancelled at the last press: the click went out whole and stands.
+		assert_eq!(run(2), (Ok(()), vec![(down, 1), (up, 1), (down, 2), (up, 2)]));
+		// Cancelled at an earlier press: released, and the rest is not sent.
+		assert_eq!(run(1), (Err(ErrorCode::Cancelled), vec![(down, 1), (up, 1)]));
 	}
 
 	#[test]

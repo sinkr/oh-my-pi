@@ -1065,8 +1065,9 @@ impl Worker {
 			.frame_target()
 			.and_then(|target| self.frames.remove(target.key()));
 		control::take_focus_return();
-		// A read cancelled while it ran is discarded. Input that went out
-		// stands: a cancel arriving after it stops the next call instead.
+		// A read cancelled while it ran is discarded. A mutation's result
+		// stands, since its input may have gone out (a menu read makes its
+		// window key): a cancel arriving after it stops the next call instead.
 		let result = self.process(request, token).and_then(|response| {
 			if !request.is_mutation() {
 				token.check()?;
