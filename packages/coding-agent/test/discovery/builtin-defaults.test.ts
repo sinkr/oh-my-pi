@@ -321,6 +321,9 @@ describe("builtin-defaults rule provider", () => {
 			'const ROLES = new Set<PropertyKey>([\n\t"select",\n\t"confirm",\n]);',
 			'const LABELS = new Map<\n\tstring,\n\tstring\n>([["text", "Text"]]);',
 			'const TRANSFORMS = new Map<string, (value: string) => string>([["trim", value => value.trim()]]);',
+			'const KINDS = new Set<string>([ /* categories */ "a", "b" ]);',
+			'const KINDS = new Set([\n\t// text kinds\n\t"text",\n\t"json", // structured\n]);',
+			'const LABELS = new Map([\n\t["text", "Text"],\n\t["json", "JSON"],\n]);',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
 
@@ -332,6 +335,8 @@ describe("builtin-defaults rule provider", () => {
 			"const keys = new Set([...Object.keys(a), ...Object.keys(b)]);",
 			"for (const id of new Set(ids)) {}",
 			'const labels = new Map<string, string>().set("key", choose<string>(["a", "b"]));',
+			'const keep = new Set(["vendor", ...legs.map(leg => leg.id)]);',
+			'const counts = new Map([["known", 1], ...runtimeEntries]);',
 		];
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 	});
@@ -343,6 +348,10 @@ describe("builtin-defaults rule provider", () => {
 			'type Condense = import("./designs.js").Condense;',
 			'const options: import("arktype").infer<Schema> = value;',
 			'const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");',
+			'type Mod = typeof import("./mod");',
+			'let call: Parameters<typeof import("./declared-arguments").check>[0];',
+			'type Page = import("puppeteer-core")["Page"];',
+			'type Client = import(/* sdk */ "some-sdk").Client;',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
 
@@ -354,6 +363,7 @@ describe("builtin-defaults rule provider", () => {
 			"const { completeText } = await import(`${cwd}/src/client.ts`);",
 			'const [manifest] = await Promise.all([import("../readers/manifest.js")]);',
 			'const impit = import("impit").then(({ Impit }) => new Impit());',
+			'const pending = typeof import("./mod");',
 		];
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 
@@ -372,6 +382,9 @@ describe("builtin-defaults rule provider", () => {
 			"let entry: any;",
 			"items.map((item: any) => item.id);",
 			"function readId(value: unknown): any {",
+			"const id = (value as any) ?? fallback;",
+			"const id = value as any ?? fallback;",
+			"const id = value as any!;",
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-no-any"]);
 
@@ -382,6 +395,8 @@ describe("builtin-defaults rule provider", () => {
 			"/** `posts.raw_json`, as far as anything reads it back. */",
 			"// The debugging bar shows while omp has any one attached.",
 			"return any?.newest ? { date: any.newest } : {};",
+			"// mapping: any\nconst flag = true;",
+			"const flag = true; // as far as any\nreturn flag;",
 		];
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 
