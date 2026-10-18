@@ -109,20 +109,28 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 	// anyOf/oneOf unions: merge the non-null branches (a field stays required
 	// only when every branch requires it), marking the result nullable when a
 	// `type: "null"` branch is present, then fold that into this node so its
-	// own properties/required survive.
+	// own properties/required survive. Branches of different types cannot merge
+	// into one Schema (`string` gaining `items` is a 400), so they stay an
+	// `anyOf`, as the CLI sends them.
 	const unionKey = Array.isArray(node.anyOf) ? "anyOf" : Array.isArray(node.oneOf) ? "oneOf" : undefined;
 	if (unionKey) {
 		const branches = (node[unionKey] as unknown[])
 			.map(copyFactoryDroidSchema)
 			.filter((branch): branch is JsonObject => branch !== undefined);
 		const nonNull = branches.filter(branch => !typeIncludesNull(branch));
-		let collapsed: JsonObject | undefined;
-		for (const branch of nonNull) {
-			collapsed = collapsed ? mergeFactoryDroidSchemas(collapsed, branch, "intersection") : { ...branch };
-		}
-		if (collapsed) {
-			collapsed.nullable = nonNull.length < branches.length;
-			Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
+		const nullable = nonNull.length < branches.length;
+		if (new Set(nonNull.map(branch => branch.type)).size > 1) {
+			out.anyOf = nonNull;
+			if (nullable) out.nullable = true;
+		} else {
+			let collapsed: JsonObject | undefined;
+			for (const branch of nonNull) {
+				collapsed = collapsed ? mergeFactoryDroidSchemas(collapsed, branch, "intersection") : { ...branch };
+			}
+			if (collapsed) {
+				collapsed.nullable = nullable;
+				Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
+			}
 		}
 	}
 

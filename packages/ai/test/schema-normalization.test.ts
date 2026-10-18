@@ -1498,6 +1498,20 @@ describe("normalizeSchemaForMoonshot", () => {
 // ---------------------------------------------------------------------------
 
 describe("normalizeSchemaForFactoryDroid", () => {
+	it("keeps a union of different types as anyOf instead of a string with items", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: {
+				model: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }, { type: "null" }] },
+			},
+		}) as { properties: Record<string, unknown> };
+
+		expect(normalized.properties.model).toEqual({
+			anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+			nullable: true,
+		});
+	});
+
 	it("keeps parent properties/required when collapsing an anyOf of object branches", () => {
 		const normalized = normalizeSchemaForFactoryDroid({
 			type: "object",
