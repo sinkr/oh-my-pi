@@ -278,6 +278,16 @@ impl Listener {
 		Self { inputs: Arc::default(), tap: Tap::Simulated }
 	}
 
+	/// A listener whose tap never starts, for tests of elements no real app
+	/// owns.
+	#[cfg(test)]
+	pub(crate) fn off() -> Self {
+		Self {
+			inputs: Arc::default(),
+			tap:    Tap::Stopped(|_| Err(DesktopError::permission_denied("no tap in tests"))),
+		}
+	}
+
 	#[cfg(test)]
 	pub(crate) fn record_for_test(&self, pid: libc::pid_t, at: Instant) {
 		self.inputs.record(pid, at);

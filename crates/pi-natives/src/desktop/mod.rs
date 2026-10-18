@@ -922,7 +922,17 @@ impl Worker {
 		#[cfg(target_os = "macos")]
 		let watch = {
 			self.read = None;
-			self.watch_app(request, token)?
+			match self.watch_app(request, token) {
+				Ok(watch) => watch,
+				// Naming an element's app can find it destroyed; that `StaleRef`
+				// names its match like one from the request itself.
+				Err(error) => {
+					return Err(match request.reference() {
+						Some(reference) => self.name_match(reference, error, token),
+						None => error,
+					});
+				},
+			}
 		};
 		let lease = request
 			.is_mutation()
@@ -3312,6 +3322,12 @@ mod capture_tests {
 		let mut backend = FakeWaylandBackend::new();
 		backend.tree = Some(Arc::clone(&tree));
 		let mut worker = worker_with(backend);
+		// The user-input watch names a real macOS element's app; these fake
+		// elements have none, so the watch stays off.
+		#[cfg(target_os = "macos")]
+		{
+			worker.listener = control::intervention::Listener::off();
+		}
 		let target = Target::Window(WAYLAND_ID.to_string());
 		worker
 			.snapshot(&target, &AxSnapshotOptions::default())
