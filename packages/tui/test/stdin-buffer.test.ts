@@ -910,6 +910,29 @@ describe("StdinBuffer", () => {
 		});
 
 		it.each([
+			["before a separate Enter", ["hello", "\r"]],
+			["together with Enter", ["hello\r"]],
+		])("replays keys an event-loop stall batched into one read %s", (_name, reads) => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			for (const read of reads) processInput(read);
+			expect(emittedSequences).toEqual(["h", "e", "l", "l", "o", "\r"]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("does not let post-stall reads postpone abandonment", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput("ab");
+			vi.advanceTimersByTime(2000);
+			processInput("cd");
+			vi.advanceTimersByTime(2800);
+			expect(emittedSequences).toEqual(["a", "b", "c", "d"]);
+		});
+
+		it.each([
 			["BEL", "", "\x07"],
 			["split-ST backslash", "\x1b", "\\"],
 		])("completes an abandoned head when a late lone %s arrives", (_name, tail, terminator) => {
@@ -918,6 +941,16 @@ describe("StdinBuffer", () => {
 			vi.advanceTimersByTime(5000);
 			processInput(terminator);
 			expect(emittedSequences).toEqual([`${head}${tail}${terminator}`]);
+		});
+
+		it("completes an abandoned head when a late ST arrives split under the kitty keyboard protocol", () => {
+			setKittyProtocolActive(true);
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000);
+			processInput("\x1b");
+			processInput("\\");
+			expect(emittedSequences).toEqual([`${head}\x1b\\`]);
 		});
 	});
 

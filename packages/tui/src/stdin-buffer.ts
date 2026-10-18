@@ -599,7 +599,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		const startIndex = this.#buffer.indexOf(BRACKETED_PASTE_START);
 		if (startIndex !== -1) {
 			// Keys typed while a string head stalled precede the paste.
-			for (const key of this.#takeStringTypedKeys()) this.#emitDataSequence(key);
+			this.#emitStringTypedKeys();
 			if (startIndex > 0) {
 				const beforePaste = this.#buffer.slice(0, startIndex);
 				const result = extractCompleteSequences(beforePaste, 0);
@@ -640,9 +640,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
 		// An abandoned string head hands back the keys typed while it stalled;
 		// they precede the byte that aborted it.
-		if (result.abortedHead) {
-			for (const key of this.#takeStringTypedKeys()) this.#emitDataSequence(key);
-		}
+		if (result.abortedHead) this.#emitStringTypedKeys();
 		for (const sequence of result.sequences) {
 			this.#emitDataSequence(sequence);
 		}
@@ -915,34 +913,32 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	 * Classify a read arriving while a string head is pending. Chunk boundaries
 	 * do not follow terminal writes (SSH, tmux), so no read is ever torn out of
 	 * the string: every byte stays payload until the terminator completes it or
-	 * an impossible byte aborts it. But a lone printable key arriving after the
-	 * flush window passed without progress is probably the user typing; it is
-	 * remembered so that, if the head is then abandoned (aborting byte or
-	 * {@link STRING_ABANDON_MS} without terminal-shaped progress), the keys are
-	 * replayed instead of lost. A head that completes keeps them as payload.
+	 * an impossible byte aborts it. A read within the flush window of the last
+	 * progress is the terminal still writing. After a stall, though, a read may
+	 * equally be the terminal's late payload or keys the user typed — one per
+	 * read, or batched by an event-loop stall — and its bytes cannot tell them
+	 * apart. Its payload-shaped part is remembered without counting as
+	 * progress: a head that completes keeps it as payload, while a head that is
+	 * abandoned (aborting byte, or {@link STRING_ABANDON_MS} without progress)
+	 * replays it as keys instead of losing it.
 	 */
 	#trackStringRead(str: string): void {
-		const code = str.codePointAt(0)!;
-		const loneKey = str.length === (code > 0xffff ? 2 : 1);
-		if (!loneKey || Date.now() - this.#stringProgressMs < this.#timeoutMs) {
+		if (Date.now() - this.#stringProgressMs < this.#timeoutMs) {
 			this.#noteStringProgress();
 			return;
 		}
-		// Only a printable key the string would keep as payload is remembered;
-		// a terminator completes it, ESC may open ST, and an impossible byte
-		// aborts it and is delivered by the parser itself.
-		if (code < 0x20 || code === 0x7f) return;
+		const start = this.#buffer.length;
 		const candidate = this.#buffer + str;
-		const end = resolveStringEnd(
-			candidate,
-			0,
-			candidate.length,
-			this.#buffer.length,
-			this.#buffer.charCodeAt(1) === 0x5d,
-		);
-		if (end !== -1) return;
-		this.#stringTypedKeys.push(str);
-		this.#stringTypedAt.push(this.#buffer.length);
+		const end = resolveStringEnd(candidate, 0, candidate.length, start, this.#buffer.charCodeAt(1) === 0x5d);
+		// A read that completes the head is all payload; one that aborts it
+		// keeps only the part before the aborting byte, which the parser
+		// delivers itself; a trailing ESC may open ST and is not a key.
+		if (end > 0) return;
+		let typed = end === -1 ? str : candidate.slice(start, Math.max(start, STRING_ABORTED - end));
+		if (typed.endsWith(ESC)) typed = typed.slice(0, -1);
+		if (typed.length === 0) return;
+		this.#stringTypedKeys.push(typed);
+		this.#stringTypedAt.push(start);
 	}
 
 	#noteStringProgress(): void {
@@ -961,7 +957,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.#dormantString = dormant;
 			this.#buffer = "";
 			this.#escapeSearchOffset = 0;
-			for (const key of this.#takeStringTypedKeys()) this.#emitDataSequence(key);
+			this.#emitStringTypedKeys();
 		}, STRING_ABANDON_MS);
 	}
 
@@ -977,20 +973,30 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		return keys;
 	}
 
+	/** End string head tracking and replay the keys typed while it stalled. */
+	#emitStringTypedKeys(): void {
+		for (const keys of this.#takeStringTypedKeys()) {
+			for (const sequence of extractCompleteSequences(keys, 0).sequences) this.#emitDataSequence(sequence);
+		}
+	}
+
 	/**
 	 * Re-attach a late tail to an abandoned string head. A read that completes
-	 * the head (even a lone BEL, or `\` after a held ESC), or a multi-byte
-	 * read that continues its grammar (strict base64 for OSC 5522), is the
-	 * terminal's delayed payload: the head resumes and the tail completes it
-	 * rather than being typed. Other lone printable keys pass through as
-	 * typing and keep the head dormant; anything else means input moved on.
+	 * the head (even a lone BEL, or `\` after a held ESC), a lone ESC under the
+	 * kitty keyboard protocol (never a key there, so it opens a split ST), or a
+	 * multi-byte read that continues its grammar (strict base64 for OSC 5522)
+	 * resumes the head. A resumed read is tracked like any post-stall read, so
+	 * if it was batched typing after all, abandonment replays it. Other lone
+	 * printable keys pass through as typing and keep the head dormant;
+	 * anything else means input moved on.
 	 */
 	#resumeDormantString(str: string): void {
 		const head = this.#dormantString!;
 		const candidate = head + str;
 		const end = resolveStringEnd(candidate, 0, candidate.length, head.length, head.charCodeAt(1) === 0x5d);
 		const code = str.codePointAt(0)!;
-		if (end <= 0 && str.length === (code > 0xffff ? 2 : 1)) {
+		const heldSt = str === ESC && isKittyProtocolActive();
+		if (end <= 0 && !heldSt && str.length === (code > 0xffff ? 2 : 1)) {
 			if (code < 0x20 || code === 0x7f) this.#dormantString = undefined;
 			return;
 		}
