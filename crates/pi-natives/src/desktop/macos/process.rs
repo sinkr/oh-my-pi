@@ -569,13 +569,28 @@ mod tests {
 	}
 
 	#[test]
-	fn linkage_cache_starts_over_when_full() {
+	fn a_full_linkage_cache_starts_over_and_reads_dropped_processes_again() {
 		let cache = LinkageCache::default();
-		let executable = PathBuf::from("/Applications/Viewer.app/Contents/MacOS/Viewer");
-		for pid in 0..=MAX_CACHED_LINKAGES as libc::pid_t {
-			cached_linkage(&cache, pid, executable.clone(), |_| Some(Vec::new()));
+		let reads = std::cell::Cell::new(0);
+		let read = |_: &Path| {
+			reads.set(reads.get() + 1);
+			Some(vec![KIT.as_bytes().to_vec()])
+		};
+		let viewer = PathBuf::from("/Applications/Viewer.app/Contents/MacOS/Viewer");
+		let last = MAX_CACHED_LINKAGES as libc::pid_t;
+		for pid in 0..=last {
+			assert_eq!(
+				cached_linkage(&cache, pid, viewer.clone(), read),
+				Some(RemoteScreen::HidReports)
+			);
 		}
-		assert_eq!(cache.lock().len(), 1);
+		assert_eq!(reads.get(), MAX_CACHED_LINKAGES + 1);
+		// The process read after the cache filled is still cached.
+		let kept = cached_linkage(&cache, last, viewer.clone(), |_| panic!("read again"));
+		assert_eq!(kept, Some(RemoteScreen::HidReports));
+		// One dropped when it started over is read again, with the same answer.
+		assert_eq!(cached_linkage(&cache, 0, viewer, read), Some(RemoteScreen::HidReports));
+		assert_eq!(reads.get(), MAX_CACHED_LINKAGES + 2);
 	}
 
 	#[test]
