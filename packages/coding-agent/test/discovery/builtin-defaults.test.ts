@@ -327,6 +327,7 @@ describe("builtin-defaults rule provider", () => {
 			'const ALIASES = new Map<string, string[]>([["ts", ["typescript", "tsx"]]]);',
 			'const COLUMNS = new Map([["first", ROW[0]], ["second", ROW[1]]]);',
 			"const KINDS = new Set([`text`, `json`]);",
+			'const GREETINGS = new Set(["say \\"hi\\"", "bye"]);',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
 
@@ -361,6 +362,8 @@ describe("builtin-defaults rule provider", () => {
 			'type Pair = [typeof import("./a"), string];',
 			'type Both = Base & typeof import("./mod");',
 			'type Thing = import("pkg", { with: { "resolution-mode": "import" } }).Thing;',
+			'type Mod = (typeof import("./mod"));',
+			'type Keys = keyof typeof import("./mod");',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
 
@@ -372,7 +375,6 @@ describe("builtin-defaults rule provider", () => {
 			"const { completeText } = await import(`${cwd}/src/client.ts`);",
 			'const [manifest] = await Promise.all([import("../readers/manifest.js")]);',
 			'const impit = import("impit").then(({ Impit }) => new Impit());',
-			'const pending = typeof import("./mod");',
 		];
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 
@@ -397,6 +399,10 @@ describe("builtin-defaults rule provider", () => {
 			"let entry: any /* TODO */;",
 			"let entry: any // TODO: type this\n",
 			"\t*next(value: any) {}",
+			"const n = value as any + 1;",
+			"const n = value as any instanceof Foo;",
+			"const n = (value as any) in obj;",
+			"let entry: any",
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-no-any"]);
 
