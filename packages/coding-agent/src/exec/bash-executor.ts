@@ -72,6 +72,12 @@ export interface BashExecutorOptions {
 	 * user-shell paths.
 	 */
 	onStart?: (pids: () => readonly number[]) => void;
+	/**
+	 * Invoked before the run when the session's persistent shell is busy with
+	 * another command, so this one runs in a one-shot shell instead: it sees
+	 * none of the session's shell state, and the state it sets is discarded.
+	 */
+	onSessionShellBusy?: () => void;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -676,6 +682,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	if (ownsPersistentSession) {
 		shellSessionsInUse.add(sessionKey);
 	}
+	if (sessionBusy) options?.onSessionShellBusy?.();
 	const userSignal = options?.signal;
 	const runAbortController = new AbortController();
 	let abortCleanupPromise: Promise<void> | undefined;

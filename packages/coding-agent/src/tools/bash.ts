@@ -442,6 +442,10 @@ interface BashProgressDetails extends BashToolDetails {
 /** Pid probe of a background job with no command in flight. */
 const NO_PIDS = (): readonly number[] => [];
 
+/** Shown when a call overlapped another one (parallel or backgrounded) and could not use the session's shell. */
+const SESSION_SHELL_BUSY_NOTICE =
+	"Ran in a temporary shell while the session shell is busy with another command: session variables and functions were unavailable, and nothing set here persists.";
+
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
 }
@@ -865,10 +869,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				};
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const wallTimeStart = performance.now();
+				const notices = [...(options.notices ?? [])];
 				try {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
-						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+						// A call that starts in the foreground runs in the session's
+						// persistent shell, like the direct path, so its variables,
+						// functions, and options reach the next call even after it is
+						// backgrounded. A job that starts in the background gets its own
+						// shell, so it never holds the session's.
+						sessionKey: options.foreground
+							? (this.session.getSessionId?.() ?? undefined)
+							: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						gitGuard: cfgBashGitGuard.get(this.session.settings),
@@ -883,6 +895,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onStart: probe => {
 							pids = probe;
 						},
+						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
 					}).finally(() => {
 						pids = NO_PIDS;
 					});
@@ -890,7 +903,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					const wallTimeMs = performance.now() - wallTimeStart;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						requestedTimeoutSec: options.requestedTimeoutSec,
-						notices: options.notices ?? [],
+						notices,
 						wallTimeMs,
 					});
 					const finalText = this.#extractTextResult(finalResult);
@@ -1556,6 +1569,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					// Stream the sink's own inline view rather than re-buffering chunks.
 					onPreview: onUpdate ? text => onUpdate({ content: [{ type: "text", text }], details: {} }) : undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
 		if (result.cancelled) {
