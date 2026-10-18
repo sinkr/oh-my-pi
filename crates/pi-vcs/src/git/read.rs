@@ -544,7 +544,7 @@ impl GitRepo {
 		}
 		let repo = self.gix()?;
 		let mut out = Vec::new();
-		for id in self.walk_commit_ids("HEAD")?.into_iter().take(count) {
+		for id in self.walk_commit_ids("HEAD", count)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git log", err))?;
@@ -565,7 +565,7 @@ impl GitRepo {
 		}
 		let mut out = Vec::new();
 		let repo = self.gix()?;
-		for id in self.walk_commit_ids("HEAD")?.into_iter().take(count) {
+		for id in self.walk_commit_ids("HEAD", count)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git log", err))?;
@@ -657,7 +657,7 @@ impl GitRepo {
 		}
 		let mut out = Vec::new();
 		let repo = self.gix()?;
-		for id in self.walk_commit_ids(rev)? {
+		for id in self.walk_commit_ids(rev, usize::MAX)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git rev-list", err))?;
@@ -1017,25 +1017,29 @@ impl GitRepo {
 		Ok(None)
 	}
 
-	fn walk_commit_ids(&self, rev: &str) -> Result<Vec<gix::ObjectId>> {
+	fn walk_commit_ids(&self, rev: &str, retain: usize) -> Result<Vec<gix::ObjectId>> {
 		let repo = self.gix()?;
 		let id = repo
 			.rev_parse_single(rev)
 			.map_err(|err| Error::backend("git rev-list", err))?
 			.detach();
-		repo
+		let walk = repo
 			.rev_walk([id])
 			.sorting(gix::revision::walk::Sorting::ByCommitTime(
 				gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
 			))
 			.all()
-			.map_err(|err| Error::backend("git rev-list", err))?
-			.map(|item| {
-				item
-					.map(|info| info.id)
-					.map_err(|err| Error::backend("git rev-list", err))
-			})
-			.collect()
+			.map_err(|err| Error::backend("git rev-list", err))?;
+		let mut ids = Vec::new();
+		// Keep traversing after the requested prefix: failures in older history
+		// must still surface before callers start reading commit messages.
+		for item in walk {
+			let info = item.map_err(|err| Error::backend("git rev-list", err))?;
+			if ids.len() < retain {
+				ids.push(info.id);
+			}
+		}
+		Ok(ids)
 	}
 }
 
@@ -1364,6 +1368,40 @@ mod tests {
 		fs::write(cwd.join(name), contents)?;
 		git(cwd, &["add", name])?;
 		git(cwd, &["commit", "-m", subject])?;
+		Ok(())
+	}
+
+	#[test]
+	fn bounded_logs_preserve_prefixes_and_report_broken_older_history() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "one", "one\n", "first")?;
+		let first = repo.head_sha()?.ok_or("missing HEAD")?;
+		commit(dir.path(), "two", "two\n", "second")?;
+		commit(dir.path(), "three", "three\n", "third")?;
+		assert_eq!(repo.log_subjects(1)?, ["third"]);
+		assert!(repo.log_subjects(0)?.is_empty());
+		assert!(repo.log_onelines(0)?.is_empty());
+		assert_eq!(
+			repo.log_onelines(1)?,
+			git(dir.path(), &["log", "-1", "--oneline", "--no-decorate"])?
+				.lines()
+				.map(str::to_owned)
+				.collect::<Vec<_>>()
+		);
+		fs::remove_file(
+			dir.path()
+				.join(".git/objects")
+				.join(&first[..2])
+				.join(&first[2..]),
+		)?;
+		// A fresh handle cannot satisfy the missing ancestor from an object
+		// cache.
+		let repo = GitRepo::require(dir.path())?;
+		for result in
+			[repo.log_subjects(1), repo.log_onelines(1), repo.log_subjects(0), repo.log_onelines(0)]
+		{
+			assert!(matches!(result, Err(Error::Backend { context: "git rev-list", .. })));
+		}
 		Ok(())
 	}
 
