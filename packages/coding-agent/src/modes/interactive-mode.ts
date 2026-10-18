@@ -3912,7 +3912,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (ansi) {
 				this.editor.borderColor = (str: string) => `${ansi}${str}\x1b[39m`;
 			} else {
-				const level = this.session.thinkingLevel ?? ThinkingLevel.Off;
+				const level = this.viewSession.thinkingLevel ?? ThinkingLevel.Off;
 				this.editor.borderColor = theme.getThinkingBorderColor(level);
 			}
 		}

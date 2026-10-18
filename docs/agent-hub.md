@@ -74,7 +74,8 @@ For a normal local subagent, `Enter` or click focuses the main TUI on that agent
 
 1. Read its live transcript and tool activity.
 2. Type a message and press `Enter` to steer a running turn or prompt an idle agent.
-3. Press `Esc` with an empty editor, or double-tap `←`, to return to the main session.
+3. Change its model or thinking level with `Alt+P`, `/switch`, `Ctrl+P`, `Shift+Tab`, or `/effort`. These switches are session-only and leave the main session alone. `/model` and `Alt+M` open the same session-only picker, because role assignments configure the main session.
+4. Press `Esc` with an empty editor, or double-tap `←`, to return to the main session.
 
 Steering uses the normal prompt path, so the message and response are written to the subagent's persisted session history. While a subagent is focused, `Esc` returns to the main session; it does not interrupt the subagent.
 
