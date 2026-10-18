@@ -15,6 +15,8 @@ const PROVIDER = "muse-code";
 const SOURCE = "api.meta.ai/muse-code/key";
 const FAILURE_BACKOFF_MS = 5 * 60_000;
 const WEEKLY_ID = "1w";
+/** Limit ids `rollingWindow()` produces: `<minutes>m`, or `rolling` when Meta names no duration. */
+const ROLLING_ID = /^(?:rolling|\d+m)$/;
 /** Meta's documented rolling window, used when no earlier report names one. */
 const DEFAULT_ROLLING_MINUTES = 300;
 type MuseCodeSubscriptionUsage = NonNullable<MuseCodeKeyResponse["subs_usage"]>;
@@ -127,9 +129,13 @@ function buildLimits(
  * Limits for a key response that omits `subs_usage`, which Meta does while the
  * rolling window is idle: no request has opened one, so it is unused. Weekly
  * usage only accrues inside a rolling window, so the previous report's weekly
- * figure holds until its fixed reset and is zero after it. Without a previous
- * weekly figure and its reset the weekly limit stays unreported: an unbounded
- * carry would present old usage as current forever.
+ * figure holds until its reset and is zero after it. The carried figure is a
+ * lower bound: usage after that report (late in its window, or from another
+ * client on the same subscription) is not visible. Meta's weekly reset is a
+ * fixed weekly boundary (observed at Monday 00:00 UTC), so a passed reset rolls
+ * forward by whole weeks. Without a previous weekly figure and its reset the
+ * weekly limit stays unreported: an unbounded carry would present old usage as
+ * current forever.
  */
 function buildIdleLimits(
 	previous: UsageReport | undefined,
@@ -137,7 +143,7 @@ function buildIdleLimits(
 	accountId: string | undefined,
 	now: number,
 ): UsageLimit[] {
-	const previousRolling = previous?.limits.find(limit => limit.id !== WEEKLY_ID);
+	const previousRolling = previous?.limits.find(limit => ROLLING_ID.test(limit.id));
 	const shape = previousRolling?.window ?? rollingWindow(DEFAULT_ROLLING_MINUTES);
 	const window: UsageWindow = { id: shape.id, label: shape.label, durationMs: shape.durationMs };
 	const limits = [
@@ -157,7 +163,11 @@ function buildIdleLimits(
 			{ id: WEEKLY_ID, label: "Weekly", durationMs: WEEK_MS, resetsAt },
 			tier,
 			accountId,
-			[reset ? "Reset since the last active window" : "Carried from the last active window"],
+			[
+				reset
+					? "Reset since the last reported usage"
+					: "Carried from the last reported usage; later usage not visible",
+			],
 		),
 	);
 	return limits;
