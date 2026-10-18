@@ -387,6 +387,8 @@ impl Request {
 		reply.send(result).is_ok()
 	}
 
+	/// Requests that can send input or move focus, which hold the input lease.
+	/// A menu read counts: on macOS it makes its window key first.
 	const fn is_mutation(&self) -> bool {
 		matches!(
 			self,
@@ -403,6 +405,7 @@ impl Request {
 				| Self::AxFocus { .. }
 				| Self::AxClick { .. }
 				| Self::OpenApplication { .. }
+				| Self::MenuItems { .. }
 				| Self::MenuSelect { .. }
 				| Self::BringToCurrentSpace { .. }
 				| Self::HoldKeys { .. }
@@ -2164,6 +2167,8 @@ mod capture_tests {
 		/// Each window listing signals the sender, then blocks until the
 		/// receiver's sender drops.
 		hang_windows:           Option<(flume::Sender<()>, flume::Receiver<()>)>,
+		/// Runs as each menu read is served.
+		on_menu_read:           Option<Box<dyn Fn() + Send>>,
 	}
 
 	impl FakeWaylandBackend {
@@ -2210,6 +2215,7 @@ mod capture_tests {
 				awake:                  Arc::new(Mutex::new(Vec::new())),
 				unlock_on_layout:       Arc::new(Mutex::new(false)),
 				hang_windows:           None,
+				on_menu_read:           None,
 			}
 		}
 	}
@@ -2508,7 +2514,10 @@ mod capture_tests {
 			_: &DesktopWindow,
 			_: &[String],
 		) -> CoreResult<Vec<DesktopMenuItem>> {
-			unreachable!("menu_items not exercised")
+			if let Some(on_menu_read) = &self.on_menu_read {
+				on_menu_read();
+			}
+			Ok(Vec::new())
 		}
 
 		fn menu_select(
@@ -3230,6 +3239,25 @@ mod capture_tests {
 		assert_eq!(named(&error, "e2"), None);
 		assert_eq!(tree.lock().pressed, [2, 2, 2]);
 		assert_eq!(tree.lock().probes, 1);
+	}
+
+	#[test]
+	fn a_menu_read_holds_the_input_lease() {
+		let source = CancellationSource::default();
+		// Whether another call of the session could take input during the read.
+		let free = Arc::new(AtomicBool::new(true));
+		let (other, seen) = (source.clone(), Arc::clone(&free));
+		let mut backend = FakeWaylandBackend::new();
+		backend.on_menu_read = Some(Box::new(move || {
+			seen.store(InputLease::acquire(&other.token()).is_ok(), Ordering::SeqCst);
+		}));
+		// The worker holds the ownership tests' lock, which the grant needs.
+		let mut worker = worker_with(backend);
+		control::grant_for_test(&source);
+		let target = Target::Window(WAYLAND_ID.to_string());
+		call(&mut worker, |reply| Request::MenuItems { target, path: Vec::new(), reply }, &source)
+			.unwrap();
+		assert!(!free.load(Ordering::SeqCst), "the menu read ran without the input lease");
 	}
 
 	#[test]

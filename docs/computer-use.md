@@ -209,7 +209,7 @@ No agent input reached the lock screen's password field.
 
 ## Safety and troubleshooting
 
-Native mutations acquire an OS-backed input/focus lock shared across processes. Contention returns `InputBusy` before sending input; screenshots and inspection remain available. The lock is released after the operation and its cleanup, not held for the whole conversation.
+Native mutations, and menu reads, which on macOS make their window key first, acquire an OS-backed input/focus lock shared across processes. Contention returns `InputBusy` before sending input; screenshots and other inspection remain available. The lock is released after the operation and its cleanup, not held for the whole conversation.
 
 On macOS, physical `Esc` interrupts the current native input operation without swallowing the key. Synthetic Escape chords do not trigger the emergency stop. The stop needs event-listening access, which Accessibility provides unless Input Monitoring is turned off for the launching app; then the stop sees no input and `capabilities()` reports `globalEscape: false`. A stop that fails to start refuses input with `PermissionDenied`. `inputPermission` reports event-posting access for information only: AX text input works without it, and `input` follows Accessibility. Cancellation releases held buttons and modifiers before ownership is released. Synchronous OS/AX calls already in progress cannot be undone: inspect the UI after `Cancelled` or a partial-delivery error before retrying.
 
