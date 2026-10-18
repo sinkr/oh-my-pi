@@ -2115,6 +2115,15 @@ mod tests {
 			run_util::<Rg>(&["--path-separator", "::", "hit", "."], "", tree.path());
 		assert_eq!(code, 2);
 		assert!(capture.err().contains("exactly one byte"));
+		// An explicit operand is printed as spelled: on Windows its native `\`
+		// separators are rewritten too, so displayed paths stay uniform.
+		let (code, capture) = run_util::<Rg>(
+			&["--path-separator", "|", "hit", if cfg!(windows) { "sub\\a.txt" } else { "sub/a.txt" }],
+			"",
+			tree.path(),
+		);
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "sub|a.txt:hit\n");
 	}
 }
 
