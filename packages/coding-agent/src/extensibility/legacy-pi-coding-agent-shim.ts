@@ -43,6 +43,7 @@ import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, Settings } from "../config/settings";
+import { cfgShellPath } from "../exec/settings";
 import { EditTool } from "../edit";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
@@ -783,22 +784,44 @@ export function createReadOnlyTools(cwd: string): ToolDefinition[] {
  * Legacy pi `SettingsManager` shim.
  *
  * Upstream Pi's `SettingsManager.create(cwd)` is **synchronous** and returns a
- * manager exposing `getGlobalSettings()`/`getProjectSettings()` (plus the typed
- * `get(path)`). OMP's `Settings` is that manager, so the shim resolves the
- * active extension session's instance first, then falls back to a live instance
- * matching the requested `cwd`/`agentDir`, or an isolated instance when nothing
- * matches. Returning the promise from `Settings.init()` here broke every pi
- * extension that read settings synchronously — e.g. pi-vim's `session_start`
- * handler (#10397); selecting a process-global instance would leak one session's
- * settings into another.
+ * manager exposing `getGlobalSettings()`/`getProjectSettings()`, shell
+ * accessors, and the typed `get(path)`. OMP's `Settings` backs that manager;
+ * the shim resolves the active extension session's instance first, then falls
+ * back to a live instance matching the requested `cwd`/`agentDir`, or an
+ * isolated instance when nothing matches. Returning the promise from
+ * `Settings.init()` here broke extensions that read settings synchronously —
+ * e.g. pi-vim's `session_start` handler (#10397); selecting a process-global
+ * instance would leak one session's settings into another.
  */
+interface LegacyShellAccessors {
+	getShellPath(): string | undefined;
+	getShellCommandPrefix(): string | undefined;
+}
+
+function hasLegacyShellAccessors(settings: Settings): settings is Settings & LegacyShellAccessors {
+	return (
+		"getShellPath" in settings &&
+		typeof settings.getShellPath === "function" &&
+		"getShellCommandPrefix" in settings &&
+		typeof settings.getShellCommandPrefix === "function"
+	);
+}
+
+function withLegacyShellAccessors(settings: Settings): Settings & LegacyShellAccessors {
+	if (hasLegacyShellAccessors(settings)) return settings;
+	return Object.assign(settings, {
+		getShellPath: () => cfgShellPath.get(settings),
+		getShellCommandPrefix: () => undefined,
+	});
+}
+
 export const SettingsManager = {
-	create(cwd?: string, agentDir?: string): Settings {
-		return findScopedSettings(cwd, agentDir) ?? Settings.isolated();
+	create(cwd?: string, agentDir?: string): Settings & LegacyShellAccessors {
+		return withLegacyShellAccessors(findScopedSettings(cwd, agentDir) ?? Settings.isolated());
 	},
 
-	inMemory(): Settings {
-		return Settings.isolated();
+	inMemory(): Settings & LegacyShellAccessors {
+		return withLegacyShellAccessors(Settings.isolated());
 	},
 } as const;
 

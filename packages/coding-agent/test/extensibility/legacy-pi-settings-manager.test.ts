@@ -80,6 +80,8 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 		const inMemory = SettingsManager.inMemory();
 		expect(typeof inMemory.getProjectSettings).toBe("function");
+		expect(inMemory.getShellPath()).toBeUndefined();
+		expect(inMemory.getShellCommandPrefix()).toBeUndefined();
 		expect(inMemory.getProjectSettings()).toEqual({});
 	});
 
@@ -96,30 +98,42 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 		const singleton = await Settings.init({ cwd: projectDir, agentDir });
 		const sessionB = await Settings.loadIsolated({ cwd: projectB, agentDir });
 
-		expect(SettingsManager.create(projectDir)).toBe(singleton);
-		expect(SettingsManager.create(projectB)).toBe(sessionB);
+		expect<Settings>(SettingsManager.create(projectDir)).toBe(singleton);
+		expect<Settings>(SettingsManager.create(projectB)).toBe(sessionB);
 		expect(SettingsManager.create(projectB).getProjectSettings().piVim).toEqual({ session: "b" });
 	});
 
 	it("uses the active session settings when same-cwd sessions have different managers", async () => {
 		const sdkAgentDir = tempDir.join("sdk-agent");
 		fs.mkdirSync(sdkAgentDir, { recursive: true });
-		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ piVim: { session: "default" } }));
-		await Bun.write(path.join(sdkAgentDir, "config.yml"), YAML.stringify({ piVim: { session: "sdk" } }));
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({ piVim: { session: "default" }, shellPath: "/bin/sh" }),
+		);
+		await Bun.write(
+			path.join(sdkAgentDir, "config.yml"),
+			YAML.stringify({ piVim: { session: "sdk" }, shellPath: "/bin/bash" }),
+		);
 
 		// Construct the explicit SDK instance first, then the same-cwd singleton.
 		// Outside active extension execution the singleton is therefore the newest
 		// matching fallback — exactly the leak this regression must distinguish.
 		const sdkSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir: sdkAgentDir });
 		const singleton = await Settings.init({ cwd: projectDir, agentDir });
-		expect(SettingsManager.create(projectDir)).toBe(singleton);
+		expect<Settings>(SettingsManager.create(projectDir)).toBe(singleton);
 
 		let observed: Settings | undefined;
+		let shellOptions: { shellPath: string | undefined; commandPrefix: string | undefined } | undefined;
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
 				pi.on("session_start", (_event, ctx) => {
-					observed = SettingsManager.create(ctx.cwd);
+					const settings = SettingsManager.create(ctx.cwd);
+					observed = settings;
+					shellOptions = {
+						shellPath: settings.getShellPath(),
+						commandPrefix: settings.getShellCommandPrefix(),
+					};
 				});
 			},
 			projectDir,
@@ -142,6 +156,7 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 			expect(observed).toBe(sdkSettings);
 			expect(observed?.getGlobalSettings().piVim).toEqual({ session: "sdk" });
+			expect(shellOptions).toEqual({ shellPath: "/bin/bash", commandPrefix: undefined });
 		} finally {
 			authStorage.close();
 		}
@@ -201,7 +216,7 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 			expect(commandObserved).toBe(sdkSettings);
 			expect(shortcutObserved).toBe(sdkSettings);
 			// Without the scope the same call leaks the newest same-cwd manager.
-			expect(SettingsManager.create(projectDir)).toBe(singleton);
+			expect<Settings>(SettingsManager.create(projectDir)).toBe(singleton);
 		} finally {
 			authStorage.close();
 		}
@@ -251,7 +266,7 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 			await wrapped.execute("tool-call-id", {});
 
 			expect(observed).toBe(sdkSettings);
-			expect(SettingsManager.create(projectDir)).toBe(singleton);
+			expect<Settings>(SettingsManager.create(projectDir)).toBe(singleton);
 		} finally {
 			authStorage.close();
 		}
