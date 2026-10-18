@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -112,7 +113,7 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 		);
 		await Bun.write(
 			path.join(sdkAgentDir, "config.yml"),
-			YAML.stringify({ piVim: { session: "sdk" }, shellPath: "/bin/bash" }),
+			YAML.stringify({ piVim: { session: "sdk" }, shellPath: "~/.local/bin/bash" }),
 		);
 
 		// Construct the explicit SDK instance first, then the same-cwd singleton.
@@ -156,7 +157,8 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 			expect(observed).toBe(sdkSettings);
 			expect(observed?.getGlobalSettings().piVim).toEqual({ session: "sdk" });
-			expect(shellOptions).toEqual({ shellPath: "/bin/bash", commandPrefix: undefined });
+			// Legacy Pi expands `~`; a literal tilde path cannot be spawned.
+			expect(shellOptions).toEqual({ shellPath: `${os.homedir()}/.local/bin/bash`, commandPrefix: undefined });
 		} finally {
 			authStorage.close();
 		}

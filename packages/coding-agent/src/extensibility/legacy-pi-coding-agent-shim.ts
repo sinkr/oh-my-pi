@@ -68,7 +68,7 @@ import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { WriteTool } from "../tools/write";
-import { resolveToCwd } from "../tools/path-utils";
+import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
@@ -810,7 +810,11 @@ function hasLegacyShellAccessors(settings: Settings): settings is Settings & Leg
 function withLegacyShellAccessors(settings: Settings): Settings & LegacyShellAccessors {
 	if (hasLegacyShellAccessors(settings)) return settings;
 	return Object.assign(settings, {
-		getShellPath: () => cfgShellPath.get(settings),
+		// Upstream Pi expands `~` before returning; spawn APIs take the path literally.
+		getShellPath: () => {
+			const shellPath = cfgShellPath.get(settings);
+			return shellPath ? expandTilde(shellPath) : shellPath;
+		},
 		getShellCommandPrefix: () => undefined,
 	});
 }
