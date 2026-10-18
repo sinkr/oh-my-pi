@@ -1136,8 +1136,8 @@ mod tests {
 		let last_style = format!("color:{}", colors[1]);
 		for orientation in ["", " horizontal"] {
 			let source = format!(
-				"xychart-beta{orientation}\nx-axis [A, B, C]\ny-axis 0 --> 100\n\
-				 line [20, 80, 40]\nline [20, 80, 40]"
+				"xychart-beta{orientation}\nx-axis [A, B, C]\ny-axis 0 --> 100\nline [20, 80, \
+				 40]\nline [20, 80, 40]"
 			);
 			let output = render(&source, &config(false), ColorMode::Html, &theme);
 			let (legend, plot) = output.split_once('\n').unwrap();
