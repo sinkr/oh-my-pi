@@ -635,6 +635,7 @@ async function runInteractiveMode(
 	startupLease?: ComposerLease,
 	startupGoal?: string,
 	startupRestore?: () => Promise<RestoreOutcome>,
+	refreshScopedModelsAfterLogin?: () => Promise<void>,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -649,6 +650,7 @@ async function runInteractiveMode(
 			eventBus,
 			startupLease?.composer,
 			subagentEventBus,
+			refreshScopedModelsAfterLogin,
 		);
 		startupLease?.adopt();
 	} catch (error) {
@@ -1076,6 +1078,25 @@ export interface ScopedModelSink {
 	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void;
 }
 
+async function applyScopedModelRebuild(
+	session: ScopedModelSink,
+	patterns: string[],
+	modelRegistry: Pick<ModelRegistry, "getAvailable">,
+	activeSettings: Settings,
+): Promise<void> {
+	if (session.isDisposed) return;
+	const rebuilt = await resolveModelScope(
+		patterns,
+		modelRegistry,
+		getModelMatchPreferences(activeSettings),
+		activeSettings,
+	);
+	if (session.isDisposed) return;
+	const mapped = toSessionScopedModels(rebuilt, activeSettings);
+	if (mapped.length === 0 || sameScopedModelSet(session.scopedModels, mapped)) return;
+	session.setScopedModels(mapped);
+}
+
 /**
  * Startup resolves the `--models`/`enabledModels` scope from the model registry
  * before background provider discovery runs — `createSession` fires
@@ -1099,16 +1120,25 @@ export async function rebuildScopedModelsAfterDiscovery(
 	const patterns = parsed.models ?? cfgEnabledModels.get(activeSettings);
 	if (!patterns || patterns.length === 0) return;
 	await modelRegistry.awaitBackgroundRefresh();
-	if (session.isDisposed) return;
-	const rebuilt = await resolveModelScope(
-		patterns,
-		modelRegistry,
-		getModelMatchPreferences(activeSettings),
-		activeSettings,
-	);
-	const mapped = toSessionScopedModels(rebuilt, activeSettings);
-	if (mapped.length === 0 || sameScopedModelSet(session.scopedModels, mapped)) return;
-	session.setScopedModels(mapped);
+	await applyScopedModelRebuild(session, patterns, modelRegistry, activeSettings);
+}
+
+/**
+ * Re-resolve the explicit `--models` or settings-derived scope after a
+ * successful login has made a provider's models available. Unlike the startup
+ * rebuild, this runs after the provider-specific refresh has completed and
+ * must not wait for the unrelated background refresh. It only replaces the
+ * picker/cycle scope; the active model is intentionally left unchanged.
+ */
+export async function rebuildScopedModelsAfterLogin(
+	session: ScopedModelSink,
+	parsed: Args,
+	modelRegistry: Pick<ModelRegistry, "getAvailable">,
+	activeSettings: Settings,
+): Promise<void> {
+	const patterns = parsed.models ?? cfgEnabledModels.get(activeSettings);
+	if (!patterns || patterns.length === 0) return;
+	await applyScopedModelRebuild(session, patterns, modelRegistry, activeSettings);
 }
 
 /** Settings the scoped model list follows (see {@link watchScopedModelSettings}). */
@@ -2543,6 +2573,8 @@ export async function runRootCommand(
 				}
 				void startBackgroundModelDiscovery?.();
 			};
+			const refreshScopedModelsAfterLogin = () =>
+				rebuildScopedModelsAfterLogin(session, parsedArgs, modelRegistry, settingsInstance);
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
 			if (modelFallbackMessage) {
@@ -2662,6 +2694,7 @@ export async function runRootCommand(
 						startupLease,
 						initialArgs.goal,
 						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						refreshScopedModelsAfterLogin,
 					);
 				} finally {
 					startupLease?.dispose();

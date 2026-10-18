@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed newly authenticated models missing from the current session's scoped `/model` picker and model cycle after login, without changing the active model or widening the configured scope
+
 ## [18.12.1] - 2026-10-17
 
 ### Breaking Changes
