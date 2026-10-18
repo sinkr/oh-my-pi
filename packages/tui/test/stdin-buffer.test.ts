@@ -887,15 +887,37 @@ describe("StdinBuffer", () => {
 			processInput("IHdvcmxkIQ==\x1b\\");
 			expect(emittedSequences).toEqual(["h", "i", `${head}IHdvcmxkIQ==\x1b\\`]);
 		});
-
-		it("keeps legacy Alt+] plus a key on the key timer without the kitty keyboard protocol", () => {
-			// Terminal OSC replies open with a numeric command, so `\x1b]a` is a
-			// legacy Alt+] chord batched with a key, not a string to wait on.
+		it.each([
+			["Alt+]", "\x1b]a"],
+			["Alt+P", "\x1bPa"],
+			["Alt+_", "\x1b_a"],
+		])("keeps legacy %s batched with a key on the key timer without the kitty keyboard protocol", (_name, chord) => {
+			// Terminal replies open with a numeric command (or a known reply
+			// letter), so the chord plus a key is not a string to wait on.
 			vi.useFakeTimers();
-			processInput("\x1b]a");
+			processInput(chord);
 			vi.advanceTimersByTime(100);
-			expect(emittedSequences).toEqual(["\x1b]a"]);
+			expect(emittedSequences).toEqual([chord]);
 			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("delivers a non-payload key typed into a stalled head exactly once", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput(" ");
+			expect(emittedSequences).toEqual([" "]);
+		});
+
+		it.each([
+			["BEL", "", "\x07"],
+			["split-ST backslash", "\x1b", "\\"],
+		])("completes an abandoned head when a late lone %s arrives", (_name, tail, terminator) => {
+			vi.useFakeTimers();
+			processInput(`${head}${tail}`);
+			vi.advanceTimersByTime(5000);
+			processInput(terminator);
+			expect(emittedSequences).toEqual([`${head}${tail}${terminator}`]);
 		});
 	});
 

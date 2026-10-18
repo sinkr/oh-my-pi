@@ -887,17 +887,28 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	/**
 	 * Whether the buffer is the head of an OSC/DCS/APC string: terminal
 	 * protocol data (OSC 5522 clipboard read, graphics reply), never a key.
-	 * Without the kitty keyboard protocol a lone `\x1b]`/`\x1bP`/`\x1b_` may
-	 * be Alt+]/Alt+P/Alt+_, and a terminal's OSC reply always opens with its
-	 * numeric command, so `\x1b]` plus a non-digit stays on the key timer.
+	 * Without the kitty keyboard protocol `\x1b]`/`\x1bP`/`\x1b_` may be
+	 * Alt+]/Alt+P/Alt+_, alone or batched with the next key, so a head counts
+	 * only once it opens the way terminal replies do: OSC and DCS with a
+	 * digit (`\x1b]11;`, `\x1bP1$r`) or DCS `>`/`!` (XTVERSION, DA3), APC with
+	 * a kitty graphics `G`, TSP `tsp;`, or Glyph Protocol `25a1;` reply.
+	 * Anything else stays on the key flush timer.
 	 */
 	#bufferIsStringHead(): boolean {
 		const buffer = this.#buffer;
 		if (!STRING_SEQ_PARTIAL.test(buffer)) return false;
 		if (isKittyProtocolActive()) return true;
 		if (buffer.length <= 2) return false;
-		const command = buffer.charCodeAt(2);
-		return buffer.charCodeAt(1) !== 0x5d /* ] */ || (command >= 0x30 && command <= 0x39);
+		const opener = buffer.charCodeAt(2);
+		const digit = opener >= 0x30 && opener <= 0x39;
+		switch (buffer.charCodeAt(1)) {
+			case 0x5d /* ] */:
+				return digit;
+			case 0x50 /* P */:
+				return digit || opener === 0x3e /* > */ || opener === 0x21; /* ! */
+			default:
+				return opener === 0x47 /* G */ || opener === 0x74 /* t */ || opener === 0x32; /* 2 */
+		}
 	}
 
 	/**
@@ -915,10 +926,23 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		const loneKey = str.length === (code > 0xffff ? 2 : 1);
 		if (!loneKey || Date.now() - this.#stringProgressMs < this.#timeoutMs) {
 			this.#noteStringProgress();
-		} else if (code >= 0x20 && code !== 0x7f) {
-			this.#stringTypedKeys.push(str);
-			this.#stringTypedAt.push(this.#buffer.length);
+			return;
 		}
+		// Only a printable key the string would keep as payload is remembered;
+		// a terminator completes it, ESC may open ST, and an impossible byte
+		// aborts it and is delivered by the parser itself.
+		if (code < 0x20 || code === 0x7f) return;
+		const candidate = this.#buffer + str;
+		const end = resolveStringEnd(
+			candidate,
+			0,
+			candidate.length,
+			this.#buffer.length,
+			this.#buffer.charCodeAt(1) === 0x5d,
+		);
+		if (end !== -1) return;
+		this.#stringTypedKeys.push(str);
+		this.#stringTypedAt.push(this.#buffer.length);
 	}
 
 	#noteStringProgress(): void {
@@ -954,22 +978,23 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	}
 
 	/**
-	 * Re-attach a late tail to an abandoned string head. A multi-byte read
-	 * that continues the head's grammar (strict base64 for OSC 5522) is the
-	 * terminal's delayed payload, so the head resumes and the tail completes
-	 * it rather than being typed. Lone printable keys pass through as typing
-	 * and keep the head dormant; anything else means input moved on.
+	 * Re-attach a late tail to an abandoned string head. A read that completes
+	 * the head (even a lone BEL, or `\` after a held ESC), or a multi-byte
+	 * read that continues its grammar (strict base64 for OSC 5522), is the
+	 * terminal's delayed payload: the head resumes and the tail completes it
+	 * rather than being typed. Other lone printable keys pass through as
+	 * typing and keep the head dormant; anything else means input moved on.
 	 */
 	#resumeDormantString(str: string): void {
 		const head = this.#dormantString!;
+		const candidate = head + str;
+		const end = resolveStringEnd(candidate, 0, candidate.length, head.length, head.charCodeAt(1) === 0x5d);
 		const code = str.codePointAt(0)!;
-		if (str.length === (code > 0xffff ? 2 : 1)) {
+		if (end <= 0 && str.length === (code > 0xffff ? 2 : 1)) {
 			if (code < 0x20 || code === 0x7f) this.#dormantString = undefined;
 			return;
 		}
 		this.#dormantString = undefined;
-		const candidate = head + str;
-		const end = resolveStringEnd(candidate, 0, candidate.length, head.length, head.charCodeAt(1) === 0x5d);
 		if (end <= STRING_ABORTED) return;
 		this.#buffer = head;
 		this.#escapeSearchOffset = head.length;
