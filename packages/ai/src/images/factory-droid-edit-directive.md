@@ -1,0 +1,1 @@
+Produce a single image that applies the description in the user message to the images that follow it. Treat those images as the subject to change and keep everything the description does not mention. Do not ask clarifying questions.

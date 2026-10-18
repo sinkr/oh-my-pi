@@ -72,18 +72,28 @@ describe("Factory Droid image generation", () => {
 		]);
 	});
 
-	const rejected: Array<{ label: string; inputImages: ImageInput[] }> = [
+	const rejected: Array<{ label: string; model: string; inputImages: ImageInput[] }> = [
 		{
 			label: "more than 16 references",
+			model: "gpt-image-2.5-flare",
 			inputImages: Array.from({ length: 17 }, () => ({ data: IMAGE, mimeType: "image/png" })),
 		},
-		{ label: "a reference type the edits contract rejects", inputImages: [{ data: IMAGE, mimeType: "image/gif" }] },
+		{
+			label: "a reference type the edits contract rejects",
+			model: "gpt-image-2.5-flare",
+			inputImages: [{ data: IMAGE, mimeType: "image/gif" }],
+		},
+		...["gpt-image-2.5-flare", "gemini-3-pro-image-preview"].map(model => ({
+			label: `a reference over 5 MiB on ${model}`,
+			model,
+			inputImages: [{ data: Buffer.alloc(5 * 1024 * 1024 + 1).toString("base64"), mimeType: "image/png" }],
+		})),
 	];
-	it.each(rejected)("rejects $label before sending", async ({ inputImages }) => {
+	it.each(rejected)("rejects $label before sending", async ({ model, inputImages }) => {
 		const captured: CapturedRequest[] = [];
 		await expect(
 			generateImage(
-				factoryModel("gpt-image-2.5-flare"),
+				factoryModel(model),
 				{ prompt: "edit", inputImages },
 				{ apiKey: WORKOS_TOKEN, fetch: jsonFetch(captured, imagesResponse) },
 			),
@@ -110,7 +120,10 @@ describe("Factory Droid image generation", () => {
 		expect(config.responseModalities).toEqual(["TEXT", "IMAGE"]);
 		// Gemini image models reject thinking configuration.
 		expect(config).not.toHaveProperty("thinkingConfig");
-		expect(JSON.stringify(request.body.systemInstruction)).toContain("Droid");
+		// Edit mode: identity first, then the directive that keeps the references as the subject.
+		expect(request.body.systemInstruction).toEqual({
+			parts: [{ text: expect.stringMatching(/^You are Droid.* Treat those images as the subject to change/) }],
+		});
 		expect(request.body.contents).toEqual([
 			{ role: "user", parts: [{ inlineData: { data: IMAGE, mimeType: "image/png" } }, { text: "a lighthouse" }] },
 		]);
@@ -118,17 +131,43 @@ describe("Factory Droid image generation", () => {
 		expect(result.usage).toMatchObject({ input: 23, output: 1120 });
 	});
 
-	it("says why when Gemini blocks the prompt instead of returning nothing", async () => {
-		const result = await generateImage(
+	it("sends the generate directive when there are no references", async () => {
+		const captured: CapturedRequest[] = [];
+		const chunk = { candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: IMAGE } }] } }] };
+		await generateImage(
+			factoryModel("gemini-3-pro-image-preview"),
+			{ prompt: "a lighthouse" },
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, [JSON.stringify(chunk)]) },
+		);
+		expect(captured[0].body.systemInstruction).toEqual({
+			parts: [{ text: expect.stringMatching(/^You are Droid.* faithfully matches the description/) }],
+		});
+		expect(JSON.stringify(captured[0].body.systemInstruction)).not.toContain("Treat those images");
+	});
+
+	it("fails with the block reason when Gemini blocks the prompt", async () => {
+		const error = await generateImage(
 			factoryModel("gemini-3-pro-image-preview"),
 			{ prompt: "a circle" },
 			{
 				apiKey: WORKOS_TOKEN,
 				fetch: captureFetch([], [JSON.stringify({ promptFeedback: { blockReason: "OTHER" } })]),
 			},
-		);
-		expect(result.images).toEqual([]);
-		expect(result.text).toContain("OTHER");
+		).catch((caught: unknown) => caught);
+		// A response error, not an HTTP error: the tool reports it instead of trying the next model.
+		expect(error).toBeInstanceOf(AIError.ProviderResponseError);
+		expect(error).not.toBeInstanceOf(AIError.ProviderHttpError);
+		expect((error as Error).message).toContain("blocked (OTHER)");
+	});
+
+	it("fails when the Images route answers 200 with no image", async () => {
+		await expect(
+			generateImage(
+				factoryModel("gpt-image-2.5-flare"),
+				{ prompt: "a cat" },
+				{ apiKey: WORKOS_TOKEN, fetch: jsonFetch([], { data: [] }) },
+			),
+		).rejects.toBeInstanceOf(AIError.ProviderResponseError);
 	});
 
 	it("maps a proxy rejection to a provider HTTP error carrying Factory's reason", async () => {
