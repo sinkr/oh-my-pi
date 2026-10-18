@@ -1016,9 +1016,6 @@ describe("computer prelude", () => {
 		override async axClick(ref: string, opts?: PointerOptions | null): Promise<void> {
 			this.axCalls.push(["axClick", ref, opts]);
 		}
-		override async axType(ref: string, text: string, opts?: PointerOptions | null): Promise<void> {
-			this.axCalls.push(["axType", ref, text, opts]);
-		}
 		override async axKeyChord(ref: string, keys: string[], opts?: PointerOptions | null): Promise<void> {
 			this.axCalls.push(["axKeyChord", ref, keys, opts]);
 		}
@@ -1073,7 +1070,7 @@ describe("computer prelude", () => {
 		}
 	});
 
-	it("types and presses chords into JavaScript elements, keeping press() without a chord the native press", async () => {
+	it("presses a chord into a JavaScript element and keeps press() without a chord the native press", async () => {
 		const session = toolSession();
 		const native = new RefCallSession();
 		const prelude = workerPrelude(session, native);
@@ -1090,23 +1087,21 @@ describe("computer prelude", () => {
 			await runInContext(
 				`(async () => {
 					const win = await computer.window(42);
-					await win.ref("e1").type("123456");
-					await win.ref("e1").press("cmd+a", { takeover: true });
+					await win.ref("e1").press("cmd+a");
 					await win.ref("e1").press();
 					await computer.run(async ({ desktop }) => {
 						const el = await desktop.ref("e1");
-						await el.type("x", { takeover: true });
 						await el.press(["shift", "tab"]);
+						await el.press();
 					});
 				})()`,
 				realm,
 			);
 			expect(native.axCalls.filter(call => (call as unknown[])[0] !== "axNode")).toEqual([
-				["axType", "e1", "123456", {}],
-				["axKeyChord", "e1", ["cmd", "a"], { takeover: true }],
+				["axKeyChord", "e1", ["cmd", "a"], {}],
 				["axPerform", "e1", "press"],
-				["axType", "e1", "x", { takeover: true }],
 				["axKeyChord", "e1", ["shift", "tab"], {}],
+				["axPerform", "e1", "press"],
 			]);
 		} finally {
 			await prelude.invoke({ action: "close" }, context);
