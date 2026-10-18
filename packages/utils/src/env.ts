@@ -380,6 +380,7 @@ export function $envpos(name: string, defaultValue: number): number {
 	return parsed;
 }
 
+
 let terminalHeadless = isBunTestRuntime();
 
 /**
