@@ -205,6 +205,7 @@ import {
 	screenshotQuality,
 	screenshotScope,
 	screenshotThreshold,
+	whileDrawing,
 } from "./screenshot";
 import { RuntimeDialogController, type DialogPolicy, type DialogState } from "./dialogs";
 import {
@@ -3068,17 +3069,20 @@ export class WorkerCore {
 			parseAriaRefSelector(selector) !== null
 				? await this.#resolveAriaRef(selector)
 				: asElementHandle(await untilAborted(signal, () => page.$(normalizeSelector(selector))));
-		let comparisonBuffer: Uint8Array;
-		let buffer: Uint8Array;
+		let captured: { comparison: Uint8Array; image: Uint8Array };
 		try {
-			comparisonBuffer = await captureScreenshotBuffer(page, opts, signal, resolveSelector, "png");
-			buffer =
-				captureFormat === "png"
-					? comparisonBuffer
-					: await captureScreenshotBuffer(page, opts, signal, resolveSelector, captureFormat);
+			captured = await whileDrawing(page, signal, async () => {
+				const comparison = await captureScreenshotBuffer(page, opts, signal, resolveSelector, "png");
+				const image =
+					captureFormat === "png"
+						? comparison
+						: await captureScreenshotBuffer(page, opts, signal, resolveSelector, captureFormat);
+				return { comparison, image };
+			});
 		} finally {
 			await cleanupAnnotations();
 		}
+		const { comparison: comparisonBuffer, image: buffer } = captured;
 		let changeResult: ScreenshotChangeResult | undefined;
 		if (changeDetection) {
 			const scope = screenshotScope(opts);
@@ -3142,7 +3146,9 @@ export class WorkerCore {
 		const page = this.#requirePage();
 		const absoluteBaseline = resolveToCwd(baselinePath, session.cwd);
 		const baseline = await untilAborted(signal, () => fs.promises.readFile(absoluteBaseline));
-		const current = await captureScreenshotBuffer(page, {}, signal, async () => null, "png");
+		const current = await whileDrawing(page, signal, () =>
+			captureScreenshotBuffer(page, {}, signal, async () => null, "png"),
+		);
 		const diff = createPngDiff(baseline, current);
 		const threshold = screenshotThreshold(opts.threshold);
 		const changed = diff.pixelChangeRatio > threshold;
