@@ -845,15 +845,23 @@ impl UserSwitchWatch {
 			self.buttons = signals.buttons;
 			// A click in the user's own app, menus included, picks no app: the
 			// target activating itself right after is still sent back.
+			let pending = self.placement;
 			self.placement = ClickPlacement::Settled;
 			if signals.in_user_app {
 				if pressed {
 					self.own_click = Some(signals.last_click.unwrap_or(now));
 				}
 			} else {
-				self.placement = ClickPlacement::Pending {
-					previous: self.click,
-					press:    pressed.then(|| signals.last_click.unwrap_or(now)),
+				self.placement = match pending {
+					// A release while its press still waits for placement is part
+					// of that click.
+					ClickPlacement::Pending { previous, press } if !pressed => {
+						ClickPlacement::Pending { previous, press }
+					},
+					_ => ClickPlacement::Pending {
+						previous: self.click,
+						press:    pressed.then(|| signals.last_click.unwrap_or(now)),
+					},
 				};
 				self.click = Some(signals.last_click.unwrap_or(now));
 			}
@@ -2927,6 +2935,16 @@ mod tests {
 			guard.observe(PREVIOUS, Some(43), click.in_user_app(), t0 + ms(20)),
 			FocusDecision::Observe
 		);
+		// Even when its press and its release are both counted before the
+		// placement arrives: the target coming forward is then sent back.
+		let mut guard = lease_at(t0, None);
+		let down = SwitchSignals::new([1, 0, 0, 0, 0, 0], Some(t0 + ms(5)), NO_MODIFIERS, None);
+		let up = clicked_at(t0 + ms(8));
+		assert_eq!(guard.observe(PREVIOUS, Some(42), down, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), up, t0 + ms(15)), FocusDecision::Observe);
+		let placed = up.in_user_app();
+		assert_eq!(guard.observe(PREVIOUS, Some(43), placed, t0 + ms(20)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(30)), FocusDecision::Restore);
 	}
 
 	#[test]
