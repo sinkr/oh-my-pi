@@ -6,7 +6,7 @@
 
 use std::{ptr::NonNull, time::Duration};
 
-use objc2_application_services::{AXUIElement, AXValue, AXValueType};
+use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{CFRange, CFString};
 
 use super::{
@@ -143,7 +143,19 @@ fn write_range(element: &AXUIElement, range: Utf16Range) -> CoreResult<()> {
 	let attribute = CFString::from_str(SELECTED_RANGE);
 	// SAFETY: The element, attribute and range value remain retained for the
 	// setter.
-	let error = unsafe { element.set_attribute_value(&attribute, &value) };
+	write_result(unsafe { element.set_attribute_value(&attribute, &value) })
+}
+
+/// The outcome of the selection write. `CannotComplete` means the app did not
+/// reply in time or messaging failed: the write was made and the caret may
+/// already have moved, so the outcome is unconfirmed rather than failed.
+fn write_result(error: AXError) -> CoreResult<()> {
+	if error == AXError::CannotComplete {
+		return Err(DesktopError::ax_unconfirmed(format!(
+			"setting {SELECTED_RANGE} got no reply in time (CannotComplete) and may still apply: \
+			 inspect the element's selection before retrying or typing"
+		)));
+	}
 	ax_result(error, format!("setting {SELECTED_RANGE} failed; nothing was selected"))
 }
 
@@ -151,7 +163,9 @@ fn write_range(element: &AXUIElement, range: Utf16Range) -> CoreResult<()> {
 mod tests {
 	use std::{cell::Cell, time::Duration};
 
-	use super::{CoreResult, Utf16Range, apply};
+	use objc2_application_services::AXError;
+
+	use super::{CoreResult, Utf16Range, apply, write_result};
 	use crate::desktop::{control, error::ErrorCode};
 
 	const VALUE: &str = "alpha beta gamma";
@@ -189,6 +203,17 @@ mod tests {
 		);
 		assert_eq!(writes.get(), 1, "the selection is written exactly once");
 		result
+	}
+
+	#[test]
+	fn a_selection_write_without_a_reply_is_unconfirmed_not_failed() {
+		assert!(write_result(AXError::Success).is_ok());
+		let error = write_result(AXError::CannotComplete).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed, "{error}");
+		assert!(error.message.contains("inspect the element"), "{error}");
+		let error = write_result(AXError::IllegalArgument).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed, "{error}");
+		assert!(error.message.contains("nothing was selected"), "{error}");
 	}
 
 	#[test]
