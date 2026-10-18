@@ -9,9 +9,9 @@
 //! this module watches `WindowServer`'s focus notifications and taps the keys
 //! delivered to the target; a key the user typed while the target holds the
 //! keyboard uninvited is posted to the user's app instead and the original is
-//! dropped. A theft that outlasts the action, as an open menu does, keeps being
-//! repaired until the keyboard comes back, the next action starts, or 30 s
-//! pass.
+//! dropped. A theft that outlasts the action behind the user's app, as an
+//! open menu does, keeps being repaired until the keyboard comes back, the
+//! target comes in front, the next action starts, or 30 s pass.
 //!
 //! A key's repeats and release go to the app its press went to, even after
 //! the theft ends: `WindowServer` can still deliver them to the target, which
@@ -309,10 +309,15 @@ impl Theft {
 		Self { user, target, buttons, holder: Holder::Elsewhere, generation }
 	}
 
-	/// Whether the user picked an app since the action started: a mouse button
-	/// went down or up, or ⌘/⌃ was held within the chord window.
+	/// Whether the user picked an app: a mouse button went down or up since
+	/// the action started, or since the theft once there is one, or ⌘/⌃ was
+	/// held within the chord window.
 	fn user_acted(&self, signals: UserSignals, now: Instant) -> bool {
-		signals.buttons != self.buttons
+		let since = match self.holder {
+			Holder::Stolen { buttons } => buttons,
+			_ => self.buttons,
+		};
+		signals.buttons != since
 			|| signals
 				.last_chord
 				.is_some_and(|at| now.saturating_duration_since(at) <= CHORD_WINDOW)
@@ -324,6 +329,22 @@ impl Theft {
 		} else {
 			Holder::Stolen { buttons: signals.buttons }
 		};
+	}
+
+	/// The target holds the keyboard: a theft, unless the user picked it. A
+	/// theft already under way stays one unless the user picks the target now,
+	/// as ⌘-Tab, a ⌃ launcher hotkey or a click does while its menu has the
+	/// keyboard.
+	fn target_holds(&mut self, signals: UserSignals, now: Instant) {
+		if !self.stolen() || self.user_acted(signals, now) {
+			self.take(signals, now);
+		}
+	}
+
+	/// Whether `focus` is a panel of another process, such as Spotlight's or
+	/// a launcher's, which the user opened to pick an app.
+	const fn is_panel(&self, focus: pid_t, front: pid_t) -> bool {
+		focus != front && focus != self.user && focus != self.target
 	}
 
 	/// Updates the holder from one `WindowServer` notification.
@@ -339,18 +360,21 @@ impl Theft {
 			return;
 		}
 		match notification {
-			NEW_FRONT if subject == self.target => {
-				if !matches!(self.holder, Holder::Stolen { .. }) {
-					self.take(signals, now);
-				}
-			},
+			NEW_FRONT if subject == self.target => self.target_holds(signals, now),
 			NEW_FRONT => self.holder = Holder::Elsewhere,
 			KEY_FOCUS_TAKEN if recipient == self.user && subject == self.target => {
 				self.take(signals, now);
 			},
-			// Another process's panel took the user's keyboard: Spotlight or a
-			// launcher, which the user opened to pick an app.
-			KEY_FOCUS_TAKEN if recipient == self.user => self.holder = Holder::UserChose,
+			// Another process's panel took the keyboard from the user's app, or
+			// from the target holding it: Spotlight or a launcher, which the user
+			// opened to pick an app.
+			KEY_FOCUS_TAKEN
+				if (recipient == self.user || (recipient == self.target && self.stolen()))
+					&& subject != self.user
+					&& subject != self.target =>
+			{
+				self.holder = Holder::UserChose;
+			},
 			KEY_FOCUS_RETURNED if recipient == self.user => self.holder = Holder::Elsewhere,
 			_ => {},
 		}
@@ -370,13 +394,10 @@ impl Theft {
 			return;
 		}
 		let focus = key_focus.unwrap_or(front);
-		if front == self.target || focus == self.target {
-			if !self.stolen() {
-				self.take(signals, now);
-			}
-		} else if front == self.user && focus != self.user {
-			// Another process's panel has the user's keyboard.
+		if self.is_panel(focus, front) {
 			self.holder = Holder::UserChose;
+		} else if front == self.target || focus == self.target {
+			self.target_holds(signals, now);
 		} else {
 			self.holder = Holder::Elsewhere;
 		}
@@ -478,6 +499,16 @@ impl Theft {
 	/// Stops moving keys pressed from now on.
 	const fn end(&mut self) {
 		self.holder = Holder::Ended;
+	}
+
+	/// After the action, `lingered` ago: the repair goes on only for a target
+	/// that holds the keyboard from behind the user's app, as an open menu
+	/// does, and for at most [`LINGER_MAX`]. A target in `front` is in plain
+	/// sight, and the user's keys are theirs to aim.
+	fn linger(&mut self, front: Option<pid_t>, lingered: Duration) {
+		if front == Some(self.target) || lingered >= LINGER_MAX {
+			self.end();
+		}
 	}
 
 	/// Whether the taps can go: the target no longer holds the keyboard
@@ -602,8 +633,12 @@ unsafe extern "C" fn route_key(_proxy: Ref, kind: u32, event: Ref, user: Ref) ->
 		// SAFETY: a read-only query of a live event.
 		_ => Stroke::of_modifier(code, unsafe { CGEventGetFlags(event) }),
 	};
-	let physical = field(event, FIELD_SOURCE_PID) == 0
-		&& field(event, FIELD_SOURCE_USER_DATA) != SYNTHETIC_EVENT_TAG;
+	let source = (field(event, FIELD_SOURCE_PID), field(event, FIELD_SOURCE_USER_DATA));
+	let physical = typed_by_user(source.0, source.1);
+	// A key a process posted always passes, before the per-key system reads.
+	if !physical {
+		return event;
+	}
 	let key = Key { physical, code, stroke };
 	let secure = secure_entry();
 	let buttons = mouse_buttons();
@@ -619,8 +654,15 @@ unsafe extern "C" fn route_key(_proxy: Ref, kind: u32, event: Ref, user: Ref) ->
 	ptr::null_mut()
 }
 
+/// Whether a key event was typed on a keyboard: no process posted it, and it
+/// does not carry omp's [`SYNTHETIC_EVENT_TAG`], as in the escape-key watch.
+const fn typed_by_user(source_pid: i64, source_user_data: i64) -> bool {
+	source_pid == 0 && source_user_data != SYNTHETIC_EVENT_TAG
+}
+
 /// How long the repair outlives its action while the target still holds the
-/// keyboard: a menu it opened keeps the keyboard until it closes.
+/// keyboard behind the user's app: a menu it opened keeps the keyboard until
+/// it closes.
 const LINGER_MAX: Duration = Duration::from_secs(30);
 /// How often the tap thread checks whether its action ended or a newer one
 /// took over.
@@ -712,6 +754,11 @@ impl KeyReroute {
 						loop {
 							CFRunLoopRunInMode(kCFRunLoopDefaultMode, SLICE_SECONDS, 0);
 							let now = Instant::now();
+							let front = if action_ended.load(Ordering::Acquire) {
+								skylight::keyboard_holders().map(|(front, _)| front)
+							} else {
+								None
+							};
 							let mut registry = REGISTRY.lock();
 							let (latest, latest_target) = registry.latest;
 							if latest != generation {
@@ -726,10 +773,8 @@ impl KeyReroute {
 								continue;
 							}
 							let at = *ended_at.get_or_insert(now);
-							if now.saturating_duration_since(at) >= LINGER_MAX {
-								context.theft.end();
-								context.theft.publish(&mut registry);
-							}
+							context.theft.linger(front, now.saturating_duration_since(at));
+							context.theft.publish(&mut registry);
 							forget_lifted(&mut registry.held, target, key_down, now);
 							if context.theft.settled(&registry.held) {
 								registry.held.retain(|held| held.target != target);
@@ -1184,5 +1229,68 @@ mod tests {
 		theft.notify(KEY_FOCUS_RETURNED, SPOTLIGHT, SPOTLIGHT, quiet(), Instant::now());
 		theft.notify(KEY_FOCUS_TAKEN, SPOTLIGHT, TARGET, quiet(), Instant::now());
 		assert!(theft.reroutes(false, BUTTONS));
+	}
+
+	#[test]
+	fn picking_the_target_while_it_holds_the_keyboard_ends_the_theft() {
+		let now = Instant::now();
+		let tabbed = UserSignals { buttons: BUTTONS, last_chord: Some(now) };
+		let clicked = UserSignals { buttons: CLICKED, last_chord: None };
+		// Its menu has the keyboard; the user ⌘-Tabs, uses a ⌃ launcher hotkey
+		// or clicks to bring it forward, and types into it.
+		for signals in [tabbed, clicked] {
+			let mut rig = Rig::new();
+			rig.steal();
+			rig.theft.notify(NEW_FRONT, 1, TARGET, signals, now);
+			assert_eq!(rig.key(Q, Stroke::Press), KEPT);
+		}
+		// Spotlight's panel takes the keyboard from the target's menu.
+		let mut rig = Rig::new();
+		rig.steal();
+		rig.notify(KEY_FOCUS_TAKEN, TARGET, SPOTLIGHT);
+		assert_eq!(rig.key(Q, Stroke::Press), KEPT);
+		// The target coming forward on its own keeps the theft.
+		let mut rig = Rig::new();
+		rig.steal();
+		rig.notify(NEW_FRONT, 1, TARGET);
+		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+
+		// The same, read back after the focus tap was disabled.
+		for (front, focus, signals) in
+			[(TARGET, None, tabbed), (TARGET, None, clicked), (TARGET, Some(SPOTLIGHT), quiet())]
+		{
+			let mut theft = theft();
+			theft.notify(KEY_FOCUS_TAKEN, USER, TARGET, quiet(), now);
+			theft.resync(front, focus, signals, now);
+			assert_eq!(theft.holder, Holder::UserChose, "focus {focus:?}");
+		}
+		let mut theft = theft();
+		theft.notify(KEY_FOCUS_TAKEN, USER, TARGET, quiet(), now);
+		theft.resync(TARGET, None, quiet(), now);
+		assert!(theft.stolen());
+	}
+
+	#[test]
+	fn the_repair_lingers_only_behind_the_users_app_and_for_at_most_30_s() {
+		let linger = |front, lingered| {
+			let mut theft = theft();
+			theft.notify(KEY_FOCUS_TAKEN, USER, TARGET, quiet(), Instant::now());
+			theft.linger(front, lingered);
+			theft.stolen()
+		};
+		// A menu left open behind the user's app.
+		assert!(linger(Some(USER), Duration::from_secs(1)));
+		assert!(linger(None, Duration::from_secs(1)), "front unknown");
+		// The target in front after the action, or 30 s on.
+		assert!(!linger(Some(TARGET), Duration::ZERO));
+		assert!(!linger(Some(USER), LINGER_MAX));
+	}
+
+	#[test]
+	fn only_keys_no_process_posted_are_typed_by_the_user() {
+		assert!(typed_by_user(0, 0));
+		assert!(!typed_by_user(0, SYNTHETIC_EVENT_TAG), "omp's own HID keys");
+		assert!(!typed_by_user(4321, 0), "an automation tool's keys");
+		assert!(!typed_by_user(4321, SYNTHETIC_EVENT_TAG));
 	}
 }
