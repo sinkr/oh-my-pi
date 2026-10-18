@@ -1464,6 +1464,7 @@ fn background_pointer(
 	let timeout = menu_watch(window, &event, background, menu.is_some(), || {
 		presses_menu_control(&event, pid, menu_pid)
 	})?;
+	refuse_drag_source(window, &event, |x, y| ax::open_menu::role_at(to, x, y))?;
 	let before = match timeout {
 		Some(_) => Some(capture::menu_windows(menu_pid).ok_or_else(|| {
 			DesktopError::background_unavailable(format!(
@@ -1553,6 +1554,56 @@ fn menu_watch(
 		)));
 	}
 	Ok((menu || on_control).then_some(ax::open_menu::CONTROL_MENU_TIMEOUT))
+}
+
+/// Roles of controls that track a left-button drag themselves and never begin
+/// a drag-and-drop session.
+const DRAG_TRACKING_ROLES: [&str; 5] =
+	["AXSlider", "AXScrollBar", "AXSplitter", "AXValueIndicator", "AXIncrementor"];
+
+/// Refuses a background left-button drag or mouse hold on `window` before
+/// anything is posted, unless the element at its start point (`role_at`)
+/// tracks the drag itself ([`DRAG_TRACKING_ROLES`]). A press elsewhere can
+/// pick up an item (a file, a row, an image, selected text) and begin a
+/// drag-and-drop session, which macOS completes from the user's real pointer
+/// as well as from the routed events: on macOS 26.5 a Finder file followed a
+/// user's moving pointer into their own Finder window and onto the Desktop,
+/// and going back to the start once the session began did not keep it out
+/// (1 in 2 on an 11-point path). Which elements begin such a session is up to
+/// each application, so only the known trackers are let through.
+fn refuse_drag_source(
+	window: &DesktopWindow,
+	event: &PointerEvent,
+	role_at: impl FnOnce(f64, f64) -> Option<String>,
+) -> CoreResult<()> {
+	let (x, y) = match event {
+		PointerEvent::Hold { x, y, button: MouseButton::Left, .. } => (*x, *y),
+		PointerEvent::Drag { path, button: MouseButton::Left, .. } => match path.first() {
+			Some(&start) => start,
+			None => return Ok(()),
+		},
+		_ => return Ok(()),
+	};
+	let role = role_at(x, y);
+	if role
+		.as_deref()
+		.is_some_and(|role| DRAG_TRACKING_ROLES.contains(&role))
+	{
+		return Ok(());
+	}
+	let element = role.map_or_else(
+		|| "an element accessibility does not identify".to_string(),
+		|role| format!("an {role}"),
+	);
+	Err(DesktopError::background_unavailable(format!(
+		"the {} on window {} ({}) starts on {element}, where a press can pick up an item for drag \
+		 and drop, which macOS completes from the user's real pointer and could drop into the \
+		 user's own window; background drags and holds run only on sliders, scroll bars, splitters \
+		 and steppers; nothing was sent; retry with takeover:true",
+		pointer_kind(event),
+		window.id,
+		window.app,
+	)))
 }
 
 /// Whether `event` presses the left button on a menu button or popup button
@@ -4748,6 +4799,57 @@ mod tests {
 		assert_eq!(run(Some((Down, 1.0))), (false, vec![(Down, 1.0), (Up, 1.0)]));
 		// The release goes where the failed move may have taken the target.
 		assert_eq!(run(Some((Dragged, 5.0))), (false, vec![(Down, 1.0), (Dragged, 5.0), (Up, 5.0)]));
+	}
+
+	#[test]
+	fn background_drags_and_holds_run_only_on_controls_that_track_them() {
+		let window = background_window("Finder");
+		let drag = |button| PointerEvent::Drag {
+			path: vec![(3.0, 4.0), (90.0, 40.0)],
+			button,
+			modifiers: Modifiers::default(),
+			keys: Vec::new(),
+		};
+		let hold = |button| PointerEvent::Hold {
+			x: 5.0,
+			y: 6.0,
+			button,
+			keys: Vec::new(),
+			duration: Duration::from_secs(1),
+		};
+		for event in [drag(MouseButton::Left), hold(MouseButton::Left)] {
+			// Finder's icons and rows, a table cell, and anything unread can
+			// begin a drag-and-drop session.
+			for role in [Some("AXImage"), Some("AXRow"), Some("AXCell"), Some("AXWebArea"), None] {
+				let error = refuse_drag_source(&window, &event, |_, _| role.map(str::to_string))
+					.expect_err("refused before posting");
+				assert_eq!(error.code.as_str(), "BackgroundUnavailable", "{role:?}");
+				assert!(error.message.contains("nothing was sent"), "{}", error.message);
+				assert!(error.message.contains("retry with takeover:true"), "{}", error.message);
+			}
+			for role in DRAG_TRACKING_ROLES {
+				refuse_drag_source(&window, &event, |_, _| Some(role.to_string())).expect(role);
+			}
+		}
+		// The point read is where the press goes down.
+		let mut at = None;
+		let _ = refuse_drag_source(&window, &drag(MouseButton::Left), |x, y| {
+			at = Some((x, y));
+			None
+		});
+		assert_eq!(at, Some((3.0, 4.0)));
+		// Other gestures pay no hit-test.
+		let unread = |_, _| -> Option<String> { panic!("not hit-tested") };
+		refuse_drag_source(&window, &drag(MouseButton::Middle), unread).expect("middle drag");
+		refuse_drag_source(&window, &hold(MouseButton::Middle), unread).expect("middle hold");
+		let click = PointerEvent::Click {
+			x:         1.0,
+			y:         1.0,
+			button:    MouseButton::Left,
+			count:     1,
+			modifiers: Modifiers::default(),
+		};
+		refuse_drag_source(&window, &click, unread).expect("click");
 	}
 
 	#[test]
