@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed terminal capability replies relayed through win32-input-mode appearing as input in WSL terminals
+
 ## [18.12.1] - 2026-10-17
 
 ### Breaking Changes
