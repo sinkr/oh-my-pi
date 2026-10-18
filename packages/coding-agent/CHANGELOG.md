@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed browser `role/<role>[name="…" exact]` selectors in Chromium and Tern tabs matching nothing for names copied from `observe()`: buttons and links are now named by their visible text rather than their `title`, without hidden or `aria-hidden` text, with image `alt`s and child `aria-label`s, and text fields by their placeholder
+- Fixed browser `role/<role>[name="…" exact]` selectors in Chromium and Tern tabs matching nothing for names copied from `observe()`: buttons and links are now named by their visible text rather than their `title`, without hidden or `aria-hidden` text, with image `alt`s and child `aria-label`s, and text fields by their placeholder ([#16252](https://github.com/can1357/oh-my-pi/pull/16252) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
