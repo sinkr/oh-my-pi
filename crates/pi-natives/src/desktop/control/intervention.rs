@@ -25,7 +25,7 @@ const QUIET: Duration = Duration::from_secs(5);
 /// Time left before the run's deadline for the refusal to reach the caller.
 const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
 const READ_AGAIN: &str =
-	"read the window again (win.ax(), win.observe() or a screenshot) before acting on it";
+	"read the window again (win.ax(), win.observe() or win.screenshot()) before acting on it";
 
 struct App {
 	name:    String,

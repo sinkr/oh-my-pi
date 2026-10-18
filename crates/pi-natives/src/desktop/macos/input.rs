@@ -1434,12 +1434,13 @@ fn background_pointer(
 }
 
 /// The check right before background pointer input for window `wid` of `pid`
-/// posts. The probes that chose where it goes can block, and the user may
-/// bring the target forward meanwhile, or come to it and leave again
-/// (`visited`): the input then refuses, whether or not it first made the
-/// window key (`prepared`, [`recheck_background`]). A target that was
-/// already the user's own front app as the input began (`entry_front`) still
-/// takes it.
+/// posts. The user's own key or click in the target's app since the call was
+/// admitted refuses it ([`control::intervention::check_press`]). The probes
+/// that chose where it goes can block, and the user may bring the target
+/// forward meanwhile, or come to it and leave again (`visited`): the input
+/// then refuses, whether or not it first made the window key (`prepared`,
+/// [`recheck_background`]). A target that was already the user's own front
+/// app as the input began (`entry_front`) still takes it.
 fn pointer_recheck(
 	prepared: bool,
 	entry_front: EntryFront,
@@ -1448,6 +1449,7 @@ fn pointer_recheck(
 	front: impl Fn() -> Option<libc::pid_t>,
 	visited: impl Fn() -> bool,
 ) -> CoreResult<()> {
+	control::intervention::check_press()?;
 	entry_front.require_behind(front(), pid, wid)?;
 	if visited() {
 		return Err(came_forward_refusal(wid));
@@ -2574,13 +2576,13 @@ fn post_global(event: &CGEvent) -> CoreResult<()> {
 	})
 }
 
-/// Tags and posts `event` at the HID tap through `post`. A key or modifier
-/// press first checks that the user has not used the target's app since the
-/// call began ([`control::intervention::check_press`]); releases always go
-/// out.
+/// Tags and posts `event` at the HID tap through `post`. A key, modifier or
+/// pointer press first checks that the user has not used the target's app
+/// since the call began ([`control::intervention::check_press`]); releases
+/// always go out.
 fn post_hid(event: &CGEvent, post: impl FnOnce(&CGEvent)) -> CoreResult<()> {
 	control::check()?;
-	if is_key_press(event) {
+	if is_key_press(event) || control::is_pointer_press(event.get_type() as u32) {
 		control::intervention::check_press()?;
 	}
 	event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, control::SYNTHETIC_EVENT_TAG);
@@ -2957,6 +2959,48 @@ mod tests {
 			SHIFT_SPACE_TRANSITIONS[2],
 			SHIFT_SPACE_TRANSITIONS[3]
 		]);
+	}
+
+	#[test]
+	fn a_background_click_stops_at_the_users_input_during_its_preparation() {
+		use crate::desktop::error::ErrorCode;
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let _watch = listener
+			.admit(7, &token)
+			.expect("the user has not used TextEdit");
+		let recheck = || pointer_recheck(true, EntryFront(Some(9)), 7, 42, || Some(9), || false);
+		recheck().unwrap();
+		// The user types in TextEdit while the click makes its window key.
+		listener.record_for_test(7, Instant::now());
+		assert_eq!(recheck().unwrap_err().code, ErrorCode::UserIntervened);
+	}
+
+	#[test]
+	fn a_takeover_click_stops_at_the_users_input_before_its_press() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let _watch = listener
+			.admit(7, &token)
+			.expect("the user has not used TextEdit");
+		let event = |kind| {
+			CGEvent::new_mouse_event(source.clone(), kind, CGPoint::new(1.0, 1.0), CGMouseButton::Left)
+				.expect("mouse event")
+		};
+		let mut posted = Vec::new();
+		let mut post = |kind| post_hid(&event(kind), |event| posted.push(event.get_type() as u32));
+		// The user clicks in TextEdit while takeover brings the target forward.
+		listener.record_for_test(7, Instant::now());
+		let press = post(CGEventType::LeftMouseDown);
+		assert_eq!(press.unwrap_err().code, ErrorCode::UserIntervened);
+		// Moves and releases still go out.
+		post(CGEventType::MouseMoved).unwrap();
+		post(CGEventType::LeftMouseUp).unwrap();
+		assert_eq!(posted, [CGEventType::MouseMoved as u32, CGEventType::LeftMouseUp as u32]);
 	}
 
 	#[test]

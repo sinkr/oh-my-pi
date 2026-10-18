@@ -615,6 +615,10 @@ struct Worker {
 	/// began; it shows the user's input only once its reply is delivered.
 	#[cfg(target_os = "macos")]
 	read:          Option<(libc::pid_t, Instant)>,
+	/// Windows whose drawing process the user-input watch already looked up;
+	/// a window keeps the process that draws it, so each is probed once.
+	#[cfg(target_os = "macos")]
+	drawer_probed: std::collections::HashSet<String>,
 }
 
 impl Worker {
@@ -634,6 +638,8 @@ impl Worker {
 			listener: control::intervention::Listener::default(),
 			#[cfg(target_os = "macos")]
 			read: None,
+			#[cfg(target_os = "macos")]
+			drawer_probed: std::collections::HashSet::new(),
 		}
 	}
 
@@ -1036,12 +1042,16 @@ impl Worker {
 		let started = Instant::now();
 		let (app, input) = match access {
 			AppAccess::Read(id) | AppAccess::Look(id) | AppAccess::Input(id) => {
-				let backend = self.backend()?;
-				let app = backend.window_app(id);
+				let app = self.backend()?.window_app(id);
 				// The user's input into a panel another process draws goes to
 				// that process from the first read on, before any input of the
 				// session's names it.
-				let input = app.map(|pid| backend.window_input(id, pid));
+				let input = match app {
+					Some(pid) if self.drawer_probed.insert(id.to_string()) => {
+						Some(self.backend()?.window_input(id, pid))
+					},
+					_ => None,
+				};
 				(app, input)
 			},
 			AppAccess::Element(reference) => match self.element_app(reference)? {
@@ -2448,6 +2458,9 @@ mod capture_tests {
 		/// How many times the app's name was looked up.
 		#[cfg(target_os = "macos")]
 		name_lookups:           Arc<Mutex<u32>>,
+		/// How many times the process drawing a window was looked up.
+		#[cfg(target_os = "macos")]
+		input_lookups:          Arc<Mutex<u32>>,
 	}
 
 	impl FakeWaylandBackend {
@@ -2499,6 +2512,8 @@ mod capture_tests {
 				drawn_by: None,
 				#[cfg(target_os = "macos")]
 				name_lookups: Arc::new(Mutex::new(0)),
+				#[cfg(target_os = "macos")]
+				input_lookups: Arc::new(Mutex::new(0)),
 			}
 		}
 	}
@@ -2712,6 +2727,7 @@ mod capture_tests {
 
 		#[cfg(target_os = "macos")]
 		fn window_input(&mut self, _: &str, pid: libc::pid_t) -> libc::pid_t {
+			*self.input_lookups.lock() += 1;
 			self.drawn_by.unwrap_or(pid)
 		}
 
@@ -2884,6 +2900,8 @@ mod capture_tests {
 			listener: control::intervention::Listener::simulated(),
 			#[cfg(target_os = "macos")]
 			read: None,
+			#[cfg(target_os = "macos")]
+			drawer_probed: std::collections::HashSet::new(),
 		}
 	}
 
@@ -3905,16 +3923,18 @@ mod capture_tests {
 
 	#[cfg(target_os = "macos")]
 	#[test]
-	fn an_apps_name_is_looked_up_once_however_often_the_session_uses_it() {
+	fn an_apps_name_and_a_windows_drawing_process_are_looked_up_once_however_often_it_is_used() {
 		let backend = FakeWaylandBackend::new();
-		let lookups = Arc::clone(&backend.name_lookups);
+		let (names, drawers) =
+			(Arc::clone(&backend.name_lookups), Arc::clone(&backend.input_lookups));
 		let mut worker = worker_with(backend);
 		let token = CancellationSource::default().token();
 		let target = Target::Window(WAYLAND_ID.to_string());
 		for _ in 0..3 {
 			worker.dispatch(capture_request(target.clone()), &token);
 		}
-		assert_eq!(*lookups.lock(), 1);
+		assert_eq!(*names.lock(), 1);
+		assert_eq!(*drawers.lock(), 1);
 	}
 
 	#[cfg(target_os = "macos")]
