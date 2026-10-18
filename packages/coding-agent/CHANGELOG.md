@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed terminals that restore sessions by file path (such as Tern) reopening a plain shell instead of `omp --restore` for sessions stored in PostgreSQL: omp now keeps an empty local placeholder at each such session's path, and `scripts/backfill-session-placeholders.ts` adds them for existing sessions
+- Fixed moving a PostgreSQL-stored session to another directory failing because the move looked for the transcript on local disk
+
 ## [18.12.1] - 2026-10-17
 
 ### Breaking Changes

@@ -108,6 +108,7 @@ import {
 	writeTerminalBreadcrumb,
 } from "./session-paths";
 import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-persistence";
+import { ensureSessionPlaceholder } from "./session-placeholder";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
@@ -1030,12 +1031,19 @@ export class SessionManager {
 	}
 
 	/**
-	 * Re-stamp a fresh-session breadcrumb as non-fresh once the session has
-	 * materialized on disk. A no-op unless the current breadcrumb is still fresh.
+	 * The session's journal now exists in storage. Re-stamp a fresh-session
+	 * breadcrumb as non-fresh (a no-op unless the current breadcrumb is still
+	 * fresh) and, for storage that keeps transcripts off the local filesystem,
+	 * make sure the terminal-facing session has its local placeholder so a
+	 * terminal restore can find the path (see `session-placeholder.ts`).
 	 */
-	#materializeBreadcrumb(): void {
-		if (!this.#breadcrumbFresh || !this.#sessionFile) return;
-		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, false);
+	#noteMaterialized(): void {
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile) return;
+		if (this.#storage.keepsLocalPlaceholders && !this.#suppressBreadcrumb && this.#storage.existsSync(sessionFile)) {
+			ensureSessionPlaceholder(sessionFile);
+		}
+		if (this.#breadcrumbFresh) this.#rememberBreadcrumb(this.#cwd, sessionFile, false);
 	}
 
 	#clearDiskError(): void {
@@ -1430,6 +1438,7 @@ export class SessionManager {
 			} while (this.#atomicRewriteDirty);
 
 			this.#fileIsCurrent = true;
+			this.#noteMaterialized();
 			this.#rewriteRequired = false;
 			this.#hasTitleSlot = true;
 			this.#clearDiskError();
@@ -1652,7 +1661,7 @@ export class SessionManager {
 					}
 					if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
 						this.#fileIsCurrent = true;
-						this.#materializeBreadcrumb();
+						this.#noteMaterialized();
 						this.#rewriteRequired = false;
 						this.#hasTitleSlot = true;
 					}
@@ -1665,7 +1674,7 @@ export class SessionManager {
 			// still the pre-repoint source until moveTo repoints it.
 			if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
 				this.#fileIsCurrent = true;
-				this.#materializeBreadcrumb();
+				this.#noteMaterialized();
 				this.#rewriteRequired = false;
 				this.#hasTitleSlot = true;
 			} else {
@@ -1699,7 +1708,7 @@ export class SessionManager {
 			async () => {
 				if (await this.#runFencedAtomicRewrite(startEpoch)) {
 					this.#fileIsCurrent = true;
-					this.#materializeBreadcrumb();
+					this.#noteMaterialized();
 					this.#rewriteRequired = false;
 					this.#hasTitleSlot = true;
 				}
@@ -2372,6 +2381,7 @@ export class SessionManager {
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
+		this.#noteMaterialized();
 		this.#rewriteRequired = migrated || loaded.malformedRecords > 0;
 		this.#loadedMalformedRecords = loaded.malformedRecords;
 		this.#forceFileCreation = true;
@@ -2555,12 +2565,17 @@ export class SessionManager {
 						// sessions we checked.
 						await assertSourceIsOurs(oldSessionFile);
 						await claimDestination(newSessionFile);
-						try {
-							await fs.promises.rename(oldSessionFile, newSessionFile);
-						} catch (error) {
-							if (!isFsError(error) || error.code !== "EXDEV") throw error;
-							if (this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
-							await moveFileAcrossDevices(oldSessionFile, newSessionFile);
+						if (this.#storage.keepsLocalPlaceholders) {
+							// The journal lives in storage, not on disk; its rename carries the placeholder.
+							await this.#storage.rename(oldSessionFile, newSessionFile);
+						} else {
+							try {
+								await fs.promises.rename(oldSessionFile, newSessionFile);
+							} catch (error) {
+								if (!isFsError(error) || error.code !== "EXDEV") throw error;
+								if (this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
+								await moveFileAcrossDevices(oldSessionFile, newSessionFile);
+							}
 						}
 						sessionMoved = true;
 					}
@@ -2592,11 +2607,15 @@ export class SessionManager {
 
 					if (sessionMoved) {
 						try {
-							try {
-								await fs.promises.rename(newSessionFile, oldSessionFile);
-							} catch (error) {
-								if (!isFsError(error) || error.code !== "EXDEV") throw error;
-								await moveFileAcrossDevices(newSessionFile, oldSessionFile);
+							if (this.#storage.keepsLocalPlaceholders) {
+								await this.#storage.rename(newSessionFile, oldSessionFile);
+							} else {
+								try {
+									await fs.promises.rename(newSessionFile, oldSessionFile);
+								} catch (error) {
+									if (!isFsError(error) || error.code !== "EXDEV") throw error;
+									await moveFileAcrossDevices(newSessionFile, oldSessionFile);
+								}
 							}
 						} catch (rollbackErr) {
 							throw new Error(
