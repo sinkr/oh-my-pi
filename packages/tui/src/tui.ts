@@ -28,6 +28,7 @@ import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backen
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
+import { cropSixelTop } from "./sixel";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
 import {
@@ -36,6 +37,7 @@ import {
 	encodeKittyDeleteImage,
 	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
+	getCellDimensions,
 	getTerminalBackgroundColor,
 	ImageProtocol,
 	isImageProtocolForced,
@@ -3287,10 +3289,10 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Clip a Kitty direct placement and record its live owner; history
-	 * placements have no mutable owner. Other direct placements (SIXEL,
-	 * iTerm2) have no delete command and composite over whatever pixels they
-	 * land on, so the rows they paint above `screenRow` are erased first.
+	 * Clip direct placements to the visible source slice: Kitty tracks a live
+	 * placement owner, while SIXEL crops the encoded raster. SIXEL and iTerm2
+	 * have no delete command and composite over existing pixels, so erase the
+	 * visible rows they paint above `screenRow` before repainting.
 	 */
 	#imageLineSequence(
 		line: string,
@@ -3301,7 +3303,16 @@ export class TUI extends Container {
 		if (screenRow < 0) return line;
 		const parsed = parseKittyDirectPlacementLine(line);
 		if (!parsed) {
-			const lift = Math.min(directPlacementLift(line), screenRow);
+			const requestedLift = directPlacementLift(line);
+			const lift = Math.min(requestedLift, screenRow);
+			if (requestedLift > lift) {
+				const cellHeight = getCellDimensions().heightPx;
+				const cropPixels = Math.round((requestedLift - lift) * cellHeight);
+				const maxHeightPixels = Math.floor((screenRow + 1) * cellHeight);
+				line = line.replace(/\x1bP[0-9;]*q[\s\S]*?\x1b\\/g, sequence =>
+					cropSixelTop(sequence, cropPixels, maxHeightPixels),
+				);
+			}
 			return lift > 0 ? `\x1b[${lift}A${`${ERASE_LINE}\x1b[B`.repeat(lift)}${line}` : line;
 		}
 		const previous = placements?.get(placementRow);
