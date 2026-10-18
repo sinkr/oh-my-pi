@@ -1301,6 +1301,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#stopSpeculationBlink();
 		this.#stopBrandFadeTimer();
 		this.#stopActiveWindowRepaint();
+		this.#stopPricingTimer();
+		this.#clearUsageStartTimer();
 		this.#unwatchNativeRendering?.();
 		this.#unwatchNativeRendering = undefined;
 		this.#onCodexResetFireworks = undefined;

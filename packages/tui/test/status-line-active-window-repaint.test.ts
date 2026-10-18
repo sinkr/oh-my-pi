@@ -143,3 +143,47 @@ describe("status line active-window repaint ticker", () => {
 		component.dispose();
 	});
 });
+
+/**
+ * Contract: dispose() must clear the pricing-transition timer it armed for a
+ * visible time-based cost. The transition can sit up to a week out; a timer
+ * that survives teardown keeps the disposed component, its session, and the
+ * host reachable until it fires.
+ */
+describe("dispose clears pending pricing-transition timers", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("stops a timer armed for an upcoming tariff edge", () => {
+		vi.useFakeTimers();
+		// Schedule a tariff edge ~10 minutes out on the clock the component
+		// itself reads, so the arming path is deterministic without pinning
+		// the wall clock.
+		const minuteOfDay = Math.floor((Date.now() % 86_400_000) / 60_000);
+		const peakStart = minuteOfDay < 1429 ? minuteOfDay + 10 : 0;
+		const peakEnd = minuteOfDay < 1429 ? minuteOfDay + 11 : 1;
+		const session = createSession();
+		session.state.model = {
+			cost: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				timeBased: {
+					offPeakMultiplier: 0.5,
+					peakWindows: [{ weekdays: [0, 1, 2, 3, 4, 5, 6], startMinute: peakStart, endMinute: peakEnd }],
+				},
+			},
+		} as unknown as NonNullable<StatusLineSession["state"]["model"]>;
+		const component = new StatusLineComponent(session, createHost({ leftSegments: ["cost"] }));
+		const repaint = vi.fn();
+		component.watchBranch(repaint);
+
+		component.invalidate();
+		expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+		component.dispose();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+});
