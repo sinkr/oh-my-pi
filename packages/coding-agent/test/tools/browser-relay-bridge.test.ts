@@ -1535,6 +1535,29 @@ describe("RelayBridge multiple extension instances", () => {
 		}
 	});
 
+	it("closes a tab Chrome creates after its extension socket closed mid-create, answered on the next socket", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connectInstance(bridge, ext, "chrome", []);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const createId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: createId, method: "Target.createTarget", params: {} }));
+		await flush();
+		const [create] = ext.rpcs("createTab");
+		bridge.extClosed(ext);
+		await flush();
+		expect(cdp.messages.find(message => message.id === createId)).toHaveProperty("error");
+		const back = new FakeExtSocket();
+		connectInstance(bridge, back, "chrome", [tab({ tabId: 9 })]);
+		bridge.extMessage(
+			back,
+			JSON.stringify({ t: "rpcResult", id: create!.id, ok: true, result: { tab: tab({ tabId: 9 }) } }),
+		);
+		await flush();
+		expect(back.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([9]);
+	});
+
 	it("forgets a timed-out createTab once its late window passes, so a wedged extension cannot grow the relay", async () => {
 		jest.useFakeTimers();
 		try {
@@ -1582,6 +1605,12 @@ describe("closeRelayTarget", () => {
 		const back = new FakeExtSocket();
 		connectInstance(bridge, back, "chrome", [tab({ tabId: 7 }), tab({ tabId: 8 })]);
 		expect(back.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
+		// It drops again before closing the tab: the next reconnect closes it.
+		bridge.extClosed(back);
+		await flush();
+		const again = new FakeExtSocket();
+		connectInstance(bridge, again, "chrome", [tab({ tabId: 7 }), tab({ tabId: 8 })]);
+		expect(again.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
 	});
 
 	it("reports a tab the relay no longer knows as closed", async () => {

@@ -272,9 +272,17 @@ export class RelayBridge {
 	#extensionGoneSince: number | null = null;
 	#pendingRpc = new Map<
 		string,
-		{ resolve: (value: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+		{
+			resolve: (value: unknown) => void;
+			reject: (err: Error) => void;
+			timer: NodeJS.Timeout;
+			onLateResult?: (result: unknown) => void;
+		}
 	>();
-	/** Timed-out RPCs whose late success still needs undoing (a tab Chrome created after omp gave up), by `instance:id`. */
+	/**
+	 * RPCs given up on (timed out, or their socket closed) whose late success still needs undoing (a tab Chrome
+	 * created after omp gave up), by `instance:id`. Ids are never reused, so a reconnected extension's answer matches.
+	 */
 	#lateRpc = new Map<string, { onResult: (result: unknown) => void; timer: NodeJS.Timeout }>();
 	/** Real child session id → owning tab key, learned from `Target.attachedToTarget` events. */
 	#realSessionTabs = new Map<string, string>();
@@ -418,13 +426,10 @@ export class RelayBridge {
 		for (const [key, pending] of this.#pendingRpc) {
 			if (!key.startsWith(prefix)) continue;
 			clearTimeout(pending.timer);
+			// The extension may still finish it and answer on its next socket.
+			if (pending.onLateResult) this.#keepLateRpc(key, pending.onLateResult);
 			pending.reject(error);
 			this.#pendingRpc.delete(key);
-		}
-		for (const [key, late] of this.#lateRpc) {
-			if (!key.startsWith(prefix)) continue;
-			clearTimeout(late.timer);
-			this.#lateRpc.delete(key);
 		}
 	}
 
@@ -568,6 +573,7 @@ export class RelayBridge {
 			closed.closing = true;
 			void this.#rpc({ op: "removeTab", tabId: closed.tabId }, inst).catch(() => {
 				closed.closing = false;
+				this.#closeOnHello.add(key);
 			});
 		}
 		for (const tab of this.#tabs.values()) {
@@ -1774,16 +1780,17 @@ export class RelayBridge {
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		const timer = setTimeout(() => {
 			this.#pendingRpc.delete(`${inst.instanceId}:${id}`);
-			if (onLateResult) {
-				const key = `${inst.instanceId}:${id}`;
-				const expiry = setTimeout(() => this.#lateRpc.delete(key), LATE_RPC_KEEP_MS);
-				expiry.unref?.();
-				this.#lateRpc.set(key, { onResult: onLateResult, timer: expiry });
-			}
+			if (onLateResult) this.#keepLateRpc(`${inst.instanceId}:${id}`, onLateResult);
 			reject(new Error(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
-		this.#pendingRpc.set(`${inst.instanceId}:${id}`, { resolve, reject, timer });
+		this.#pendingRpc.set(`${inst.instanceId}:${id}`, { resolve, reject, timer, onLateResult });
 		inst.socket.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
 		return promise;
+	}
+
+	#keepLateRpc(key: string, onResult: (result: unknown) => void): void {
+		const expiry = setTimeout(() => this.#lateRpc.delete(key), LATE_RPC_KEEP_MS);
+		expiry.unref?.();
+		this.#lateRpc.set(key, { onResult, timer: expiry });
 	}
 }
