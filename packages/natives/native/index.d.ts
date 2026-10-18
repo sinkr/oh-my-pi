@@ -355,6 +355,29 @@ export declare class IpcServer {
   unref(): void
 }
 
+/** Native multi-pattern line matcher returning named captures per line. */
+export declare class LineMatcher {
+  /**
+   * Throws when a pattern fails to compile; message names the failing index
+   * and the regex error, e.g. `pattern 2: regex parse error: ...`.
+   *
+   * # Errors
+   * Returns an error when any pattern fails to compile.
+   */
+  constructor(patterns: Array<string>)
+  /**
+   * Named groups of each pattern, in pattern order: the layout of a match's
+   * `start, end` pairs in [`LineMatches::spans`].
+   */
+  groupNames(): Array<Array<string>>
+  /**
+   * Matches every line (split on `
+  `) against every pattern; first match
+   * per line per pattern; ordered by line then pattern index.
+   */
+  matchLines(text: string): LineMatches
+}
+
 /** WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio. */
 export declare class LiveWebRtcPeer {
   /**
@@ -412,6 +435,27 @@ export declare class NativeOAuthCallback {
   waitForCallback(timeoutMs?: number | undefined | null): Promise<string>
   /** Restore prior OS state and release ownership. Safe to call repeatedly. */
   dispose(): Promise<undefined>
+}
+
+/**
+ * The bytes crossing one shell run's pipeline pipes, during and after the run.
+ *
+ * For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
+ * so far while `tail` still holds it back. Create one per run and pass it as
+ * [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
+ * run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
+ * 4 newest finished streams.
+ */
+export declare class PipeStreams {
+  constructor()
+  /** The run's retained streams, oldest first. */
+  list(): Array<PipeStreamInfo>
+  /**
+   * Retained bytes of stream `id` from stream offset `from` on (all of them
+   * without it), or `null` for a stream the run never opened or no longer
+   * keeps.
+   */
+  read(id: number, from?: number | undefined | null): PipeStreamChunk | null
 }
 
 /**
@@ -2559,6 +2603,25 @@ export declare enum KeyEventType {
   Release = 3
 }
 
+/**
+ * Matches of one [`LineMatcher::match_lines`] call, column-wise.
+ *
+ * Match `i` is on line `lines[i]` for pattern `rules[i]`, and its named
+ * groups (in [`LineMatcher::group_names`] order for that pattern) are the
+ * next `start, end` pairs of `spans`.
+ */
+export interface LineMatches {
+  /** 0-based line index per match. */
+  lines: Uint32Array
+  /** Pattern index per match. */
+  rules: Uint32Array
+  /**
+   * Per match and named group: UTF-16 start and end within the line, `-1, -1`
+   * when the group did not participate.
+   */
+  spans: Int32Array
+}
+
 export interface LineRange {
   /** 1-indexed inclusive first visible line. */
   startLine: number
@@ -2963,6 +3026,35 @@ export interface PdfMarkdownResult {
  * be parsed or converted.
  */
 export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
+
+/** Retained bytes of a stream, as stream offsets `start..end`. */
+export interface PipeStreamChunk {
+  /**
+   * Stream offset of `data`'s first byte; past 0 once older bytes were
+   * dropped.
+   */
+  start: number
+  /** Stream offset just past `data`: the next read's `from`. */
+  end: number
+  /** The bytes `start..end`. */
+  data: Buffer
+  /** Whether bytes may still arrive. */
+  open: boolean
+}
+
+/** A tapped pipe of a run. */
+export interface PipeStreamInfo {
+  /** Stream number, from 1. */
+  id: number
+  /** Source text of the stage writing into the pipe. */
+  producer: string
+  /** Source text of the stage reading from it. */
+  consumer: string
+  /** Bytes written so far, including those no longer retained. */
+  total: number
+  /** Whether bytes may still arrive. */
+  open: boolean
+}
 
 export interface PointerOptions {
   button?: string
@@ -3613,6 +3705,8 @@ export interface ShellRunOptions {
    * filesystem applies again to later runs.
    */
   filesystem?: ShellFilesystem
+  /** Receives a copy of every byte crossing the run's pipeline pipes. */
+  streams?: PipeStreams
 }
 
 /** Result of running a shell command. */
