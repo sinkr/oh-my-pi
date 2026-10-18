@@ -57,28 +57,44 @@ async function ensureBrowserSession(): Promise<string> {
 }
 
 const ORPHAN_TABS_KEY = "relayOrphanTabs";
-/** Serializes orphan-tab bookkeeping, so a retry pass and a new orphan do not overwrite each other's list. */
-let orphanTabs: Promise<void> = Promise.resolve();
+/** Serializes edits of the stored orphan-tab list, so concurrent passes do not overwrite each other's changes. */
+let orphanEdits: Promise<number[]> = Promise.resolve([]);
 
-/**
- * Close tabs created for RPCs whose relay connection was gone. One Chrome will not close yet is kept in
- * `chrome.storage.session`, which outlives a service-worker restart, and tried again on the next connect and
- * keepalive; `added` joins the list first.
- */
-function closeOrphanTabs(added?: number): Promise<void> {
-	orphanTabs = orphanTabs
+/** Apply `edit` to the stored orphan-tab ids; resolves with the list as stored. */
+function editOrphanTabs(edit: (ids: number[]) => number[]): Promise<number[]> {
+	orphanEdits = orphanEdits
+		.catch(() => [])
 		.then(async () => {
 			const stored = await chrome.storage.session.get({ [ORPHAN_TABS_KEY]: [] });
 			const listed = stored[ORPHAN_TABS_KEY];
-			const ids = Array.isArray(listed) ? listed.filter(id => typeof id === "number") : [];
-			if (added !== undefined) ids.push(added);
-			if (ids.length === 0) return;
-			const left: number[] = [];
-			for (const id of ids) await removeTab(id).catch(() => left.push(id));
-			await chrome.storage.session.set({ [ORPHAN_TABS_KEY]: left });
-		})
-		.catch(() => {});
-	return orphanTabs;
+			const before = Array.isArray(listed) ? listed.filter(id => typeof id === "number") : [];
+			const ids = edit(before);
+			if (ids.length !== before.length || ids.some((id, i) => id !== before[i])) {
+				await chrome.storage.session.set({ [ORPHAN_TABS_KEY]: ids });
+			}
+			return ids;
+		});
+	return orphanEdits;
+}
+
+/**
+ * Close tabs created for RPCs whose relay connection was gone. Each is kept in `chrome.storage.session`, which
+ * outlives a service-worker restart, until Chrome confirms its close, and tried again on the next connect and
+ * keepalive; `added` is stored before any close is tried.
+ */
+async function closeOrphanTabs(added?: number): Promise<void> {
+	try {
+		const ids = await editOrphanTabs(ids => (added === undefined || ids.includes(added) ? ids : [...ids, added]));
+		for (const id of ids) {
+			const closed = await removeTab(id).then(
+				() => true,
+				() => false,
+			);
+			if (closed) await editOrphanTabs(list => list.filter(other => other !== id));
+		}
+	} catch {
+		// Storage unavailable: the ids stay as stored for the next pass.
+	}
 }
 
 interface RelaySettings {

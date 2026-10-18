@@ -46,22 +46,29 @@ async function ensureBrowserSession() {
   return created;
 }
 var ORPHAN_TABS_KEY = "relayOrphanTabs";
-var orphanTabs = Promise.resolve();
-function closeOrphanTabs(added) {
-  orphanTabs = orphanTabs.then(async () => {
+var orphanEdits = Promise.resolve([]);
+function editOrphanTabs(edit) {
+  orphanEdits = orphanEdits.catch(() => []).then(async () => {
     const stored = await chrome.storage.session.get({ [ORPHAN_TABS_KEY]: [] });
     const listed = stored[ORPHAN_TABS_KEY];
-    const ids = Array.isArray(listed) ? listed.filter((id) => typeof id === "number") : [];
-    if (added !== undefined)
-      ids.push(added);
-    if (ids.length === 0)
-      return;
-    const left = [];
-    for (const id of ids)
-      await removeTab(id).catch(() => left.push(id));
-    await chrome.storage.session.set({ [ORPHAN_TABS_KEY]: left });
-  }).catch(() => {});
-  return orphanTabs;
+    const before = Array.isArray(listed) ? listed.filter((id) => typeof id === "number") : [];
+    const ids = edit(before);
+    if (ids.length !== before.length || ids.some((id, i) => id !== before[i])) {
+      await chrome.storage.session.set({ [ORPHAN_TABS_KEY]: ids });
+    }
+    return ids;
+  });
+  return orphanEdits;
+}
+async function closeOrphanTabs(added) {
+  try {
+    const ids = await editOrphanTabs((ids) => added === undefined || ids.includes(added) ? ids : [...ids, added]);
+    for (const id of ids) {
+      const closed = await removeTab(id).then(() => true, () => false);
+      if (closed)
+        await editOrphanTabs((list) => list.filter((other) => other !== id));
+    }
+  } catch {}
 }
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });

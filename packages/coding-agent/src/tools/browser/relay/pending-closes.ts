@@ -8,8 +8,16 @@ export function relayPendingClosesFile(port: number): string {
 	return path.join(getBrowserRelayDir(), `pending-closes-${port}.json`);
 }
 
-/** Pending closes kept in `file` as JSON; an unreadable or malformed file holds none. */
-export function fileCloseStore(file: string): RelayPendingCloseStore {
+/**
+ * Pending closes kept in `file` as JSON; an unreadable or malformed file holds none. Loading is synchronous so
+ * the relay has them before the first extension hello. Saves run in order, each written beside the file and
+ * renamed over it, so a failed or interrupted save leaves the last saved list in place. `save` settles once that
+ * save has run.
+ */
+export function fileCloseStore(
+	file: string,
+): RelayPendingCloseStore & { save(closes: RelayPendingClose[]): Promise<void> } {
+	let saving = Promise.resolve();
 	return {
 		load() {
 			try {
@@ -24,16 +32,21 @@ export function fileCloseStore(file: string): RelayPendingCloseStore {
 			}
 		},
 		save(closes) {
-			try {
-				if (closes.length === 0) {
-					fs.rmSync(file, { force: true });
-					return;
-				}
-				fs.mkdirSync(path.dirname(file), { recursive: true });
-				fs.writeFileSync(file, JSON.stringify(closes));
-			} catch {
-				// A close that cannot be kept still waits in this relay's memory.
-			}
+			const json = JSON.stringify(closes);
+			saving = saving
+				.then(async () => {
+					if (closes.length === 0) {
+						await fs.promises.rm(file, { force: true });
+						return;
+					}
+					const staged = `${file}.${process.pid}.tmp`;
+					await Bun.write(staged, json);
+					await fs.promises.rename(staged, file);
+				})
+				.catch(() => {
+					// The last saved list stays; a close that cannot be kept still waits in this relay's memory.
+				});
+			return saving;
 		},
 	};
 }

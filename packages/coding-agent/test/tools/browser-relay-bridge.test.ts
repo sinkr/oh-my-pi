@@ -1692,15 +1692,21 @@ describe("RelayBridge pending closes across relay processes", () => {
 		return kept;
 	}
 
-	it("closes a tab an earlier relay could not, once the browser reconnects in the same session", async () => {
+	it("closes a tab an earlier relay could not once the browser reconnects in the same session, keeping it until confirmed", async () => {
 		const kept = await closeWhileOffline();
 		expect(kept).toEqual([{ key: `${instanceCode("chrome")}:7`, browserSession: "session-1" }]);
 		// A new relay process loads what the stopped one kept.
+		let left: RelayPendingClose[] = kept;
 		const bridge = new RelayBridge({});
-		bridge.keepPendingClosesIn({ load: () => kept, save: () => {} });
+		bridge.keepPendingClosesIn({ load: () => kept, save: closes => (left = closes) });
 		const chrome = new FakeExtSocket();
 		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
 		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
+		// Still kept while the retry is unanswered: a relay stopping now leaves it for the next.
+		expect(left).toEqual(kept);
+		ack(bridge, chrome, "removeTab");
+		await flush();
+		expect(left).toEqual([]);
 	});
 
 	it("drops a kept close once Chrome restarted, since tab 7 may now be another tab", async () => {

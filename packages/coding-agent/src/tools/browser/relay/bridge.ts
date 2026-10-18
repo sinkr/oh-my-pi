@@ -589,15 +589,19 @@ export class RelayBridge {
 		this.#helloOrder.delete(instanceId);
 		this.#helloOrder.add(instanceId);
 		// Close the tabs whose close failed while this browser was offline, unless Chrome restarted since (it reuses
-		// tab ids) or the user closed them meanwhile.
+		// tab ids) or the user closed them meanwhile. One being retried stays queued until the extension confirms it.
+		let dropped = false;
 		for (const [key, session] of this.#closeOnHello) {
 			if (!key.startsWith(`${inst.code}:`)) continue;
-			this.#closeOnHello.delete(key);
-			if (session !== undefined && session !== msg.browserSession) continue;
 			const closed = this.#tabs.get(key);
-			if (closed) void this.#closeTab(key, closed.tabId, inst).catch(() => undefined);
+			if (!closed || (session !== undefined && session !== msg.browserSession)) {
+				this.#closeOnHello.delete(key);
+				dropped = true;
+				continue;
+			}
+			void this.#closeTab(key, closed.tabId, inst).catch(() => undefined);
 		}
-		this.#savePendingCloses();
+		if (dropped) this.#savePendingCloses();
 		for (const tab of this.#tabs.values()) {
 			if (tab.instanceId !== instanceId) continue;
 			const wasAttached = tab.attached;
@@ -1821,6 +1825,7 @@ export class RelayBridge {
 			this.#savePendingCloses();
 			throw err;
 		}
+		if (this.#closeOnHello.delete(key)) this.#savePendingCloses();
 	}
 
 	/**
