@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `index.d.ts` drifting from the generated bindings, so building the natives no longer leaves the checkout modified
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
