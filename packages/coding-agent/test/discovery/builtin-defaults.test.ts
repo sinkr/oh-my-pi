@@ -328,6 +328,8 @@ describe("builtin-defaults rule provider", () => {
 			'const COLUMNS = new Map([["first", ROW[0]], ["second", ROW[1]]]);',
 			"const KINDS = new Set([`text`, `json`]);",
 			'const GREETINGS = new Set(["say \\"hi\\"", "bye"]);',
+			'const KINDS = new Set([/* categories * kept together */ "a", "b"]);',
+			'const CLOSERS = new Map([["close", "]"]]);',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
 
@@ -364,6 +366,7 @@ describe("builtin-defaults rule provider", () => {
 			'type Thing = import("pkg", { with: { "resolution-mode": "import" } }).Thing;',
 			'type Mod = (typeof import("./mod"));',
 			'type Keys = keyof typeof import("./mod");',
+			'type Client = import(/* SDK * pinned */ "sdk").Client;',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
 
@@ -403,6 +406,7 @@ describe("builtin-defaults rule provider", () => {
 			"const n = value as any instanceof Foo;",
 			"const n = (value as any) in obj;",
 			"let entry: any",
+			"type Box = { value: any extends string ? 1 : 0 };",
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-no-any"]);
 
