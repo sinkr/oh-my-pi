@@ -286,10 +286,9 @@ enum UserInput {
 	Typing,
 }
 
-const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
-	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
-		return None;
-	}
+/// The rule for each type the takeover monitor's tap listens to; `None` for a
+/// type without one.
+const fn classify(kind: u32, key: i64, flags: u64) -> Option<UserInput> {
 	match kind {
 		kind if is_pointer_press(kind) => Some(UserInput::Choice),
 		KEY_DOWN if plain_typing(key, flags) => Some(UserInput::Typing),
@@ -297,6 +296,30 @@ const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Opti
 		FLAGS_CHANGED if typing_modifier(key) => Some(UserInput::Typing),
 		FLAGS_CHANGED => Some(UserInput::Choice),
 		_ => None,
+	}
+}
+
+// A type added to `MONITORED_TYPES` fails the build until it has a rule.
+const _: () = {
+	let mut i = 0;
+	while i < MONITORED_TYPES.len() {
+		assert!(classify(MONITORED_TYPES[i], 0, 0).is_some(), "a monitored type has no rule");
+		i += 1;
+	}
+};
+
+const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
+	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
+		return None;
+	}
+	match classify(kind, key, flags) {
+		Some(input) => Some(input),
+		// Not a type the tap listens to, so it never counts toward `SEEN`.
+		None if seen_index(kind, pid, tag).is_none() => None,
+		// A type the tap listens to without a rule still counts toward `SEEN`,
+		// so the monitor would look caught up with it; read as no input, the
+		// hand-back would take the front back over the user's pick.
+		None => Some(UserInput::Choice),
 	}
 }
 
@@ -361,18 +384,61 @@ const fn foreign(tag: i64, source_pid: i64, own_pid: i64) -> bool {
 	tag != SYNTHETIC_EVENT_TAG && source_pid != own_pid
 }
 
+/// The event types the user-input monitor's tap listens to: key presses and
+/// every pointer press.
+const USER_INPUT_MASK: u64 =
+	(1 << KEY_DOWN) | (1 << LEFT_MOUSE_DOWN) | (1 << RIGHT_MOUSE_DOWN) | (1 << OTHER_MOUSE_DOWN);
+
+/// Where a foreign event the annotated tap names no target for lands.
+enum Untargeted {
+	/// The front process, which takes the keyboard.
+	Front,
+	/// Nowhere: a click without a target names no app.
+	Dropped,
+}
+
+/// The rule for each type the user-input tap listens to; `None` for a type
+/// without one.
+const fn untargeted(kind: u32) -> Option<Untargeted> {
+	match kind {
+		KEY_DOWN => Some(Untargeted::Front),
+		LEFT_MOUSE_DOWN | RIGHT_MOUSE_DOWN | OTHER_MOUSE_DOWN => Some(Untargeted::Dropped),
+		_ => None,
+	}
+}
+
+// A type added to `USER_INPUT_MASK` fails the build until it has a rule.
+const _: () = {
+	let mut kind = 0;
+	while kind < 64 {
+		assert!(
+			USER_INPUT_MASK & (1 << kind) == 0 || untargeted(kind).is_some(),
+			"a user-input type has no rule"
+		);
+		kind += 1;
+	}
+};
+
 /// The process a foreign key press or click lands in: the target the
-/// annotated tap names, else for a key the front process, which takes the
-/// keyboard. A click without a target names no app and is dropped.
+/// annotated tap names, else what [`untargeted`] says for its type, and the
+/// front process for a type without a rule.
 fn input_target(
 	kind: u32,
 	target: i64,
 	front: impl FnOnce() -> Option<libc::pid_t>,
 ) -> Option<libc::pid_t> {
-	match libc::pid_t::try_from(target) {
-		Ok(pid) if pid > 0 => Some(pid),
-		_ if kind == KEY_DOWN => front(),
-		_ => None,
+	if let Ok(pid) = libc::pid_t::try_from(target)
+		&& pid > 0
+	{
+		return Some(pid);
+	}
+	match untargeted(kind) {
+		Some(Untargeted::Front) => front(),
+		Some(Untargeted::Dropped) => None,
+		// Not a type the tap listens to, since each of those has a rule: counted
+		// against the front process, it at worst has the agent read that app
+		// again, where dropping it would let the agent act on what the user changed.
+		None => front(),
 	}
 }
 
@@ -561,10 +627,7 @@ impl UserInputMonitor {
 			"desktop-user-input",
 			"user input",
 			ANNOTATED_SESSION_TAP,
-			(1 << KEY_DOWN)
-				| (1 << LEFT_MOUSE_DOWN)
-				| (1 << RIGHT_MOUSE_DOWN)
-				| (1 << OTHER_MOUSE_DOWN),
+			USER_INPUT_MASK,
 			inputs,
 			observe_user,
 		)?;
@@ -677,6 +740,10 @@ mod tests {
 		assert_eq!(input_target(KEY_DOWN, 0, || None), None);
 		assert_eq!(input_target(LEFT_MOUSE_DOWN, 0, unread), None);
 		assert_eq!(input_target(RIGHT_MOUSE_DOWN, -1, unread), None);
+		assert_eq!(input_target(OTHER_MOUSE_DOWN, 0, unread), None);
+		// A type without a rule counts against the front process rather than
+		// being dropped.
+		assert_eq!(input_target(11, 0, || Some(12)), Some(12));
 	}
 
 	#[test]
