@@ -405,14 +405,28 @@ enum FocusDecision {
 /// Once the user changes the front app/window, later target activations cannot
 /// resurrect this action's old focus claim.
 struct BackgroundFocusLease {
-	previous: ProcessSerialNumber,
-	target:   ProcessSerialNumber,
+	previous:    ProcessSerialNumber,
+	target:      ProcessSerialNumber,
 	/// The user's key window; `None` when the front app showed no window.
-	key:      Option<u32>,
-	activity: [u32; 5],
-	disarmed: bool,
+	key:         Option<u32>,
+	activity:    [u32; 5],
+	/// Polls left in which the target coming to the front counts as the
+	/// user's doing: a click seen while their app was still in front may be
+	/// the one on the target that brings it forward a moment later.
+	click_polls: u8,
+	disarmed:    bool,
 	/// The user came to the target ([`TargetVisit`]).
-	visited:  bool,
+	visited:     bool,
+}
+
+/// Polls of [`ACTIVATION_POLL`] after a click with the user's app in front
+/// during which the target coming forward is taken as that click's work.
+const CLICK_SWITCH_POLLS: u8 = 25;
+
+/// Whether `now` counts a press of a mouse button that `before` did not
+/// ([`activation_activity`] lists the three buttons first).
+fn clicked(before: [u32; 5], now: [u32; 5]) -> bool {
+	before[..3] != now[..3]
 }
 
 impl BackgroundFocusLease {
@@ -425,7 +439,7 @@ impl BackgroundFocusLease {
 		if self.disarmed
 			|| (front != self.previous && front != self.target)
 			|| (front == self.previous && key.is_some_and(|key| Some(key) != self.key))
-			|| (front == self.target && activity != self.activity)
+			|| (front == self.target && (activity != self.activity || self.click_polls > 0))
 		{
 			// The target in front now is the user's: they acted there, or the
 			// lease no longer sends it back.
@@ -436,8 +450,15 @@ impl BackgroundFocusLease {
 		if front == self.target {
 			FocusDecision::Restore
 		} else {
-			// Input while the user's original window is still frontmost is not
+			// Typing while the user's original window is still frontmost is not
 			// a focus change. Remember it so a later app reflex can be contained.
+			// A click may be on the target, which then comes forward only on a
+			// later poll, so the target counts as the user's for a while.
+			self.click_polls = if clicked(self.activity, activity) {
+				CLICK_SWITCH_POLLS
+			} else {
+				self.click_polls.saturating_sub(1)
+			};
 			self.activity = activity;
 			FocusDecision::Observe
 		}
@@ -528,6 +549,7 @@ pub(super) fn with_background_watch<T>(
 		target,
 		key: previous_key,
 		activity: activation_activity(),
+		click_polls: 0,
 		disarmed: false,
 		visited: false,
 	};
@@ -1164,6 +1186,7 @@ mod tests {
 			target,
 			key: Some(42),
 			activity: [0; 5],
+			click_polls: 0,
 			disarmed: false,
 			visited: false,
 		};
@@ -1189,11 +1212,46 @@ mod tests {
 			target,
 			key: Some(42),
 			activity: [0; 5],
+			click_polls: 0,
 			disarmed: false,
 			visited: false,
 		};
-		assert_eq!(guard.observe(previous, Some(42), [1; 5]), FocusDecision::Observe);
-		assert_eq!(guard.observe(target, None, [1; 5]), FocusDecision::Restore);
+		// Key and modifier presses only.
+		let typed = [0, 0, 0, 1, 1];
+		assert_eq!(guard.observe(previous, Some(42), typed), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, typed), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_click_seen_just_before_the_target_comes_forward_is_the_users() {
+		// The user clicks the target window: the poll sees the click while
+		// their app (7) is still in front, and the target (8) in front on a
+		// later poll with no further input. Sending it back would undo the
+		// user's own switch.
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let lease = || BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			click_polls: 0,
+			disarmed: false,
+			visited: false,
+		};
+		let clicked = [1, 0, 0, 0, 0];
+		let mut guard = lease();
+		assert_eq!(guard.observe(previous, Some(42), clicked), FocusDecision::Observe);
+		assert_eq!(guard.observe(previous, Some(42), clicked), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, clicked), FocusDecision::Disarm);
+		assert!(guard.visited);
+		// Long after that click, the target's own activation is sent back.
+		let mut guard = lease();
+		guard.observe(previous, Some(42), clicked);
+		for _ in 0..CLICK_SWITCH_POLLS {
+			guard.observe(previous, Some(42), clicked);
+		}
+		assert_eq!(guard.observe(target, None, clicked), FocusDecision::Restore);
 	}
 
 	#[test]
@@ -1206,6 +1264,7 @@ mod tests {
 			target,
 			key: None,
 			activity: [0; 5],
+			click_polls: 0,
 			disarmed: false,
 			visited: false,
 		};
@@ -1229,6 +1288,7 @@ mod tests {
 			target,
 			key: Some(42),
 			activity: [0; 5],
+			click_polls: 0,
 			disarmed: false,
 			visited: false,
 		};
