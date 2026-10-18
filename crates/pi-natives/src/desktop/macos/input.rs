@@ -2425,9 +2425,8 @@ fn stroke_path(
 			last = at;
 			post(Stroke::Dragged, at)?;
 		}
-		// Every point is out and the release always goes: a cancel now must
-		// not report the drag unsent.
-		std::thread::sleep(DRAG_RELEASE_GAP);
+		// Every point is out and the release always goes.
+		control::settle(DRAG_RELEASE_GAP);
 		Ok(())
 	})();
 	let release = control::cleanup(|| {
