@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
@@ -218,6 +219,38 @@ describe("relay extension self-update decisions", () => {
 		expect(bridge.ready).toBe(true);
 	});
 
+	it("releases an attach the last client left mid-way, then updates", async () => {
+		const { bridge, calls, finish } = bridgeWithUpdater();
+		const conn = bridge.cdpConnected(FAKE_CDP);
+		const socket = new FakeExtSocket();
+		hello(bridge, socket);
+		const code = new Bun.CryptoHasher("sha256").update("chrome").digest("base64url").slice(0, 8);
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: 1,
+				method: "Target.attachToTarget",
+				params: { targetId: `PAGE${code}.1`, flatten: true },
+			}),
+		);
+		await flushMicrotasks();
+		const attach = socket.messages.find(msg => msg.t === "rpc" && msg.op === "attach") as { id: number };
+		bridge.cdpClosed(conn);
+		await finish(true);
+		expect(calls).toEqual([]);
+		// Chrome attaches after the client left: nobody holds the tab, so the relay detaches it and then updates.
+		bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id: attach.id, ok: true, result: {} }));
+		await flushMicrotasks();
+		const detach = socket.messages.find(msg => msg.t === "rpc" && msg.op === "detach") as { id: number };
+		expect(detach).toBeDefined();
+		expect(calls).toEqual([]);
+		bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id: detach.id, ok: true, result: {} }));
+		await flushMicrotasks();
+		expect(calls).toEqual([EXTENSION_ID]);
+		await finish(true);
+		expect(socket.reloads).toBe(1);
+	});
+
 	it("waits out a tab create and its close when the client left mid-create, so the tab omp opened is closed", async () => {
 		const { bridge, calls, finish } = bridgeWithUpdater();
 		const conn = bridge.cdpConnected(FAKE_CDP);
@@ -430,5 +463,30 @@ describe("relay extension self-update on a real relay", () => {
 		expect(await Bun.file(home.join("extension/background.js")).text()).toBe(
 			relayExtensionFiles(OLD)["background.js"]!,
 		);
+	});
+
+	it("replaces a file Windows refuses to rename over, as when Chrome or antivirus holds it", async () => {
+		const dir = home.join("extension");
+		await writeRelayExtension(dir, OLD);
+		const rename = nodeFs.promises.rename.bind(nodeFs.promises);
+		let refused = 0;
+		const spy = spyOn(nodeFs.promises, "rename").mockImplementation(async (from, to) => {
+			// Windows answers a rename over a held file with EPERM; moving the held file aside still works.
+			if (String(from).endsWith(".tmp") && refused++ === 0) {
+				throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+			}
+			return rename(from, to);
+		});
+		try {
+			await writeRelayExtension(dir, VERSION);
+		} finally {
+			spy.mockRestore();
+		}
+		expect(refused).toBeGreaterThan(1);
+		expect(await installedRelayExtensionVersion(dir)).toBe(VERSION);
+		expect(await Bun.file(home.join("extension/background.js")).text()).toBe(
+			relayExtensionFiles(VERSION)["background.js"]!,
+		);
+		expect((await fs.readdir(dir)).filter(name => name.endsWith(".tmp") || name.endsWith(".bak"))).toEqual([]);
 	});
 });

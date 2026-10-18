@@ -11,6 +11,7 @@ import manifestJson from "./extension-assets/manifest.json.txt" with { type: "te
 import optionsHtml from "./extension-assets/options.html.txt" with { type: "text" };
 import optionsJs from "./extension-assets/options.js.txt" with { type: "text" };
 import thirdPartyNotices from "./extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
+import { replaceFileAtomically } from "../../../utils/atomic-file";
 import { stampRelayExtensionManifest, stampRelayExtensionScript } from "./protocol";
 
 /** The extension files `omp browser-relay install` writes, stamped with the installing omp's version. */
@@ -54,7 +55,7 @@ export async function writeRelayExtension(dir: string, ompVersion: string): Prom
 		if (current === content) continue;
 		const staged = `${target}.${crypto.randomUUID()}.tmp`;
 		await Bun.write(staged, content);
-		await fs.rename(staged, target);
+		await replaceFileAtomically(staged, target);
 	}
 }
 
