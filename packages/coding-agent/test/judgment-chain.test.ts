@@ -297,7 +297,7 @@ describe("ChainJudge", () => {
 		expect(online).not.toHaveBeenCalled();
 	});
 
-	it("fails instead of degrading to a prompted model, and skips a rejected account on later calls", async () => {
+	it("falls back to a prompted model when the account rejects the native judge, and skips it on later calls", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
@@ -308,22 +308,48 @@ describe("ChainJudge", () => {
 			.mockImplementation(
 				asGlobalFetch(async () => Response.json({ detail: { error_type: "billing_error" } }, { status: 402 })),
 			);
-		const online = vi.spyOn(ai, "completeSimple");
-		const onUsage = vi.fn();
+		const online = vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {
+			const response = reply(model, "high");
+			options?.onAttempt?.(response);
+			return response;
+		});
 		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
 
-		await expect(
-			new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE, onUsage }).judge(request),
-		).rejects.toThrow("402");
-		await expect(new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge(request)).rejects.toThrow(
-			"rejected the account recently",
-		);
+		const onUsage = vi.fn();
+		const first = await new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge(request);
+		const second = await new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge(request);
 
+		expect(first.model).toBe(ONLINE.id);
+		expect(second.answers.level.choice).toBe("high");
 		expect(typesafeCalls).toHaveBeenCalledTimes(1);
+		expect(online).toHaveBeenCalledTimes(2);
+		expect(onUsage.mock.calls.map(([usage]) => [usage.provider, usage.model, usage.stopReason])).toEqual([
+			["typesafe", JEV_PREVIEW.id, "error"],
+			[ONLINE.provider, ONLINE.id, "stop"],
+			[ONLINE.provider, ONLINE.id, "stop"],
+		]);
+	});
+
+	it("fails instead of degrading to a prompted model when the native judge itself errors", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, ONLINE], { typesafe: "ts-key", [ONLINE.provider]: "online-key" });
+		vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => new Response("bad", { status: 400 })));
+		const online = vi.spyOn(ai, "completeSimple");
+		const onUsage = vi.fn();
+
+		await expect(
+			new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE, onUsage }).judge({
+				state: "rename a local",
+				questions: { level: TIER_QUESTION },
+			}),
+		).rejects.toThrow("400");
 		expect(online).not.toHaveBeenCalled();
 		expect(onUsage).toHaveBeenCalledTimes(1);
 		expect(onUsage).toHaveBeenCalledWith(
-			expect.objectContaining({ provider: "typesafe", model: "jev-preview", stopReason: "error" }),
+			expect.objectContaining({ provider: "typesafe", model: JEV_PREVIEW.id, stopReason: "error" }),
 		);
 	});
 
