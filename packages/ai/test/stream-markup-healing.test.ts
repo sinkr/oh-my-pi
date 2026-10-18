@@ -652,6 +652,26 @@ describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
 		}
 	});
 
+	it("heals a re-spelled call after an unmatched backtick, which Markdown renders as plain text", () => {
+		// The paragraph ends inside the call, so the run before it never closed and
+		// a token quoted after the call is still code.
+		const call = `<｜tool_calls_begin｜><｜tool_call_begin｜>bash<｜tool_sep｜>${RESPELLED_TEMPLATE_ARGS}\n\n<｜tool_calls_end｜>`;
+		const after = " Then `<｜tool_calls_begin｜>` stays.";
+		for (const prose of ["Run the `grep first. ", "Run the `grep first.\n", "A ``x` run. ", "Run `"]) {
+			const input = prose + call + after;
+			for (const step of [input.length, 1]) {
+				const healing = new StreamMarkupHealing({ pattern: "dsml" });
+				let visible = "";
+				for (let i = 0; i < input.length; i += step) visible += healing.feed(input.slice(i, i + step));
+				visible += healing.flushPending();
+				expect(visible).toBe(prose + after);
+				expect(healing.drainCompleted().map(c => JSON.parse(c.arguments))).toEqual([
+					JSON.parse(RESPELLED_TEMPLATE_ARGS),
+				]);
+			}
+		}
+	});
+
 	it("leaves ASCII-pipe tokens from other templates visible", () => {
 		// Kimi's `<|tool_call_begin|>` shares a name with DeepSeek's token; without a
 		// fullwidth bar it is not DeepSeek markup and must not open a call.
