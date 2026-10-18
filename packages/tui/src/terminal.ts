@@ -1395,6 +1395,15 @@ export class ProcessTerminal implements Terminal {
 			if (decoder && win32Keys !== undefined) {
 				clearTimeout(this.#win32PendingFlushTimer);
 				this.#win32PendingFlushTimer = undefined;
+				// The record is ESC-led, so it interrupts any direct reply still being
+				// reassembled, just as a raw escape does below. Decoded keys carry no ESC
+				// of their own and would otherwise be appended to that fragment.
+				this.#privateCsiResponseBuffer = "";
+				this.#inBandResizeBuffer = "";
+				this.#osc11ResponseBuffer = "";
+				this.#osc99ResponseBuffer = "";
+				this.#glyphProtocolReplyBuffer = "";
+				this.#tspReplyBuffer = "";
 				for (const key of win32Keys) this.#stdinSequenceHandler?.(key);
 				if (decoder.hasPendingSequence) {
 					this.#win32PendingFlushTimer = setTimeout(
