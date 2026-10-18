@@ -911,6 +911,19 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual([reply]);
 		});
 
+		it("starts fresh tracking for a head that follows a flushed one", () => {
+			// Stale tracking from the flushed head made a payload byte that
+			// arrived right after the new head look like typing after a stall.
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(1000);
+			expect(buffer.flush()).toEqual([]);
+			processInput(head);
+			processInput("I");
+			processInput("\r");
+			expect(emittedSequences).toEqual(["\r"]);
+		});
+
 		it("delivers a non-payload key typed into a stalled head exactly once", () => {
 			vi.useFakeTimers();
 			processInput(head);

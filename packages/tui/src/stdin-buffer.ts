@@ -959,7 +959,10 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		clearTimeout(this.#stringAbandonTimer);
 		this.#stringAbandonTimer = setTimeout(() => {
 			this.#stringAbandonTimer = undefined;
-			if (!this.#bufferIsStringHead()) return;
+			if (!this.#bufferIsStringHead()) {
+				this.#takeStringTypedKeys();
+				return;
+			}
 			// The replayed keys are not payload: cut them from the dormant head
 			// so a late tail completes the packet the terminal actually sent.
 			let dormant = this.#buffer;
@@ -1071,7 +1074,9 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		if (buffered === `${ESC}${ESC}`) {
 			sequences.push(ESC, ESC);
 		} else if (stringHead) {
-			// Unterminated OSC/DCS/APC head: protocol data, never delivered as a key.
+			// Unterminated OSC/DCS/APC head: protocol data, never delivered as a
+			// key. Its tracking ends with it so the next head starts fresh.
+			this.#takeStringTypedKeys();
 		} else {
 			sequences.push(buffered);
 		}
