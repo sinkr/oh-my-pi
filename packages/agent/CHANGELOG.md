@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The failed-tool-call correction sent to DeepSeek models now also covers chat-template tool-call tokens written out as text, not only malformed DSML ([#16216](https://github.com/can1357/oh-my-pi/pull/16216) by [@H4vC](https://github.com/H4vC))
+
 ## [18.12.0] - 2026-10-17
 
 ### Fixed
