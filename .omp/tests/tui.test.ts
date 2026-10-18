@@ -109,11 +109,21 @@ process.stdout.write("READY\\r\\n");
 	it.skipIf(process.platform !== "win32")(
 		"keeps the Windows PTY, screen, and reported size aligned with native dimensions",
 		async () => {
+			using dir = TempDir.createSync("@omp-tui-dimensions-fixture-");
+			const preload = dir.join("interactive.ts");
+			// CI marks test children headless; opt only this real-PTY child back into terminal I/O.
+			await Bun.write(
+				preload,
+				`import { setTerminalHeadless } from ${JSON.stringify(path.resolve(import.meta.dir, "../../packages/utils/src/env.ts"))};
+setTerminalHeadless(false);
+`,
+			);
 			const name = `dimensions-${crypto.randomUUID()}`;
 			const started = await execute({
 				op: "start",
 				name,
-				file: "packages/tui/examples/debug-demo.ts",
+				bin: process.execPath,
+				args: ["--preload", preload, path.resolve(import.meta.dir, "../../packages/tui/examples/debug-demo.ts")],
 				cols: 10,
 				rows: 3,
 			});
