@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved native account-rejection fallback while rebasing the local patch stack onto 18.12.3, including upstream image fitting, box routing, and exactly-once attempt accounting.
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
