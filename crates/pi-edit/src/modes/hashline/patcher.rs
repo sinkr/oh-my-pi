@@ -346,8 +346,25 @@ fn rescue_shifted_anchors(
 	Ok(rescued)
 }
 
+/// Lines the seen-line guard checks: the section's authored anchors plus every
+/// line a resolved `PUT N*:`/`CUT N*` replaces or removes. Block inserts and
+/// pastes after a block leave its lines intact, so they keep only their anchor.
+fn guarded_lines(
+	section: &PatchSection,
+	blocks: &[BlockResolution],
+) -> Result<Vec<u32>, EditError> {
+	let mut lines: BTreeSet<u32> = section.collect_anchor_lines()?.into_iter().collect();
+	for block in blocks {
+		if matches!(block.op, BlockOpKind::Replace | BlockOpKind::Cut) {
+			lines.extend(block.start..=block.end);
+		}
+	}
+	Ok(lines.into_iter().collect())
+}
+
 fn assert_seen_lines(
 	section: &PatchSection,
+	blocks: &[BlockResolution],
 	expected: &str,
 	canonical: &Path,
 	store: &EditStore,
@@ -362,8 +379,7 @@ fn assert_seen_lines(
 	if seen.is_empty() {
 		return Ok(());
 	}
-	let mut unseen = section
-		.collect_anchor_lines()?
+	let mut unseen = guarded_lines(section, blocks)?
 		.into_iter()
 		.filter(|line| !seen.contains(line))
 		.collect::<Vec<_>>();
@@ -458,7 +474,7 @@ pub(crate) fn apply_with_recovery(
 	validate_clipboard_sequence(&resolved, clipboard)?;
 	if live_matches {
 		if enforce_seen_lines {
-			assert_seen_lines(section, expected, canonical, store, normalized)?;
+			assert_seen_lines(section, &block_resolutions, expected, canonical, store, normalized)?;
 		}
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
 			clipboard:      Some(clipboard),
