@@ -19,7 +19,10 @@ use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError},
-		macos::{application_windows, has_onscreen_window, has_open_window, window_on_another_space},
+		macos::{
+			application_windows, ax_window_ids, has_onscreen_window, has_open_window,
+			window_on_another_space,
+		},
 		types::DesktopWindow,
 	},
 	Application, OpenedApplication,
@@ -255,7 +258,7 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 		return open_running(
 			app,
 			pid,
-			|pid| application_windows(pid).ok(),
+			key_capable_windows,
 			|| {
 				libc::pid_t::try_from(pid)
 					.ok()
@@ -271,7 +274,7 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 		Some(pid) => first_window(
 			false,
 			FIRST_WINDOW_WAIT,
-			|| application_windows(pid).ok(),
+			|| key_capable_windows(pid),
 			|| false,
 			|| false,
 			wait,
@@ -279,6 +282,25 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 		None => None,
 	};
 	Ok(OpenedApplication::new(application, window))
+}
+
+/// `pid`'s on-screen windows, front to back, that can be key: Quartz lists
+/// Chromium's, Electron's and `WebKit`'s compositor surfaces as windows of
+/// their own, and a handle to one refuses keys and menus and misplaces
+/// clicks. `None` without a window list.
+fn key_capable_windows(pid: u32) -> Option<Vec<DesktopWindow>> {
+	let windows = application_windows(pid).ok()?;
+	let ax_ids = libc::pid_t::try_from(pid).ok().and_then(ax_window_ids);
+	Some(in_ax_windows(windows, ax_ids.as_deref()))
+}
+
+/// The `windows` among the application's accessibility windows (`ax_ids`);
+/// all of them when those cannot be read, which proves nothing either way.
+fn in_ax_windows(mut windows: Vec<DesktopWindow>, ax_ids: Option<&[u32]>) -> Vec<DesktopWindow> {
+	if let Some(ids) = ax_ids {
+		windows.retain(|window| window.id.parse::<u32>().is_ok_and(|id| ids.contains(&id)));
+	}
+	windows
 }
 
 /// [`open`] for application `app`, running as `pid`: its first window
@@ -671,5 +693,16 @@ mod tests {
 		.expect("opened");
 		assert_eq!(opened.pid, Some(4200));
 		assert_eq!(opened.window.map(|window| window.id).as_deref(), Some("187"));
+	}
+
+	#[test]
+	fn an_opened_window_is_never_a_compositor_surface() {
+		// Chrome's compositor surface 501 sits in front of its window 500 in
+		// Quartz's list; only 500 is among its AXWindows.
+		let listed = vec![window("501"), window("500")];
+		let kept = in_ax_windows(listed.clone(), Some(&[500]));
+		assert_eq!(kept.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(), ["500"]);
+		// Without accessibility windows nothing is dropped.
+		assert_eq!(in_ax_windows(listed, None).len(), 2);
 	}
 }

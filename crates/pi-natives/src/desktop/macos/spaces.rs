@@ -155,8 +155,8 @@ pub(super) fn bring_to_current_space(id: &str) -> CoreResult<()> {
 	result
 }
 
-/// Whether `pid` has a normal window on a Space other than the current one,
-/// which on-screen window lists leave out. `None` when the window list or a
+/// Whether `pid` has a normal window on a Space no display shows now, which
+/// on-screen window lists leave out. `None` when the window list or a
 /// window's Space membership cannot be read.
 pub(in crate::desktop) fn window_on_another_space(pid: libc::pid_t) -> Option<bool> {
 	let windows = super::capture::normal_window_ids(pid)?;
@@ -166,25 +166,32 @@ pub(in crate::desktop) fn window_on_another_space(pid: libc::pid_t) -> Option<bo
 	if connection <= 0 {
 		return None;
 	}
-	let current = active_space(spi, connection).ok()?;
+	// With "Displays have separate Spaces", each display shows its own.
+	let shown: Vec<u64> = display_spaces(spi, connection)
+		.ok()?
+		.into_iter()
+		.map(|(_, space)| space)
+		.collect();
 	on_another_space(
-		current,
+		&shown,
 		windows
 			.iter()
 			.map(|&wid| window_spaces(spi, connection, wid)),
 	)
 }
 
-/// Whether one of the windows whose Space memberships are `memberships` is on
-/// a Space other than `current`; a window `WindowServer` keeps ordered out
-/// belongs to none. `None` once a membership is unknown and none seen so far
-/// is elsewhere.
+/// Whether one of the windows whose Space memberships are `memberships`
+/// belongs only to Spaces no display shows (`shown`); a window
+/// `WindowServer` keeps ordered out belongs to none, and one on every Space
+/// belongs to a shown one too. `None` once a membership is unknown and none
+/// seen so far is elsewhere.
 fn on_another_space(
-	current: u64,
+	shown: &[u64],
 	memberships: impl IntoIterator<Item = Option<Vec<u64>>>,
 ) -> Option<bool> {
 	for spaces in memberships {
-		if spaces?.iter().any(|&space| space != current) {
+		let spaces = spaces?;
+		if !spaces.is_empty() && !spaces.iter().any(|space| shown.contains(space)) {
 			return Some(true);
 		}
 	}
@@ -342,10 +349,20 @@ mod tests {
 	fn an_unknown_space_membership_is_not_proof_of_no_window_elsewhere() {
 		// Space 9 is current. A window on Space 4 is elsewhere; one kept
 		// ordered out belongs to no Space.
-		assert_eq!(on_another_space(9, [Some(vec![9]), Some(vec![4])]), Some(true));
-		assert_eq!(on_another_space(9, [Some(vec![9]), Some(vec![])]), Some(false));
-		assert_eq!(on_another_space(9, []), Some(false));
+		assert_eq!(on_another_space(&[9], [Some(vec![9]), Some(vec![4])]), Some(true));
+		assert_eq!(on_another_space(&[9], [Some(vec![9]), Some(vec![])]), Some(false));
+		assert_eq!(on_another_space(&[9], []), Some(false));
 		// A window whose membership WindowServer did not give may be elsewhere.
-		assert_eq!(on_another_space(9, [Some(vec![9]), None]), None);
+		assert_eq!(on_another_space(&[9], [Some(vec![9]), None]), None);
+	}
+
+	#[test]
+	fn a_window_on_any_displays_shown_space_is_not_elsewhere() {
+		// Displays have separate Spaces: the main display shows 9, the second
+		// 4, so a window on 4 is on screen there, not on another Space.
+		assert_eq!(on_another_space(&[9, 4], [Some(vec![4])]), Some(false));
+		// A window on every Space belongs to a shown one too.
+		assert_eq!(on_another_space(&[9, 4], [Some(vec![3, 9])]), Some(false));
+		assert_eq!(on_another_space(&[9, 4], [Some(vec![3])]), Some(true));
 	}
 }
