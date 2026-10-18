@@ -2246,7 +2246,6 @@ mod tests {
 	#[test]
 	fn a_click_placed_in_the_users_app_does_not_let_the_target_keep_the_front() {
 		let t0 = Instant::now();
-		let idle = input(0, NO_MODIFIERS);
 		// The user clicks in their own app, a menu of it included, and the
 		// target activates itself right after: it is sent back.
 		let mut guard = lease_at(t0, None);
@@ -2261,7 +2260,8 @@ mod tests {
 			clicked_at(t0).in_user_app(),
 			t0 + ms(50),
 		);
-		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(60)), FocusDecision::Restore);
+		// A later reading still counts that click, now too old to place.
+		assert_eq!(guard.observe(TARGET, None, clicked_at(t0), t0 + ms(60)), FocusDecision::Restore);
 		// A click outside the user's app, or one no reading placed in time,
 		// may be the one that picked the target: it stays in front.
 		let mut guard = lease_at(t0, None);
