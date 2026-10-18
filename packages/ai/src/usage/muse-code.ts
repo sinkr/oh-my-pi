@@ -128,7 +128,8 @@ function buildLimits(
  * rolling window is idle: no request has opened one, so it is unused. Weekly
  * usage only accrues inside a rolling window, so the previous report's weekly
  * figure holds until its fixed reset and is zero after it. Without a previous
- * weekly figure the weekly limit stays unreported rather than invented.
+ * weekly figure and its reset the weekly limit stays unreported: an unbounded
+ * carry would present old usage as current forever.
  */
 function buildIdleLimits(
 	previous: UsageReport | undefined,
@@ -144,10 +145,10 @@ function buildIdleLimits(
 	];
 	const previousWeekly = previous?.limits.find(limit => limit.id === WEEKLY_ID);
 	const usedFraction = previousWeekly ? resolveUsedFraction(previousWeekly) : undefined;
-	if (usedFraction === undefined) return limits;
 	let resetsAt = previousWeekly?.window?.resetsAt;
-	const reset = resetsAt !== undefined && resetsAt <= now;
-	if (resetsAt !== undefined && reset) resetsAt += (Math.floor((now - resetsAt) / WEEK_MS) + 1) * WEEK_MS;
+	if (usedFraction === undefined || resetsAt === undefined) return limits;
+	const reset = resetsAt <= now;
+	if (reset) resetsAt += (Math.floor((now - resetsAt) / WEEK_MS) + 1) * WEEK_MS;
 	limits.push(
 		percentLimit(
 			WEEKLY_ID,
@@ -202,8 +203,12 @@ export const museCodeUsageProvider: UsageProvider = {
 		const tier = payload.subs_tier_name?.trim() || payload.subs_tier_id?.trim() || undefined;
 		const now = Date.now();
 		// Payment-required responses omit `subs_usage` too; only an explicitly
-		// active, paid subscription's omission means an idle window.
-		const idle = payload.is_subs_active === true && payload.require_payment !== true;
+		// active subscription with no payment demand or action means an idle window.
+		const idle =
+			payload.is_subs_active === true &&
+			payload.require_payment !== true &&
+			!payload.require_payment_action_url?.trim() &&
+			!payload.action_url?.trim();
 		const limits = payload.subs_usage
 			? buildLimits(payload.subs_usage, tier, accountId)
 			: idle

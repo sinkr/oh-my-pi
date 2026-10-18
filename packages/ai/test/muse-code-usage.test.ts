@@ -204,7 +204,7 @@ describe("Muse Code subscription usage", () => {
 		}
 	});
 
-	test("zeroes carried weekly usage once its reset passes and never invents an unobserved weekly limit", async () => {
+	test("zeroes carried weekly usage once its reset passes and carries none it cannot bound", async () => {
 		const now = 1_800_000_000_000;
 		vi.spyOn(Date, "now").mockReturnValue(now);
 		const idleKey: FetchImpl = () => Promise.resolve(Response.json({ is_subs_active: true }));
@@ -231,12 +231,21 @@ describe("Muse Code subscription usage", () => {
 			{ provider: "muse-code", credential },
 			{ fetch: idleKey },
 		);
+		const { resetsAt: _dropped, ...unbounded } = previousReport.limits[0].window;
+		const resetUnknown = await museCodeUsageProvider.fetchUsage(
+			{ provider: "muse-code", credential },
+			{
+				fetch: idleKey,
+				previousReport: { ...previousReport, limits: [{ ...previousReport.limits[0], window: unbounded }] },
+			},
+		);
 
 		expect(rolled?.limits.find(limit => limit.id === "1w")).toMatchObject({
 			amount: { usedFraction: 0 },
 			window: { resetsAt: passedReset + 604_800_000 },
 		});
 		expect(firstSeen?.limits.map(limit => limit.id)).toEqual(["300m"]);
+		expect(resetUnknown?.limits.map(limit => limit.id)).toEqual(["300m"]);
 	});
 
 	test("reports no quota when a response without usage is not an active paid subscription", async () => {
@@ -256,6 +265,7 @@ describe("Muse Code subscription usage", () => {
 		const responses = [
 			{ require_payment: true, require_payment_action_url: "https://dev.meta.ai/subscribe" },
 			{ is_subs_active: true, require_payment: true },
+			{ is_subs_active: true, action_url: "https://dev.meta.ai/subscribe" },
 		];
 
 		for (const body of responses) {
