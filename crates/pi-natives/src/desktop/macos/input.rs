@@ -84,7 +84,7 @@ impl MacInput {
 							input_owner(pid, wid, ax::window_content(pid, &window), ax::focused_window_id)
 						};
 						let entry_front = skylight::front_pid();
-						skylight::with_background_guard(pid, || {
+						skylight::with_background_watch(pid, |visit| {
 							background_pointer(
 								&self.source,
 								pid,
@@ -94,6 +94,7 @@ impl MacInput {
 								entry_front,
 								owner,
 								in_overlay,
+								visit,
 							)
 						})
 					},
@@ -338,22 +339,30 @@ fn with_background_keyboard<T>(
 	}
 	let in_overlay = focus.in_overlay_of(wid, skylight::window_parent);
 	let entry_front = skylight::front_pid();
-	skylight::with_background_guard(pid, || {
-		let prepared = make_key_in_background(source, pid, wid, window, entry_front, in_overlay)?;
+	skylight::with_background_watch(pid, |visit| {
+		let prepared =
+			make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit)?;
 		let (to, focus) = await_key_destination(pid, wid, conflict)?;
 		let to =
 			key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
 		deliver(to, &|| {
-			recheck_background(prepared, pid, wid, skylight::front_pid, || {
-				keys_still_reach(
-					pid,
-					wid,
-					conflict,
-					focus,
-					|| ax::key_focus(pid),
-					skylight::window_parent,
-				)
-			})
+			recheck_background(
+				prepared,
+				pid,
+				wid,
+				skylight::front_pid,
+				|| visit.happened(),
+				|| {
+					keys_still_reach(
+						pid,
+						wid,
+						conflict,
+						focus,
+						|| ax::key_focus(pid),
+						skylight::window_parent,
+					)
+				},
+			)
 		})
 	})
 }
@@ -883,8 +892,10 @@ fn front_target(
 ///
 /// Returns whether the activation step ran. The user can bring the target app
 /// forward at any moment, which would turn the step into a key-window switch
-/// in the app they type into, so the front process is re-read before the
-/// press and, through [`still_behind_user`], by callers before they deliver.
+/// in the app they type into, so before the press the front process is read
+/// again and `visit`, the guard's record of the user coming to the target, is
+/// checked ([`still_behind_user`]); callers check again through
+/// [`recheck_background`] before each later step.
 pub(super) fn make_key_in_background(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -892,6 +903,7 @@ pub(super) fn make_key_in_background(
 	window: &DesktopWindow,
 	entry_front: Option<libc::pid_t>,
 	focus_in_overlay: bool,
+	visit: skylight::TargetVisit<'_>,
 ) -> CoreResult<bool> {
 	let focused = || {
 		if focus_in_overlay {
@@ -946,7 +958,7 @@ pub(super) fn make_key_in_background(
 		|| ax::reports_active(pid),
 		|| control::wait(KEY_WINDOW_POLL),
 	)?;
-	still_behind_user(pid, wid)?;
+	still_behind_user(pid, wid, visit)?;
 	if focus_in_overlay {
 		return Ok(true);
 	}
@@ -973,28 +985,36 @@ pub(super) fn make_key_in_background(
 }
 
 /// Refuses once the target's application is frontmost (or the front process
-/// is unknown) after [`make_key_in_background`] judged it a background app.
-fn still_behind_user(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
-	recheck_background(true, pid, wid, skylight::front_pid, || Ok(()))
+/// is unknown), or the user came to it (`visit`), after
+/// [`make_key_in_background`] judged it a background app.
+fn still_behind_user(
+	pid: libc::pid_t,
+	wid: u32,
+	visit: skylight::TargetVisit<'_>,
+) -> CoreResult<()> {
+	recheck_background(true, pid, wid, skylight::front_pid, || visit.happened(), || Ok(()))
 }
 
 /// The check before each later press or command of background input for
 /// window `wid` of `pid`: `target_holds` must pass, and then, when
 /// [`make_key_in_background`] found the application behind the user's
-/// (`prepared`), it must still be, as `front` reads the front process now.
-/// `BackgroundFocusLease` only stands down when the user brings the target
-/// forward, so this is what keeps the input from following them into the
-/// window they just picked. The front process is read last, as close to the
-/// input as it can be.
+/// (`prepared`), the user must not have come to it since: `visited` reads the
+/// focus guard's record of that, which stays set once the user has left the
+/// target again, and `front` reads the front process now, which the guard
+/// polls only every few milliseconds. The guard itself only stands down when
+/// the user brings the target forward, so this is what keeps the input from
+/// following them into the window they picked. Both are read last, as close
+/// to the input as they can be.
 pub(super) fn recheck_background(
 	prepared: bool,
 	pid: libc::pid_t,
 	wid: u32,
 	front: impl FnOnce() -> Option<libc::pid_t>,
+	visited: impl FnOnce() -> bool,
 	target_holds: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
 	target_holds()?;
-	if prepared && left_background(front(), pid) {
+	if prepared && (visited() || left_background(front(), pid)) {
 		return Err(DesktopError::background_unavailable(format!(
 			"window {wid}'s application came to the front, or the front application could not be \
 			 identified, during background input; no further input was sent; inspect the window, \
@@ -1175,7 +1195,9 @@ const fn button_types(
 /// goes to its own application. `in_overlay` says `wid` is a sheet or popover
 /// on the application's focused window ([`takes_overlay_focus`]), so a left
 /// click sends only the activation, without the press outside its frame that
-/// would close a popover or reach the window the sheet is attached to.
+/// would close a popover or reach the window the sheet is attached to. Each
+/// press of a left click that made the window key first passes
+/// [`recheck_background`], with `visit` from the focus guard.
 fn background_pointer(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1185,17 +1207,32 @@ fn background_pointer(
 	entry_front: Option<libc::pid_t>,
 	owner: impl FnOnce() -> CoreResult<(libc::pid_t, u32)>,
 	in_overlay: bool,
+	visit: skylight::TargetVisit<'_>,
 ) -> CoreResult<()> {
-	let prepare = || {
-		if make_key_in_background(source, pid, wid, window, entry_front, in_overlay)? {
-			still_behind_user(pid, wid)?;
-		}
-		Ok(())
-	};
-	let (to, to_wid) = pointer_owner(&event, prepare, owner)?;
+	let prepare =
+		|| make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit);
+	let (prepared, (to, to_wid)) = pointer_owner(&event, prepare, owner)?;
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			background_left_click(source, to, to_wid, window, x, y, count)
+			let before_press = || {
+				recheck_background(
+					prepared,
+					pid,
+					wid,
+					skylight::front_pid,
+					|| visit.happened(),
+					|| Ok(()),
+				)
+			};
+			background_left_click(
+				source,
+				to,
+				to_wid,
+				window,
+				(x, y, count),
+				before_press,
+				skylight::post_routed,
+			)
 		},
 		PointerEvent::Click { x, y, button, count, .. } => {
 			background_button_click(source, to, to_wid, window, x, y, button, count)
@@ -1213,24 +1250,29 @@ fn background_pointer(
 	}
 }
 
-/// Where background pointer `event` goes: `owner`'s answer. A left click first
+/// Where background pointer `event` goes: `owner`'s answer, with whether
+/// `prepare` made its window key behind the user's app. A left click first
 /// makes its window key through `prepare`, and a system Open or Save panel's
 /// drawing process reports focus in its window only once the panel is key, so
 /// the owner is read after that; other events never make the window key.
 fn pointer_owner(
 	event: &PointerEvent,
-	prepare: impl FnOnce() -> CoreResult<()>,
+	prepare: impl FnOnce() -> CoreResult<bool>,
 	owner: impl FnOnce() -> CoreResult<(libc::pid_t, u32)>,
-) -> CoreResult<(libc::pid_t, u32)> {
-	if matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) {
-		prepare()?;
-	}
-	owner()
+) -> CoreResult<(bool, (libc::pid_t, u32))> {
+	let prepared = if matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) {
+		prepare()?
+	} else {
+		false
+	};
+	Ok((prepared, owner()?))
 }
 
 /// Background left click on the Chromium-compatible route: a hover primer at
 /// the target, a press/release off-screen that satisfies Chromium's
-/// user-activation gate without hitting any element, then the real presses.
+/// user-activation gate without hitting any element, then the real presses,
+/// each posted through `post` once `before_press` passes; a release always
+/// follows a posted press.
 ///
 /// Quartz event locations are global; the separate window-location field is
 /// relative to the window's top-left, including its title bar. Chromium uses
@@ -1240,9 +1282,9 @@ fn background_left_click(
 	pid: libc::pid_t,
 	wid: u32,
 	window: &DesktopWindow,
-	x: f64,
-	y: f64,
-	count: u32,
+	(x, y, count): (f64, f64, u32),
+	before_press: impl Fn() -> CoreResult<()>,
+	post_event: impl Fn(libc::pid_t, &CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	let group = click_group_id();
 	let target = CGPoint::new(x, y);
@@ -1267,10 +1309,11 @@ fn background_left_click(
 			(FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE, i64::from(wid)),
 		])?;
 		skylight::set_window_location(&event, window_location)?;
-		skylight::post_routed(pid, &event)
+		post_event(pid, &event)
 	};
 	post(CGEventType::MouseMoved, target, local, 2, 0)?;
 	control::wait(Duration::from_millis(15))?;
+	before_press()?;
 	post(CGEventType::LeftMouseDown, offscreen, offscreen, 1, 1)?;
 	let result = control::wait(Duration::from_millis(1));
 	let release = control::cleanup(|| post(CGEventType::LeftMouseUp, offscreen, offscreen, 2, 1));
@@ -1278,6 +1321,7 @@ fn background_left_click(
 	control::wait(Duration::from_millis(100))?;
 	let count = count.max(1);
 	for click_state in 1..=count {
+		before_press()?;
 		post(CGEventType::LeftMouseDown, target, local, 3, i64::from(click_state))?;
 		let result = control::wait(Duration::from_millis(1));
 		let release = control::cleanup(|| {
@@ -2639,7 +2683,7 @@ mod tests {
 		// The user's app 9 is in front when typing into app 7 begins; after a,
 		// the user clicks the target window, bringing app 7 forward.
 		let front = std::cell::Cell::new(Some(9));
-		let guard = || recheck_background(true, 7, 41, || front.get(), || Ok(()));
+		let guard = || recheck_background(true, 7, 41, || front.get(), || false, || Ok(()));
 		let mut typed = Vec::new();
 		let result = type_text(&source, "ab", |event| {
 			post_guarded(event, guard, |event| {
@@ -2654,7 +2698,58 @@ mod tests {
 		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
 		assert_eq!(typed, [down, up, up]);
 		// Input into the app the user already had in front is not stopped.
-		assert!(recheck_background(false, 7, 41, || Some(7), || Ok(())).is_ok());
+		assert!(recheck_background(false, 7, 41, || Some(7), || false, || Ok(())).is_ok());
+	}
+
+	#[test]
+	fn a_menu_command_stops_once_the_user_visited_the_target_and_left() {
+		// The user clicked the target during the menu's settle wait and went
+		// back to their app 9: the front process alone shows nothing, the focus
+		// guard's record does.
+		let error = recheck_background(true, 7, 41, || Some(9), || true, || Ok(())).unwrap_err();
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::BackgroundUnavailable);
+		assert!(recheck_background(true, 7, 41, || Some(9), || false, || Ok(())).is_ok());
+	}
+
+	#[test]
+	fn a_background_left_click_stops_before_its_real_press_once_the_user_comes_forward() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let window = DesktopWindow {
+			id:      "554".into(),
+			title:   String::new(),
+			app:     "TextEdit".into(),
+			pid:     Some(7581),
+			x:       100,
+			y:       100,
+			width:   600,
+			height:  400,
+			focused: false,
+		};
+		// The user brings the panel's app forward while the primer runs.
+		let front = std::cell::Cell::new(Some(9));
+		let posted = std::cell::RefCell::new(Vec::new());
+		let before_press =
+			|| recheck_background(true, 7581, 554, || front.get(), || false, || Ok(()));
+		let post = |_, event: &CGEvent| {
+			let kind = event.get_type();
+			if matches!(kind, CGEventType::LeftMouseUp) {
+				front.set(Some(7581));
+			}
+			posted.borrow_mut().push(kind as u32);
+			Ok(())
+		};
+		let result =
+			background_left_click(&source, 7592, 556, &window, (300.0, 200.0, 1), before_press, post);
+		assert_eq!(result.unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		// The hover and the off-screen press and release went out; the real
+		// press did not.
+		let (moved, down, up) = (
+			CGEventType::MouseMoved as u32,
+			CGEventType::LeftMouseDown as u32,
+			CGEventType::LeftMouseUp as u32,
+		);
+		assert_eq!(*posted.borrow(), [moved, down, up]);
 	}
 
 	#[test]
@@ -2696,7 +2791,7 @@ mod tests {
 		let owner = || Ok(if key.get() { (7592, 556) } else { (7581, 554) });
 		let prepare = || {
 			key.set(true);
-			Ok(())
+			Ok(true)
 		};
 		let click = PointerEvent::Click {
 			x:         10.0,
@@ -2705,12 +2800,12 @@ mod tests {
 			count:     1,
 			modifiers: Modifiers::default(),
 		};
-		assert_eq!(pointer_owner(&click, prepare, owner).unwrap(), (7592, 556));
+		assert_eq!(pointer_owner(&click, prepare, owner).unwrap(), (true, (7592, 556)));
 		// A scroll never makes the window key, so it is not prepared.
 		key.set(false);
 		let scroll = PointerEvent::Scroll { x: 10.0, y: 10.0, dx: 0.0, dy: 3.0 };
 		let owned = pointer_owner(&scroll, || panic!("a scroll must not make its window key"), owner);
-		assert_eq!(owned.unwrap(), (7581, 554));
+		assert_eq!(owned.unwrap(), (false, (7581, 554)));
 	}
 
 	#[test]

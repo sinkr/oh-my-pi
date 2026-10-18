@@ -411,6 +411,8 @@ struct BackgroundFocusLease {
 	key:      Option<u32>,
 	activity: [u32; 5],
 	disarmed: bool,
+	/// The user came to the target ([`TargetVisit`]).
+	visited:  bool,
 }
 
 impl BackgroundFocusLease {
@@ -425,6 +427,9 @@ impl BackgroundFocusLease {
 			|| (front == self.previous && key.is_some_and(|key| Some(key) != self.key))
 			|| (front == self.target && activity != self.activity)
 		{
+			// The target in front now is the user's: they acted there, or the
+			// lease no longer sends it back.
+			self.visited |= front == self.target;
 			self.disarmed = true;
 			return FocusDecision::Disarm;
 		}
@@ -437,6 +442,43 @@ impl BackgroundFocusLease {
 			FocusDecision::Observe
 		}
 	}
+
+	/// The hand-back was refused because the user pressed a key or clicked
+	/// with the target in front.
+	const fn user_acted(&mut self) {
+		self.visited = true;
+		self.disarmed = true;
+	}
+}
+
+/// Whether the user has come to the background target since its guard
+/// began: the target was in front with a key or click of theirs, the
+/// hand-back was refused because of one, or the target was in front after the
+/// guard stood down. Later steps of the input must stop then, even once the
+/// user has left the target again.
+#[derive(Clone, Copy)]
+pub(super) struct TargetVisit<'a>(&'a AtomicBool);
+
+static NO_VISIT: AtomicBool = AtomicBool::new(false);
+
+impl TargetVisit<'_> {
+	/// For input into the application already in front, which no guard
+	/// watches.
+	pub(super) fn none() -> TargetVisit<'static> {
+		TargetVisit(&NO_VISIT)
+	}
+
+	pub(super) fn happened(self) -> bool {
+		self.0.load(Ordering::Acquire)
+	}
+}
+
+/// [`with_background_watch`] for an action that has no later steps to stop.
+pub(super) fn with_background_guard<T>(
+	pid: pid_t,
+	action: impl FnOnce() -> CoreResult<T>,
+) -> CoreResult<T> {
+	with_background_watch(pid, |_| action())
 }
 
 /// Contains asynchronous self-activation during background input and its
@@ -444,10 +486,11 @@ impl BackgroundFocusLease {
 /// A third app, changed prior key window, or new hardware input permanently
 /// disarms the lease. Only the addressed target can be sent back behind the
 /// original front app; unlike cua's wildcard suppressor, unrelated activations
-/// are never undone.
-pub(super) fn with_background_guard<T>(
+/// are never undone. `action` gets the [`TargetVisit`] the guard records,
+/// which keeps being watched after the lease disarms.
+pub(super) fn with_background_watch<T>(
 	pid: pid_t,
-	action: impl FnOnce() -> CoreResult<T>,
+	action: impl FnOnce(TargetVisit<'_>) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
@@ -463,7 +506,7 @@ pub(super) fn with_background_guard<T>(
 		)
 	})?;
 	if previous.pid == Some(pid) {
-		return action();
+		return action(TargetVisit::none());
 	}
 	let target = process_psn(spi.psn, pid, 0).ok_or_else(|| {
 		DesktopError::background_unavailable(
@@ -486,67 +529,78 @@ pub(super) fn with_background_guard<T>(
 		key: previous_key,
 		activity: activation_activity(),
 		disarmed: false,
+		visited: false,
 	};
 	let stopped = AtomicBool::new(false);
+	let visited = AtomicBool::new(false);
 	thread::scope(|scope| {
 		let stop = &stopped;
+		let visit = &visited;
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
 			.spawn_scoped(scope, move || -> CoreResult<()> {
 				let mut restored = false;
 				loop {
-					let Some(front) = front_process(spi.get_front) else {
-						return Err(DesktopError::input_failed(
-							"lost the front process during background input",
-						));
-					};
-					let key = if front.psn == previous.psn {
-						previous.pid.and_then(ax::key_window_id)
-					} else {
-						None
-					};
-					match lease.observe(front.psn, key, activation_activity()) {
-						FocusDecision::Disarm => return Ok(()),
-						FocusDecision::Observe => {},
-						FocusDecision::Restore => {
-							// Re-check immediately before changing focus: an AX probe
-							// may have raced a newer application or hardware event.
-							// `WindowServer` then refuses the hand-back if the user
-							// pressed a key or clicked after the re-check began.
-							let handed_back = request_after_check(
-								event_clock_now,
-								|| {
-									front_process(spi.get_front).is_some_and(|front| front.psn == target)
-										&& activation_activity() == lease.activity
-								},
-								|since| {
-									set_front_unless_user_acted(
-										spi,
-										previous.psn,
-										previous_key.unwrap_or(0),
-										since,
-									)
-								},
-							)?;
-							match handed_back {
-								None => {},
-								// The user brought the target forward themselves.
-								Some(FrontRequest::UserActed) => return Ok(()),
-								Some(FrontRequest::Done) => {
-									restored = true;
-									if let Some(key) = previous_key
-										&& !post_record(spi.post_record, previous.psn, &focus_record(key))
-									{
-										return Err(DesktopError::input_failed(
-											"background key-window restoration was rejected",
-										));
-									}
-								},
+					// Once disarmed, nothing is sent back any more, but the lease
+					// keeps watching for the user coming to the target.
+					match front_process(spi.get_front) {
+						None if lease.disarmed => {},
+						None => {
+							return Err(DesktopError::input_failed(
+								"lost the front process during background input",
+							));
+						},
+						Some(front) => {
+							let key = if !lease.disarmed && front.psn == previous.psn {
+								previous.pid.and_then(ax::key_window_id)
+							} else {
+								None
+							};
+							if lease.observe(front.psn, key, activation_activity())
+								== FocusDecision::Restore
+							{
+								// Re-check immediately before changing focus: an AX
+								// probe may have raced a newer application or hardware
+								// event. `WindowServer` then refuses the hand-back if
+								// the user pressed a key or clicked after the re-check
+								// began.
+								let handed_back = request_after_check(
+									event_clock_now,
+									|| {
+										front_process(spi.get_front).is_some_and(|front| front.psn == target)
+											&& activation_activity() == lease.activity
+									},
+									|since| {
+										set_front_unless_user_acted(
+											spi,
+											previous.psn,
+											previous_key.unwrap_or(0),
+											since,
+										)
+									},
+								)?;
+								match handed_back {
+									None => {},
+									// The user brought the target forward themselves.
+									Some(FrontRequest::UserActed) => lease.user_acted(),
+									Some(FrontRequest::Done) => {
+										restored = true;
+										if let Some(key) = previous_key
+											&& !post_record(spi.post_record, previous.psn, &focus_record(key))
+										{
+											return Err(DesktopError::input_failed(
+												"background key-window restoration was rejected",
+											));
+										}
+									},
+								}
 							}
 						},
 					}
+					visit.store(lease.visited, Ordering::Release);
 					if stop.load(Ordering::Acquire) {
 						if restored
+							&& !lease.disarmed
 							&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
 						{
 							return Err(DesktopError::input_failed(
@@ -577,7 +631,8 @@ pub(super) fn with_background_guard<T>(
 			}
 		}
 		let stop = StopObserver { stopped: &stopped, thread: observer.thread().clone() };
-		let result = run_then_settle(action, || control::wait(BACKGROUND_SETTLE));
+		let result =
+			run_then_settle(|| action(TargetVisit(&visited)), || control::wait(BACKGROUND_SETTLE));
 		drop(stop);
 		let cleanup = observer.join().unwrap_or_else(|_| {
 			Err(DesktopError::input_failed("background focus guard terminated unexpectedly"))
@@ -1110,6 +1165,7 @@ mod tests {
 			key: Some(42),
 			activity: [0; 5],
 			disarmed: false,
+			visited: false,
 		};
 		let mut guard = lease();
 		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Restore);
@@ -1134,6 +1190,7 @@ mod tests {
 			key: Some(42),
 			activity: [0; 5],
 			disarmed: false,
+			visited: false,
 		};
 		assert_eq!(guard.observe(previous, Some(42), [1; 5]), FocusDecision::Observe);
 		assert_eq!(guard.observe(target, None, [1; 5]), FocusDecision::Restore);
@@ -1144,8 +1201,14 @@ mod tests {
 		// Finder in front after a click on the desktop: no key window to restore.
 		let previous = ProcessSerialNumber { high: 0, low: 7 };
 		let target = ProcessSerialNumber { high: 0, low: 8 };
-		let lease =
-			|| BackgroundFocusLease { previous, target, key: None, activity: [0; 5], disarmed: false };
+		let lease = || BackgroundFocusLease {
+			previous,
+			target,
+			key: None,
+			activity: [0; 5],
+			disarmed: false,
+			visited: false,
+		};
 		let mut guard = lease();
 		assert_eq!(guard.observe(previous, None, [0; 5]), FocusDecision::Observe);
 		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Restore);
@@ -1154,6 +1217,40 @@ mod tests {
 		let mut guard = lease();
 		assert_eq!(guard.observe(previous, Some(43), [0; 5]), FocusDecision::Disarm);
 		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Disarm);
+	}
+
+	#[test]
+	fn a_visit_to_the_target_is_kept_after_the_user_leaves_it() {
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let third = ProcessSerialNumber { high: 0, low: 9 };
+		let lease = || BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			disarmed: false,
+			visited: false,
+		};
+		// The user clicks the target, then goes back to their app.
+		let mut guard = lease();
+		guard.observe(target, None, [1; 5]);
+		guard.observe(previous, Some(42), [1; 5]);
+		assert!(guard.visited);
+		// After a switch to a third app the lease stands down, yet still sees
+		// the user come to the target.
+		let mut guard = lease();
+		guard.observe(third, None, [0; 5]);
+		assert!(!guard.visited);
+		guard.observe(target, None, [0; 5]);
+		assert!(guard.visited);
+		// The target's own activation, sent back, is not a visit; a refused
+		// hand-back is.
+		let mut guard = lease();
+		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Restore);
+		assert!(!guard.visited);
+		guard.user_acted();
+		assert!(guard.visited);
 	}
 
 	#[test]

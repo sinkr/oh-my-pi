@@ -184,25 +184,35 @@ fn with_window_menu<T>(
 	// AX parent.
 	let entry_front = skylight::front_pid();
 	let activated = reports_active(pid) == Some(false);
-	skylight::with_background_guard(pid, || {
+	skylight::with_background_watch(pid, |visit| {
 		let prepared = enter_menu_context(access, || {
 			// A read must not end an overlay's editing, such as a popover's: the
 			// press that makes `wid` key would close it.
 			let in_overlay = access == MenuAccess::Read
 				&& key_focus(pid).in_overlay_of(wid, skylight::window_parent);
 			let prepared =
-				make_key_in_background(&source()?, pid, wid, window, entry_front, in_overlay)?;
+				make_key_in_background(&source()?, pid, wid, window, entry_front, in_overlay, visit)?;
 			// The user may have brought the app forward while its key window
 			// settled.
-			recheck_background(prepared, pid, wid, skylight::front_pid, || {
-				require_key_context(pid, wid)
-			})?;
+			recheck_background(
+				prepared,
+				pid,
+				wid,
+				skylight::front_pid,
+				|| visit.happened(),
+				|| require_key_context(pid, wid),
+			)?;
 			Ok(prepared)
 		})?;
 		let context_holds = || {
-			recheck_background(prepared, pid, wid, skylight::front_pid, || {
-				require_key_context(pid, wid)
-			})
+			recheck_background(
+				prepared,
+				pid,
+				wid,
+				skylight::front_pid,
+				|| visit.happened(),
+				|| require_key_context(pid, wid),
+			)
 		};
 		action(&app, pid, &context_holds, activated)
 	})

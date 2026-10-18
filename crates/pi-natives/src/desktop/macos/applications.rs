@@ -18,7 +18,7 @@ use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError},
-		macos::{application_windows, has_onscreen_window},
+		macos::{application_windows, has_onscreen_window, has_open_window},
 		types::DesktopWindow,
 	},
 	Application, OpenedApplication,
@@ -310,11 +310,12 @@ fn first_window(
 }
 
 /// Asks a running application without a window on screen to show one, without
-/// activating it. A hidden application (`AppleScript` launches them hidden) is
-/// unhidden through AX; any other gets Launch Services' reopen event, which
-/// needs no Automation consent. On a macOS 26.5 VM both showed the window of
-/// Contacts, Notes, `TextEdit`, Calendar and Font Book in 0.1–0.4 s, and no
-/// application came to the front. `false` when neither could be requested.
+/// activating it ([`ask_for_window`]). A hidden application (`AppleScript`
+/// launches them hidden) is unhidden through AX; any other gets Launch
+/// Services' reopen event, which needs no Automation consent. On a macOS 26.5
+/// VM both showed the window of Contacts, Notes, `TextEdit`, Calendar and Font
+/// Book in 0.1–0.4 s, and no application came to the front. `false` when
+/// neither could be requested.
 fn show_in_background(pid: u32, path: &str) -> bool {
 	let Ok(pid) = libc::pid_t::try_from(pid) else {
 		return false;
@@ -331,13 +332,35 @@ fn show_in_background(pid: u32, path: &str) -> bool {
 		.flatten()
 		.and_then(|value| value.downcast::<CFBoolean>().ok())
 		.is_some_and(|value| value.as_bool());
-	if is_hidden {
+	ask_for_window(
+		is_hidden,
 		// SAFETY: The retained element, attribute name and singleton CFBoolean
 		// stay valid for the synchronous setter.
-		unsafe { app.set_attribute_value(&hidden, CFBoolean::new(false)) == AXError::Success }
-	} else {
-		launch(path, false).is_ok()
+		|| unsafe { app.set_attribute_value(&hidden, CFBoolean::new(false)) == AXError::Success },
+		|| has_open_window(pid) != Some(false),
+		|| launch(path, false).is_ok(),
+	)
+}
+
+/// Asks for a window: a `hidden` application is unhidden through `unhide`,
+/// which shows only the windows it still has open (`open_window`); one whose
+/// last window was closed, or whose windows are all minimized, also gets the
+/// reopen event (`reopen`), as an application that is not hidden does.
+fn ask_for_window(
+	hidden: bool,
+	unhide: impl FnOnce() -> bool,
+	open_window: impl FnOnce() -> bool,
+	reopen: impl FnOnce() -> bool,
+) -> bool {
+	if hidden {
+		if !unhide() {
+			return false;
+		}
+		if open_window() {
+			return true;
+		}
 	}
+	reopen()
 }
 
 fn launch(path: &str, activate: bool) -> CoreResult<Application> {
@@ -535,5 +558,24 @@ mod tests {
 			|| panic!("no window is awaited"),
 		);
 		assert!(found.expect("no window").is_none());
+	}
+
+	#[test]
+	fn a_hidden_application_with_no_open_window_is_reopened_after_unhiding() {
+		// A hidden app whose last window was closed shows nothing when unhidden.
+		let reopened = Cell::new(false);
+		let reopen = || {
+			reopened.set(true);
+			true
+		};
+		assert!(ask_for_window(true, || true, || false, reopen));
+		assert!(reopened.get());
+		// One with a window open shows it; the reopen event is not sent.
+		reopened.set(false);
+		assert!(ask_for_window(true, || true, || true, reopen));
+		assert!(!reopened.get());
+		// An app that is not hidden gets the reopen event at once.
+		assert!(ask_for_window(false, || panic!("not hidden"), || panic!("not read"), reopen));
+		assert!(reopened.get());
 	}
 }
