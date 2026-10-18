@@ -683,7 +683,7 @@ impl Libei {
 	fn with_keys(
 		&mut self,
 		keys: &[KeyName],
-		held: impl FnOnce() -> CoreResult<()>,
+		hold: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
 		self.refresh_devices()?;
 		let device = self
@@ -711,7 +711,7 @@ impl Libei {
 				Self::send_key(device, &interface, code, true, serial, &mut time)?;
 			}
 			flush_context(&self.context)?;
-			held()?;
+			hold()?;
 			time = Self::timestamp()?.max(time);
 			Ok(())
 		})();

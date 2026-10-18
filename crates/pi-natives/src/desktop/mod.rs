@@ -3138,7 +3138,8 @@ mod capture_tests {
 			_: &OperationToken,
 		) -> CoreResult<()> {
 			self.modes.lock().push(mode);
-			if let Some(source) = self.cancel_after_chord.lock().take() {
+			let cancel = self.cancel_after_chord.lock().take();
+			if let Some(source) = cancel {
 				source.cancel();
 			}
 			Ok(())
