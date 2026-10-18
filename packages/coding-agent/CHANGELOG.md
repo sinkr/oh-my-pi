@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed browser `role/<role>[name="…" exact]` selectors in Chromium and Tern tabs matching nothing for names copied from `observe()`: buttons and links are now named by their visible text rather than their `title`, without hidden or `aria-hidden` text, with image `alt`s and child `aria-label`s, and text fields by their placeholder
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
@@ -33,7 +37,6 @@
 
 - Fixed repeated status commands such as `/goal show` showing nothing after the first few times in a native terminal when the text had not changed
 - Fixed browser relay tabs that a browser already had open when its extension connected staying invisible to omp until they changed; opening such a tab by `app.target` could fail with "Selected tab did not become available before omp could attach"
-- Fixed browser `role/<role>[name="…" exact]` selectors in Chromium and Tern tabs matching nothing for a name copied from `observe()` when the element has a `title`, an `aria-hidden` icon, an image with `alt`, or text spread over several lines
 - Fixed Ollama Cloud sessions compacting too early on stripped thinking or too late after switching from another model ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
 - Fixed Google sign-in rejecting the `/login perplexity` SSO browser window with "This browser or app may not be secure"; the sign-in browser no longer runs in automation mode ([#16141](https://github.com/can1357/oh-my-pi/issues/16141))
 - Fixed `task.softRequestBudget` never stopping Cursor subagents ([#16182](https://github.com/can1357/oh-my-pi/pull/16182) by [@joseotaviorf](https://github.com/joseotaviorf))

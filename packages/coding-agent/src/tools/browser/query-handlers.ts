@@ -145,7 +145,8 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|tooltip|treeitem)$/.test(
 			wantedRole,
 		);
-	// Text as the accessibility tree reads it: `aria-hidden` subtrees skipped, embedded images give their alt.
+	// Text as the accessibility tree reads it (as the Tern kit's `contentText`): hidden subtrees skipped, block
+	// children spaced apart, a child's `aria-label` or an image's `alt` in place of its content.
 	const contentText = (element: Pick<Element, "childNodes">): string => {
 		let text = "";
 		for (const child of Array.from(element.childNodes)) {
@@ -153,17 +154,23 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			if (child.nodeType === 3) text += child.nodeValue ?? "";
 			if (child.nodeType !== 1) continue;
 			const childElement = child as Element;
+			const tag = childElement.tagName.toLocaleLowerCase();
+			if (["script", "style", "template", "noscript"].includes(tag)) continue;
 			if (childElement.getAttribute("aria-hidden") === "true") continue;
+			const display = getComputedStyle(childElement).display;
+			if (display === "none") continue;
+			const gap = display === "inline" || display === "contents" ? "" : " ";
+			const label = normalizeSpace(childElement.getAttribute("aria-label") ?? "");
 			text +=
-				childElement.tagName.toLocaleLowerCase() === "img"
-					? (childElement.getAttribute("alt") ?? "")
-					: contentText(childElement);
+				gap +
+				(label || (tag === "img" ? (childElement.getAttribute("alt") ?? "") : contentText(childElement))) +
+				gap;
 		}
 		return text;
 	};
 	const accessibleName = (element: Element): string => {
-		const ariaLabel = element.getAttribute("aria-label");
-		if (ariaLabel) return normalizeSpace(ariaLabel);
+		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
+		if (ariaLabel) return ariaLabel;
 		const labelledBy = element.getAttribute("aria-labelledby");
 		if (labelledBy) {
 			const value = normalizeSpace(
@@ -184,16 +191,21 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		}
 		const wrappingLabel = element.closest("label");
 		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel));
-		const alt = element.getAttribute("alt");
-		if (alt !== null) return normalizeSpace(alt);
-		const content = normalizeSpace(
-			element.tagName.toLocaleLowerCase() === "input" &&
-				["button", "submit", "reset"].includes((element as unknown as { type: string }).type.toLocaleLowerCase())
-				? (element as unknown as { value: string }).value
-				: contentText(element),
-		);
+		const tag = element.tagName.toLocaleLowerCase();
+		// An `<input>`'s type and value decide its name; other elements have neither.
+		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
+		const inputType = input?.type.toLocaleLowerCase();
+		if (tag === "img" || tag === "area" || inputType === "image") {
+			const alt = normalizeSpace(element.getAttribute("alt") ?? "");
+			if (alt) return alt;
+		}
+		const content =
+			inputType === "button" || inputType === "submit" || inputType === "reset"
+				? normalizeSpace(input?.value ?? "") ||
+					(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "")
+				: normalizeSpace(contentText(element));
 		if (content && namedByContent) return content;
-		return normalizeSpace(element.getAttribute("title") ?? content);
+		return normalizeSpace(element.getAttribute("title") || element.getAttribute("placeholder") || content);
 	};
 	return Array.from(root.querySelectorAll("*")).filter(element => {
 		const role = (element.getAttribute("role")?.trim().split(/\s+/)[0] ?? implicitRole(element))?.toLocaleLowerCase();

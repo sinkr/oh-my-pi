@@ -67,7 +67,12 @@ beforeAll(async () => {
 		<button><span aria-hidden="true">⚙</span> Settings</button>
 		<button><img alt="bogusz's logo" src="data:,"> bogusz</button>
 		<button>Sign
-			in</button>`;
+			in</button>
+		<button>Save<span hidden>!</span></button>
+		<button><div>Next</div><div>step</div></button>
+		<button><span aria-label="Close dialog">×</span></button>
+		<input type="submit">
+		<input placeholder="Email">`;
 	await invoke({ action: "open", name: namesTab, url: `data:text/html,${encodeURIComponent(namesHtml)}` });
 });
 
@@ -91,18 +96,32 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 	});
 
 	it.each([
-		["a title does not replace the text content", "Cart"],
-		["aria-hidden text is left out", "Settings"],
-		["an embedded image contributes its alt", "bogusz's logo bogusz"],
-		["whitespace collapses", "Sign in"],
-	])("matches role/ exact names to the name observe() shows when %s", async (_, buttonName) => {
+		["a title does not replace the text content", "button", "Cart"],
+		["aria-hidden text is left out", "button", "Settings"],
+		["an embedded image contributes its alt", "button", "bogusz's logo bogusz"],
+		["whitespace collapses", "button", "Sign in"],
+		["hidden text is left out", "button", "Save"],
+		["block children are separated", "button", "Next step"],
+		["a child's aria-label replaces its text", "button", "Close dialog"],
+		["a submit input has no value", "button", "Submit"],
+		["a textbox is named by its placeholder", "textbox", "Email"],
+	])("matches role/ exact names to the name observe() shows when %s", async (_, role, elementName) => {
 		const result = (await invoke({
 			action: "run",
 			name: namesTab,
-			code: `const observed = (await tab.observe()).elements.find(entry => entry.role === "button" && entry.name.trim() === ${JSON.stringify(buttonName)});
-			return observed && await tab.count(\`role/button[name="\${observed.name}" exact]\`);`,
+			code: `const observed = (await tab.observe()).elements.find(entry => entry.role === ${JSON.stringify(role)} && entry.name.trim() === ${JSON.stringify(elementName)});
+			return observed && await tab.count(\`role/${role}[name="\${observed.name}" exact]\`);`,
 		})) as { details?: { value?: number } };
 		expect(result.details?.value).toBe(1);
+	});
+
+	it("collapses whitespace in the queried role/ name and skips a title that is not the button's name", async () => {
+		const result = (await invoke({
+			action: "run",
+			name: namesTab,
+			code: `return [await tab.count('role/button[name="Sign   in" exact]'), await tab.count('role/button[name="Open the cart" exact]')];`,
+		})) as { details?: { value?: number[] } };
+		expect(result.details?.value).toEqual([1, 0]);
 	});
 
 	it("returns DOM content, values, attributes, counts, boxes, styles, and query state branches", async () => {
