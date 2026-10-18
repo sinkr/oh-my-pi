@@ -22,7 +22,9 @@ describe("loadSessionFile path errors", () => {
 		await using dir = await TempDir.create("omp-session-enotdir-");
 		const file = path.join(dir.path(), "plain-file.txt");
 		await Bun.write(file, "not a directory");
-		await expect(loadSessionFile(path.join(file, "sub", "session.jsonl"))).rejects.toMatchObject({
+		const sessionPath = path.join(file, "sub", "session.jsonl");
+		await expect(loadSessionFile(sessionPath)).rejects.toMatchObject({ code: "ENOTDIR" });
+		await expect(loadSessionFile(sessionPath, undefined, { throwIfMissing: true })).rejects.toMatchObject({
 			code: "ENOTDIR",
 		});
 	});

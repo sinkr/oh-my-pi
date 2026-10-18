@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ConcatSink, getBlobsDir, isEisdir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -459,7 +459,7 @@ export async function hasFileAsPathComponent(filePath: string): Promise<boolean>
 	let current = path.resolve(filePath);
 	for (;;) {
 		try {
-			return !(await fs.promises.stat(current)).isDirectory();
+			return !(await fs.stat(current)).isDirectory();
 		} catch {
 			// Missing component: climb to the first existing ancestor.
 		}
@@ -479,20 +479,21 @@ export async function loadSessionFile(
 		const statSize = storage.statSync(filePath).size;
 		const { loaded, sourceSize } = await loadWithKnownSize(filePath, storage, statSize, options);
 		return { ...loaded, sourceSize };
-	} catch (err) {
+	} catch (caught) {
+		// Windows reports ENOENT where POSIX reports ENOTDIR for a path running
+		// through a regular file; restore ENOTDIR so that path error is never
+		// masked as a missing session.
+		const err =
+			isEnoent(caught) &&
+			process.platform === "win32" &&
+			storage instanceof FileSessionStorage &&
+			(await hasFileAsPathComponent(filePath))
+				? enotdir(filePath)
+				: caught;
 		if (options?.throwIfMissing && (isEnoent(err) || isEnotdir(err))) {
 			throw err;
 		}
 		if (isEnoent(err)) {
-			// Keep the ENOTDIR rejection POSIX produces so a path-component
-			// error is not masked as a missing session.
-			if (
-				process.platform === "win32" &&
-				storage instanceof FileSessionStorage &&
-				(await hasFileAsPathComponent(filePath))
-			) {
-				throw enotdir(filePath);
-			}
 			return {
 				entries: [],
 				titleSlot: undefined,
