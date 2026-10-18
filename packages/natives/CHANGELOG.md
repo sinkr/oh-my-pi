@@ -50,7 +50,7 @@
 - Fixed the user's typing landing in the macOS app a background action targets when that app brings itself to the front while they type ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input sending the user back to their previous app after they opened the target app from Spotlight during the action ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed an app that a macOS background action opens something in, such as TextEdit after a background ⌘O in Finder, staying in front of the user's app; it is sent back like the target ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed the user's keystrokes landing in the app a macOS background action targets, or vanishing into a menu it opened, when it takes the keyboard mid-action; they now reach the user's app
+- Fixed the user's keystrokes landing in the app a macOS background action targets, or vanishing into a menu it opened, when it takes the keyboard mid-action; they now reach the user's app ([#16140](https://github.com/can1357/oh-my-pi/pull/16140) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.1] - 2026-10-17
 
