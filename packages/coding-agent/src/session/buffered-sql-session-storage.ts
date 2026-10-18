@@ -8,6 +8,7 @@ import type { FileLockHandle } from "@oh-my-pi/pi-utils/file-lock";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { isAssistantMessageLine } from "./session-entries";
+import { moveSessionPlaceholder, removeSessionPlaceholder } from "./session-placeholder";
 import type {
 	SessionStorage,
 	SessionStorageStat,
@@ -151,6 +152,7 @@ function connectionFailure(error: Error): boolean {
  */
 export class BufferedSqlSessionStorage implements SessionStorage {
 	readonly defersSyncPublish = false;
+	readonly keepsLocalPlaceholders = true;
 	readonly #db: Database;
 	readonly #cachePath: string;
 	readonly #table: string;
@@ -685,6 +687,7 @@ export class BufferedSqlSessionStorage implements SessionStorage {
 			this.#run("UPDATE buffer_segments SET path = ? WHERE path = ?", destination, source);
 			this.#enqueue({ kind: "rename", expected, mtime, destination });
 		});
+		moveSessionPlaceholder(source, destination);
 	}
 	#delete(file: string, artifacts: boolean): void {
 		this.#assertOpen();
@@ -715,6 +718,7 @@ export class BufferedSqlSessionStorage implements SessionStorage {
 			}
 			this.#enqueue({ kind: "delete", expected, mtime, prefix });
 		});
+		removeSessionPlaceholder(file);
 	}
 	async unlink(file: string): Promise<void> {
 		this.#delete(file, false);
