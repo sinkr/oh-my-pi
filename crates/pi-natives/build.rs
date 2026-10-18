@@ -17,6 +17,13 @@ fn main() {
 			&["AppKit", "ScreenCaptureKit", "CoreGraphics"],
 			"14.0",
 		);
+		build_darwin_native_helper(
+			"src/desktop/macos/keymap-helper.m",
+			"omp-keymap-helper",
+			"OMP_KEYMAP_DARWIN_HELPER",
+			&["Carbon"],
+			"12.0",
+		);
 		build_rust_helper(
 			"src/desktop/macos/release_helper.rs",
 			&["src/desktop/macos/release.rs", "src/desktop/macos/route.rs"],
