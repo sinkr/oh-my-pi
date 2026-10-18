@@ -141,6 +141,7 @@ The automatic paths are intentionally different:
 
 - **Idle maintenance**
    - Trigger: `runIdleCompaction()` when not streaming or already compacting; it cancels pending cache-warm refreshes first so no warm replay races the summary. The interactive idle timer arms after a turn ends with empty input and context at or above `compaction.idleThresholdTokens`. When a response has confirmed a long-tier (1h, Anthropic long retention) prompt-cache entry — it read or wrote the cache — the timer fires 5s before the cache warmer's refresh point, `min(90% of TTL, TTL − 10s)` after the last request or warm hit (about 54 min), so the summary request still reads the cached prefix; a turn that settles past that point but before expiry compacts immediately. A 5-minute entry never drives the timer: it lapses too soon after a turn for compaction to be worth starting on its schedule. In that case, with an unknown lifetime, or once the entry has expired, the timer waits `compaction.idleTimeoutSeconds`.
+   - Short-tier trade-off (deliberate): the fallback delay counts from turn end while the cache lifetime counts from the request send, so with the default 300s delay an idle summary after a 5-minute entry always runs on an expired cache and pays a cold full-prefix read. This is accepted so a short break never triggers compaction; shorter `compaction.idleTimeoutSeconds` values (minimum 60s) can still land inside the entry's lifetime.
    - Uses `reason: "idle"` and does not auto-continue afterward.
 
 ### Payload-rejection guard
