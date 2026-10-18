@@ -118,7 +118,9 @@ describe("bash internal URLs through the shell filesystem", () => {
 
 		expect(isError).toBe(true);
 		expect(text).not.toContain("ran\n");
-		expect(text).toContain("Unknown skill: nope");
+		// Unix maps the provider's ENOENT to the native errno (its message is the
+		// OS's); other platforms keep the provider message. Both name the URL.
+		expect(text).toContain("cannot resolve skill://nope/tool.js");
 	});
 
 	it("starts an external program in the directory a URL working directory aliases", async () => {

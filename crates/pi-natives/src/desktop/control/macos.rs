@@ -1,19 +1,36 @@
-//! Listen-only physical Escape monitoring for operation and durable task
-//! ownership.
+//! Listen-only event taps: physical Escape for operation and durable task
+//! ownership, and the user's own keys and clicks in the apps a session uses.
 use std::{
 	ffi::c_void,
 	ptr,
-	sync::atomic::{AtomicU32, Ordering},
+	sync::{
+		Arc,
+		atomic::{AtomicU32, Ordering},
+	},
 	thread::{self, JoinHandle},
+	time::Instant,
 };
 
-use super::{CoreResult, DesktopError, EmergencyStop};
+use parking_lot::Mutex;
+
+use super::{CoreResult, DesktopError, EmergencyStop, intervention::UserInputs};
+use crate::desktop::macos::front_pid;
 
 pub(crate) const SYNTHETIC_EVENT_TAG: i64 = 0x7069_6465_736b;
 const SOURCE_USER_DATA: u32 = 42;
 const SOURCE_UNIX_PID: u32 = 41;
+/// `kCGEventTargetUnixProcessID`: the process `WindowServer` routes the event
+/// to, filled in at the annotated session tap. Verified on a macOS VM for
+/// hardware key presses and left clicks, from a USB keyboard and a VNC pointer;
+/// right and other clicks were not exercised.
+const TARGET_UNIX_PID: u32 = 40;
 const KEYBOARD_KEYCODE: u32 = 9;
+const LEFT_MOUSE_DOWN: u32 = 1;
+const RIGHT_MOUSE_DOWN: u32 = 3;
 const KEY_DOWN: u32 = 10;
+const OTHER_MOUSE_DOWN: u32 = 25;
+const SESSION_TAP: u32 = 1;
+const ANNOTATED_SESSION_TAP: u32 = 2;
 type Ref = *mut c_void;
 type ConstRef = *const c_void;
 type Callback = unsafe extern "C" fn(Ref, u32, Ref, Ref) -> Ref;
@@ -63,9 +80,97 @@ unsafe extern "C" {
 	fn CFRelease(object: ConstRef);
 }
 
-struct TapContext {
-	stop: EmergencyStop,
-	tap:  Ref,
+struct TapContext<C> {
+	inner: C,
+	tap:   Ref,
+}
+
+/// The ports of this process's live taps, so the process can invalidate them
+/// before it exits ([`close_taps`]).
+struct LiveTaps(Mutex<Live>);
+
+struct Live {
+	ports:  Vec<usize>,
+	/// The process closed its taps: it is exiting, and a tap that starts after
+	/// that is invalidated as it is listed.
+	closed: bool,
+}
+
+static LIVE_TAPS: LiveTaps = LiveTaps::new();
+
+impl LiveTaps {
+	const fn new() -> Self {
+		Self(Mutex::new(Live { ports: Vec::new(), closed: false }))
+	}
+
+	/// Lists `port`, or invalidates it at once after [`Self::close`].
+	///
+	/// # Safety
+	/// `port` must be a live `CFMachPort`.
+	unsafe fn add(&self, port: Ref) {
+		let mut live = self.0.lock();
+		if live.closed {
+			// SAFETY: forwarded caller contract.
+			unsafe { CFMachPortInvalidate(port) };
+		} else {
+			live.ports.push(port as usize);
+		}
+	}
+
+	/// Removes `port` and invalidates it under the same lock as
+	/// [`Self::close`], so neither touches a port the other may release.
+	///
+	/// # Safety
+	/// `port` must be a live `CFMachPort`.
+	unsafe fn invalidate(&self, port: Ref) {
+		let mut live = self.0.lock();
+		live.ports.retain(|&live| live != port as usize);
+		// SAFETY: forwarded caller contract.
+		unsafe { CFMachPortInvalidate(port) };
+	}
+
+	fn close(&self) {
+		let mut live = self.0.lock();
+		live.closed = true;
+		for port in live.ports.drain(..) {
+			// SAFETY: a port is listed only while its tap thread holds it, and
+			// that thread unlists it under this lock before releasing it.
+			unsafe { CFMachPortInvalidate(port as Ref) };
+		}
+	}
+}
+
+/// Invalidates every event tap this process still holds; for a process
+/// about to exit, after which no tap here sees input again. A tap whose
+/// process exits or is killed with it still valid makes `WindowServer`
+/// deliver the key it was routing at that moment again to the app the user
+/// types in, often many times; a tap invalidated first never did (measured on
+/// macOS 26.5 with helper processes exiting during the user's typing). The
+/// host calls this from its exit handler: Bun's `process.exit` runs no native
+/// exit hook. Nothing helps a process killed outright.
+pub(super) fn close_taps() {
+	LIVE_TAPS.close();
+}
+
+/// Lists `port`, a tap made elsewhere in the desktop backend, among the taps
+/// [`close_taps`] invalidates, or invalidates it at once if they are already
+/// closed. Its thread must later unlist it through [`invalidate_live_tap`]
+/// before releasing it.
+///
+/// # Safety
+/// `port` must be a live `CFMachPort`.
+pub(crate) unsafe fn add_live_tap(port: Ref) {
+	// SAFETY: forwarded caller contract.
+	unsafe { LIVE_TAPS.add(port) };
+}
+
+/// Unlists and invalidates `port`, which may never have been listed.
+///
+/// # Safety
+/// `port` must be a live `CFMachPort`.
+pub(crate) unsafe fn invalidate_live_tap(port: Ref) {
+	// SAFETY: forwarded caller contract.
+	unsafe { LIVE_TAPS.invalidate(port) };
 }
 
 const fn physical_escape(kind: u32, key: i64, pid: i64, tag: i64) -> bool {
@@ -209,10 +314,9 @@ enum UserInput {
 	Typing,
 }
 
-const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
-	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
-		return None;
-	}
+/// The rule for each type the takeover monitor's tap listens to; `None` for a
+/// type without one.
+const fn classify(kind: u32, key: i64, flags: u64) -> Option<UserInput> {
 	match kind {
 		kind if is_pointer_press(kind) => Some(UserInput::Choice),
 		KEY_DOWN if plain_typing(key, flags) => Some(UserInput::Typing),
@@ -220,6 +324,30 @@ const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Opti
 		FLAGS_CHANGED if typing_modifier(key) => Some(UserInput::Typing),
 		FLAGS_CHANGED => Some(UserInput::Choice),
 		_ => None,
+	}
+}
+
+// A type added to `MONITORED_TYPES` fails the build until it has a rule.
+const _: () = {
+	let mut i = 0;
+	while i < MONITORED_TYPES.len() {
+		assert!(classify(MONITORED_TYPES[i], 0, 0).is_some(), "a monitored type has no rule");
+		i += 1;
+	}
+};
+
+const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
+	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
+		return None;
+	}
+	match classify(kind, key, flags) {
+		Some(input) => Some(input),
+		// Not a type the tap listens to, so it never counts toward `SEEN`.
+		None if seen_index(kind, pid, tag).is_none() => None,
+		// A type the tap listens to without a rule still counts toward `SEEN`,
+		// so the monitor would look caught up with it; read as no input, the
+		// hand-back would take the front back over the user's pick.
+		None => Some(UserInput::Choice),
 	}
 }
 
@@ -237,9 +365,9 @@ pub(crate) fn uptime_ns() -> u64 {
 unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
 	// SAFETY: the monitor thread retains this stack context through
 	// invalidation.
-	let context = unsafe { &*(user.cast::<TapContext>()) };
+	let context = unsafe { &*(user.cast::<TapContext<EmergencyStop>>()) };
 	if kind == u32::MAX || kind == u32::MAX - 1 {
-		context.stop.cancel();
+		context.inner.cancel();
 		// SAFETY: the event tap remains alive until this callback returns.
 		unsafe {
 			CGEventTapEnable(context.tap, true);
@@ -271,7 +399,101 @@ unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> R
 			SEEN[index].fetch_add(1, Ordering::AcqRel);
 		}
 		if physical_escape(kind, key, pid, tag) {
-			context.stop.escape();
+			context.inner.escape();
+		}
+	}
+	event
+}
+
+/// Whether an event came from someone other than this process: the user's
+/// hardware, or a tool such as dictation that posts for them under its own
+/// process id.
+const fn foreign(tag: i64, source_pid: i64, own_pid: i64) -> bool {
+	tag != SYNTHETIC_EVENT_TAG && source_pid != own_pid
+}
+
+/// The event types the user-input monitor's tap listens to: key presses and
+/// every pointer press.
+const USER_INPUT_MASK: u64 =
+	(1 << KEY_DOWN) | (1 << LEFT_MOUSE_DOWN) | (1 << RIGHT_MOUSE_DOWN) | (1 << OTHER_MOUSE_DOWN);
+
+/// Where a foreign event the annotated tap names no target for lands.
+enum Untargeted {
+	/// The front process, which takes the keyboard.
+	Front,
+	/// Nowhere: a click without a target names no app.
+	Dropped,
+}
+
+/// The rule for each type the user-input tap listens to; `None` for a type
+/// without one.
+const fn untargeted(kind: u32) -> Option<Untargeted> {
+	match kind {
+		KEY_DOWN => Some(Untargeted::Front),
+		LEFT_MOUSE_DOWN | RIGHT_MOUSE_DOWN | OTHER_MOUSE_DOWN => Some(Untargeted::Dropped),
+		_ => None,
+	}
+}
+
+// A type added to `USER_INPUT_MASK` fails the build until it has a rule.
+const _: () = {
+	let mut kind = 0;
+	while kind < 64 {
+		assert!(
+			USER_INPUT_MASK & (1 << kind) == 0 || untargeted(kind).is_some(),
+			"a user-input type has no rule"
+		);
+		kind += 1;
+	}
+};
+
+/// The process a foreign key press or click lands in: the target the
+/// annotated tap names, else what [`untargeted`] says for its type, and the
+/// front process for a type without a rule.
+fn input_target(
+	kind: u32,
+	target: i64,
+	front: impl FnOnce() -> Option<libc::pid_t>,
+) -> Option<libc::pid_t> {
+	if let Ok(pid) = libc::pid_t::try_from(target)
+		&& pid > 0
+	{
+		return Some(pid);
+	}
+	match untargeted(kind) {
+		Some(Untargeted::Front) => front(),
+		Some(Untargeted::Dropped) => None,
+		// Not a type the tap listens to, since each of those has a rule: counted
+		// against the front process, it at worst has the agent read that app
+		// again, where dropping it would let the agent act on what the user changed.
+		None => front(),
+	}
+}
+
+unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
+	// SAFETY: the monitor thread retains this stack context through
+	// invalidation.
+	let context = unsafe { &*(user.cast::<TapContext<Arc<UserInputs>>>()) };
+	if kind == u32::MAX || kind == u32::MAX - 1 {
+		// SAFETY: the event tap remains alive until this callback returns.
+		unsafe {
+			CGEventTapEnable(context.tap, true);
+		}
+		return event;
+	}
+	if !event.is_null() {
+		// SAFETY: documented read-only CGEvent fields.
+		let (tag, source, target) = unsafe {
+			(
+				CGEventGetIntegerValueField(event, SOURCE_USER_DATA),
+				CGEventGetIntegerValueField(event, SOURCE_UNIX_PID),
+				CGEventGetIntegerValueField(event, TARGET_UNIX_PID),
+			)
+		};
+		if foreign(tag, source, i64::from(std::process::id()))
+			&& let Some(pid) = input_target(kind, target, front_pid)
+		{
+			context.inner.record(pid, Instant::now());
 		}
 	}
 	event
@@ -284,29 +506,30 @@ unsafe extern "C" fn stop_loop(_: Ref) {
 	}
 }
 
-pub(super) struct EscapeMonitor {
+/// A listen-only event tap running on its own thread's run loop until drop.
+struct TapThread {
 	thread:      Option<JoinHandle<()>>,
 	run_loop:    usize,
 	stop_source: usize,
 }
 
-impl EscapeMonitor {
-	pub(super) fn start(emergency: EmergencyStop) -> CoreResult<Self> {
+impl TapThread {
+	fn start<C: Send + 'static>(
+		thread_name: &'static str,
+		label: &'static str,
+		location: u32,
+		mask: u64,
+		inner: C,
+		callback: Callback,
+	) -> CoreResult<Self> {
 		let (ready, receive) = flume::bounded(1);
 		let worker = thread::Builder::new()
-			.name("desktop-escape".into())
+			.name(thread_name.into())
 			.spawn(move || {
-				let mut context = TapContext { stop: emergency, tap: ptr::null_mut() };
+				let mut context = TapContext { inner, tap: ptr::null_mut() };
 				// SAFETY: listen-only tap; context stays live until invalidation.
 				let tap = unsafe {
-					CGEventTapCreate(
-						1,
-						0,
-						1,
-						monitor_mask(),
-						observe,
-						ptr::from_mut(&mut context).cast(),
-					)
+					CGEventTapCreate(location, 0, 1, mask, callback, ptr::from_mut(&mut context).cast())
 				};
 				if tap.is_null() {
 					let _ = ready.send(None);
@@ -356,32 +579,33 @@ impl EscapeMonitor {
 					CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode);
 					CFRunLoopAddSource(run_loop, stop_source, kCFRunLoopDefaultMode);
 					CGEventTapEnable(tap, true);
+					LIVE_TAPS.add(tap);
 					let _ =
 						ready.send(Some((CFRetain(run_loop) as usize, CFRetain(stop_source) as usize)));
 					CFRunLoopRun();
 					CFRunLoopRemoveSource(run_loop, source, kCFRunLoopDefaultMode);
 					CFRunLoopRemoveSource(run_loop, stop_source, kCFRunLoopDefaultMode);
-					CFMachPortInvalidate(tap);
+					LIVE_TAPS.invalidate(tap);
 					CFRelease(source);
 					CFRelease(stop_source);
 					CFRelease(tap);
 				}
 			})
 			.map_err(|error| {
-				DesktopError::input_failed(format!("cannot start emergency Escape monitor: {error}"))
+				DesktopError::input_failed(format!("cannot start {label} monitor: {error}"))
 			})?;
 		let Some((run_loop, stop_source)) = receive.recv().ok().flatten() else {
 			let _ = worker.join();
-			return Err(DesktopError::permission_denied(
-				"cannot start the emergency Escape monitor: macOS refused its event tap, so no input \
-				 was sent; check Accessibility for the app that launched omp",
-			));
+			return Err(DesktopError::permission_denied(format!(
+				"cannot start the {label} monitor: macOS refused its event tap, so no input was sent; \
+				 check Accessibility for the app that launched omp"
+			)));
 		};
 		Ok(Self { thread: Some(worker), run_loop, stop_source })
 	}
 }
 
-impl Drop for EscapeMonitor {
+impl Drop for TapThread {
 	fn drop(&mut self) {
 		// SAFETY: these retains belong to this owner. A signaled source remains
 		// pending even when stop races the first CFRunLoopRun call.
@@ -399,9 +623,141 @@ impl Drop for EscapeMonitor {
 	}
 }
 
+pub(super) struct EscapeMonitor {
+	_tap: TapThread,
+}
+
+impl EscapeMonitor {
+	pub(super) fn start(emergency: EmergencyStop) -> CoreResult<Self> {
+		let tap = TapThread::start(
+			"desktop-escape",
+			"emergency Escape",
+			SESSION_TAP,
+			monitor_mask(),
+			emergency,
+			observe,
+		)?;
+		Ok(Self { _tap: tap })
+	}
+}
+
+/// Records every foreign key press and click by the process it lands in, at
+/// the annotated session tap where `WindowServer` has named that process. It
+/// listens during background input and between calls, not only during
+/// takeover like the Escape monitor.
+pub(super) struct UserInputMonitor {
+	_tap: TapThread,
+}
+
+impl UserInputMonitor {
+	pub(super) fn start(inputs: Arc<UserInputs>) -> CoreResult<Self> {
+		let tap = TapThread::start(
+			"desktop-user-input",
+			"user input",
+			ANNOTATED_SESSION_TAP,
+			USER_INPUT_MASK,
+			inputs,
+			observe_user,
+		)?;
+		Ok(Self { _tap: tap })
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// `CFMachPortContext`, version 0.
+	#[repr(C)]
+	struct PortContext {
+		version:     isize,
+		info:        Ref,
+		retain:      Option<unsafe extern "C" fn(ConstRef) -> ConstRef>,
+		release:     Option<unsafe extern "C" fn(ConstRef)>,
+		description: Option<unsafe extern "C" fn(ConstRef) -> ConstRef>,
+	}
+
+	#[link(name = "CoreFoundation", kind = "framework")]
+	unsafe extern "C" {
+		fn CFMachPortCreate(
+			allocator: Ref,
+			callback: unsafe extern "C" fn(Ref, Ref, isize, Ref),
+			context: *mut PortContext,
+			should_free_info: *mut bool,
+		) -> Ref;
+		fn CFMachPortIsValid(port: Ref) -> bool;
+	}
+
+	unsafe extern "C" fn ignore(_: Ref, _: Ref, _: isize, _: Ref) {}
+
+	/// A plain mach port standing in for a tap's, which needs event-listening
+	/// access to create.
+	fn port() -> Ref {
+		let mut context = PortContext {
+			version:     0,
+			info:        ptr::null_mut(),
+			retain:      None,
+			release:     None,
+			description: None,
+		};
+		// SAFETY: a version-zero context copied at creation and a no-op
+		// callback.
+		let port =
+			unsafe { CFMachPortCreate(ptr::null_mut(), ignore, &raw mut context, ptr::null_mut()) };
+		assert!(!port.is_null());
+		port
+	}
+
+	#[test]
+	fn closing_invalidates_every_live_tap_and_none_its_thread_already_ended() {
+		let taps = LiveTaps::new();
+		let (live, ended) = (port(), port());
+		// SAFETY: live ports created above.
+		unsafe {
+			taps.add(live);
+			taps.add(ended);
+		}
+		// SAFETY: `ended` is a live port, released below.
+		unsafe { taps.invalidate(ended) };
+		let other = port();
+		taps.close();
+		// SAFETY: live ports created above.
+		unsafe {
+			assert!(!CFMachPortIsValid(live), "a live tap outlived close");
+			assert!(!CFMachPortIsValid(ended));
+			assert!(CFMachPortIsValid(other), "close touched a port it was never given");
+		}
+		assert!(taps.0.lock().ports.is_empty());
+		// A tap thread ending after close finds its port already gone.
+		// SAFETY: still a live (invalid) CFMachPort.
+		unsafe { taps.invalidate(live) };
+		// SAFETY: create-rule objects from `port`.
+		unsafe {
+			for port in [live, ended, other] {
+				CFRelease(port);
+			}
+		}
+	}
+
+	#[test]
+	fn a_tap_that_starts_after_closing_is_invalidated_as_it_is_listed() {
+		let taps = LiveTaps::new();
+		taps.close();
+		let late = port();
+		// SAFETY: a live port created above, released below.
+		unsafe {
+			taps.add(late);
+			assert!(!CFMachPortIsValid(late), "a tap started after close stayed live");
+		}
+		assert!(taps.0.lock().ports.is_empty());
+		// SAFETY: still a live (invalid) CFMachPort, then its create-rule
+		// release.
+		unsafe {
+			taps.invalidate(late);
+			CFRelease(late);
+		}
+	}
+
 	#[test]
 	fn only_physical_escape_cancels() {
 		assert!(physical_escape(KEY_DOWN, 53, 0, 0));
@@ -409,6 +765,35 @@ mod tests {
 		assert!(!physical_escape(KEY_DOWN, 53, 42, 0));
 		assert!(!physical_escape(KEY_DOWN, 0, 0, 0));
 		assert!(!physical_escape(11, 53, 0, 0));
+	}
+
+	#[test]
+	fn the_users_and_their_tools_input_is_foreign_and_this_processs_is_not() {
+		let own = 900;
+		// Hardware input carries no source process.
+		assert!(foreign(0, 0, own));
+		// A dictation tool posts under its own process id.
+		assert!(foreign(0, 4242, own));
+		// Anything this process posts carries its tag, whoever relays it.
+		assert!(!foreign(SYNTHETIC_EVENT_TAG, 0, own));
+		assert!(!foreign(SYNTHETIC_EVENT_TAG, 4242, own));
+		// An untagged event this process posted is still its own.
+		assert!(!foreign(0, own, own));
+	}
+
+	#[test]
+	fn foreign_input_lands_in_its_annotated_target_or_a_key_in_the_front_process() {
+		let unread = || -> Option<libc::pid_t> { panic!("the front process is not read") };
+		assert_eq!(input_target(KEY_DOWN, 77, unread), Some(77));
+		assert_eq!(input_target(LEFT_MOUSE_DOWN, 77, unread), Some(77));
+		assert_eq!(input_target(KEY_DOWN, 0, || Some(12)), Some(12));
+		assert_eq!(input_target(KEY_DOWN, 0, || None), None);
+		assert_eq!(input_target(LEFT_MOUSE_DOWN, 0, unread), None);
+		assert_eq!(input_target(RIGHT_MOUSE_DOWN, -1, unread), None);
+		assert_eq!(input_target(OTHER_MOUSE_DOWN, 0, unread), None);
+		// A type without a rule counts against the front process rather than
+		// being dropped.
+		assert_eq!(input_target(11, 0, || Some(12)), Some(12));
 	}
 
 	#[test]

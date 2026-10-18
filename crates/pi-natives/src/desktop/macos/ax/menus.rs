@@ -94,8 +94,7 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 		// validate itself in response to a key-window change.
 		let item = reread()?;
 		require_command(&item)?;
-		context_holds()?;
-		control::check()?;
+		ready_to_dispatch(context_holds)?;
 		perform_action(element, "AXPress").map_err(|error| {
 			DesktopError::ax_failed(format!(
 				"{error}; the menu command may already have taken effect; inspect the target before \
@@ -103,6 +102,16 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 			))
 		})
 	})
+}
+
+/// Before a menu command is pressed: its context still holds, the call is not
+/// cancelled, and the user has not pressed a key or clicked in the app since
+/// the call was admitted ([`control::intervention::check_press`]), since the
+/// command can wait seconds for its menu to revalidate.
+fn ready_to_dispatch(context_holds: &dyn Fn() -> CoreResult<()>) -> CoreResult<()> {
+	context_holds()?;
+	control::check()?;
+	control::intervention::check_press()
 }
 
 /// Reads again through `read`, waiting through `wait` before each read, until
@@ -310,7 +319,7 @@ fn children(
 	Ok((elements, items))
 }
 
-fn bounded_children(
+pub(super) fn bounded_children(
 	element: &AXUIElement,
 	optional: bool,
 ) -> CoreResult<Vec<CFRetained<AXUIElement>>> {
@@ -527,6 +536,20 @@ mod tests {
 				.code,
 			ErrorCode::Cancelled
 		);
+	}
+
+	#[test]
+	fn a_menu_command_is_not_pressed_once_the_user_used_the_app_during_the_call() {
+		// A disabled command waits up to 1.5 s for its menu to revalidate; the
+		// user types into the same window meanwhile.
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, None, || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let _watch = listener.admit(7, &token).unwrap();
+		let holds = || Ok(());
+		assert!(ready_to_dispatch(&holds).is_ok());
+		listener.record_for_test(7, Instant::now());
+		assert_eq!(ready_to_dispatch(&holds).unwrap_err().code, ErrorCode::UserIntervened);
 	}
 
 	#[test]

@@ -24,3 +24,9 @@ export function desktopEscapeStops(key) {
 export function forgetDesktopEscapeStops(key) {
 	(loadNative().forgetDesktopEscapeStops ?? missingNativeExport("forgetDesktopEscapeStops"))(key);
 }
+
+/** Invalidate this process's event taps before it exits (see the native doc). A stale
+ * workspace addon without the export holds no such taps. */
+export function closeDesktopEventTaps() {
+	loadNative().closeDesktopEventTaps?.();
+}
