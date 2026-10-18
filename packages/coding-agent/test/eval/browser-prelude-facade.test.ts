@@ -209,6 +209,45 @@ describe("browser JavaScript facade", () => {
 			{ name: "docs", fn: "async () => 1", args: [], action: "run" },
 		]);
 	});
+
+	function recordingFacade() {
+		const calls: unknown[] = [];
+		const context = createContext({
+			__omp_log__: () => {},
+			__omp_prelude__: async (_name: string, parameters: unknown) => {
+				calls.push(parameters);
+				return responseFor(parameters);
+			},
+		});
+		runInContext(createBrowserPrelude(makeSession()).javascript, context);
+		return { calls, context };
+	}
+
+	it("tells tab.run given an args array to wrap it in { args }", async () => {
+		const { calls, context } = recordingFacade();
+
+		await expect(
+			runInContext('browser.tab("docs").run(async (_scope, url) => url, ["https://example.test"])', context),
+		).rejects.toThrow("pass the function's arguments as { args: [...] }");
+		for (const call of ['run(async () => 1, "fast")', 'run("return 1;", [1])']) {
+			await expect(runInContext(`browser.tab("docs").${call}`, context)).rejects.toThrow(
+				/^tab\.run\(\) expects an options object$/,
+			);
+		}
+		expect(calls).toEqual([]);
+	});
+
+	it("tells browser.open given a URL string to pass { url, name }", async () => {
+		const { calls, context } = recordingFacade();
+
+		await expect(
+			runInContext('browser.open("https://example.test", { viewport: { width: 1280, height: 900 } })', context),
+		).rejects.toThrow("browser.open({ url, name })");
+		await expect(runInContext("browser.open(42)", context)).rejects.toThrow(
+			/^browser\.open\(\) expects an options object$/,
+		);
+		expect(calls).toEqual([]);
+	});
 });
 
 describe("browser facade in real Eval runtimes", () => {
