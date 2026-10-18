@@ -163,6 +163,21 @@ describe("EventController idle compaction teardown", () => {
 		controller.dispose();
 	});
 
+	it("compacts right away when the turn settles past the refresh point but before expiry", async () => {
+		const runIdleCompaction = vi.fn(async () => {});
+		const context = createContext({
+			runIdleCompaction,
+			promptCacheEntry: { touchedAt: Date.now() - 59 * 60_000, ttlMs: 3_600_000 },
+		});
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		// The entry expires in one minute; the 60s fallback would land after it.
+		vi.advanceTimersByTime(1);
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
 	it("falls back to the configured delay once the cache entry has lapsed", async () => {
 		const runIdleCompaction = vi.fn(async () => {});
 		const context = createContext({
@@ -172,7 +187,9 @@ describe("EventController idle compaction teardown", () => {
 		const controller = new EventController(context);
 		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
 
-		vi.advanceTimersByTime(60_000);
+		vi.advanceTimersByTime(59_999);
+		expect(runIdleCompaction).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
 		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
 		controller.dispose();
 	});

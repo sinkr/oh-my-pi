@@ -25,7 +25,7 @@
 ### Changed
 
 - The default `judge` role now uses TypeSafe Jev 1.14 (`typesafe/jev-1.14.0`, then `openrouter/typesafe/jev-1.14`): `jev-latest` is TypeSafe's stable alias and answered as `jev-1.13.0`
-- Idle compaction now runs just before the model's prompt cache entry expires (about 54 minutes after the last request on a 1-hour cache, under 4.5 minutes on a 5-minute one), so the summary still reads the cached context; `compaction.idleTimeoutSeconds` applies only when the cache lifetime is unknown
+- Idle compaction now runs just before the model's prompt cache entry expires (about 54 minutes after the last request on a 1-hour cache, under 4.5 minutes on a 5-minute one), so the summary still reads the cached context; `compaction.idleTimeoutSeconds` applies only when the cache lifetime is unknown ([#16198](https://github.com/can1357/oh-my-pi/pull/16198) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 

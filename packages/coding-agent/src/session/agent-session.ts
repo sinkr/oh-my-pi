@@ -6821,6 +6821,10 @@ export class AgentSession implements SettingsScope {
 		// keeps its context (the async settle, or the threshold path, compacts if
 		// still needed).
 		if (this.#hasPendingAsyncWake()) return;
+		// The compaction request reads the warm prefix itself and then rewrites
+		// history; a warm replay racing a slow summary would be paid for nothing.
+		// A streaming session owns a live run whose warming must survive.
+		if (!this.isStreaming && !this.isCompacting) this.#cacheWarmer?.cancel();
 		await this.#maintenance.runIdleCompaction();
 	}
 

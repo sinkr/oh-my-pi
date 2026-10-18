@@ -2796,16 +2796,16 @@ export class EventController {
 		if (this.#currentContextTokens() < threshold) return;
 
 		// Compact just before the prompt cache entry expires, while the summary
-		// request can still read the cached prefix. Without a known lifetime (or
-		// once it has already lapsed) fall back to the configured delay.
+		// request can still read the cached prefix; a turn that settles past that
+		// point but before expiry compacts right away. Without a known lifetime, or
+		// once the entry has expired, fall back to the configured delay.
 		const cacheEntry = this.ctx.viewSession.promptCacheEntry;
 		const refreshDelayMs = cacheEntry ? getCacheWarmingDelayMs(cacheEntry.ttlMs) : undefined;
-		const cacheDeadlineMs =
-			cacheEntry && refreshDelayMs !== undefined
-				? cacheEntry.touchedAt + refreshDelayMs - IDLE_COMPACTION_CACHE_LEAD_MS - Date.now()
-				: 0;
+		const now = Date.now();
 		const timeoutMs =
-			cacheDeadlineMs > 0 ? cacheDeadlineMs : Math.max(60, Math.min(3600, idleSettings.idleTimeoutSeconds)) * 1000;
+			cacheEntry && refreshDelayMs !== undefined && cacheEntry.touchedAt + cacheEntry.ttlMs > now
+				? Math.max(0, cacheEntry.touchedAt + refreshDelayMs - IDLE_COMPACTION_CACHE_LEAD_MS - now)
+				: Math.max(60, Math.min(3600, idleSettings.idleTimeoutSeconds)) * 1000;
 		this.#idleCompactionTimer = setTimeout(() => {
 			this.#idleCompactionTimer = undefined;
 			// Re-check conditions before firing. Pruning may have run between arming
