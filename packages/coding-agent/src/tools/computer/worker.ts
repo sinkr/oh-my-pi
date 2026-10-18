@@ -790,6 +790,8 @@ export class ComputerWorkerCore {
 	#active: ActiveRun | null = null;
 	/** `#session` as the desktop scope sees it, checking for the user's Escape on every access. */
 	#guarded?: NativeDesktopSession;
+	/** Settles when this worker's latest `clipboard.write` finished. */
+	#clipboardWrite: Promise<void> = Promise.resolve();
 	/**
 	 * Per-run context, carried through AsyncLocalStorage so async work leaked
 	 * from an ended run (timers, dangling promises) keeps that run's aborted
@@ -1130,6 +1132,8 @@ export class ComputerWorkerCore {
 				output.pushDisplay(display);
 			},
 			callTool: (name, args) => {
+				// A bridged tool acts outside the desktop session, so the user's Escape is checked here too.
+				this.#checkEscape();
 				throwIfAborted(active.signal);
 				return this.#callTool(active, name, args);
 			},
@@ -1354,9 +1358,18 @@ export class ComputerWorkerCore {
 					// Clipboard access is part of the native desktop surface and remains
 					// outside the worker's readiness-only import graph.
 					const { copyToClipboard } = await import("../../utils/clipboard");
-					// The import yields; an Escape during it must still stop the write.
-					guardRun(getContext(), "clipboard.write");
-					await copyToClipboard(text);
+					// `copyToClipboard` queues behind the previous write; wait out this worker's own writes
+					// first, so the Escape check below is the last step before this one starts.
+					const previous = this.#clipboardWrite;
+					const { promise, resolve } = Promise.withResolvers<void>();
+					this.#clipboardWrite = promise;
+					try {
+						await previous;
+						guardRun(getContext(), "clipboard.write");
+						await copyToClipboard(text);
+					} finally {
+						resolve();
+					}
 					throwIfAborted(context.signal);
 				},
 			},

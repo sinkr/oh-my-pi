@@ -272,11 +272,20 @@ export class ComputerSupervisor implements ComputerController {
 			try {
 				result = await this.#raceWithGrace(promise, timeoutMs);
 			} catch (error) {
-				if (this.#escapeStopped()) throw new ToolError(ESCAPE_STOPPED_MESSAGE);
-				throw error;
+				if (!this.#escapeStopped()) throw error;
+				// What the worker said went wrong (input that landed in part, a timeout) stays first; its abort adds nothing.
+				const own =
+					error instanceof Error &&
+					!(error instanceof ToolAbortError) &&
+					!error.message.includes(ESCAPE_STOPPED_MESSAGE)
+						? error.message
+						: undefined;
+				throw new ToolError(own ? `${own}\n\n${ESCAPE_STOPPED_MESSAGE}` : ESCAPE_STOPPED_MESSAGE);
 			}
-			// A script that caught the cancelled operation still ends as the user's stop.
-			if (this.#escapeStopped()) throw new ToolError(ESCAPE_STOPPED_MESSAGE);
+			// The stop landed after the script finished: keep what it did, led by the user's stop.
+			if (this.#escapeStopped()) {
+				return { ...result, displays: [{ type: "text", text: ESCAPE_STOPPED_MESSAGE }, ...result.displays] };
+			}
 			return result;
 		} finally {
 			signal?.removeEventListener("abort", abort);

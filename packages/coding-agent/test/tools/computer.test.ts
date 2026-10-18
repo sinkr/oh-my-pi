@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
@@ -26,6 +26,7 @@ import {
 	resumeComputerUseForOwner,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
+import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import type {
 	AxNode,
 	AxQuery,
@@ -2228,6 +2229,10 @@ function confirmationContext(confirm: NonNullable<AgentToolContext["ui"]>["confi
 }
 
 describe("expanded computer APIs", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it.each([true, false])(
 		"requires an actual live approval answer (%s), retaining only approved mode across helpers",
 		async approved => {
@@ -2391,7 +2396,10 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
-	it("stops a run at the next non-native facade call after an Escape between native calls", async () => {
+	it.each([
+		["a clipboard write", 'await desktop.clipboard.write("after");'],
+		["a bridged tool call", "await tool.echo({ value: 7 });"],
+	])("stops a run before %s after an Escape between native calls", async (_path, effect) => {
 		/** The user's Escape lands right after `listWindows` settled and passed its check, while no native call runs. */
 		class LateEscapeSession extends FakeNativeSession {
 			#readsSinceList: number | undefined;
@@ -2411,16 +2419,48 @@ describe("expanded computer APIs", () => {
 				return await super.listWindows();
 			}
 		}
+		const written: string[] = [];
+		vi.spyOn(clipboard, "copyToClipboard").mockImplementation(async text => {
+			written.push(text);
+		});
 		const transport = new MemoryTransport();
+		// Answer a tool call a regression would send, so the run still ends.
+		transport.listeners.add(message => {
+			if (message.type === "tool-call")
+				transport.inbound({ type: "tool-reply", id: message.id, reply: { ok: true, value: null } });
+		});
 		new ComputerWorkerCore(transport, () => new LateEscapeSession());
-		// `clipboard.read` stands in for `clipboard.write`, so a regression cannot overwrite the real clipboard.
-		const result = await runWorker(
-			transport,
-			"clipboard-after-escape",
-			'await desktop.windows(); await desktop.clipboard.read(); return "continued";',
-		);
+		const result = await runWorker(transport, "effect-after-escape", `await desktop.windows(); ${effect} return 1;`);
 		// The worker aborts the run; the host, reading the stop count, words it as ESCAPE_STOPPED_MESSAGE.
 		expect(result.ok ? result.payload.returnValue : result.error).toMatchObject({ isAbort: true });
+		expect(written).toEqual([]);
+		expect(transport.outbound.filter(message => message.type === "tool-call")).toEqual([]);
+	});
+
+	it("starts a clipboard write only once the previous one finished, so its Escape check comes last", async () => {
+		// `copyToClipboard` queues a write behind one in flight; an Escape during that wait would follow the check.
+		const started: Array<{ text: string; overlapping: boolean }> = [];
+		let inFlight = 0;
+		vi.spyOn(clipboard, "copyToClipboard").mockImplementation(async text => {
+			started.push({ text, overlapping: inFlight > 0 });
+			inFlight += 1;
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			inFlight -= 1;
+		});
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new FakeNativeSession());
+		const result = await runWorker(
+			transport,
+			"queued-clipboard",
+			'await Promise.all([desktop.clipboard.write("first"), desktop.clipboard.write("second")]);',
+		);
+		expect(result.ok).toBe(true);
+		expect(started).toEqual([
+			{ text: "first", overlapping: false },
+			{ text: "second", overlapping: false },
+		]);
 	});
 
 	it("refuses capabilities and runs after an Escape between calls that no run reported", async () => {
@@ -2478,7 +2518,7 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
-	it("reports a stop that lands after the worker answered", async () => {
+	it("keeps a run's result, led by the stop, when the stop lands after the worker answered", async () => {
 		let stops = 0;
 		const supervisor = new ComputerSupervisor(
 			toolSession(),
@@ -2499,7 +2539,50 @@ describe("expanded computer APIs", () => {
 			{ read: () => stops, forget: () => {} },
 		);
 		try {
-			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			const result = await supervisor.run("1", 1_000, snapshot());
+			expect(result.returnValue).toBe("fresh");
+			expect(result.displays[0]).toEqual({ type: "text", text: ESCAPE_STOPPED_MESSAGE });
+			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow("the user pressed Escape");
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it("keeps the worker's own error ahead of the stop it reports", async () => {
+		let stops = 0;
+		const partial = "type: 3 of 10 characters were sent before the input was cancelled";
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				const handlers = new Set<(message: ComputerWorkerOutbound) => void>();
+				const emit = (message: ComputerWorkerOutbound) => {
+					for (const handler of handlers) handler(message);
+				};
+				return {
+					send: message => {
+						if (message.type === "close") queueMicrotask(() => emit({ type: "closed" }));
+						if (message.type !== "run") return;
+						stops += 1;
+						const error = { name: "ToolError", message: partial, isToolError: true, isAbort: false };
+						queueMicrotask(() => emit({ type: "result", id: message.id, ok: false, error }));
+					},
+					onMessage: handler => {
+						handlers.add(handler);
+						queueMicrotask(() => emit({ type: "ready" }));
+						return () => handlers.delete(handler);
+					},
+					onError: () => () => {},
+					terminate: async () => {},
+				};
+			},
+			{ startMs: 200, closeMs: 200 },
+			undefined,
+			{ read: () => stops, forget: () => {} },
+		);
+		try {
+			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(
+				`${partial}\n\n${ESCAPE_STOPPED_MESSAGE}`,
+			);
 		} finally {
 			await supervisor.close();
 		}
