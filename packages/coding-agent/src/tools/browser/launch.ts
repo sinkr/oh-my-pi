@@ -77,11 +77,9 @@ function isMicrosoftEdgeExecutable(executablePath: string | undefined): boolean 
 	if (!executablePath) return false;
 	const normalizedPath = executablePath.replaceAll("\\", "/").toLowerCase();
 	const executableName = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
-	return (
-		executableName === "msedge.exe" ||
-		executableName === "microsoft edge" ||
-		executableName.startsWith("microsoft-edge")
-	);
+	// Windows ships every channel as msedge.exe; macOS bundles use "Microsoft Edge[ Beta|Dev|Canary]",
+	// Linux packages "microsoft-edge[-stable|-beta|-dev]".
+	return executableName === "msedge.exe" || /^microsoft[ -]edge(?:$|[ -])/.test(executableName);
 }
 
 /**

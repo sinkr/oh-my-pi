@@ -21,6 +21,9 @@ const AUTOMATION_FLAG = "--enable-automation";
 const EDGE_EXECUTABLE_PATHS = [
 	"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
 	"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+	"/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta",
+	"/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev",
+	"/Applications/Microsoft Edge Canary.app/Contents/MacOS/Microsoft Edge Canary",
 	"/usr/bin/microsoft-edge-stable",
 ] as const;
 
