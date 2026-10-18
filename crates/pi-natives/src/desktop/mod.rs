@@ -1602,13 +1602,8 @@ impl Worker {
 			},
 			Request::AxInput { reference, input, takeover, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let windows = self.backend()?.windows()?;
-				let target = Target::Window(self.ax()?.window_id(&h, &windows)?);
 				let mode = takeover.mode();
-				match self
-					.backend()?
-					.element_input(&target, &h, input, mode, token)?
-				{
+				match self.backend()?.element_input(&h, input, mode, token)? {
 					ElementDelivery::Delivered => Ok(Response::Input(control::take_focus_return())),
 					ElementDelivery::Unfocused(focus) => {
 						Err(self.element_focus_refusal(reference, focus, mode))
@@ -1662,9 +1657,9 @@ impl Worker {
 			},
 		};
 		let message = format!(
-			"{reference} did not take keyboard focus, so nothing was sent; its application's \
-			 keyboard focus is in {window}, on {element}. Re-read with win.ax() or win.observe() \
-			 before retrying"
+			"{reference} did not take keyboard focus when asked to, so no keys were sent; its \
+			 application's keyboard focus is in {window}, on {element}. Re-read with win.ax() or \
+			 win.observe() before retrying"
 		);
 		match mode {
 			DeliveryMode::Background => DesktopError::background_unavailable(message),
@@ -2719,6 +2714,8 @@ mod capture_tests {
 		active_display:         Arc<Mutex<String>>,
 		captures:               Arc<Mutex<u8>>,
 		window_queries:         Arc<Mutex<u32>>,
+		/// `window_queries` as each `element_input` began.
+		queries_at_input:       Arc<Mutex<Vec<u32>>>,
 		cancel_on_capabilities: Arc<Mutex<Option<CancellationSource>>>,
 		snapshot_error:         Arc<Mutex<bool>>,
 		cancel_on_snapshot:     Arc<Mutex<Option<CancellationSource>>>,
@@ -2787,6 +2784,7 @@ mod capture_tests {
 				active_display: Arc::new(Mutex::new("screen-1".to_string())),
 				captures: Arc::new(Mutex::new(0)),
 				window_queries: Arc::new(Mutex::new(0)),
+				queries_at_input: Arc::new(Mutex::new(Vec::new())),
 				cancel_on_capabilities: Arc::new(Mutex::new(None)),
 				snapshot_error: Arc::new(Mutex::new(false)),
 				cancel_on_snapshot: Arc::new(Mutex::new(None)),
@@ -3160,12 +3158,15 @@ mod capture_tests {
 		/// window.
 		fn element_input(
 			&mut self,
-			_: &Target,
 			h: &AxHandle,
 			_: &ElementInput,
 			_: DeliveryMode,
 			_: &OperationToken,
 		) -> CoreResult<ElementDelivery> {
+			self
+				.queries_at_input
+				.lock()
+				.push(*self.window_queries.lock());
 			if let Some(tree) = &self.tree {
 				tree.lock().element(h)?;
 			}
@@ -4004,6 +4005,37 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn element_input_leaves_the_elements_window_to_the_backend() {
+		// macOS reads the user's front app before it asks the element's
+		// application for its window, which blocks while that app is busy; a
+		// window listing or lookup here would come before that read.
+		let backend = FakeWaylandBackend::new();
+		let queries = Arc::clone(&backend.window_queries);
+		let seen = Arc::clone(&backend.queries_at_input);
+		let mut worker = worker_with(backend);
+		let inner: &mut Worker = &mut worker;
+		let (backend, registry) = (&mut inner.backend, &mut inner.registry);
+		let ax = backend
+			.as_mut()
+			.ok()
+			.and_then(|backend| backend.ax())
+			.unwrap();
+		let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
+			.unwrap()
+			.ref_;
+		let (reply, _rx) = flume::bounded(1);
+		let request = Request::AxInput {
+			reference,
+			input: ElementInput::Text("4".to_owned()),
+			takeover: Takeover::new(None, None),
+			reply,
+		};
+		let before = *queries.lock();
+		let _ = worker.process(&request, &CancellationSource::default().token());
+		assert_eq!(*seen.lock(), [before], "the worker listed windows before the backend ran");
+	}
+
+	#[test]
 	fn element_keys_refused_for_focus_name_where_focus_is_with_a_usable_ref() {
 		for (takeover, code) in
 			[(None, ErrorCode::BackgroundUnavailable), (Some(true), ErrorCode::InputFailed)]
@@ -4035,6 +4067,9 @@ mod capture_tests {
 				message.starts_with(&format!("{reference} did not take keyboard focus")),
 				"{message}"
 			);
+			// The focus request itself went to the app, so only keys are unsent.
+			assert!(message.contains("so no keys were sent"), "{message}");
+			assert!(!message.contains("nothing was sent"), "{message}");
 			assert!(message.contains(&format!("window {WAYLAND_ID} (\"Obsidian\")")), "{message}");
 			assert!(message.contains("on - button [ref=e2]."), "{message}");
 			assert!(message.contains("win.ax()"), "{message}");

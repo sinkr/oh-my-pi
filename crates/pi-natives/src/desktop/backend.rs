@@ -253,24 +253,25 @@ pub trait Backend: Send {
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<()>;
-	/// Types or presses `input` into `element`, a live element of window
-	/// `target`. Backends that cannot read which element holds keyboard focus
-	/// focus it and send through the window's keyboard path.
+	/// Types or presses `input` into `element`, a live element, in the window
+	/// that holds it. The backend looks that window up itself, so it can read
+	/// what it needs about the user's state before the lookup reaches the
+	/// element's application. Backends that cannot read which element holds
+	/// keyboard focus focus it and send through the window's keyboard path.
 	fn element_input(
 		&mut self,
-		target: &Target,
 		element: &AxHandle,
 		input: &ElementInput,
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<ElementDelivery> {
-		self
-			.ax()
-			.ok_or_else(DesktopError::ax_unsupported)?
-			.focus(element)?;
+		let windows = self.windows()?;
+		let ax = self.ax().ok_or_else(DesktopError::ax_unsupported)?;
+		let target = Target::Window(ax.window_id(element, &windows)?);
+		ax.focus(element)?;
 		match input {
-			ElementInput::Text(text) => self.type_text(target, text, mode, token)?,
-			ElementInput::Chord(keys) => self.key_chord(target, keys, mode, token)?,
+			ElementInput::Text(text) => self.type_text(&target, text, mode, token)?,
+			ElementInput::Chord(keys) => self.key_chord(&target, keys, mode, token)?,
 		}
 		Ok(ElementDelivery::Delivered)
 	}

@@ -12,6 +12,10 @@
 - Fixed `renderMermaidAscii` starting an edge one cell away from its node's side when a labeled sibling edge leaves the same node from another side ([#16730](https://github.com/can1357/oh-my-pi/issues/16730))
 - Fixed Mermaid flowchart parsing swallowing leading dashes of spaceless arrows (`A-->B`, `B-.->C`, `C:::cls-->D`) into the preceding node ID or class name ([#16750](https://github.com/can1357/oh-my-pi/pull/16750) by [@berney](https://github.com/berney))
 
+### Fixed
+
+- Fixed macOS background `axType` and `axKeyChord` sending input into an app you switched to while it was busy answering the element's window lookup; they now read your front app first and refuse with `BackgroundUnavailable`, as window input does. The refusal for an element that does not take focus now says no keys were sent, since the focus request reached the app
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
