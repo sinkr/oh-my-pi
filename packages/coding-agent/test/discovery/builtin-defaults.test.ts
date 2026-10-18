@@ -301,6 +301,89 @@ describe("builtin-defaults rule provider", () => {
 		).toEqual([]);
 	});
 
+	async function streamRule(name: string): Promise<(...deltas: string[]) => string[]> {
+		const rule = (await loadBuiltinRules()).find(r => r.name === name);
+		if (!rule) throw new Error(`${name} rule missing`);
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
+		return (...deltas) => {
+			manager.resetBuffer();
+			return deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(r => r.name));
+		};
+	}
+
+	it("fires ts-set-map on string-literal initializers but not on empty or computed sets and maps", async () => {
+		const fired = await streamRule("ts-set-map");
+		const hits = [
+			'const KINDS = new Set(["text", "json"]);',
+			"const LABELS = new Map<string, string>([['text', 'Text']]);",
+			'const ROLES = new Set<PropertyKey>([\n\t"select",\n\t"confirm",\n]);',
+		];
+		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
+
+		// Shapes the rule body keeps as Set/Map: runtime-built membership and lookups.
+		const misses = [
+			"const seen = new Set<string>();",
+			"#pending = new Map<number, (m: { result?: unknown }) => void>();",
+			"const byId = new Map(items.map(item => [item.id, item]));",
+			"const keys = new Set([...Object.keys(a), ...Object.keys(b)]);",
+			"for (const id of new Set(ids)) {}",
+		];
+		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
+	});
+
+	it("fires ts-import-type on inline type imports but not on runtime import() calls", async () => {
+		const fired = await streamRule("ts-import-type");
+		const hits = [
+			'function run(client: import("some-sdk").Client): void {}',
+			'type Condense = import("./designs.js").Condense;',
+			'const options: import("arktype").infer<Schema> = value;',
+			'const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");',
+		];
+		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
+
+		// Runtime loads belong to ts-no-dynamic-import, or to no rule at all.
+		const misses = [
+			'const { carryFindings } = await import("./designs.js");',
+			'const mod = (await import("./known-module")).default;',
+			"const { completeText } = await import(`${cwd}/src/client.ts`);",
+			'const [manifest] = await Promise.all([import("../readers/manifest.js")]);',
+			'const impit = import("impit").then(({ Impit }) => new Impit());',
+		];
+		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
+
+		// The stream pauses mid-call: the rule waits for the member name before deciding.
+		expect(fired('const impit = import("impit").', "then(({ Impit }) => new Impit());")).toEqual([]);
+	});
+
+	it("fires ts-no-any on any annotations and casts but not on the English word in comments", async () => {
+		const fired = await streamRule("ts-no-any");
+		const hits = [
+			"function readId(value: any): string {}",
+			"const root = el as any;",
+			"const config = { port: 3000 } as any as ServerConfig;",
+			"const rows: any[] = [];",
+			"let entry: any;",
+			"items.map((item: any) => item.id);",
+			"function readId(value: unknown): any {",
+		];
+		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-no-any"]);
+
+		const misses = [
+			"// Native terminal mapping: any tool call wins over every finish",
+			" * intact: anything that cited the preview's lines can still resolve.",
+			" * (`tallyStep`'s `items`): any of them fails the phase.",
+			"/** `posts.raw_json`, as far as anything reads it back. */",
+			"// The debugging bar shows while omp has any one attached.",
+			"return any?.newest ? { date: any.newest } : {};",
+		];
+		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
+
+		// A stream paused right after the word must not fire before the rest of it arrives.
+		expect(fired(" * intact: any", "thing that cited the preview's lines.\n")).toEqual([]);
+	});
+
 	it("is the lowest-priority rule provider so user/project rules override defaults", () => {
 		const { cap, provider } = ruleProvider();
 		const others = cap.providers.filter(p => p.id !== BUILTIN_DEFAULTS_PROVIDER_ID);
