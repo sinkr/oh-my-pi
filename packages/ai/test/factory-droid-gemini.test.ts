@@ -878,18 +878,26 @@ describe("Factory Droid gemini wire — tool schema allowlist", () => {
 		});
 	});
 
-	it("truncates long tool names with a sha256 suffix", async () => {
-		const { captured } = await run({
-			messages: [{ role: "user", content: "hi", timestamp: 1 }],
-			tools: [
-				{
-					name: "x".repeat(120),
-					description: "long",
-					parameters: { type: "object", properties: { a: { type: "string" } } },
-				},
+	it("caps long tool names at 64 characters, hash suffix included, and keeps their calls in replayed history", async () => {
+		const name = "mcp__some_long_server_name__some_long_tool_name_that_exceeds_limits";
+		const tool = { name, description: "long", parameters: { type: "object", properties: { a: { type: "string" } } } };
+		const first = await run({ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [tool] });
+		const wire = declarations(first.captured)[0].name;
+		expect(wire).toMatch(/^mcp__some_long_server_name__some_long_tool_name_that_ex_[0-9a-f]{8}$/);
+		expect(wire).toHaveLength(64);
+		const call = { type: "toolCall" as const, id: "call_long", name, arguments: { a: "x" }, thoughtSignature: "sig" };
+		const { captured, contents } = await run({
+			messages: [
+				{ role: "user", content: "hi", timestamp: 1 },
+				assistantMessage([call], { stopReason: "toolUse" }),
+				toolResult("call_long", "long result", name),
 			],
+			tools: [tool],
 		});
-		expect(declarations(captured)[0].name).toMatch(/^x{64}_[0-9a-f]{8}$/);
+		// Stable across requests, and the call and its result both survive replay.
+		expect(declarations(captured)[0].name).toBe(wire);
+		expect(contents[1].parts).toEqual([{ functionCall: { name: wire, args: { a: "x" } }, thoughtSignature: "sig" }]);
+		expect(contents[2].parts).toEqual([{ functionResponse: { name: wire, response: { result: "long result" } } }]);
 	});
 
 	const dotted = { description: "d", parameters: { type: "object", properties: {} } };

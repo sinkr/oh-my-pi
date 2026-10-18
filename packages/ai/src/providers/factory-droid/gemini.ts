@@ -41,14 +41,15 @@ function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean
 }
 
 /**
- * The CLI sanitizes tool names to `[a-zA-Z0-9_-]`; names longer than 64 chars
- * are truncated and suffixed with `_` + an 8-char sha256. Applied to
- * declarations and replayed functionCall/functionResponse names.
+ * The CLI sanitizes tool names to `[a-zA-Z0-9_-]`; a name longer than 64
+ * chars keeps its first 55 and ends `_` + an 8-char sha256, 64 in all, which
+ * stays inside the route's tool-name bound. Applied to declarations and
+ * replayed functionCall/functionResponse names.
  */
 function sanitizeFactoryDroidToolName(name: string): string {
 	const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
 	if (sanitized.length <= 64) return sanitized;
-	return `${sanitized.slice(0, 64)}_${Bun.SHA256.hash(sanitized, "hex").slice(0, 8)}`;
+	return `${sanitized.slice(0, 55)}_${Bun.SHA256.hash(sanitized, "hex").slice(0, 8)}`;
 }
 
 /**

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Factory Droid Gemini models losing calls to tools with names over 64 characters (common for MCP tools) from the conversation: the call and its result were left out of every later request, so the model called the tool again; long names are now shortened to 64 characters, hash included, as droid does
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
