@@ -1065,11 +1065,11 @@ impl Worker {
 			.frame_target()
 			.and_then(|target| self.frames.remove(target.key()));
 		control::take_focus_return();
-		// A read cancelled while it ran is discarded. A mutation's result
-		// stands, since its input may have gone out (a menu read makes its
-		// window key): a cancel arriving after it stops the next call instead.
+		// A read cancelled while it ran is discarded, a menu read included.
+		// Input's result stands, since it may have gone out: a cancel arriving
+		// after it stops the next call instead.
 		let result = self.process(request, token).and_then(|response| {
-			if !request.is_mutation() {
+			if !request.is_mutation() || matches!(request, Request::MenuItems { .. }) {
 				token.check()?;
 			}
 			Ok(response)
@@ -3950,6 +3950,22 @@ mod capture_tests {
 		call(&mut worker, |reply| Request::MenuItems { target, path: Vec::new(), reply }, &source)
 			.unwrap();
 		assert!(!free.load(Ordering::SeqCst), "the menu read ran without the input lease");
+	}
+
+	#[test]
+	fn a_menu_read_cancelled_while_it_reads_is_discarded() {
+		let source = CancellationSource::default();
+		let canceller = source.clone();
+		let mut backend = FakeWaylandBackend::new();
+		backend.on_menu_read = Some(Box::new(move || canceller.cancel()));
+		let mut worker = worker_with(backend);
+		control::grant_for_test(&source);
+		let target = Target::Window(WAYLAND_ID.to_string());
+		let read = |reply| Request::MenuItems { target, path: Vec::new(), reply };
+		let error = call(&mut worker, read, &source)
+			.err()
+			.map(|error| error.code);
+		assert_eq!(error, Some(ErrorCode::Cancelled));
 	}
 
 	#[test]

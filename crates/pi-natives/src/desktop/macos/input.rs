@@ -525,8 +525,9 @@ const fn holds_modifier(flags: u64) -> bool {
 /// window: Screen Sharing gives the key the modifiers the physical keyboard
 /// holds as it forwards it, so a press stops while `flags` holds one or has
 /// Caps Lock on. A user's Command would otherwise turn `q` into Cmd-Q on the
-/// remote computer, and Caps Lock types capitals. As for a pointer recheck
-/// ([`pointer_recheck`]), the refusal says whether keys already went out.
+/// remote computer, and Caps Lock types capitals. Before any press it is
+/// `BackgroundUnavailable`; once keys went out it is `InputFailed`, which
+/// the host never reruns in takeover, since that would type them again.
 fn physical_modifier_check<'a>(
 	window: &'a DesktopWindow,
 	flags: impl Fn() -> u64 + 'a,
@@ -534,20 +535,20 @@ fn physical_modifier_check<'a>(
 	let mut sent = 0;
 	move || {
 		if holds_modifier(flags()) {
-			let sent = if sent == 0 {
-				"nothing was sent".to_owned()
-			} else {
-				format!(
-					"{sent} key press(es) sent before this may already have landed, and no further \
-					 input was sent; inspect the remote screen first"
-				)
-			};
-			return Err(DesktopError::background_unavailable(format!(
+			let why = format!(
 				"window {} ({}) gives the keys it forwards the physical keyboard's Shift, Control, \
-				 Option, Command and Caps Lock, and one is held or Caps Lock is on; {sent}; retry \
-				 once no modifier key is held and Caps Lock is off",
+				 Option, Command and Caps Lock, and one is held or Caps Lock is on",
 				window.id, window.app,
-			)));
+			);
+			let retry = "retry once no modifier key is held and Caps Lock is off";
+			return Err(if sent == 0 {
+				DesktopError::background_unavailable(format!("{why}; nothing was sent; {retry}"))
+			} else {
+				DesktopError::input_failed(format!(
+					"{why}; {sent} key press(es) sent before this may already have landed, and no \
+					 further input was sent; inspect the remote screen first, then {retry}"
+				))
+			});
 		}
 		sent += 1;
 		Ok(())
@@ -4567,7 +4568,7 @@ mod tests {
 			Ok(())
 		})
 		.unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(error.code, ErrorCode::InputFailed);
 		assert!(
 			error
 				.message

@@ -694,8 +694,9 @@ impl X11Input {
 	}
 
 	fn xtest_key(&self, keycode: u8, press: bool) -> CoreResult<()> {
-		control::check()?;
+		// A release always goes out: a cancel stops only the next press.
 		if press {
+			control::check()?;
 			self.check_takeover_focus()?;
 		}
 		self
@@ -725,7 +726,9 @@ impl X11Input {
 		press: bool,
 		state: KeyButMask,
 	) -> CoreResult<()> {
-		control::check()?;
+		if press {
+			control::check()?;
+		}
 		let event = KeyPressEvent {
 			response_type: if press {
 				KEY_PRESS_EVENT
