@@ -1903,6 +1903,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const handler = subprocessToolRegistry.getHandler(event.toolName);
 				const eventRecord: unknown = event;
 				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
+				let endsRun = false;
 				if (handler) {
 					// Extract data using handler
 					if (handler.extractData) {
@@ -1941,7 +1942,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							isError: event.isError,
 						}) === true;
 					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
-					if (wantsTerminate || forcedFinalYield) {
+					endsRun = wantsTerminate || forcedFinalYield;
+					if (endsRun) {
 						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
 							// Terminal yield with owner jobs still pending: park the
 							// run behind the quiescence barrier instead of completing
@@ -1984,7 +1986,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					}
 				}
 				flushProgress = true;
-				if (assistantStreaming && event.toolName !== "yield") {
+				if (assistantStreaming && !endsRun) {
 					progress.requests += 1;
 					evaluateSoftRequestBudget();
 				}

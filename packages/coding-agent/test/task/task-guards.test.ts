@@ -84,6 +84,19 @@ function readToolEnd(toolCallId: string): AgentSessionEvent {
 	} as AgentSessionEvent;
 }
 
+function incrementalYieldToolEnd(toolCallId = "tool-yield-inc"): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "yield",
+		result: {
+			content: [{ type: "text", text: "Section recorded." }],
+			details: { status: "success", type: ["findings"], data: { note: "partial" } },
+		},
+		isError: false,
+	} as AgentSessionEvent;
+}
+
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 	let abortCount = 0;
 	const steerCalls: SteerCall[] = [];
@@ -339,6 +352,26 @@ describe("runSubprocess request guards", () => {
 		const result = await runSubprocess({ ...baseOptions, id: "subagent-server-steps", settings });
 
 		expect(handle.steerCalls.length).toBe(1);
+		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
+		expect(result.abortReason).toContain("request budget exceeded");
+	});
+
+	it("counts a nonterminal incremental yield during a streaming response as a request", async () => {
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 0,
+			"task.softRequestBudget": 2,
+			"task.softRequestBudgetNotice": true,
+		});
+		const handle = createFakeSession({
+			hang: true,
+			events: [assistantMessageStart(), readToolEnd("read-1"), incrementalYieldToolEnd(), readToolEnd("read-2")],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-incremental-yield", settings });
+
+		expect(handle.steerCalls.length).toBe(1);
+		expect(handle.steerCalls[0].content).toContain("used 2 requests");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(result.abortReason).toContain("request budget exceeded");
 	});
