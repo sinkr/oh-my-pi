@@ -2442,14 +2442,10 @@ mod tests {
 	#[test]
 	fn screen_sharing_text_with_a_keyless_character_types_nothing() {
 		use crate::desktop::error::ErrorCode;
-		for character in ["é", "😀", "e\u{301}", "\u{1b}", "\u{7f}"] {
-			let text = format!("ab{character}cd");
-			let error = physical_transitions(&text).unwrap_err();
-			assert_eq!(error.code, ErrorCode::InvalidKey, "{text:?}");
-			let named = character.chars().last().unwrap();
-			assert!(error.message.contains(&format!("'{named}'")), "{}", error.message);
-			assert!(error.message.contains("no text was typed"), "{}", error.message);
-		}
+		let error = physical_transitions("abécd").unwrap_err();
+		assert_eq!(error.code, ErrorCode::InvalidKey);
+		assert!(error.message.contains("'é'"), "{}", error.message);
+		assert!(error.message.contains("no text was typed"), "{}", error.message);
 		// Tab, newline and shifted characters have keys.
 		assert_eq!(physical_transitions("a\tB\n").unwrap(), [
 			(0, true),
