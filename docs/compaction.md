@@ -140,7 +140,7 @@ The automatic paths are intentionally different:
    - On success, if `compaction.autoContinue !== false`, post-turn maintenance schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`; mid-turn maintenance never schedules a separate continuation because the core loop already owns the next provider request.
 
 - **Idle maintenance**
-   - Trigger: `runIdleCompaction()` when not streaming or already compacting; it cancels pending cache-warm refreshes first so no warm replay races the summary. The interactive idle timer arms after a turn ends with empty input and context at or above `compaction.idleThresholdTokens`. When a response has confirmed a prompt-cache entry (it read or wrote the cache) and the model declares a lifetime for that tier, the timer fires 5s before the cache warmer's refresh point — `min(90% of TTL, TTL − 10s)` after the last request or warm hit, about 54 min on a 1h entry — so the summary request still reads the cached prefix; a turn that settles past that point but before expiry compacts immediately. Otherwise, or once the entry has expired, it waits `compaction.idleTimeoutSeconds`.
+   - Trigger: `runIdleCompaction()` when not streaming or already compacting; it cancels pending cache-warm refreshes first so no warm replay races the summary. The interactive idle timer arms after a turn ends with empty input and context at or above `compaction.idleThresholdTokens`. When a response has confirmed a long-tier (1h, Anthropic long retention) prompt-cache entry — it read or wrote the cache — the timer fires 5s before the cache warmer's refresh point, `min(90% of TTL, TTL − 10s)` after the last request or warm hit (about 54 min), so the summary request still reads the cached prefix; a turn that settles past that point but before expiry compacts immediately. A 5-minute entry never drives the timer: it lapses too soon after a turn for compaction to be worth starting on its schedule. In that case, with an unknown lifetime, or once the entry has expired, the timer waits `compaction.idleTimeoutSeconds`.
    - Uses `reason: "idle"` and does not auto-continue afterward.
 
 ### Payload-rejection guard
@@ -525,7 +525,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `task.agentCompactionThresholdOverrides` = `{}`; exact-name task/eval agent → token count (`90000`) or percentage (`"80%"`) replacing both thresholds for that agent only. See [Settings](./settings.md#context-compaction-and-memory).
 - `compaction.idleEnabled` = `false`
 - `compaction.idleThresholdTokens` = `200000`
-- `compaction.idleTimeoutSeconds` = `300` (fallback when the prompt-cache lifetime is unknown)
+- `compaction.idleTimeoutSeconds` = `300` (fallback unless a confirmed 1h prompt-cache entry sets the timing)
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)

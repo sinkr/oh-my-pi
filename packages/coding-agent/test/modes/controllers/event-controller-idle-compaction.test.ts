@@ -150,7 +150,7 @@ describe("EventController idle compaction teardown", () => {
 		const runIdleCompaction = vi.fn(async () => {});
 		const context = createContext({
 			runIdleCompaction,
-			promptCacheEntry: { touchedAt: Date.now(), ttlMs: 3_600_000 },
+			promptCacheEntry: { touchedAt: Date.now(), tier: "long", ttlMs: 3_600_000 },
 		});
 		const controller = new EventController(context);
 		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
@@ -167,7 +167,7 @@ describe("EventController idle compaction teardown", () => {
 		const runIdleCompaction = vi.fn(async () => {});
 		const context = createContext({
 			runIdleCompaction,
-			promptCacheEntry: { touchedAt: Date.now() - 59 * 60_000, ttlMs: 3_600_000 },
+			promptCacheEntry: { touchedAt: Date.now() - 59 * 60_000, tier: "long", ttlMs: 3_600_000 },
 		});
 		const controller = new EventController(context);
 		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
@@ -182,12 +182,38 @@ describe("EventController idle compaction teardown", () => {
 		const runIdleCompaction = vi.fn(async () => {});
 		const context = createContext({
 			runIdleCompaction,
-			promptCacheEntry: { touchedAt: Date.now() - 600_000, ttlMs: 300_000 },
+			promptCacheEntry: { touchedAt: Date.now() - 2 * 3_600_000, tier: "long", ttlMs: 3_600_000 },
 		});
 		const controller = new EventController(context);
 		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
 
 		vi.advanceTimersByTime(59_999);
+		expect(runIdleCompaction).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("ignores a live 5-minute cache entry and keeps the configured delay", async () => {
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: {
+				"compaction.idleEnabled": true,
+				"compaction.idleThresholdTokens": 100,
+				"compaction.idleTimeoutSeconds": 600,
+			},
+		});
+		const runIdleCompaction = vi.fn(async () => {});
+		const context = createContext({
+			runIdleCompaction,
+			promptCacheEntry: { touchedAt: Date.now(), tier: "short", ttlMs: 300_000 },
+		});
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		// Cache timing would compact at ~4.4 min; the configured 10 min wins.
+		vi.advanceTimersByTime(600_000 - 1);
 		expect(runIdleCompaction).not.toHaveBeenCalled();
 		vi.advanceTimersByTime(1);
 		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
