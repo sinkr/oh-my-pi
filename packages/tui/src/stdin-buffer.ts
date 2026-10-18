@@ -77,6 +77,14 @@ const STRING_ABANDON_MS = 5000;
 // so a stale packet cannot absorb unrelated multi-byte input later on; a
 // resumed head that is abandoned again is dropped for good.
 const STRING_DORMANT_MS = 10_000;
+// Openings of the string replies omp receives, matched while still partial
+// (each alternative accepts any prefix of its opener) so a legacy Alt chord
+// that diverges is recognized as soon as it does:
+// - OSC: numeric command then `;` (`\x1b]11;`, `\x1b]5522;`).
+// - DCS: DECRQSS/XTGETTCAP `\x1bP1$r` / `\x1bP1+r`, XTVERSION `\x1bP>|`, DA3 `\x1bP!|`.
+// - APC: kitty graphics `\x1b_G`, TSP `\x1b_tsp;`, Glyph Protocol `\x1b_25a1;`.
+const LEGACY_STRING_REPLY_OPENER =
+	/^(?:\x1b\]\d+(?:;|$)|\x1bP(?:\d(?:[$+](?:r|$)|$)|[>!](?:\||$))|\x1b_(?:G|t(?:s(?:p(?:;|$)|$)|$)|2(?:5(?:a(?:1(?:;|$)|$)|$)|$)))/;
 
 // SGR mouse report bodies live between `<` and the terminating `M`/`m`.
 // Matched only when the trailing byte is a valid terminator, so the regex
@@ -146,6 +154,8 @@ function resolveStringEnd(
 	const searchFrom = Math.max(pos + 2, resumeSearchFrom - 1);
 	const scanLimit = Math.min(length, pos + MAX_STRING_SEQ_BYTES);
 	const base64From = belTerminates ? osc5522PayloadStart(buffer, pos, scanLimit) : -1;
+	// ECMA-48 §8.3.27: a DCS command string may carry BS..CR (0x08-0x0D).
+	const dcs = buffer.charCodeAt(pos + 1) === 0x50; /* P */
 	for (let i = searchFrom; i < scanLimit; i++) {
 		const code = buffer.charCodeAt(i);
 		if (code === 0x1b /* ESC */) {
@@ -155,7 +165,7 @@ function resolveStringEnd(
 			return STRING_ABORTED - i;
 		}
 		if (code === 0x07 /* BEL */ && belTerminates) return i + 1;
-		if (code < 0x20 || code === 0x7f) return STRING_ABORTED - i;
+		if ((code < 0x20 || code === 0x7f) && !(dcs && code >= 0x08 && code <= 0x0d)) return STRING_ABORTED - i;
 		if (base64From !== -1 && i >= base64From && !isBase64Code(code)) return STRING_ABORTED - i;
 	}
 	return length - pos >= MAX_STRING_SEQ_BYTES ? -2 : -1;
@@ -897,27 +907,16 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	 * Whether the buffer is the head of an OSC/DCS/APC string: terminal
 	 * protocol data (OSC 5522 clipboard read, graphics reply), never a key.
 	 * Without the kitty keyboard protocol `\x1b]`/`\x1bP`/`\x1b_` may be
-	 * Alt+]/Alt+P/Alt+_, alone or batched with the next key, so a head counts
-	 * only once it opens the way terminal replies do: OSC and DCS with a
-	 * digit (`\x1b]11;`, `\x1bP1$r`) or DCS `>`/`!` (XTVERSION, DA3), APC with
-	 * a kitty graphics `G`, TSP `tsp;`, or Glyph Protocol `25a1;` reply.
-	 * Anything else stays on the key flush timer.
+	 * Alt+]/Alt+P/Alt+_, alone or batched with the next keys, so a head counts
+	 * only while it follows the opening of a reply omp actually receives
+	 * ({@link LEGACY_STRING_REPLY_OPENER}); the moment it diverges it falls
+	 * back to the key flush timer.
 	 */
 	#bufferIsStringHead(): boolean {
 		const buffer = this.#buffer;
 		if (!STRING_SEQ_PARTIAL.test(buffer)) return false;
 		if (isKittyProtocolActive()) return true;
-		if (buffer.length <= 2) return false;
-		const opener = buffer.charCodeAt(2);
-		const digit = opener >= 0x30 && opener <= 0x39;
-		switch (buffer.charCodeAt(1)) {
-			case 0x5d /* ] */:
-				return digit;
-			case 0x50 /* P */:
-				return digit || opener === 0x3e /* > */ || opener === 0x21; /* ! */
-			default:
-				return opener === 0x47 /* G */ || opener === 0x74 /* t */ || opener === 0x32; /* 2 */
-		}
+		return buffer.length > 2 && LEGACY_STRING_REPLY_OPENER.test(buffer);
 	}
 
 	/**

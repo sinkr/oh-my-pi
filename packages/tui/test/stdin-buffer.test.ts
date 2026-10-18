@@ -891,17 +891,24 @@ describe("StdinBuffer", () => {
 		});
 
 		it.each([
-			["Alt+]", "\x1b]a"],
-			["Alt+P", "\x1bPa"],
-			["Alt+_", "\x1b_a"],
-		])("keeps legacy %s batched with a key on the key timer without the kitty keyboard protocol", (_name, chord) => {
-			// Terminal replies open with a numeric command (or a known reply
-			// letter), so the chord plus a key is not a string to wait on.
+			["Alt+]", ["\x1b]a"]],
+			["Alt+P", ["\x1bPa"]],
+			["Alt+_", ["\x1b_a"]],
+			["Alt+_ diverging from a TSP opener", ["\x1b_t", "x"]],
+		])("keeps legacy %s batched with keys on the key timer without the kitty keyboard protocol", (_name, reads) => {
+			// Terminal replies open a known way (a numeric OSC command, a DCS or
+			// APC reply prefix); a chord plus keys that diverges is not a string.
 			vi.useFakeTimers();
-			processInput(chord);
+			for (const read of reads) processInput(read);
 			vi.advanceTimersByTime(100);
-			expect(emittedSequences).toEqual([chord]);
+			expect(emittedSequences).toEqual([reads.join("")]);
 			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("keeps ECMA-48 format effectors inside a DCS reply", () => {
+			const reply = "\x1bP1+r544e\r\n=787465726d\x1b\\";
+			processInput(reply);
+			expect(emittedSequences).toEqual([reply]);
 		});
 
 		it("delivers a non-payload key typed into a stalled head exactly once", () => {
