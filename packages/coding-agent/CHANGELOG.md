@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed newly authenticated models missing from the current session's scoped `/model` picker and model cycle after login, without changing the active model or widening the configured scope
+- Fixed newly authenticated models missing from the current session's scoped `/model` picker and model cycle after login, without changing the active model or widening the configured scope ([#16234](https://github.com/can1357/oh-my-pi/pull/16234) by [@lazy1523](https://github.com/lazy1523))
 
 ## [18.12.1] - 2026-10-17
 
