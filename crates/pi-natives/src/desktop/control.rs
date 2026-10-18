@@ -30,8 +30,8 @@ mod macos;
 mod windows;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
-	MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, is_pointer_press, monitor_seen,
-	uptime_ns,
+	MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, add_live_tap, invalidate_live_tap,
+	is_pointer_press, monitor_seen, uptime_ns,
 };
 
 #[derive(Default)]
@@ -361,7 +361,7 @@ pub(crate) fn forget_escape_stops(key: &str) {
 	ESCAPE_STOPS.lock().remove(key);
 }
 
-/// Invalidates this process's listen-only event taps before it exits
+/// Invalidates this process's event taps before it exits
 /// (`macos::close_taps`); only macOS taps are known to need it.
 #[cfg_attr(
 	not(target_os = "macos"),

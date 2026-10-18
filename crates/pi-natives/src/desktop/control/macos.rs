@@ -117,7 +117,7 @@ impl LiveTaps {
 	}
 }
 
-/// Invalidates every listen-only tap this process still holds; for a process
+/// Invalidates every event tap this process still holds; for a process
 /// about to exit, after which no tap here sees input again. A tap whose
 /// process exits or is killed with it still valid makes `WindowServer`
 /// deliver the key it was routing at that moment again to the app the user
@@ -127,6 +127,22 @@ impl LiveTaps {
 /// exit hook. Nothing helps a process killed outright.
 pub(super) fn close_taps() {
 	LIVE_TAPS.close();
+}
+
+/// Lists `port`, a tap made elsewhere in the desktop backend, among the taps
+/// [`close_taps`] invalidates. Its thread must later unlist it through
+/// [`invalidate_live_tap`] before releasing it.
+pub(crate) fn add_live_tap(port: Ref) {
+	LIVE_TAPS.add(port);
+}
+
+/// Unlists and invalidates `port`, which may never have been listed.
+///
+/// # Safety
+/// `port` must be a live `CFMachPort`.
+pub(crate) unsafe fn invalidate_live_tap(port: Ref) {
+	// SAFETY: forwarded caller contract.
+	unsafe { LIVE_TAPS.invalidate(port) };
 }
 
 const fn physical_escape(kind: u32, key: i64, pid: i64, tag: i64) -> bool {

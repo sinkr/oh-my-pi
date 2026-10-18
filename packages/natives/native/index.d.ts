@@ -1301,7 +1301,7 @@ export interface ClipboardImage {
 }
 
 /**
- * Invalidates this process's listen-only event taps; for a host about to
+ * Invalidates this process's event taps; for a host about to
  * exit, after which no desktop session here sees the user's input again. A
  * macOS tap that dies with its process while the user types makes
  * `WindowServer` deliver their key again; Bun's `process.exit` runs no native

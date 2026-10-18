@@ -1808,7 +1808,7 @@ pub fn forget_desktop_escape_stops(key: String) {
 	control::forget_escape_stops(&key);
 }
 
-/// Invalidates this process's listen-only event taps before it exits.
+/// Invalidates this process's event taps before it exits.
 ///
 /// No desktop session here sees the user's input again afterwards. A macOS tap
 /// that dies with its process while the user types makes `WindowServer`
@@ -4136,9 +4136,12 @@ mod capture_tests {
 			ErrorCode::UserIntervened
 		);
 		// One after the pause does, and input is admitted again.
-		worker
-			.listener
-			.record_for_test(1234, Instant::now() - Duration::from_secs(6));
+		worker.listener.record_for_test(
+			1234,
+			Instant::now()
+				.checked_sub(Duration::from_secs(6))
+				.expect("uptime past 6 s"),
+		);
 		let (reply, read) = flume::bounded(1);
 		worker.dispatch(
 			Request::Capture { target: target.clone(), caps: CaptureCaps::default(), reply },
@@ -4374,9 +4377,12 @@ mod capture_tests {
 				options: ParsedPointerOptions::parse(None).unwrap(),
 				reply:   flume::unbounded().0,
 			};
-			worker
-				.listener
-				.record_for_test(1234, Instant::now() - Duration::from_secs(6));
+			worker.listener.record_for_test(
+				1234,
+				Instant::now()
+					.checked_sub(Duration::from_secs(6))
+					.expect("uptime past 6 s"),
+			);
 			worker.dispatch(capture_request(target.clone()), &token);
 			assert_eq!(worker.execute(&click, &token).err().unwrap().code, ErrorCode::UserIntervened);
 			let (reply, read) = flume::bounded(1);

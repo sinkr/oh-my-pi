@@ -3133,7 +3133,15 @@ mod tests {
 		let _watch = listener
 			.admit(7, &token)
 			.expect("the user has not used TextEdit");
-		let recheck = || pointer_recheck(true, EntryFront(Some(9)), 7, 42, || Some(9), || false);
+		let recheck = || {
+			pointer_recheck(
+				(true, false),
+				EntryFront(Some(9)),
+				(7, 42, "TextEdit"),
+				|| Some(9),
+				|| false,
+			)
+		};
 		recheck().unwrap();
 		// The user types in TextEdit while the click makes its window key.
 		listener.record_for_test(7, Instant::now());

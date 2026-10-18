@@ -9,5 +9,5 @@ export declare function desktopEscapeStops(key: string): number;
 /** Drop the stop count kept under `key`. */
 export declare function forgetDesktopEscapeStops(key: string): void;
 
-/** Invalidate this process's listen-only event taps before it exits (see the native doc). */
+/** Invalidate this process's event taps before it exits (see the native doc). */
 export declare function closeDesktopEventTaps(): void;

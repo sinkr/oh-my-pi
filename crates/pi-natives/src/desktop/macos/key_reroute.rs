@@ -41,7 +41,7 @@ use libc::pid_t;
 use parking_lot::Mutex;
 
 use super::skylight;
-use crate::desktop::control::SYNTHETIC_EVENT_TAG;
+use crate::desktop::control::{self, SYNTHETIC_EVENT_TAG};
 
 type Ref = *mut c_void;
 type ConstRef = *const c_void;
@@ -128,7 +128,6 @@ unsafe extern "C" {
 	static kCFRunLoopCommonModes: Ref;
 	static kCFRunLoopDefaultMode: Ref;
 	fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: isize) -> Ref;
-	fn CFMachPortInvalidate(port: Ref);
 	fn CFRunLoopGetCurrent() -> ConstRef;
 	fn CFRunLoopAddSource(run_loop: ConstRef, source: Ref, mode: Ref);
 	fn CFRunLoopRemoveSource(run_loop: ConstRef, source: Ref, mode: Ref);
@@ -746,6 +745,9 @@ impl KeyReroute {
 						}
 						CGEventTapEnable(focus_tap, true);
 						CGEventTapEnable(key_tap, true);
+						// Listed so a host exiting mid-action closes them too.
+						control::add_live_tap(focus_tap);
+						control::add_live_tap(key_tap);
 						// From here this action's taps decide for its target, and
 						// older actions stop moving new keys.
 						context.theft.register(&mut REGISTRY.lock());
@@ -773,7 +775,9 @@ impl KeyReroute {
 								continue;
 							}
 							let at = *ended_at.get_or_insert(now);
-							context.theft.linger(front, now.saturating_duration_since(at));
+							context
+								.theft
+								.linger(front, now.saturating_duration_since(at));
 							context.theft.publish(&mut registry);
 							forget_lifted(&mut registry.held, target, key_down, now);
 							if context.theft.settled(&registry.held) {
@@ -794,7 +798,7 @@ impl KeyReroute {
 					}
 					for tap in [focus_tap, key_tap] {
 						if !tap.is_null() {
-							CFMachPortInvalidate(tap);
+							control::invalidate_live_tap(tap);
 							CFRelease(tap);
 						}
 					}
@@ -1064,7 +1068,8 @@ mod tests {
 		rig.steal();
 		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
 		let mut posted = |code, stroke| {
-			rig.theft.route(&mut rig.registry, posted_key(code, stroke), false, BUTTONS)
+			rig.theft
+				.route(&mut rig.registry, posted_key(code, stroke), false, BUTTONS)
 		};
 		assert_eq!(posted(LEFT_SHIFT, Stroke::Press), KEPT);
 		assert_eq!(posted(Q, Stroke::Press), KEPT);
@@ -1088,7 +1093,8 @@ mod tests {
 		let mut rig = Rig::new();
 		rig.steal();
 		let mut own = |stroke| {
-			rig.theft.route(&mut rig.registry, posted_key(Q, stroke), false, BUTTONS)
+			rig.theft
+				.route(&mut rig.registry, posted_key(Q, stroke), false, BUTTONS)
 		};
 		assert_eq!(own(Stroke::Press), KEPT);
 		assert_eq!(own(Stroke::Release), KEPT);
@@ -1096,7 +1102,8 @@ mod tests {
 		rig.steal();
 		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
 		assert_eq!(
-			rig.theft.route(&mut rig.registry, posted_key(Q, Stroke::Release), false, BUTTONS),
+			rig.theft
+				.route(&mut rig.registry, posted_key(Q, Stroke::Release), false, BUTTONS),
 			KEPT
 		);
 		rig.give_back();
