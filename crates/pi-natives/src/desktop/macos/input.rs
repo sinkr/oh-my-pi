@@ -372,6 +372,9 @@ fn with_background_keyboard<T>(
 		let (to, focus) = await_key_destination(pid, wid, conflict)?;
 		let owner =
 			key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
+		activate_owner(pid, owner, |(owner, window)| {
+			activate_in_background(source, owner, window, skylight::sender_connection()?)
+		})?;
 		deliver(owner.0, &|| {
 			recheck_background(
 				prepared,
@@ -393,6 +396,24 @@ fn with_background_keyboard<T>(
 			)
 		})
 	})
+}
+
+/// Before background keys go to `owner`, a process other than `pid` that
+/// draws the target ([`key_process`]), such as `openAndSavePanelService`
+/// for a system Save panel: `activate` tells it it is active, as
+/// [`make_key_in_background`] told `pid`. A process that does not believe it
+/// is active still takes typing into its focused field, but not the keys
+/// that press a window's default or cancel button, so Return in a Save sheet
+/// did nothing while the call reported success.
+fn activate_owner(
+	pid: libc::pid_t,
+	owner: (libc::pid_t, u32),
+	activate: impl FnOnce((libc::pid_t, u32)) -> CoreResult<()>,
+) -> CoreResult<()> {
+	if owner.0 == pid {
+		return Ok(());
+	}
+	activate(owner)
 }
 
 /// Before a background press: keys posted to the process now still reach
@@ -1017,27 +1038,7 @@ pub(super) fn make_key_in_background(
 		},
 	}
 	let context = skylight::sender_connection()?;
-	let activate = || -> CoreResult<()> {
-		let activated = CGEvent::new(source.clone())
-			.map_err(|()| DesktopError::input_failed("failed to create a Quartz activation event"))?;
-		// SAFETY: `activated` is a live CGEvent and the type is a valid
-		// CGEventType value the core-graphics enum lacks.
-		unsafe { set_event_type(activated.as_ptr(), APPKIT_DEFINED_EVENT) };
-		activated.set_flags(CGEventFlags::from_bits_retain(ACTIVATION_FLAGS));
-		skylight::set_fields(&activated, &[
-			(FIELD_WINDOW_NUMBER, i64::from(wid)),
-			(FIELD_WINDOW_CONTEXT, context),
-			(FIELD_APPKIT_SUBTYPE, APPLICATION_ACTIVATED),
-		])?;
-		skylight::post_routed(pid, &activated)
-	};
-	activate_then_await(
-		ax::reports_active(pid),
-		ACTIVE_STATE_TIMEOUT,
-		activate,
-		|| ax::reports_active(pid),
-		|| control::wait(KEY_WINDOW_POLL),
-	)?;
+	activate_in_background(source, pid, wid, context)?;
 	still_behind_user(pid, wid, visit)?;
 	if focus_in_overlay {
 		return Ok(true);
@@ -1062,6 +1063,39 @@ pub(super) fn make_key_in_background(
 	press(CGEventType::LeftMouseDown, 1)?;
 	let release = control::cleanup(|| press(CGEventType::LeftMouseUp, 2));
 	skylight::after_cleanup(Ok(true), release)
+}
+
+/// Tells background process `pid` it is active with window `wid` key, as
+/// `AppKit` does for a real activation, through the connection `context`,
+/// and gives it until [`ACTIVE_STATE_TIMEOUT`] to report it
+/// ([`activate_then_await`]). `WindowServer`'s front process stays the user's.
+fn activate_in_background(
+	source: &CGEventSource,
+	pid: libc::pid_t,
+	wid: u32,
+	context: i64,
+) -> CoreResult<()> {
+	let activate = || -> CoreResult<()> {
+		let activated = CGEvent::new(source.clone())
+			.map_err(|()| DesktopError::input_failed("failed to create a Quartz activation event"))?;
+		// SAFETY: `activated` is a live CGEvent and the type is a valid
+		// CGEventType value the core-graphics enum lacks.
+		unsafe { set_event_type(activated.as_ptr(), APPKIT_DEFINED_EVENT) };
+		activated.set_flags(CGEventFlags::from_bits_retain(ACTIVATION_FLAGS));
+		skylight::set_fields(&activated, &[
+			(FIELD_WINDOW_NUMBER, i64::from(wid)),
+			(FIELD_WINDOW_CONTEXT, context),
+			(FIELD_APPKIT_SUBTYPE, APPLICATION_ACTIVATED),
+		])?;
+		skylight::post_routed(pid, &activated)
+	};
+	activate_then_await(
+		ax::reports_active(pid),
+		ACTIVE_STATE_TIMEOUT,
+		activate,
+		|| ax::reports_active(pid),
+		|| control::wait(KEY_WINDOW_POLL),
+	)
 }
 
 /// Refuses once the target's application is frontmost (or the front process
@@ -2864,11 +2898,15 @@ mod tests {
 
 	#[test]
 	fn a_background_left_click_reads_its_owner_once_the_window_is_key() {
-		// A system Open panel, window 554 of TextEdit (pid 7581), that is not
-		// key shows no drawing process; once the click made it key,
-		// openAndSavePanelService (pid 7592) reports focus in its window 556.
+		use crate::desktop::error::ErrorCode;
+		// A system Open panel, window 554 of TextEdit (pid 7581), is drawn by
+		// openAndSavePanelService (pid 7592) in its window 556, which that
+		// process reports focused only once the click made the panel key.
 		let key = std::cell::Cell::new(false);
-		let owner = || Ok(if key.get() { (7592, 556) } else { (7581, 554) });
+		let owner = || {
+			let content = ax::WindowContent::Remote { pid: 7592, window: 556 };
+			input_owner(7581, 554, content, |_| key.get().then_some(556))
+		};
 		let prepare = || {
 			key.set(true);
 			Ok(true)
@@ -2881,11 +2919,28 @@ mod tests {
 			modifiers: Modifiers::default(),
 		};
 		assert_eq!(pointer_owner(&click, prepare, owner).unwrap(), (true, (7592, 556)));
-		// A scroll never makes the window key, so it is not prepared.
+		// A scroll never makes the window key, so it is not prepared: on a panel
+		// that is not key it refuses instead of going to TextEdit, which would
+		// drop it.
 		key.set(false);
 		let scroll = PointerEvent::Scroll { x: 10.0, y: 10.0, dx: 0.0, dy: 3.0 };
 		let owned = pointer_owner(&scroll, || panic!("a scroll must not make its window key"), owner);
-		assert_eq!(owned.unwrap(), (false, (7581, 554)));
+		assert_eq!(owned.unwrap_err().code, ErrorCode::BackgroundUnavailable);
+	}
+
+	#[test]
+	fn keys_for_a_system_panel_activate_the_process_that_draws_it() {
+		// TextEdit (7581) shows a Save sheet that openAndSavePanelService (7592)
+		// draws in its window 556: Return presses the sheet's Save button only
+		// once that process believes it is active.
+		let mut activated = Vec::new();
+		activate_owner(7581, (7592, 556), |owner| {
+			activated.push(owner);
+			Ok(())
+		})
+		.unwrap();
+		assert_eq!(activated, [(7592, 556)]);
+		activate_owner(7581, (7581, 554), |_| panic!("the target was activated already")).unwrap();
 	}
 
 	#[test]
