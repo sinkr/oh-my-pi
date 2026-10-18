@@ -417,6 +417,75 @@ describe("Factory Droid completions reasoning matrix", () => {
 		expect(captured[0].body.reasoning_history).toBe("preserved");
 	});
 
+	it("caps long tool names at 64 characters and keeps their calls and results in replayed history", async () => {
+		const name = `mcp__${"long_server__".repeat(4)}${"t".repeat(16)}`;
+		expect(name).toHaveLength(73);
+		const tools = [{ name, description: "long", parameters: type({ path: "string" }) }];
+		const call = { type: "toolCall" as const, id: "call_long", name, arguments: { path: "a" } };
+		const captured: CapturedRequest[] = [];
+		const wireName = `${name.slice(0, 55)}_${Bun.SHA256.hash(name, "hex").slice(0, 8)}`;
+		const returned = [
+			JSON.stringify({
+				id: "chatcmpl-test",
+				object: "chat.completion.chunk",
+				created: 1,
+				model: "kimi-k3",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							role: "assistant",
+							tool_calls: [
+								{
+									index: 0,
+									id: "call_new",
+									type: "function",
+									function: { name: wireName, arguments: '{"path":"b"}' },
+								},
+							],
+						},
+					},
+				],
+			}),
+			JSON.stringify({
+				id: "chatcmpl-test",
+				object: "chat.completion.chunk",
+				created: 1,
+				model: "kimi-k3",
+				choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+			}),
+		];
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{
+				messages: [
+					{ role: "user", content: "go", timestamp: 1 },
+					assistantTurn([call], "kimi-k3"),
+					{
+						role: "toolResult",
+						toolCallId: "call_long",
+						toolName: name,
+						content: [{ type: "text", text: "long result" }],
+						isError: false,
+						timestamp: 3,
+					},
+				],
+				tools,
+			},
+			{ apiKey: "workos-token", fetch: captureFetch(captured, returned) },
+		).result();
+
+		const body = captured[0].body as {
+			tools: Array<{ function: { name: string } }>;
+			messages: Array<{ role: string; tool_calls?: Array<{ function: { name: string } }>; content?: unknown }>;
+		};
+		expect(body.tools[0].function.name).toBe(wireName);
+		expect(body.messages.find(message => message.role === "assistant")?.tool_calls?.[0].function.name).toBe(wireName);
+		expect(body.messages.find(message => message.role === "tool")?.content).toContain("long result");
+		// The returned call dispatches to the caller's tool.
+		expect(result.content.find(block => block.type === "toolCall")).toMatchObject({ name, arguments: { path: "b" } });
+	});
+
 	it("does not invent synthetic reasoning_content or content for kimi tool-call history", async () => {
 		const captured: CapturedRequest[] = [];
 		await streamFactoryDroid(

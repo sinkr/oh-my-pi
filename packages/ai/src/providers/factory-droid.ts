@@ -19,13 +19,25 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import type { OAuthRequestIdentity } from "../auth/types";
 import * as AIError from "../error";
 import { mapAnthropicToolChoice } from "../stream";
-import type { Api, Context, Model, ModelSpec, ServiceTier, StreamFunction, StreamOptions, ToolChoice } from "../types";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	Model,
+	ModelSpec,
+	ServiceTier,
+	StreamFunction,
+	StreamOptions,
+	ToolCall,
+	ToolChoice,
+} from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { type AnthropicOptions, mapStainlessArch, mapStainlessOs, shouldStripThinkingHistory } from "./anthropic";
 import { createProviderErrorMessage } from "./error-message";
 import droidIdentity from "./factory-droid/droid-identity.md" with { type: "text" };
 import { streamFactoryDroidGemini } from "./factory-droid/gemini";
+import { factoryDroidToolNamesByWire, sanitizeFactoryDroidToolName } from "./factory-droid/tool-names";
 import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from "./register-builtins";
 
 /**
@@ -488,29 +500,85 @@ function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): Assi
 	});
 }
 
+/**
+ * The CLI sends chat-completions tool names in the same sanitized, 64-char
+ * shape as its Gemini names: declarations and replayed calls and results go
+ * out encoded, and returned calls come back under the caller's tool name.
+ */
+function encodeCompletionsToolNames(context: Context): Context {
+	return {
+		...context,
+		tools: context.tools?.map(tool => ({ ...tool, name: sanitizeFactoryDroidToolName(tool.name) })),
+		messages: context.messages.map(message => {
+			if (message.role === "toolResult") {
+				return { ...message, toolName: sanitizeFactoryDroidToolName(message.toolName) };
+			}
+			if (message.role !== "assistant") return message;
+			return {
+				...message,
+				content: message.content.map(block =>
+					block.type === "toolCall" ? { ...block, name: sanitizeFactoryDroidToolName(block.name) } : block,
+				),
+			};
+		}),
+	};
+}
+
 function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): AssistantMessageEventStream {
 	const { options } = a;
+	const toolNamesByWire = factoryDroidToolNamesByWire(a.context.tools);
 	// The selected dialect owns every reasoning field, so the shared encoder gets none.
 	const extraBody = buildCompletionsReasoningBody(a.route.policy, a.effort, a.disabled);
-	return streamOpenAICompletions({ ...inner, compat: { ...inner.compat, extraBody } }, a.context, {
-		...a.forwarded,
-		sessionId: a.sessionUuid,
-		temperature: options?.temperature ?? FACTORY_DROID_COMPLETIONS_TEMPERATURE,
-		topP: options?.topP,
-		topK: options?.topK,
-		minP: options?.minP,
-		presencePenalty: options?.presencePenalty,
-		repetitionPenalty: options?.repetitionPenalty,
-		frequencyPenalty: options?.frequencyPenalty,
-		stopSequences: options?.stopSequences,
-		initiatorOverride: options?.initiatorOverride,
-		promptCacheKey: options?.promptCacheKey,
-		promptCache: options?.promptCache,
-		serviceTier: options?.serviceTier,
-		reasoning: undefined,
-		disableReasoning: undefined,
-		toolChoice: options?.toolChoice,
-	});
+	const source = streamOpenAICompletions(
+		{ ...inner, compat: { ...inner.compat, extraBody } },
+		encodeCompletionsToolNames(a.context),
+		{
+			...a.forwarded,
+			sessionId: a.sessionUuid,
+			temperature: options?.temperature ?? FACTORY_DROID_COMPLETIONS_TEMPERATURE,
+			topP: options?.topP,
+			topK: options?.topK,
+			minP: options?.minP,
+			presencePenalty: options?.presencePenalty,
+			repetitionPenalty: options?.repetitionPenalty,
+			frequencyPenalty: options?.frequencyPenalty,
+			stopSequences: options?.stopSequences,
+			initiatorOverride: options?.initiatorOverride,
+			promptCacheKey: options?.promptCacheKey,
+			promptCache: options?.promptCache,
+			serviceTier: options?.serviceTier,
+			reasoning: undefined,
+			disableReasoning: undefined,
+			// A forced choice names the tool by its declared (encoded) name.
+			toolChoice:
+				typeof options?.toolChoice === "object" && "function" in options.toolChoice
+					? {
+							...options.toolChoice,
+							function: { name: sanitizeFactoryDroidToolName(options.toolChoice.function.name) },
+						}
+					: typeof options?.toolChoice === "object" && "name" in options.toolChoice
+						? { ...options.toolChoice, name: sanitizeFactoryDroidToolName(options.toolChoice.name) }
+						: options?.toolChoice,
+		},
+	);
+	const decodeCall = (block: ToolCall) => {
+		block.name = toolNamesByWire.get(block.name) ?? block.name;
+	};
+	const decode = (message: AssistantMessage) => {
+		for (const block of message.content) if (block.type === "toolCall") decodeCall(block);
+	};
+	const stream = new AssistantMessageEventStream();
+	(async () => {
+		for await (const event of source) {
+			if ("partial" in event) decode(event.partial);
+			if (event.type === "toolcall_end") decodeCall(event.toolCall);
+			if (event.type === "done") decode(event.message);
+			if (event.type === "error") decode(event.error);
+			stream.push(event);
+		}
+		stream.end();
+	})();
+	return stream;
 }
 
 function streamWire(wire: FactoryDroidWire, a: Attempt): AssistantMessageEventStream {
