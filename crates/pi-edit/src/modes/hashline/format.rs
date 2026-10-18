@@ -99,7 +99,14 @@ pub fn format_hashline_header(path: &str, tag: &str) -> String {
 }
 /// Format one numbered source line.
 pub fn format_numbered_line(line_number: u32, line: &str) -> String {
-	format!("{line_number}:{line}")
+	let mut output = String::new();
+	write_numbered_line(&mut output, line_number, line);
+	output
+}
+/// Append one numbered source line to `output`: the single definition of the
+/// numbered-row encoding.
+fn write_numbered_line(output: &mut String, line_number: u32, line: &str) {
+	write!(output, "{line_number}:{line}").expect("writing to a String cannot fail");
 }
 /// Split text into lines addressable by hashline anchors.
 pub fn split_addressable_file_lines(text: &str) -> Vec<&str> {
@@ -117,7 +124,7 @@ pub fn format_numbered_lines(text: &str, start_line: u32) -> String {
 			output.push('\n');
 		}
 		let number = start_line.saturating_add(u32::try_from(index).unwrap_or(u32::MAX));
-		write!(output, "{number}:{line}").expect("writing to a String cannot fail");
+		write_numbered_line(&mut output, number, line);
 	}
 	output
 }
