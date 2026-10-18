@@ -1269,15 +1269,12 @@ fn perform_choosing(
 	skylight::with_background_watch(pid, |visit| {
 		// A popup in a system Open or Save panel opens its menu in the
 		// process that draws the panel.
-		let menu_pid = if watch {
-			open_menu::menu_process(
-				pid,
-				innermost_window_id(element).map(|(id, _)| id),
-				skylight::window_owner_pid,
-			)
+		let drawn = if watch {
+			innermost_window_id(element).map(|(id, _)| id)
 		} else {
-			pid
+			None
 		};
+		let menu_pid = open_menu::menu_process(pid, drawn, skylight::window_owner_pid);
 		let before = if watch {
 			let before = capture::menu_windows(menu_pid).ok_or_else(|| {
 				DesktopError::ax_failed(format!(
@@ -1298,7 +1295,19 @@ fn perform_choosing(
 			path,
 			perform,
 			|before, path| {
-				open_menu::settle(menu_pid, pid, before, path, open_menu::CONTROL_MENU_TIMEOUT)
+				// The user may have brought the target forward while its menu
+				// appeared.
+				let holds = || {
+					input::recheck_background(
+						background,
+						pid,
+						drawn.unwrap_or_default(),
+						skylight::front_pid,
+						|| visit.happened(),
+						control::check,
+					)
+				};
+				open_menu::settle(menu_pid, pid, before, path, open_menu::CONTROL_MENU_TIMEOUT, holds)
 			},
 		)
 	})

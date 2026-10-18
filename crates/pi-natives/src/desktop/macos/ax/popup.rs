@@ -25,6 +25,9 @@ const MENU_OPEN_WAIT: Duration = Duration::from_millis(1000);
 const CHOICE_SETTLE_WAIT: Duration = Duration::from_millis(1000);
 /// How long a cancelled menu has to leave the popup's children.
 const MENU_CLOSE_WAIT: Duration = Duration::from_millis(300);
+/// How long a pressed option's menu has to close: one that refuses
+/// `AXCancel` flashes the item and fades out for about 340 ms.
+const PRESSED_MENU_CLOSE_WAIT: Duration = Duration::from_millis(1000);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Chooses the option of `popup` titled exactly `value` and confirms it by
@@ -196,31 +199,45 @@ fn press_option(popup: &AXUIElement, item: &AXUIElement, title: &str) -> CoreRes
 	}
 	settle_choice(
 		title,
-		CHOICE_SETTLE_WAIT,
+		(PRESSED_MENU_CLOSE_WAIT, CHOICE_SETTLE_WAIT),
 		|| perform_action(item, "AXPress"),
-		|| close_menu(popup),
+		|| {
+			if let Some(menu) = open_menu_element(popup) {
+				let _ = perform_action(&menu, "AXCancel");
+			}
+		},
+		|| open_menu_element(popup).is_some(),
 		|| copy_string(popup, "AXValue"),
 	)
 }
 
-/// Runs `press` on the option titled `title`, then `close`s its menu, then
-/// waits up to `wait` for the popup's `value` to read `title`. A pressed item
-/// flashes and its menu fades out for about 340 ms, and until the menu is gone
+/// Runs `press` on the option titled `title`, then `cancel`s its menu and
+/// waits up to `closing` for the menu to be gone (`menu_open`), then up to
+/// `taking` for the popup's `value` to read `title`. A pressed item flashes
+/// and its menu fades out for about 340 ms, and until the menu is gone
 /// `WindowServer` sends the user's keys to the target, which types them into
 /// its own key window once it closes; `AXCancel` right behind the press ends
 /// the menu within a few milliseconds, and `AppKit` still sends the item's
-/// action. A menu the cancel misses closes after its fade on its own.
+/// action. A menu that refuses the cancel closes after its fade, and the
+/// choice is not reported until it has: one still open then fails.
 fn settle_choice(
 	title: &str,
-	wait: Duration,
+	(closing, taking): (Duration, Duration),
 	press: impl FnOnce() -> CoreResult<()>,
-	close: impl FnOnce() -> bool,
+	cancel: impl FnOnce(),
+	mut menu_open: impl FnMut() -> bool,
 	mut value: impl FnMut() -> Option<String>,
 ) -> CoreResult<()> {
 	press()?;
-	close();
+	cancel();
+	if poll(closing, || (!menu_open()).then_some(())).is_none() {
+		return Err(DesktopError::ax_failed(format!(
+			"pressed popup option \"{title}\" but its menu did not close, and an open menu keeps the \
+			 keyboard from the user's app; inspect the popup before retrying"
+		)));
+	}
 	let mut after = None;
-	let taken = poll(wait, || {
+	let taken = poll(taking, || {
 		after = value();
 		(after.as_deref() == Some(title)).then_some(())
 	});
@@ -304,17 +321,19 @@ mod tests {
 	#[test]
 	fn a_pressed_option_ends_its_menu_before_the_choice_is_read() {
 		let log = RefCell::new(Vec::new());
+		let open = std::cell::Cell::new(true);
 		let chosen = settle_choice(
 			"Large",
-			Duration::ZERO,
+			(Duration::ZERO, Duration::ZERO),
 			|| {
 				log.borrow_mut().push("press");
 				Ok(())
 			},
 			|| {
 				log.borrow_mut().push("cancel");
-				true
+				open.set(false);
 			},
+			|| open.get(),
 			|| {
 				log.borrow_mut().push("value");
 				Some("Large".to_string())
@@ -327,10 +346,50 @@ mod tests {
 	}
 
 	#[test]
+	fn a_choice_waits_for_a_menu_that_refuses_cancel_to_fade_out() {
+		// The menu ignores `AXCancel` and closes on its own after its fade:
+		// the choice is reported only once it is gone.
+		let reads = std::cell::Cell::new(0);
+		let fading = || {
+			reads.set(reads.get() + 1);
+			reads.get() < 4
+		};
+		let chosen = settle_choice(
+			"Large",
+			(Duration::from_secs(5), Duration::ZERO),
+			|| Ok(()),
+			|| {},
+			fading,
+			|| {
+				assert_eq!(reads.get(), 4, "the choice is read once the menu is gone");
+				Some("Large".to_string())
+			},
+		);
+		assert!(chosen.is_ok(), "{chosen:?}");
+		// A menu that never closes fails even though the app took the choice.
+		let error = settle_choice(
+			"Large",
+			(Duration::ZERO, Duration::ZERO),
+			|| Ok(()),
+			|| {},
+			|| true,
+			|| Some("Large".to_string()),
+		)
+		.expect_err("the menu is still open");
+		assert!(error.message.contains("its menu did not close"), "{}", error.message);
+	}
+
+	#[test]
 	fn a_choice_the_app_did_not_take_is_reported_after_the_cancel() {
-		let error =
-			settle_choice("Large", Duration::ZERO, || Ok(()), || false, || Some("Small".to_string()))
-				.expect_err("the popup still reads Small");
+		let error = settle_choice(
+			"Large",
+			(Duration::ZERO, Duration::ZERO),
+			|| Ok(()),
+			|| {},
+			|| false,
+			|| Some("Small".to_string()),
+		)
+		.expect_err("the popup still reads Small");
 		assert!(error.message.contains("still reads \"Small\""), "{}", error.message);
 	}
 }

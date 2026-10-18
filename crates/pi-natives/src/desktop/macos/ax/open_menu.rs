@@ -200,25 +200,13 @@ fn listed(items: &str) -> String {
 	}
 }
 
-/// How to choose an item in the background instead: holds and drags take no
-/// `menu` option, but a click on the same control does.
-fn choose_hint(press: Press<'_>) -> &'static str {
-	match press {
-		Press::Pointer { kind: "mouse hold" | "drag", .. } => {
-			"click the control with the item's path as the menu option"
-		},
-		_ => "pass its path as the menu option",
-	}
-}
-
 fn unchosen_message(press: Press<'_>, refusal: Option<&str>, items: &str) -> String {
 	let (opened, aftermath, listed) = (opened(press), aftermath(press), listed(items));
 	match refusal {
 		None => format!(
 			"{opened}, which takes the keyboard from the user's app, so it was closed with nothing \
-			 chosen{aftermath}. To choose an item in the background, {}, e.g. menu: [\"<item>\", \
-			 \"<subitem>\"].{listed}",
-			choose_hint(press)
+			 chosen{aftermath}. To choose an item in the background, pass its path as the menu \
+			 option, e.g. menu: [\"<item>\", \"<subitem>\"].{listed}"
 		),
 		Some(refusal) => format!(
 			"{opened}, but {refusal}, so nothing was chosen and the menu was \
@@ -279,15 +267,19 @@ trait Menus {
 /// Settles a menu that a press of `app_pid` opened, within `timeout`, since
 /// the menu windows of `menu_pid`, the process that shows its menus
 /// ([`menu_process`]), were `before`: chooses `path` in it, or closes it; see
-/// [`guard`].
+/// [`guard`]. `holds` runs right before a path's item is pressed: the menu
+/// can take the whole timeout to appear, and the user may have brought the
+/// target forward meanwhile, which [`input::recheck_background`] tells; when
+/// it refuses, the menu is closed and nothing is pressed.
 pub(crate) fn settle(
 	menu_pid: libc::pid_t,
 	app_pid: libc::pid_t,
 	before: &[u32],
 	path: Option<&[String]>,
 	timeout: Duration,
+	holds: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<Settled> {
-	settle_with(&mut AxMenus { pid: menu_pid, app_pid, app: None }, before, path, timeout)
+	settle_with(&mut AxMenus { pid: menu_pid, app_pid, app: None }, before, path, timeout, holds)
 }
 
 /// The process that shows the menus of an element of `app_pid` whose window
@@ -313,6 +305,7 @@ fn settle_with<M: Menus>(
 	before: &[u32],
 	path: Option<&[String]>,
 	timeout: Duration,
+	holds: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<Settled> {
 	let mut read = false;
 	let opened = poll(timeout, || {
@@ -333,11 +326,26 @@ fn settle_with<M: Menus>(
 	let menu = menus.locate(window);
 	let (refusal, items) = match (path, &menu) {
 		(Some(path), Some(menu)) => match choose(menus, menu, path) {
-			Ok(()) if end_chosen(menus, window, menu)? => return Ok(Settled::Chosen),
-			Ok(()) => (
-				Some(format!("the menu stayed open after {} was pressed", quote_path(path))),
-				String::new(),
-			),
+			Ok(leaf) => {
+				if let Err(error) = holds() {
+					close(menus, window, Some(menu))?;
+					return Err(error);
+				}
+				match menus.press(&leaf.node) {
+					Ok(()) if end_chosen(menus, window, menu)? => return Ok(Settled::Chosen),
+					Ok(()) => (
+						Some(format!("the menu stayed open after {} was pressed", quote_path(path))),
+						String::new(),
+					),
+					Err(error) => (
+						Some(format!(
+							"pressing menu item '{}' failed ({}), and it may already have taken effect",
+							leaf.path, error.message
+						)),
+						String::new(),
+					),
+				}
+			},
 			Err(refusal) => (Some(refusal.message), refusal.items),
 		},
 		(Some(_), None) => {
@@ -396,11 +404,21 @@ struct Refusal {
 	items:   String,
 }
 
-/// Walks `path` from `menu` and presses its leaf. Labels match as in
+/// The command item a path ends at, and its path as errors name it.
+struct Leaf<N> {
+	node: N,
+	path: String,
+}
+
+/// Walks `path` from `menu` to the item to press. Labels match as in
 /// `win.menu.select`: case-insensitively, a trailing ellipsis tolerated, and
 /// a label matching two items refuses. Each item on the way must be enabled,
 /// and the leaf must be a command rather than a submenu.
-fn choose<M: Menus>(menus: &mut M, menu: &M::Node, path: &[String]) -> Result<(), Refusal> {
+fn choose<M: Menus>(
+	menus: &mut M,
+	menu: &M::Node,
+	path: &[String],
+) -> Result<Leaf<M::Node>, Refusal> {
 	let mut menu = menu.clone();
 	let mut walked: Vec<String> = Vec::with_capacity(path.len());
 	for (depth, label) in path.iter().enumerate() {
@@ -448,14 +466,7 @@ fn choose<M: Menus>(menus: &mut M, menu: &M::Node, path: &[String]) -> Result<()
 				items:   listing(menus, submenu),
 			});
 		}
-		return menus.press(&entry.node).map_err(|error| Refusal {
-			message: format!(
-				"pressing menu item '{}' failed ({}), and it may already have taken effect",
-				item.path.join(" > "),
-				error.message
-			),
-			items:   String::new(),
-		});
+		return Ok(Leaf { node: entry.node.clone(), path: item.path.join(" > ") });
 	}
 	Err(Refusal { message: "the menu path is empty".to_string(), items: String::new() })
 }
@@ -720,10 +731,15 @@ mod tests {
 		labels.iter().map(ToString::to_string).collect()
 	}
 
+	/// The target still holds at every recheck.
+	fn held() -> CoreResult<()> {
+		Ok(())
+	}
+
 	#[test]
 	fn a_menu_the_press_opened_is_closed_and_its_items_listed() {
 		let mut app = font_book();
-		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT).expect("settled");
+		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT, held).expect("settled");
 		assert_eq!(settled, Settled::Unchosen {
 			refusal: None,
 			items:   "\"Add to\" ▸ [\"Bench Holdout\", \"Serif…\"], \"Remove\" (disabled), \"Show in \
@@ -739,7 +755,7 @@ mod tests {
 	fn escape_closes_a_menu_that_refuses_cancel() {
 		let mut app = font_book();
 		app.cancel_works = false;
-		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT).expect("settled");
+		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT, held).expect("settled");
 		assert!(matches!(settled, Settled::Unchosen { closed: true, .. }), "{settled:?}");
 		assert_eq!(*app.log.borrow(), ["cancel", "escape"]);
 	}
@@ -751,9 +767,31 @@ mod tests {
 		// 340 ms, with the user's keyboard; the cancel ends it at once.
 		app.press_closes = false;
 		let wanted = path(&["add TO", "serif..."]);
-		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT);
+		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT, held);
 		assert_eq!(settled.expect("settled"), Settled::Chosen);
 		assert_eq!(*app.log.borrow(), ["press Serif…", "cancel"]);
+	}
+
+	#[test]
+	fn a_path_presses_nothing_once_the_target_no_longer_holds() {
+		// The user brought the target forward while its menu took its time to
+		// appear: the recheck right before the press refuses, and the menu is
+		// closed with nothing pressed.
+		let mut app = font_book();
+		let wanted = path(&["Show in Finder"]);
+		let refused =
+			|| Err(DesktopError::background_unavailable("window 42's application came to the front"));
+		let error = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT, refused)
+			.expect_err("the recheck refuses");
+		assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+		assert!(app.open.is_empty());
+		// A path that matches nothing refuses without the recheck.
+		let mut app = font_book();
+		let wanted = path(&["Sans"]);
+		let unasked = || -> CoreResult<()> { panic!("nothing is pressed, so nothing is rechecked") };
+		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT, unasked);
+		assert!(matches!(settled, Ok(Settled::Unchosen { closed: true, .. })), "{settled:?}");
 	}
 
 	#[test]
@@ -761,7 +799,7 @@ mod tests {
 		let refused = |labels: &[&str]| {
 			let mut app = font_book();
 			let wanted = path(labels);
-			let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT);
+			let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT, held);
 			assert_eq!(*app.log.borrow(), ["cancel"], "{labels:?}");
 			match settled.expect("settled") {
 				Settled::Unchosen { refusal: Some(refusal), items, closed: true } => (refusal, items),
@@ -787,7 +825,7 @@ mod tests {
 		app.press_closes = false;
 		app.cancel_works = false;
 		let wanted = path(&["Show in Finder"]);
-		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT);
+		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT, held);
 		match settled.expect("settled") {
 			Settled::Unchosen { refusal: Some(refusal), closed: true, .. } => {
 				assert!(
@@ -807,7 +845,8 @@ mod tests {
 		let mut app = font_book();
 		app.open = vec![9];
 		app.opens = None;
-		let settled = settle_with(&mut app, &[9], None, Duration::from_millis(30)).expect("settled");
+		let settled =
+			settle_with(&mut app, &[9], None, Duration::from_millis(30), held).expect("settled");
 		assert_eq!(settled, Settled::NoMenu);
 		assert!(app.log.borrow().is_empty());
 		assert_eq!(new_menu(&[5], &[5]), None);
@@ -824,7 +863,7 @@ mod tests {
 		let mut app = font_book();
 		app.cancel_works = false;
 		app.escape_works = false;
-		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT).expect("settled");
+		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT, held).expect("settled");
 		assert!(matches!(settled, Settled::Unchosen { closed: false, .. }), "{settled:?}");
 	}
 
@@ -853,22 +892,6 @@ mod tests {
 			height:  100,
 			focused: false,
 		}
-	}
-
-	#[test]
-	fn a_hold_or_drag_whose_menu_was_closed_points_to_a_click_with_menu() {
-		let window = finder_window();
-		for kind in ["mouse hold", "drag"] {
-			let message =
-				unchosen_message(Press::Pointer { kind, window: &window }, None, "\"Small\"");
-			// Holds and drags take no `menu` option.
-			assert!(
-				message.contains("click the control with the item's path as the menu option"),
-				"{message}"
-			);
-		}
-		let click = unchosen_message(Press::Pointer { kind: "click", window: &window }, None, "");
-		assert!(click.contains("pass its path as the menu option"), "{click}");
 	}
 
 	#[test]
