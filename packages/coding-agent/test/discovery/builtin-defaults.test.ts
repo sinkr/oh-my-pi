@@ -324,6 +324,8 @@ describe("builtin-defaults rule provider", () => {
 			'const KINDS = new Set<string>([ /* categories */ "a", "b" ]);',
 			'const KINDS = new Set([\n\t// text kinds\n\t"text",\n\t"json", // structured\n]);',
 			'const LABELS = new Map([\n\t["text", "Text"],\n\t["json", "JSON"],\n]);',
+			'const ALIASES = new Map<string, string[]>([["ts", ["typescript", "tsx"]]]);',
+			'const COLUMNS = new Map([["first", ROW[0]], ["second", ROW[1]]]);',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
 
@@ -352,6 +354,9 @@ describe("builtin-defaults rule provider", () => {
 			'let call: Parameters<typeof import("./declared-arguments").check>[0];',
 			'type Page = import("puppeteer-core")["Page"];',
 			'type Client = import(/* sdk */ "some-sdk").Client;',
+			'type Load = () => typeof import("./mod");',
+			'type Pair = [typeof import("./a"), string];',
+			'type Both = Base & typeof import("./mod");',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
 
@@ -385,6 +390,8 @@ describe("builtin-defaults rule provider", () => {
 			"const id = (value as any) ?? fallback;",
 			"const id = value as any ?? fallback;",
 			"const id = value as any!;",
+			"let entry: any /* TODO */;",
+			"let entry: any // TODO: type this\n",
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-no-any"]);
 
