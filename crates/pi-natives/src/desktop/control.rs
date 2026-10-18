@@ -28,7 +28,7 @@ mod windows;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
 	MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, is_pointer_press, monitor_seen,
-	uptime_ns,
+	monitor_sees_presses, uptime_ns,
 };
 
 #[derive(Default)]
@@ -281,10 +281,10 @@ pub(crate) fn with_token_for_test<T>(token: &OperationToken, action: impl FnOnce
 #[cfg(target_os = "macos")]
 static USER_CHOICES: AtomicU64 = AtomicU64::new(0);
 
-/// Mouse buttons, Command shortcuts (Command-Tab, Spotlight) and Control
-/// navigation chords (Mission Control, a Space switch) the user pressed while
-/// the takeover monitor ran: the input that picks an app, window or Space, so
-/// takeover leaves the front application to the user.
+/// Mouse buttons and shortcuts (any key press but plain typing: Command-Tab,
+/// Control-Up, F3) the user pressed while the takeover monitor ran: the input
+/// that may pick an app, window, Space or menu, so takeover leaves the front
+/// application to the user.
 #[cfg(target_os = "macos")]
 pub(crate) fn user_choices() -> u64 {
 	USER_CHOICES.load(Ordering::Acquire)
@@ -347,7 +347,16 @@ impl ControlLease {
 	/// their own app cancels nothing; the host interrupt still cancels it.
 	#[cfg(target_os = "macos")]
 	fn acquire(source: &CancellationSource, takeover: bool) -> CoreResult<Self> {
-		Self::acquire_arming(source, takeover, macos::EscapeMonitor::start)
+		#[cfg(not(test))]
+		let start = macos::EscapeMonitor::start;
+		// Tests start the stand-in; naming the real monitor keeps it, and
+		// everything its tap uses, compiled and linted in test builds too.
+		#[cfg(test)]
+		let start = {
+			let _real = macos::EscapeMonitor::start;
+			test_escape::start
+		};
+		Self::acquire_arming(source, takeover, start)
 	}
 
 	#[cfg(target_os = "macos")]
@@ -622,6 +631,38 @@ pub(crate) fn grant_for_test(source: &CancellationSource) {
 	*source.0.state.lock() = Some(Arc::new(owner));
 }
 
+/// The Escape monitor's stand-in in tests, where no event tap can start: a
+/// takeover lease is refused as it is without the permission, and the
+/// [`EmergencyStop`] the monitor's tap would cancel through on a physical
+/// Escape is kept for [`press_escape_for_test`].
+#[cfg(all(test, target_os = "macos"))]
+mod test_escape {
+	use std::cell::RefCell;
+
+	use super::{CoreResult, DesktopError, EmergencyStop, macos};
+
+	thread_local! {
+		pub(super) static ARMED: RefCell<Vec<EmergencyStop>> = const { RefCell::new(Vec::new()) };
+	}
+
+	pub(super) fn start(stop: EmergencyStop) -> CoreResult<macos::EscapeMonitor> {
+		ARMED.with_borrow_mut(|armed| armed.push(stop));
+		Err(DesktopError::permission_denied("no event tap in tests"))
+	}
+}
+
+/// Presses a physical Escape for every Escape stop a lease armed on this
+/// thread since the last press, as the monitor's tap would; returns how many
+/// there were.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn press_escape_for_test() -> usize {
+	let armed = test_escape::ARMED.with_borrow_mut(std::mem::take);
+	for stop in &armed {
+		stop.cancel();
+	}
+	armed.len()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -701,33 +742,22 @@ mod tests {
 		remove_test_lock();
 	}
 
-	/// The Escape monitor's tap cancels through the [`EmergencyStop`] it is
-	/// started with; the seam hands that stop to the test as the monitor's
-	/// stand-in, which presses Escape by cancelling through it.
 	#[cfg(target_os = "macos")]
 	#[test]
 	fn physical_escape_stops_takeover_input_but_not_background_input() {
 		let _serial = OWNERSHIP_TEST.lock();
+		press_escape_for_test();
 		let source = CancellationSource::default();
-		let armed = RefCell::new(Vec::new());
-		let start = |stop| {
-			armed.borrow_mut().push(stop);
-			Err(DesktopError::permission_denied("no event tap in tests"))
-		};
 		let background = source.token();
-		drop(ControlLease::acquire_arming(&source, false, start).expect("background lease"));
-		for stop in armed.borrow().iter() {
-			stop.cancel();
-		}
+		drop(InputLease::acquire(&background, false).expect("background lease"));
+		assert_eq!(press_escape_for_test(), 0, "background input arms no Escape stop");
 		assert!(background.check().is_ok(), "the user's Escape leaves background input running");
+		let takeover = source.token();
 		assert!(
-			ControlLease::acquire_arming(&source, true, start).is_err(),
+			InputLease::acquire(&takeover, true).is_err(),
 			"a takeover whose Escape stop cannot start is refused"
 		);
-		let takeover = source.token();
-		for stop in armed.borrow().iter() {
-			stop.cancel();
-		}
+		assert_eq!(press_escape_for_test(), 1);
 		assert!(takeover.check().is_err(), "physical Escape stops takeover input");
 		drop(KernelOwner::acquire().expect("takeover input releases kernel ownership"));
 		remove_test_lock();

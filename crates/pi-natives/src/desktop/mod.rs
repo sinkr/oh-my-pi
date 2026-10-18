@@ -3746,6 +3746,49 @@ mod capture_tests {
 		]);
 	}
 
+	/// A raise takes the user's foreground, so the worker serves it under the
+	/// physical-Escape stop; a press stays background input the user's Escape
+	/// leaves alone. Tests start no event tap, so a takeover lease is refused
+	/// after arming, as it is without the permission.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn a_raise_runs_under_the_escape_stop_and_a_press_does_not() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go")]);
+		control::press_escape_for_test();
+		let perform = |action: &'static str| {
+			move |reply| Request::AxPerform {
+				reference: "e2".to_string(),
+				action: action.to_string(),
+				reply,
+			}
+		};
+		for action in ["press", "AXPress", "axraise"] {
+			let source = CancellationSource::default();
+			let result = call(&mut worker, perform(action), &source);
+			assert!(
+				result
+					.as_ref()
+					.err()
+					.is_none_or(|error| error.code != ErrorCode::PermissionDenied),
+				"{action} needs no Escape stop"
+			);
+			let token = source.token();
+			assert_eq!(control::press_escape_for_test(), 0, "{action} arms no Escape stop");
+			assert!(token.check().is_ok(), "the user's Escape leaves {action} running");
+		}
+		assert_eq!(tree.lock().pressed, [2], "the fake tree runs only `press`");
+		for action in ["raise", " Raise ", "AXRaise"] {
+			let source = CancellationSource::default();
+			let error = call(&mut worker, perform(action), &source)
+				.err()
+				.expect("no Escape stop starts in tests");
+			assert_eq!(error.code, ErrorCode::PermissionDenied, "{action}");
+			let token = source.token();
+			assert_eq!(control::press_escape_for_test(), 1, "{action} arms the Escape stop");
+			assert!(token.check().is_err(), "physical Escape stops {action}");
+		}
+	}
+
 	#[test]
 	fn only_takeover_requests_arm_the_physical_escape_stop() {
 		let window = Target::Window("42".to_string());

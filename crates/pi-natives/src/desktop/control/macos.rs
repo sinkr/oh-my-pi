@@ -75,6 +75,7 @@ const fn physical_escape(kind: u32, key: i64, pid: i64, tag: i64) -> bool {
 const FLAGS_CHANGED: u32 = 12;
 const COMMAND_FLAG: u64 = 0x0010_0000;
 const CONTROL_FLAG: u64 = 0x0004_0000;
+const SECONDARY_FN_FLAG: u64 = 0x0080_0000;
 
 /// Mouse presses (left, right, other `CGEventType`s): the one list both the
 /// takeover monitor and the HID press counters classify presses by.
@@ -91,11 +92,47 @@ pub(crate) const fn is_pointer_press(kind: u32) -> bool {
 	false
 }
 
-/// Keys that, held with Control, are macOS's Mission Control and Space
-/// shortcuts: the arrows (Mission Control, application windows, moving a
-/// Space) and the top-row digits (switching to Desktop 1-9).
-const fn control_navigation_key(key: i64) -> bool {
-	matches!(key, 123..=126 | 18..=23 | 25 | 26 | 28)
+/// F1-F20, home of Mission Control, Launchpad, Show Desktop and the
+/// Control-F keyboard-focus shortcuts (menu bar, Dock, status menus).
+const fn function_key(key: i64) -> bool {
+	matches!(
+		key,
+		122 | 120
+			| 99
+			| 118
+			| 96
+			| 97
+			| 98
+			| 100
+			| 101
+			| 109
+			| 103
+			| 111
+			| 105
+			| 107
+			| 113
+			| 106
+			| 64
+			| 79
+			| 80
+			| 90
+	)
+}
+
+/// The arrows and the Help, Home, End, Page Up, Page Down and Forward Delete
+/// keys, which carry the fn flag whenever they are typed.
+const fn navigation_key(key: i64) -> bool {
+	matches!(key, 114..=117 | 119 | 121 | 123..=126)
+}
+
+/// Whether a key press is plain typing: no Command or Control, not a function
+/// key, and fn only on the keys that always carry it. Shift and Option type
+/// characters. Anything else may be a shortcut that picks an app, window,
+/// Space or menu, so only this allowlist counts as typing.
+const fn plain_typing(key: i64, flags: u64) -> bool {
+	flags & (COMMAND_FLAG | CONTROL_FLAG) == 0
+		&& !function_key(key)
+		&& (flags & SECONDARY_FN_FLAG == 0 || navigation_key(key))
 }
 
 /// The event types the takeover monitor's tap listens to: every pointer
@@ -129,12 +166,20 @@ pub(crate) fn monitor_seen() -> [u32; 5] {
 	SEEN.each_ref().map(|seen| seen.load(Ordering::Acquire))
 }
 
+/// Whether the monitor has ever seen a pointer press, omp's own included: a tap
+/// that has not may be blind to them, so its silence proves nothing.
+pub(crate) fn monitor_sees_presses() -> bool {
+	SEEN[..POINTER_PRESS_TYPES.len()]
+		.iter()
+		.any(|seen| seen.load(Ordering::Acquire) != 0)
+}
+
 /// What a physical event means for takeover's hand-back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserInput {
-	/// A mouse press, a Command shortcut (Command-Tab, Spotlight) or a Control
-	/// navigation chord (Mission Control, a Space switch): it picks an app,
-	/// window or Space, so the hand-back stands down.
+	/// A mouse press or any key press that is not plain typing (Command-Tab,
+	/// Control-Up, Control-F2, F3, a Globe shortcut): it may pick an app,
+	/// window, Space or menu, so the hand-back stands down.
 	Choice,
 	/// Plain typing, which reaches the takeover target only because takeover
 	/// holds the front.
@@ -147,11 +192,9 @@ const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Opti
 	}
 	match kind {
 		kind if is_pointer_press(kind) => Some(UserInput::Choice),
-		KEY_DOWN if flags & COMMAND_FLAG != 0 => Some(UserInput::Choice),
-		KEY_DOWN if flags & CONTROL_FLAG != 0 && control_navigation_key(key) => {
-			Some(UserInput::Choice)
-		},
-		KEY_DOWN | FLAGS_CHANGED => Some(UserInput::Typing),
+		KEY_DOWN if plain_typing(key, flags) => Some(UserInput::Typing),
+		KEY_DOWN => Some(UserInput::Choice),
+		FLAGS_CHANGED => Some(UserInput::Typing),
 		_ => None,
 	}
 }
@@ -367,23 +410,39 @@ mod tests {
 	}
 
 	#[test]
-	fn control_mission_control_and_space_chords_choose_while_control_typing_does_not() {
-		// Arrow keydowns also carry the fn and numeric-pad flags.
-		let arrow_flags = CONTROL_FLAG | 0x0080_0000 | 0x0020_0000;
+	fn only_plain_typing_types_and_every_other_shortcut_chooses() {
+		// Arrow keydowns carry the fn and numeric-pad flags.
+		let fn_pad = SECONDARY_FN_FLAG | 0x0020_0000;
 		for arrow in 123..=126 {
-			assert_eq!(user_input(KEY_DOWN, arrow, arrow_flags, 0, 0), Some(UserInput::Choice));
-			assert_eq!(
-				user_input(KEY_DOWN, arrow, 0x0080_0000 | 0x0020_0000, 0, 0),
-				Some(UserInput::Typing)
-			);
+			// Control-Up and its kin: Mission Control and Space switches.
+			let control = user_input(KEY_DOWN, arrow, CONTROL_FLAG | fn_pad, 0, 0);
+			assert_eq!(control, Some(UserInput::Choice));
+			assert_eq!(user_input(KEY_DOWN, arrow, fn_pad, 0, 0), Some(UserInput::Typing));
+			let word = user_input(KEY_DOWN, arrow, fn_pad | 0x8_0000, 0, 0);
+			assert_eq!(word, Some(UserInput::Typing), "Option-arrow moves by word");
 		}
-		// Control-1 through Control-9 switch Desktops.
-		for digit in [18, 19, 20, 21, 23, 22, 26, 28, 25] {
-			assert_eq!(user_input(KEY_DOWN, digit, CONTROL_FLAG, 0, 0), Some(UserInput::Choice));
+		for key in [115, 119, 116, 121, 117] {
+			assert_eq!(user_input(KEY_DOWN, key, SECONDARY_FN_FLAG, 0, 0), Some(UserInput::Typing));
 		}
-		// Control-A, Control-E and Control-C in a terminal are typing.
-		for key in [0, 14, 8] {
-			assert_eq!(user_input(KEY_DOWN, key, CONTROL_FLAG, 0, 0), Some(UserInput::Typing));
+		// Control-1 through Control-9 switch Desktops; Control-F2 and Control-F8
+		// focus the menu bar and status menus; F3 and F4 open Mission Control and
+		// Launchpad; Globe-F toggles full screen; any other Control chord may be
+		// an app's or the system's shortcut too.
+		for (key, flags) in [
+			(18, CONTROL_FLAG),
+			(25, CONTROL_FLAG),
+			(120, CONTROL_FLAG | SECONDARY_FN_FLAG),
+			(100, CONTROL_FLAG | SECONDARY_FN_FLAG),
+			(99, SECONDARY_FN_FLAG),
+			(118, 0),
+			(3, SECONDARY_FN_FLAG),
+			(0, CONTROL_FLAG),
+		] {
+			assert_eq!(user_input(KEY_DOWN, key, flags, 0, 0), Some(UserInput::Choice), "{key}");
+		}
+		// Letters, Shift and Option characters, Return and Delete are typing.
+		for (key, flags) in [(0, 0), (0, 0x2_0000), (0, 0x8_0000), (36, 0), (51, 0)] {
+			assert_eq!(user_input(KEY_DOWN, key, flags, 0, 0), Some(UserInput::Typing), "{key}");
 		}
 		assert_eq!(user_input(KEY_DOWN, 126, CONTROL_FLAG, 0, SYNTHETIC_EVENT_TAG), None);
 	}

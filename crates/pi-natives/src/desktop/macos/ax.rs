@@ -1767,9 +1767,9 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, CHILDREN, DESCRIPTION, ENABLED, NodeRead, NodeValues, ROLE, TITLE,
-		TextField, VALUE, action_name, ax_result, element_action_result, is_raise_action,
-		may_borrow_focus, replace_utf16_selection, replace_whole_value, required_string,
-		secure_subrole, select_attached, stringify_value, text_readback,
+		TextField, VALUE, ax_result, element_action_result, may_borrow_focus,
+		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
+		select_attached, stringify_value, text_readback,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -1928,15 +1928,6 @@ mod tests {
 		assert_eq!(code(AXError::InvalidUIElement), ErrorCode::StaleRef);
 		assert_eq!(code(AXError::ActionUnsupported), ErrorCode::AxFailed);
 		assert!(element_action_result("AXPress", AXError::Success).is_ok());
-	}
-
-	#[test]
-	fn the_escape_stop_arms_for_exactly_the_actions_that_run_as_axraise() {
-		for action in
-			["raise", " Raise ", "RAISE", "AXRaise", "axraise", "AXRAISE", "Raise", "press", "AXPress"]
-		{
-			assert_eq!(is_raise_action(action), action_name(action) == "AXRaise", "{action:?}");
-		}
 	}
 
 	#[test]
