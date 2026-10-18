@@ -413,10 +413,11 @@ impl Request {
 	}
 
 	/// Whether this mutation takes over the user's own input or foreground,
-	/// which arms the physical-Escape stop: takeover delivery (explicit or
-	/// through held control), input to a desktop or display target (it drives
-	/// the user's real pointer and keyboard), an explicit raise, and an
-	/// activating launch.
+	/// which arms the physical-Escape stop: `takeover: true` delivery, input
+	/// to a desktop or display target (it drives the user's real pointer and
+	/// keyboard), an explicit raise, and an activating launch. Held control
+	/// armed the stop when it was granted, so every operation under it keeps
+	/// the stop.
 	fn takes_over(&self) -> bool {
 		let (target, takeover) = match self {
 			Self::HoldKeys { target, takeover, .. }

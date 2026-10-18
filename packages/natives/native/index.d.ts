@@ -1362,8 +1362,8 @@ export interface DesktopCapabilities {
   /**
    * Native global Escape cancellation of takeover input (`takeover: true`,
    * held control, desktop/display-level input, raises, activating launches).
-   * Background window input never watches the user's keys; it and Wayland
-   * stop only through the host interrupt.
+   * Without held control, background window input never watches the user's
+   * keys; it and Wayland stop only through the host interrupt.
    */
   globalEscape: boolean
   capturePermission: string
