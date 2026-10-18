@@ -177,12 +177,17 @@ pub(crate) fn guard(
 		},
 		(delivered, Ok(_)) => delivered,
 		// Settling stopped before pressing an item because the call was
-		// cancelled or the user came to the target; the menu was closed.
-		(_, Err(error)) if matches!(error.code, ErrorCode::Cancelled | ErrorCode::UserIntervened) => {
-			Err(error)
-		},
+		// cancelled, or the user came to or used the app; the menu was closed.
+		(_, Err(error)) if stops_the_call(&error) => Err(error),
 		(delivered, Err(error)) => skylight::after_cleanup(delivered, Err(error)),
 	}
+}
+
+/// Whether settling stopped for a reason that ends the whole call rather than
+/// refusing the menu path: the agent was stopped, or the user came to the app
+/// or pressed a key or clicked in it.
+const fn stops_the_call(error: &DesktopError) -> bool {
+	matches!(error.code, ErrorCode::Cancelled | ErrorCode::UserIntervened)
 }
 
 fn opened(press: Press<'_>) -> String {
@@ -282,13 +287,16 @@ trait Menus {
 /// ([`menu_process`]), were `before`: chooses `path` in it, or closes it; see
 /// [`guard`]. Right before a path's item is pressed, the call must not have
 /// been cancelled ([`control::check_new_input`]: settling runs under cleanup,
-/// where [`control::check`] lets everything through) and `holds` must pass:
-/// the menu can take the whole timeout to appear, and the user may have
-/// stopped the agent or brought the target forward meanwhile, which
-/// [`input::recheck_background`] tells. When either refuses, the menu is
-/// closed and nothing is pressed: a cancelled call reports `Cancelled`, and a
-/// target that no longer holds is a refusal of the path, reported as
-/// delivered ([`guard`]), since the press that opened the menu went out.
+/// where [`control::check`] lets everything through), the user must not have
+/// pressed a key or clicked in the app since the call was admitted
+/// ([`control::intervention::check_press`]), and `holds` must pass: the menu
+/// can take the whole timeout to appear, and the user may have stopped the
+/// agent, used the app, or brought the target forward meanwhile, which
+/// [`input::recheck_background`] tells. When any refuses, the menu is closed
+/// and nothing is pressed: a cancelled call reports `Cancelled`, the user's
+/// input `UserIntervened`, and a target that no longer holds is a refusal of
+/// the path, reported as delivered ([`guard`]), since the press that opened
+/// the menu went out.
 pub(crate) fn settle(
 	menu_pid: libc::pid_t,
 	app_pid: libc::pid_t,
@@ -344,8 +352,11 @@ fn settle_with<M: Menus>(
 	let menu = menus.locate(window);
 	let (refusal, items) = match (path, &menu) {
 		(Some(path), Some(menu)) => match choose(menus, menu, path) {
-			Ok(leaf) => match control::check_new_input().and_then(|()| holds()) {
-				Err(error) if error.code == ErrorCode::Cancelled => {
+			Ok(leaf) => match control::check_new_input()
+				.and_then(|()| control::intervention::check_press())
+				.and_then(|()| holds())
+			{
+				Err(error) if stops_the_call(&error) => {
 					close(menus, window, Some(menu))?;
 					return Err(error);
 				},
@@ -751,6 +762,7 @@ mod tests {
 	}
 
 	/// The target still holds at every recheck.
+	#[allow(clippy::unnecessary_wraps, reason = "stands in for a recheck, which can refuse")]
 	fn held() -> CoreResult<()> {
 		Ok(())
 	}
@@ -844,6 +856,34 @@ mod tests {
 		});
 		assert_eq!(error.code.as_str(), "Cancelled");
 		assert_eq!(log, ["cancel"]);
+	}
+
+	#[test]
+	fn a_path_presses_nothing_once_the_user_used_the_app() {
+		// The user typed in the target's app while the menu its click opened
+		// took its time to appear: the call stops as the user's, the menu is
+		// closed, and its item is not pressed.
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "Font Book".to_string());
+		let token = control::CancellationSource::default().token();
+		let _watch = listener
+			.admit(7, &token)
+			.expect("the user has not used Font Book");
+		let wanted = path(&["Show in Finder"]);
+		let mut app = font_book();
+		let error = guard(
+			Press::Action("AXPress"),
+			Some(&[]),
+			Some(&wanted),
+			|| {
+				listener.record_for_test(7, Instant::now());
+				Ok(())
+			},
+			|before, path| settle_with(&mut app, before, path, CONTEXT_MENU_TIMEOUT, held),
+		)
+		.expect_err("the user stepped in");
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(*app.log.borrow(), ["cancel"]);
 	}
 
 	#[test]

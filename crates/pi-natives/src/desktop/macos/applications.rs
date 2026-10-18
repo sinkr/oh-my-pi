@@ -338,8 +338,8 @@ fn open_running(
 
 /// The application's frontmost window, given until `timeout` to show its
 /// first one. With `show`, a running application without a window is asked to
-/// show one first; when it cannot be asked, none is awaited. Without a window
-/// list (no Screen Recording permission) no window is returned. An application
+/// show one first; when it cannot be asked, none is awaited. When the window
+/// list cannot be read, no window is returned. An application
 /// whose on-screen windows the list leaves out (`unlisted_window`), such as
 /// one that does not allow capture, is not asked: it already shows one, and
 /// the reopen event can make it activate itself.
