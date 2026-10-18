@@ -3,6 +3,7 @@
 use std::{
 	ffi::c_void,
 	ptr,
+	sync::atomic::{AtomicU32, Ordering},
 	thread::{self, JoinHandle},
 };
 
@@ -97,16 +98,35 @@ const fn control_navigation_key(key: i64) -> bool {
 	matches!(key, 123..=126 | 18..=23 | 25 | 26 | 28)
 }
 
-/// The event types the takeover monitor's tap listens to: keys, modifiers and
-/// every pointer press.
+/// The event types the takeover monitor's tap listens to: every pointer
+/// press, then key presses and modifier changes.
+pub(crate) const MONITORED_TYPES: [u32; 5] = [
+	POINTER_PRESS_TYPES[0],
+	POINTER_PRESS_TYPES[1],
+	POINTER_PRESS_TYPES[2],
+	KEY_DOWN,
+	FLAGS_CHANGED,
+];
+
 const fn monitor_mask() -> u64 {
-	let mut mask = (1 << KEY_DOWN) | (1 << FLAGS_CHANGED);
+	let mut mask = 0;
 	let mut i = 0;
-	while i < POINTER_PRESS_TYPES.len() {
-		mask |= 1 << POINTER_PRESS_TYPES[i];
+	while i < MONITORED_TYPES.len() {
+		mask |= 1 << MONITORED_TYPES[i];
 		i += 1;
 	}
 	mask
+}
+
+/// Events of each [`MONITORED_TYPES`] type the takeover monitor has seen and
+/// classified, whoever posted them.
+static SEEN: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
+
+/// [`SEEN`] now. Next to `WindowServer`'s HID counters for the same types, it
+/// tells whether the monitor has caught up with every event counted so far,
+/// since the tap's callback trails `WindowServer`.
+pub(crate) fn monitor_seen() -> [u32; 5] {
+	SEEN.each_ref().map(|seen| seen.load(Ordering::Acquire))
 }
 
 /// What a physical event means for takeover's hand-back.
@@ -177,6 +197,11 @@ unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> R
 				super::LAST_USER_TYPING.store(uptime_ns(), std::sync::atomic::Ordering::Release);
 			},
 			None => {},
+		}
+		// After the classification above, so a reader that sees this count
+		// also sees what the event meant.
+		if let Some(index) = MONITORED_TYPES.iter().position(|&watched| watched == kind) {
+			SEEN[index].fetch_add(1, Ordering::AcqRel);
 		}
 		if physical_escape(kind, key, pid, tag) {
 			context.stop.cancel();
