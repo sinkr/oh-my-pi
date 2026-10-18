@@ -528,8 +528,9 @@ describe("dispatchReportIssueDevice", () => {
 		"read agent://ReviewLifecycleLever returned an empty response",
 		"browser.open({name:'jio-terms',url:'https://www.jio.com/'}) navigated the attached relay tab",
 	])("rejects %p, which has no `: ` separator, instead of splitting inside it", async text => {
+		Bun.env.PI_AUTO_QA = "1";
 		const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
-		await expect(dispatchReportIssueDevice(session, text)).rejects.toThrow(reportIssueDeviceUsage());
+		await expect(dispatchReportIssueDevice(session, text)).rejects.toThrow("Invalid report format");
 	});
 
 	it("clamps a prose first line so the stored tool stays within the collector limit", async () => {

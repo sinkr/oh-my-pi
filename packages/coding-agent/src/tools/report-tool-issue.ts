@@ -92,7 +92,7 @@ function parseReportIssueBody(text: string): { tool: string; report: string } {
 		if (tool && report) return clampGrievance(tool, report);
 	}
 	// Only a colon followed by whitespace separates, so a URI (`xd://tui`) or an
-	// argument (`{name:'x'}`) in the tool name stays in the tool name.
+	// unspaced argument (`{name:'x'}`) in the tool name stays in the tool name.
 	const colon = body.search(/:\s/);
 	if (colon > 0) {
 		const tool = body.slice(0, colon).trim();
