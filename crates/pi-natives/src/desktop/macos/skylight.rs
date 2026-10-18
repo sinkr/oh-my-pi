@@ -433,17 +433,33 @@ fn clicked(before: [u32; 5], now: [u32; 5]) -> bool {
 	before[..3] != now[..3]
 }
 
+/// One poll's reads: the input counters, then, for a new click, whether it
+/// landed on the target (`on_target`), and the front process last. A window
+/// the target raised once its activation had changed the front process is
+/// then never taken for where the user's click landed: that poll already
+/// reads the target in front.
+fn poll<F>(
+	last: [u32; 5],
+	activity: impl FnOnce() -> [u32; 5],
+	on_target: impl FnOnce() -> bool,
+	front: impl FnOnce() -> F,
+) -> ([u32; 5], bool, F) {
+	let activity = activity();
+	let on_target = clicked(last, activity) && on_target();
+	(activity, on_target, front())
+}
+
 impl BackgroundFocusLease {
-	/// `on_target` says whether the pointer is over a window of the target,
-	/// read only for a click seen while the user's app is in front: the
-	/// counters count every physical click, the user's clicks in their own
-	/// app included, but not the events background input posts to a process.
+	/// `on_target` says whether a click seen since the last poll landed on a
+	/// window of the target ([`poll`]): the counters count every physical
+	/// click, the user's clicks in their own app included, but not the events
+	/// background input posts to a process.
 	fn observe(
 		&mut self,
 		front: ProcessSerialNumber,
 		key: Option<u32>,
 		activity: [u32; 5],
-		on_target: impl FnOnce() -> bool,
+		on_target: bool,
 	) -> FocusDecision {
 		if self.disarmed
 			|| (front != self.previous && front != self.target)
@@ -463,7 +479,7 @@ impl BackgroundFocusLease {
 			// frontmost is not a focus change. Remember it so a later app reflex
 			// can be contained. A click on the target brings it forward only on a
 			// later poll, so the target counts as the user's for a while.
-			self.click_polls = if clicked(self.activity, activity) && on_target() {
+			self.click_polls = if on_target {
 				CLICK_SWITCH_POLLS
 			} else {
 				self.click_polls.saturating_sub(1)
@@ -481,8 +497,10 @@ impl BackgroundFocusLease {
 	}
 }
 
-/// Whether the pointer is over a window of `pid`: where a physical click
-/// there landed ([`capture::click_lands_on`]).
+/// Whether the pointer is over a surface of `pid`, hit-tested the way a click
+/// there lands: a menu, the menu bar or a Dock tile over the target's window
+/// is not the target, while the pointer sprite and transparent overlays that
+/// let clicks through do not count.
 fn pointer_over(pid: pid_t) -> bool {
 	let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
 		return false;
@@ -491,7 +509,7 @@ fn pointer_over(pid: pid_t) -> bool {
 		return false;
 	};
 	let point = event.location();
-	capture::click_lands_on(pid, point.x, point.y)
+	ax::point_owner(point.x, point.y).is_some_and(|owner| owner.pid == pid)
 }
 
 /// Whether the user has come to the background target since its guard
@@ -587,7 +605,13 @@ pub(super) fn with_background_watch<T>(
 				loop {
 					// Once disarmed, nothing is sent back any more, but the lease
 					// keeps watching for the user coming to the target.
-					match front_process(spi.get_front) {
+					let (activity, on_target, front) = poll(
+						lease.activity,
+						activation_activity,
+						|| !lease.disarmed && pointer_over(pid),
+						|| front_process(spi.get_front),
+					);
+					match front {
 						None if lease.disarmed => {},
 						None => {
 							return Err(DesktopError::input_failed(
@@ -600,8 +624,7 @@ pub(super) fn with_background_watch<T>(
 							} else {
 								None
 							};
-							if lease.observe(front.psn, key, activation_activity(), || pointer_over(pid))
-								== FocusDecision::Restore
+							if lease.observe(front.psn, key, activity, on_target) == FocusDecision::Restore
 							{
 								// Re-check immediately before changing focus: an AX
 								// probe may have raced a newer application or hardware
@@ -1198,12 +1221,6 @@ mod tests {
 	use super::*;
 	use crate::desktop::error::ErrorCode;
 
-	/// The pointer is not over the target: a click seen then is the user's
-	/// in their own app.
-	fn off_target() -> bool {
-		false
-	}
-
 	#[test]
 	fn user_focus_changes_permanently_disarm_background_restoration() {
 		let previous = ProcessSerialNumber { high: 0, low: 7 };
@@ -1219,16 +1236,16 @@ mod tests {
 			visited: false,
 		};
 		let mut guard = lease();
-		assert_eq!(guard.observe(target, None, [0; 5], off_target), FocusDecision::Restore);
-		assert_eq!(guard.observe(third, None, [0; 5], off_target), FocusDecision::Disarm);
-		assert_eq!(guard.observe(target, None, [0; 5], off_target), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Restore);
+		assert_eq!(guard.observe(third, None, [0; 5], false), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Disarm);
 
 		let mut guard = lease();
-		assert_eq!(guard.observe(previous, Some(43), [0; 5], off_target), FocusDecision::Disarm);
-		assert_eq!(guard.observe(target, None, [0; 5], off_target), FocusDecision::Disarm);
+		assert_eq!(guard.observe(previous, Some(43), [0; 5], false), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Disarm);
 
 		let mut guard = lease();
-		assert_eq!(guard.observe(target, None, [1; 5], off_target), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [1; 5], false), FocusDecision::Disarm);
 	}
 
 	#[test]
@@ -1246,8 +1263,8 @@ mod tests {
 		};
 		// Key and modifier presses only.
 		let typed = [0, 0, 0, 1, 1];
-		assert_eq!(guard.observe(previous, Some(42), typed, off_target), FocusDecision::Observe);
-		assert_eq!(guard.observe(target, None, typed, off_target), FocusDecision::Restore);
+		assert_eq!(guard.observe(previous, Some(42), typed, false), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, typed, false), FocusDecision::Restore);
 	}
 
 	#[test]
@@ -1269,18 +1286,40 @@ mod tests {
 		};
 		let clicked = [1, 0, 0, 0, 0];
 		let mut guard = lease();
-		let on_target = || true;
-		assert_eq!(guard.observe(previous, Some(42), clicked, on_target), FocusDecision::Observe);
-		assert_eq!(guard.observe(previous, Some(42), clicked, off_target), FocusDecision::Observe);
-		assert_eq!(guard.observe(target, None, clicked, off_target), FocusDecision::Disarm);
+		assert_eq!(guard.observe(previous, Some(42), clicked, true), FocusDecision::Observe);
+		assert_eq!(guard.observe(previous, Some(42), clicked, false), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, clicked, false), FocusDecision::Disarm);
 		assert!(guard.visited);
 		// Long after that click, the target's own activation is sent back.
 		let mut guard = lease();
-		guard.observe(previous, Some(42), clicked, on_target);
+		guard.observe(previous, Some(42), clicked, true);
 		for _ in 0..CLICK_SWITCH_POLLS {
-			guard.observe(previous, Some(42), clicked, off_target);
+			guard.observe(previous, Some(42), clicked, false);
 		}
-		assert_eq!(guard.observe(target, None, clicked, off_target), FocusDecision::Restore);
+		assert_eq!(guard.observe(target, None, clicked, false), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_poll_places_a_click_before_it_reads_the_front_process() {
+		use std::cell::Cell;
+		let front_read = Cell::new(false);
+		let hit_tested = Cell::new(false);
+		let (activity, on_target, front) = poll(
+			[0; 5],
+			|| [1, 0, 0, 0, 0],
+			|| {
+				assert!(!front_read.get(), "the click was placed after the front process was read");
+				hit_tested.set(true);
+				true
+			},
+			|| front_read.set(true),
+		);
+		assert_eq!((activity, on_target, front), ([1, 0, 0, 0, 0], true, ()));
+		assert!(hit_tested.get() && front_read.get());
+		// Without a new click nothing is hit-tested: typing only.
+		let (_, on_target, ()) =
+			poll([0; 5], || [0, 0, 0, 1, 0], || panic!("no click to place"), || ());
+		assert!(!on_target);
 	}
 
 	#[test]
@@ -1299,8 +1338,8 @@ mod tests {
 			visited: false,
 		};
 		let clicked = [1, 0, 0, 0, 0];
-		assert_eq!(guard.observe(previous, Some(42), clicked, off_target), FocusDecision::Observe);
-		assert_eq!(guard.observe(target, None, clicked, off_target), FocusDecision::Restore);
+		assert_eq!(guard.observe(previous, Some(42), clicked, false), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, clicked, false), FocusDecision::Restore);
 		assert!(!guard.visited);
 	}
 
@@ -1319,13 +1358,13 @@ mod tests {
 			visited: false,
 		};
 		let mut guard = lease();
-		assert_eq!(guard.observe(previous, None, [0; 5], off_target), FocusDecision::Observe);
-		assert_eq!(guard.observe(target, None, [0; 5], off_target), FocusDecision::Restore);
+		assert_eq!(guard.observe(previous, None, [0; 5], false), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Restore);
 
 		// The user opened a Finder window meanwhile: hands off.
 		let mut guard = lease();
-		assert_eq!(guard.observe(previous, Some(43), [0; 5], off_target), FocusDecision::Disarm);
-		assert_eq!(guard.observe(target, None, [0; 5], off_target), FocusDecision::Disarm);
+		assert_eq!(guard.observe(previous, Some(43), [0; 5], false), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Disarm);
 	}
 
 	#[test]
@@ -1344,20 +1383,20 @@ mod tests {
 		};
 		// The user clicks the target, then goes back to their app.
 		let mut guard = lease();
-		guard.observe(target, None, [1; 5], off_target);
-		guard.observe(previous, Some(42), [1; 5], off_target);
+		guard.observe(target, None, [1; 5], false);
+		guard.observe(previous, Some(42), [1; 5], false);
 		assert!(guard.visited);
 		// After a switch to a third app the lease stands down, yet still sees
 		// the user come to the target.
 		let mut guard = lease();
-		guard.observe(third, None, [0; 5], off_target);
+		guard.observe(third, None, [0; 5], false);
 		assert!(!guard.visited);
-		guard.observe(target, None, [0; 5], off_target);
+		guard.observe(target, None, [0; 5], false);
 		assert!(guard.visited);
 		// The target's own activation, sent back, is not a visit; a refused
 		// hand-back is.
 		let mut guard = lease();
-		assert_eq!(guard.observe(target, None, [0; 5], off_target), FocusDecision::Restore);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Restore);
 		assert!(!guard.visited);
 		guard.user_acted();
 		assert!(guard.visited);

@@ -10,8 +10,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
 	CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
-	kCGWindowAlpha, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName,
-	kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID, kCGWindowSharingState,
+	kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber,
+	kCGWindowOwnerName, kCGWindowOwnerPID, kCGWindowSharingState,
 };
 use screen_capture_kit::{CaptureRequest, CaptureTarget};
 use xcap::Monitor;
@@ -371,51 +371,6 @@ pub(in crate::desktop) fn has_onscreen_window(pid: libc::pid_t) -> Option<bool> 
 	}))
 }
 
-/// The Dock's window level. `WindowServer`'s pointer sprite and the Dock's
-/// full-screen overlay sit at or above it over every point and let clicks
-/// through, so they never say where a click lands.
-const DOCK_LAYER: i64 = 20;
-
-/// Whether a click at the global point `(x, y)` lands on a window of `pid`:
-/// the frontmost visible on-screen window there below the Dock's level, or
-/// one of `pid`'s own at any level, is `pid`'s. `false` when the list cannot
-/// be read.
-pub(in crate::desktop) fn click_lands_on(pid: libc::pid_t, x: f64, y: f64) -> bool {
-	let Some(snapshot) = CGWindowListCopyWindowInfo(
-		CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
-		0,
-	) else {
-		return false;
-	};
-	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
-	// documented window keys are CFStrings and whose values are CFTypes.
-	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
-	// SAFETY: This copy-rule snapshot remains alive and is never mutated; the
-	// CoreGraphics key constants are process-lived. The list is front to back.
-	let windows = unsafe { snapshot.iter_unchecked() }.filter_map(|dictionary| unsafe {
-		let visible = window_value(dictionary, kCGWindowAlpha)
-			.and_then(|alpha| alpha.downcast_ref::<CFNumber>())
-			.and_then(CFNumber::as_f64)
-			.is_none_or(|alpha| alpha > 0.0);
-		let bounds = window_value(dictionary, kCGWindowBounds)?.downcast_ref::<CFDictionary>()?;
-		let mut rect = CGRect::default();
-		let inside = CGRectMakeWithDictionaryRepresentation(Some(bounds), &mut rect)
-			&& (rect.origin.x..rect.origin.x + rect.size.width).contains(&x)
-			&& (rect.origin.y..rect.origin.y + rect.size.height).contains(&y);
-		let owner = window_number(dictionary, kCGWindowOwnerPID)?;
-		(visible && inside).then(|| (owner, window_number(dictionary, kCGWindowLayer).unwrap_or(0)))
-	});
-	lands_on(i64::from(pid), windows)
-}
-
-/// [`click_lands_on`] over the visible windows at the point, front to back,
-/// as `(owner, layer)`.
-fn lands_on(pid: i64, mut windows: impl Iterator<Item = (i64, i64)>) -> bool {
-	windows
-		.find(|&(owner, layer)| owner == pid || layer < DOCK_LAYER)
-		.is_some_and(|(owner, _)| owner == pid)
-}
-
 /// `pid`'s normal-layer window ids, on screen or not: windows on other Spaces,
 /// minimized ones and ones the application keeps ordered out. `None` when the
 /// list cannot be read.
@@ -556,20 +511,7 @@ fn logical_bounds(bounds: CGRect) -> CoreResult<(i32, i32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-	use super::{key_window, lands_on};
-
-	#[test]
-	fn a_click_lands_under_the_pointer_sprite_and_the_dock_overlay() {
-		// Over TextEdit (2280) on a macOS 26.5 VM: WindowServer's pointer
-		// sprite (162), the Dock's full-screen overlay (388), TextEdit, then
-		// Activity Monitor (386) behind it.
-		let at = || [(162, 2_147_483_630), (388, 20), (2280, 0), (386, 0)].into_iter();
-		assert!(lands_on(2280, at()));
-		assert!(!lands_on(386, at()));
-		// A floating panel of the target over another app's window.
-		assert!(lands_on(2280, [(2280, 3), (386, 0)].into_iter()));
-		assert!(!lands_on(2280, [(388, 20)].into_iter()));
-	}
+	use super::key_window;
 
 	#[test]
 	fn key_window_is_the_accessibility_focused_window_not_the_frontmost() {
