@@ -4503,13 +4503,23 @@ mod capture_tests {
 			.record_for_test(i32::try_from(std::process::id()).unwrap(), Instant::now());
 		source.set_deadline(Some(Instant::now()));
 		let click = Request::AxClick {
-			reference: node.ref_,
+			reference: node.ref_.clone(),
 			options:   ParsedPointerOptions::parse(None).unwrap(),
 			reply:     flume::unbounded().0,
 		};
 		let error = worker.execute(&click, &source.token()).err().unwrap();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(clicks.lock().is_empty());
+		// Nor are keys typed into the element.
+		let typed = Request::AxInput {
+			reference: node.ref_,
+			input:     ElementInput::Text("hi".to_string()),
+			takeover:  Takeover::new(None, None),
+			reply:     flume::unbounded().0,
+		};
+		let error = worker.execute(&typed, &source.token()).err().unwrap();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("still using"), "{}", error.message);
 	}
 
 	#[test]

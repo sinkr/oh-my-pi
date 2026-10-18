@@ -799,6 +799,87 @@ describe("computer prelude", () => {
 		);
 	});
 
+	it("refuses run args it would drop before anything runs, and still runs empty or null args", async () => {
+		const prelude = createComputerPrelude(toolSession(), () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		const calls: unknown[] = [];
+		const realm = createContext({
+			__omp_log__: () => {},
+			__omp_prelude__: async (_name: unknown, parameters: unknown) => {
+				calls.push(parameters);
+				return { text: "", details: { value: "ran" } };
+			},
+		});
+		runInContext(prelude.javascript, realm);
+
+		await expect(
+			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
+		).rejects.toThrow("computer.run() args must be an array of the function's arguments after its scope");
+		await expect(runInContext('computer.run("return 1;", { args: ["/tmp"] })', realm)).rejects.toThrow(
+			"computer.run() passes args only to a function; a code string receives none",
+		);
+		expect(calls).toEqual([]);
+
+		expect(await runInContext('computer.run("return 1;", { args: [] })', realm)).toBe("ran");
+		expect(await runInContext("computer.run(async () => 1, { args: null })", realm)).toBe("ran");
+		expect(calls).toEqual([
+			{ code: "return 1;", action: "run" },
+			{ fn: "async () => 1", args: [], action: "run" },
+		]);
+	});
+
+	it("tells a caller running direct helpers together to await each one or use one run", async () => {
+		const gate = Promise.withResolvers<void>();
+		class GatedSession extends FakeNativeSession {
+			override async listWindows(): Promise<DesktopWindow[]> {
+				await gate.promise;
+				return super.listWindows();
+			}
+		}
+		const session = toolSession();
+		const prelude = workerPrelude(session, new GatedSession());
+		const context = { session, toolCallId: "parallel-direct-js" };
+		const realm = createContext({
+			__omp_log__: () => {},
+			__omp_prelude__: async (_name: string, parameters: unknown) => {
+				const result = await prelude.invoke(parameters, context);
+				return { text: "", details: result.details };
+			},
+		});
+		runInContext(prelude.javascript, realm);
+		try {
+			const calls = runInContext("[computer.window(42), computer.window(42)]", realm) as Promise<unknown>[];
+			// The first lookup holds the worker in native code until the gate opens, so the other one is refused.
+			const refused = await Promise.any(
+				calls.map(call =>
+					call.then(
+						() => {
+							throw new Error("not refused");
+						},
+						error => error,
+					),
+				),
+			);
+			gate.resolve();
+			const results = await Promise.allSettled(calls);
+			expect(results.map(result => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+			const error = String(refused);
+			expect(error).toContain("Computer worker is busy");
+			expect(error).toContain("Await each call before starting the next");
+			expect(error).toContain("computer.run(");
+		} finally {
+			gate.resolve();
+			await prelude.invoke({ action: "close" }, context);
+		}
+	});
+
 	it("returns direct values and prints inner display text from the Python facade in a real kernel", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];
