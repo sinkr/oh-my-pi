@@ -319,6 +319,8 @@ describe("builtin-defaults rule provider", () => {
 			'const KINDS = new Set(["text", "json"]);',
 			"const LABELS = new Map<string, string>([['text', 'Text']]);",
 			'const ROLES = new Set<PropertyKey>([\n\t"select",\n\t"confirm",\n]);',
+			'const LABELS = new Map<\n\tstring,\n\tstring\n>([["text", "Text"]]);',
+			'const TRANSFORMS = new Map<string, (value: string) => string>([["trim", value => value.trim()]]);',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
 
@@ -329,6 +331,7 @@ describe("builtin-defaults rule provider", () => {
 			"const byId = new Map(items.map(item => [item.id, item]));",
 			"const keys = new Set([...Object.keys(a), ...Object.keys(b)]);",
 			"for (const id of new Set(ids)) {}",
+			'const labels = new Map<string, string>().set("key", choose<string>(["a", "b"]));',
 		];
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 	});
@@ -347,6 +350,7 @@ describe("builtin-defaults rule provider", () => {
 		const misses = [
 			'const { carryFindings } = await import("./designs.js");',
 			'const mod = (await import("./known-module")).default;',
+			// oxlint-disable-next-line no-template-curly-in-string -- literal TypeScript source fed to the rule
 			"const { completeText } = await import(`${cwd}/src/client.ts`);",
 			'const [manifest] = await Promise.all([import("../readers/manifest.js")]);',
 			'const impit = import("impit").then(({ Impit }) => new Impit());',
@@ -363,6 +367,7 @@ describe("builtin-defaults rule provider", () => {
 			"function readId(value: any): string {}",
 			"const root = el as any;",
 			"const config = { port: 3000 } as any as ServerConfig;",
+			"const config = value as any satisfies Config;",
 			"const rows: any[] = [];",
 			"let entry: any;",
 			"items.map((item: any) => item.id);",

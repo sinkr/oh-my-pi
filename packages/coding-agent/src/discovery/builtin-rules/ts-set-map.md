@@ -1,6 +1,6 @@
 ---
 description: Prefer Record<K, V> for small static literals; use Set/Map for anything dynamic
-condition: "\\bnew\\s+(?:Set|Map)\\s*(?:<[^;\\n]*?>)?\\s*\\(\\s*\\[\\s*(?:\\[\\s*)?[\"']"
+condition: "\\bnew\\s+(?:Set|Map)\\s*(?:<(?:[^<>;()=]|=>?|<[^<>;]*>|\\([^()]*\\))*>)?\\s*\\(\\s*\\[\\s*(?:\\[\\s*)?[\"']"
 scope: "tool:edit(**/*.{ts,tsx}), tool:write(**/*.{ts,tsx})"
 interruptMode: never
 ---
