@@ -19,6 +19,36 @@ The runtime has two layers:
 
 If your extension/tool can run headless, guard with `ctx.hasUI` / `pi.hasUI`. RPC can expose `hasUI === true` for protocol-backed dialogs while still not supporting `custom()`; `hasUI` alone does not guarantee a component can be mounted.
 
+## Project-local TUI debug tool
+
+`.omp/tools/tui.ts` provides the repository's `tui` debug tool. `start` accepts
+either a TypeScript/JavaScript `file` (run with Bun) or an executable `bin` with
+separate `args`. Windows uses native ConPTY without requiring a POSIX shell;
+macOS/Linux use Bun's PTY with the startup gate that protects fast-exiting children.
+The debug connection uses a Windows named pipe or a POSIX Unix socket.
+
+`screen`, `send`, `resize`, and `stop` also work for programs without an
+`OMP_TUI_DEBUG` server. Renderer queries (`info`, `tree`, `values`, and `frame`)
+require an omp/pi-tui host. Terminal query replies remain enabled; the native
+ConPTY startup cursor handshake is answered only once.
+
+Install the tool's dependencies with `bun install --cwd .omp/tools`.
+Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`.
+
+The regressions cover real TTY streams, quoted/non-ASCII arguments, cursor query
+replies, resize followed by input, forced stop, fast-exit output and exit codes,
+and cleanup after failed launches. They do not replace a full CLI display check.
+
+For a manual CLI check, use an isolated agent directory, complete or disable its
+setup wizard, and select a model so `/context` has a context window to display.
+Exercise both `file` and `bin` entry points: inspect `info`/`tree`/`values`, open
+`/context`, resize from 100×30 to 48×18, inspect the actual ANSI `screen` as well
+as the renderer's `text`, then press Escape and confirm composer input works.
+The current `/context` view is an inline report panel, not a fullscreen overlay.
+Finally, stop the session and check that its child and temporary directory are gone.
+Run platform checks separately: Windows ConPTY results do not validate the POSIX
+Bun PTY startup gate.
+
 ## Core component contract (`@oh-my-pi/pi-tui`)
 
 `packages/tui/src/tui.ts` defines:

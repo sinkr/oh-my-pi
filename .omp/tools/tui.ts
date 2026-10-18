@@ -1,9 +1,8 @@
 /**
  * Project-local `tui` tool: run and debug pi-tui apps headlessly. Each session
- * spawns a TypeScript/JavaScript entry or executable on a Bun-native PTY — a
- * real controlling terminal, so capability probes, SIGWINCH resizes, and
- * immediate-mode hosts all behave as in production — with `OMP_TUI_DEBUG`
- * pointed at the unix socket served by an omp/pi-tui host. Injected input
+ * spawns a TypeScript/JavaScript entry or executable on a real PTY: ConPTY on
+ * Windows, Bun's controlling terminal on POSIX. `OMP_TUI_DEBUG` points at the
+ * local IPC endpoint served by an omp/pi-tui host. Injected input
  * rides the app's own input path, while renderer and component queries inspect
  * the last painted frame.
  *
@@ -22,7 +21,12 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { inflateSync } from "node:zlib";
 import type * as CanvasModule from "@napi-rs/canvas";
-import { IpcConnection } from "@oh-my-pi/pi-natives";
+import {
+	IpcConnection,
+	ipcEndpoint,
+	type PtyArgvStartOptions,
+	PtySession,
+} from "@oh-my-pi/pi-natives";
 import type * as KittyVt from "kitty-vt-wasm";
 import type { Color, KittyEvent, KittyTerminal } from "kitty-vt-wasm";
 import { tmpdir } from "node:os";
@@ -644,14 +648,14 @@ interface Waiter {
 	timer: NodeJS.Timeout;
 }
 
-/** The slice of `Bun.spawn`'s PTY handle this tool touches. */
+/** Terminal operations shared by Bun's PTY and the native ConPTY adapter. */
 interface TerminalHandle {
 	write(data: string | Uint8Array): void;
 	resize(cols: number, rows: number): void;
 	close(): void;
 }
 
-/** The slice of Bun's PTY-backed subprocess this tool touches. */
+/** Child process lifecycle owned by the TUI launcher. */
 interface Child {
 	pid: number;
 	exited: Promise<number>;
@@ -672,12 +676,15 @@ interface Session {
 	raw: Buffer[];
 	rawBytes: number;
 	exit: number | null;
+	exitError: unknown;
+	closed: boolean;
 }
 
 const sessions = new Map<string, Session>();
 
 /** Appends one PTY chunk to the session's capped raw capture. */
 function capture(session: Session, chunk: Uint8Array) {
+	if (session.closed) return;
 	session.screen.feed(chunk);
 	const bytes = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
 	session.raw.push(bytes);
@@ -704,8 +711,14 @@ function connectSocket(
 				timeoutMs: Math.max(1, Math.min(1_000, deadline - Date.now())),
 			});
 		} catch {
-			if (Date.now() >= deadline || session.exit !== null) resolve(false);
+			if (Date.now() >= deadline || session.exit !== null || session.closed)
+				resolve(false);
 			else setTimeout(attempt, 150);
+			return;
+		}
+		if (session.closed) {
+			conn.destroy();
+			resolve(false);
 			return;
 		}
 		conn.start(
@@ -773,6 +786,25 @@ function sleep(ms: number): Promise<null> {
 	return promise;
 }
 
+/** Reject queued PTY output before freeing the screen's WASM state. */
+function disposeSession(session: Session) {
+	session.closed = true;
+	session.screen.onReply = null;
+	for (const waiter of session.waiters.splice(0)) {
+		clearTimeout(waiter.timer);
+		waiter.reject(new Error("Session stopped"));
+	}
+	session.sock?.destroy();
+	session.sock = null;
+	try {
+		session.proc.terminal.close();
+	} finally {
+		session.screen.dispose();
+		rmSync(session.dir, { recursive: true, force: true });
+		sessions.delete(session.name);
+	}
+}
+
 async function stopSession(session: Session): Promise<number | null> {
 	try {
 		if (session.sock) {
@@ -785,17 +817,16 @@ async function stopSession(session: Session): Promise<number | null> {
 	} catch {
 		// Fall through to signals.
 	}
-	const exited = await Promise.race([session.proc.exited, sleep(2_000)]);
-	if (exited === null) {
-		session.proc.kill("SIGKILL");
-		await session.proc.exited.catch(() => {});
+	try {
+		const exited = await Promise.race([session.proc.exited, sleep(2_000)]);
+		if (exited === null) {
+			session.proc.kill("SIGKILL");
+			await session.proc.exited;
+		}
+		return exited ?? -9;
+	} finally {
+		disposeSession(session);
 	}
-	session.sock?.destroy();
-	session.proc.terminal.close();
-	session.screen.dispose();
-	rmSync(session.dir, { recursive: true, force: true });
-	sessions.delete(session.name);
-	return exited ?? -9;
 }
 
 // ─── Response narrowing ──────────────────────────────────────────────────────
@@ -956,6 +987,71 @@ function gated(gate: string, command: string[]): string[] {
 	const script = 'gate=$1; shift; while [ ! -e "$gate" ]; do sleep 0.01; done; exec "$@"';
 	return ["/bin/sh", "-c", script, "sh", gate, ...command];
 }
+/**
+ * Launch an executable directly on ConPTY. Race PID delivery against process
+ * completion so a failed spawn cannot leave start waiting for a missing callback.
+ */
+async function startWindowsPty(
+	options: PtyArgvStartOptions,
+	onData: (chunk: Uint8Array) => void,
+): Promise<Child> {
+	const pty = new PtySession();
+	const started = Promise.withResolvers<number>();
+	let running = true;
+	const exited = pty
+		.startArgv(
+			options,
+			(error, chunk) => {
+				if (error) started.reject(error);
+				else onData(Buffer.from(chunk));
+			},
+			(error, pid) => {
+				if (error) started.reject(error);
+				else started.resolve(pid);
+			},
+		)
+		.then((result) => result.exitCode ?? (result.cancelled ? -9 : 1))
+		.finally(() => {
+			running = false;
+		});
+	const kill = () => {
+		if (running) pty.kill();
+	};
+	try {
+		const pid = await Promise.race([
+			started.promise,
+			exited.then((code) => {
+				throw new Error(`PTY exited before reporting its pid (code ${code})`);
+			}),
+		]);
+		return {
+			pid,
+			exited,
+			kill,
+			terminal: {
+				write(data) {
+					pty.write(
+						typeof data === "string"
+							? data
+							: Buffer.from(
+									data.buffer,
+									data.byteOffset,
+									data.byteLength,
+								).toString(),
+					);
+				},
+				resize(cols, rows) {
+					pty.resize(cols, rows);
+				},
+				close: kill,
+			},
+		};
+	} catch (error) {
+		kill();
+		await exited.catch(() => {});
+		throw error;
+	}
+}
 
 // ─── Tool ────────────────────────────────────────────────────────────────────
 
@@ -978,106 +1074,160 @@ const factory = (omp: ToolHost) => {
 		const rows = params.rows ?? 30;
 		const cols = params.cols ?? 100;
 		const dir = mkdtempSync(join(tmpdir(), `omp-tui-${name}-`));
-		const sockPath = join(dir, "debug.sock");
-		const gatePath = join(dir, "spawn.gate");
-		const screen = await Screen.create(cols, rows);
-		// The PTY data callback closes over `session`; Bun.spawn returns
-		// synchronously and the callback fires on the event loop, so the
-		// binding is assigned before the first chunk can arrive.
-		let session: Session;
-		let proc: Child;
+		let screen: Screen | undefined;
+		let session: Session | undefined;
+		// Native output may arrive before the PID promise resumes. Buffer it until
+		// the session and its terminal query-reply sink have both been initialized.
+		const pending: Uint8Array[] = [];
+		const onData = (chunk: Uint8Array) => {
+			if (session) capture(session, chunk);
+			else pending.push(chunk);
+		};
 		try {
-			const spawned = Bun.spawn(gated(gatePath, command), {
-				cwd: omp.cwd,
-				env: {
-					...process.env,
-					OMP_TUI_DEBUG: sockPath,
-					TERM: "xterm-256color",
-					COLORTERM: "truecolor",
-				},
-				terminal: {
-					cols,
-					rows,
-					data(_terminal, chunk) {
-						capture(session, chunk);
-					},
-				},
-			});
-			const terminal = spawned.terminal;
-			if (!terminal) throw new Error("Bun.spawn did not create a PTY");
-			writeFileSync(gatePath, "");
-			proc = {
-				pid: spawned.pid,
-				exited: spawned.exited,
-				terminal,
-				kill(signal) {
-					spawned.kill(signal);
-				},
+			screen = await Screen.create(cols, rows);
+			const sockPath = ipcEndpoint(dir, "debug");
+			const env = {
+				OMP_TUI_DEBUG: sockPath,
+				TERM: "xterm-256color",
+				COLORTERM: "truecolor",
 			};
+			let proc: Child;
+			if (process.platform === "win32") {
+				proc = await startWindowsPty(
+					{
+						application: command[0],
+						args: command.slice(1),
+						cwd: omp.cwd,
+						env,
+						cols,
+						rows,
+					},
+					onData,
+				);
+			} else {
+				const gatePath = join(dir, "spawn.gate");
+				const spawned = Bun.spawn(gated(gatePath, command), {
+					cwd: omp.cwd,
+					env: { ...process.env, ...env },
+					terminal: {
+						cols,
+						rows,
+						data(_terminal, chunk) {
+							onData(chunk);
+						},
+					},
+				});
+				const terminal = spawned.terminal;
+				if (!terminal) throw new Error("Bun.spawn did not create a PTY");
+				writeFileSync(gatePath, "");
+				proc = {
+					pid: spawned.pid,
+					exited: spawned.exited,
+					terminal,
+					kill(signal) {
+						spawned.kill(signal);
+					},
+				};
+			}
+			// The native PTY layer already answers ConPTY's initial cursor handshake.
+			// Drop only that first duplicate CPR; keep subsequent cursor reports and
+			// any other replies sharing the same output buffer.
+			let hostCursorHandshake = process.platform === "win32";
+			screen.onReply = (bytes) => {
+				if (hostCursorHandshake) {
+					const reply = Buffer.from(
+						bytes.buffer,
+						bytes.byteOffset,
+						bytes.byteLength,
+					).toString();
+					const cursor = /\x1b\[\d+;\d+R/.exec(reply);
+					if (cursor) {
+						hostCursorHandshake = false;
+						const remaining =
+							reply.slice(0, cursor.index) +
+							reply.slice(cursor.index + cursor[0].length);
+						if (remaining) proc.terminal.write(remaining);
+						return;
+					}
+				}
+				proc.terminal.write(bytes);
+			};
+			session = {
+				name,
+				target,
+				proc,
+				cols,
+				rows,
+				dir,
+				screen,
+				sock: null,
+				waiters: [],
+				raw: [],
+				rawBytes: 0,
+				exit: null,
+				exitError: null,
+				closed: false,
+			};
+			const active = session;
+			proc.exited.then(
+				(code) => {
+					active.exit = code;
+				},
+				(error) => {
+					active.exit = 1;
+					active.exitError = error;
+				},
+			);
+			for (const chunk of pending) capture(session, chunk);
+			pending.length = 0;
+			sessions.set(name, session);
+
+			const deadline = Date.now() + (params.timeout ?? 15) * 1000;
+			const connected = await connectSocket(
+				session,
+				sockPath,
+				(params.timeout ?? 15) * 1000,
+			);
+			if (session.exit !== null) {
+				const tail = visible(Buffer.concat(session.raw)).slice(-3000);
+				if (session.exitError) throw session.exitError;
+				throw new Error(
+					`"${target}" exited immediately (code ${session.exit}).\n` +
+						`terminal tail: ${tail || "(empty)"}`,
+				);
+			}
+			let text = `session "${name}": ${target} pid=${proc.pid} pty=${cols}x${rows}`;
+			if (connected) {
+				// The socket binds at terminal entry, before the first frame
+				// paints; retry until the snapshot exists so `start` reliably
+				// returns the opening screenshot.
+				let shot = await request(session, { op: "text" });
+				while (
+					shot.ok === false &&
+					String(shot.error ?? "").includes("no frame painted yet") &&
+					session.exit === null &&
+					Date.now() < deadline
+				) {
+					await sleep(50);
+					shot = await request(session, { op: "text" });
+				}
+				text += `\n${screenshotText(shot)}`;
+			} else {
+				text +=
+					"\n(no debug socket: app is not an omp-tui host; `send` injects " +
+					"input, `screen` renders the emulated display)" +
+					`\n${session.screen.snapshot()}`;
+			}
+			return text;
 		} catch (error) {
-			screen.dispose();
-			rmSync(dir, { recursive: true, force: true });
+			if (session) {
+				await stopSession(session);
+			} else {
+				screen?.dispose();
+				rmSync(dir, { recursive: true, force: true });
+			}
 			throw error;
 		}
-		// Route the core's query replies (DA, DECRQSS, OSC color queries) back
-		// to the child: capability probes resolve as on a real terminal.
-		screen.onReply = (bytes) => proc.terminal.write(bytes);
-		session = {
-			name,
-			target,
-			proc,
-			cols,
-			rows,
-			dir,
-			screen,
-			sock: null,
-			waiters: [],
-			raw: [],
-			rawBytes: 0,
-			exit: null,
-		};
-		proc.exited.then((code) => {
-			session.exit = code;
-		});
-		sessions.set(name, session);
-
-		const deadline = Date.now() + (params.timeout ?? 15) * 1000;
-		const connected = await connectSocket(
-			session,
-			sockPath,
-			(params.timeout ?? 15) * 1000,
-		);
-		if (session.exit !== null) {
-			const tail = visible(Buffer.concat(session.raw)).slice(-3000);
-			await stopSession(session).catch(() => {});
-			throw new Error(
-				`"${target}" exited immediately (code ${session.exit}).\n` +
-					`terminal tail: ${tail || "(empty)"}`,
-			);
-		}
-		let text = `session "${name}": ${target} pid=${proc.pid} pty=${cols}x${rows}`;
-		if (connected) {
-			// The socket binds at terminal entry, before the first frame
-			// paints; retry until the snapshot exists so `start` reliably
-			// returns the opening screenshot.
-			let shot = await request(session, { op: "text" });
-			while (
-				shot.ok === false &&
-				String(shot.error ?? "").includes("no frame painted yet") &&
-				session.exit === null &&
-				Date.now() < deadline
-			) {
-				await sleep(50);
-				shot = await request(session, { op: "text" });
-			}
-			text += `\n${screenshotText(shot)}`;
-		} else {
-			text +=
-				"\n(no debug socket: app is not an omp-tui host; `send` injects " +
-				"input, `screen` renders the emulated display)" +
-				`\n${session.screen.snapshot()}`;
-		}
-		return text;
 	};
 
 	return {
@@ -1365,9 +1515,7 @@ const factory = (omp: ToolHost) => {
 				for (const session of sessions.values()) {
 					try {
 						session.proc.kill("SIGKILL");
-						session.proc.terminal.close();
-						session.screen.dispose();
-						rmSync(session.dir, { recursive: true, force: true });
+						disposeSession(session);
 					} catch {
 						// Best-effort teardown.
 					}
