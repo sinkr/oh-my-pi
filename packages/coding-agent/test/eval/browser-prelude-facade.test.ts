@@ -230,9 +230,11 @@ describe("browser JavaScript facade", () => {
 			runInContext('browser.tab("docs").run(async (_scope, url) => url, ["https://example.test"])', context),
 		).rejects.toThrow("pass the function's arguments as { args: [...] }");
 		for (const call of ['run(async () => 1, "fast")', 'run("return 1;", [1])']) {
-			await expect(runInContext(`browser.tab("docs").${call}`, context)).rejects.toThrow(
-				/^tab\.run\(\) expects an options object$/,
+			const message = await runInContext(`browser.tab("docs").${call}`, context).catch(
+				(error: Error) => error.message,
 			);
+			expect(message).toContain("tab.run() expects an options object");
+			expect(message).not.toContain("{ args");
 		}
 		expect(calls).toEqual([]);
 	});
@@ -243,9 +245,9 @@ describe("browser JavaScript facade", () => {
 		await expect(
 			runInContext('browser.open("https://example.test", { viewport: { width: 1280, height: 900 } })', context),
 		).rejects.toThrow("browser.open({ url, name })");
-		await expect(runInContext("browser.open(42)", context)).rejects.toThrow(
-			/^browser\.open\(\) expects an options object$/,
-		);
+		const message = await runInContext("browser.open(42)", context).catch((error: Error) => error.message);
+		expect(message).toContain("browser.open() expects an options object");
+		expect(message).not.toContain("{ url");
 		expect(calls).toEqual([]);
 	});
 });
