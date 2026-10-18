@@ -1,6 +1,7 @@
-import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { adaptDesktopSession } from "../native/desktop-adapter.js";
+import { desktopEscapeStops, forgetDesktopEscapeStops } from "../native/desktop.js";
+import * as loaderState from "../native/loader-state.js";
 
 describe("desktop native ABI requirements", () => {
 	it.each([
@@ -54,25 +55,27 @@ describe("desktop native ABI requirements", () => {
 });
 
 describe("lazy desktop exports", () => {
-	it("report a stale addon's missing Escape exports with the stale-addon stub", async () => {
-		// A child process, since `mock.module` leaks across test files: it stands in a pre-change addon.
-		const native = path.join(import.meta.dir, "../native");
-		const script = `
-			import { mock } from "bun:test";
-			mock.module(${JSON.stringify(`${native}/loader-state.js`)}, () => ({
-				loadNative: () => ({}),
-				missingNativeExport: name => () => { throw new Error("stale addon lacks " + name); },
-			}));
-			const desktop = await import(${JSON.stringify(`${native}/desktop.js`)});
-			for (const call of [() => desktop.desktopEscapeStops("k"), () => desktop.forgetDesktopEscapeStops("k")]) {
-				try { call(); console.log("returned"); } catch (error) { console.log(error.message); }
-			}`;
-		const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "inherit" });
-		const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-		expect(exitCode).toBe(0);
-		expect(stdout.trim().split("\n")).toEqual([
-			"stale addon lacks desktopEscapeStops",
-			"stale addon lacks forgetDesktopEscapeStops",
-		]);
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("report a stale addon's missing Escape exports with the stale-addon stub", () => {
+		// A workspace addon built before the Escape exports, which the loader tolerates as stale.
+		const missingNativeExport = loaderState.missingNativeExport;
+		const stale = {
+			path: "/w/packages/natives/native/pi_natives.darwin-arm64.node",
+			version: "18.8.7",
+			packageVersion: "18.12.1",
+			stale: true,
+		};
+		vi.spyOn(loaderState, "loadNative").mockReturnValue({});
+		vi.spyOn(loaderState, "missingNativeExport").mockImplementation(name => missingNativeExport(name, stale));
+		for (const [name, call] of [
+			["desktopEscapeStops", () => desktopEscapeStops("k")],
+			["forgetDesktopEscapeStops", () => forgetDesktopEscapeStops("k")],
+		] as const) {
+			expect(call).toThrow(`\`${name}\` is missing`);
+			expect(call).toThrow("bun run build:native");
+		}
 	});
 });

@@ -1,6 +1,8 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { CaptureRegion, DesktopCapabilities, DesktopScreenState } from "@oh-my-pi/pi-natives";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
+import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
 import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
 
@@ -63,8 +65,10 @@ export interface ComputerRunOk {
 }
 
 /** Result of a computer call the user stopped with physical Escape during takeover input. */
-export const ESCAPE_STOPPED_MESSAGE =
-	"The user pressed Escape to stop computer use; this call stopped and its input may be partial. Do not use the computer again this turn: tell the user what you did and what remains.";
+export const ESCAPE_STOPPED_MESSAGE = prompt.render(escapeStoppedMessage);
+
+/** Refusal of every later computer call until the user's next message acknowledges their Escape stop. */
+export const ESCAPE_REFUSED_MESSAGE = prompt.render(escapeRefusedMessage);
 
 /** Appended to a screenshot taken while the macOS lock screen is up. */
 export const SCREEN_LOCKED_CAPTURE_NOTE = prompt.render(screenLockedCaptureNote);

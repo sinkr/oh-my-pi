@@ -16,6 +16,7 @@ import {
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
+	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
 } from "./protocol";
@@ -28,8 +29,6 @@ const SMOKE_TIMEOUT_MS = 5_000;
 // the first ensure may load the desktop addon, so it shares the start budget.
 const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
-const ESCAPE_REFUSAL_MESSAGE =
-	"Computer use is stopped for this turn: the user pressed Escape to stop it. Nothing was sent. Do not retry; tell the user what you did and what remains. Computer use resumes after the user's next message.";
 
 /** Runs desktop scripts and owns their persistent worker session. */
 export interface ComputerController {
@@ -216,7 +215,7 @@ export class ComputerSupervisor implements ComputerController {
 		signal?: AbortSignal,
 	): Promise<DesktopCapabilities | undefined> {
 		if (this.#closed) throw new ToolError("Computer session is closed");
-		if (this.#escapeStopped()) throw new ToolError(ESCAPE_REFUSAL_MESSAGE);
+		if (this.#escapeStopped()) throw new ToolError(ESCAPE_REFUSED_MESSAGE);
 		if (signal?.aborted) throw new ToolAbortError();
 		await this.#start();
 		if (signal?.aborted) throw new ToolAbortError();
@@ -244,7 +243,7 @@ export class ComputerSupervisor implements ComputerController {
 		context?: AgentToolContext,
 	): Promise<ComputerRunOk> {
 		if (this.#closed) throw new ToolError("Computer session is closed");
-		if (this.#escapeStopped()) throw new ToolError(ESCAPE_REFUSAL_MESSAGE);
+		if (this.#escapeStopped()) throw new ToolError(ESCAPE_REFUSED_MESSAGE);
 		if (signal?.aborted) throw new ToolAbortError();
 		const epoch = this.#controlEpoch;
 		const session = { ...snapshot };
@@ -416,7 +415,13 @@ export class ComputerSupervisor implements ComputerController {
 	}
 
 	resumeAfterEscape(): void {
-		if (this.#started) this.#acknowledgedEscapeStops = this.#escapeStops.read(this.#escapeKey);
+		if (!this.#started) return;
+		try {
+			this.#acknowledgedEscapeStops = this.#escapeStops.read(this.#escapeKey);
+		} catch {
+			// An addon that cannot report the count (stale or missing) keeps the acknowledgement it had;
+			// the user's message must still reach the session, and the next call surfaces the addon error.
+		}
 	}
 
 	async #dispatchToolCall(message: Extract<ComputerWorkerOutbound, { type: "tool-call" }>): Promise<void> {
@@ -512,7 +517,13 @@ export class ComputerSupervisor implements ComputerController {
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
-		if (this.#started) this.#escapeStops.forget(this.#escapeKey);
+		if (this.#started) {
+			try {
+				this.#escapeStops.forget(this.#escapeKey);
+			} catch {
+				// An addon without the Escape exports kept no count to drop; the worker must still close.
+			}
+		}
 		const worker = this.#worker;
 		if (!worker) return;
 		const closed = Promise.withResolvers<void>();

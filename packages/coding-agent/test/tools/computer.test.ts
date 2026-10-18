@@ -2505,6 +2505,69 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
+	it("delivers the user's message and keeps the stop when the native count cannot be read", async () => {
+		let stops = 0;
+		let unreadable = false;
+		const ownerId = `escape-owner-${crypto.randomUUID()}`;
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => new SupervisorWorker(true),
+			{ startMs: 200, closeMs: 200 },
+			undefined,
+			{
+				read: () => {
+					// The stale-addon stub `desktopEscapeStops` falls back to.
+					if (unreadable) throw new Error("@oh-my-pi/pi-natives export `desktopEscapeStops` is missing");
+					return stops;
+				},
+				forget: () => {},
+			},
+		);
+		const unregister = registerComputerController(ownerId, supervisor);
+		try {
+			await supervisor.run("1", 1_000, snapshot());
+			stops = 1;
+			unreadable = true;
+			// AgentSession calls this while delivering the user's message; a throw would reject its event handling.
+			resumeComputerUseForOwner(ownerId);
+			unreadable = false;
+			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow("the user pressed Escape");
+		} finally {
+			unregister();
+			await supervisor.close();
+		}
+	});
+
+	it("terminates the worker on close when the native count cannot be dropped", async () => {
+		let terminated = false;
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				const worker = new SupervisorWorker(true);
+				return {
+					send: message => worker.send(message),
+					onMessage: handler => worker.onMessage(handler),
+					onError: handler => worker.onError(handler),
+					terminate: () => {
+						terminated = true;
+						return worker.terminate();
+					},
+				};
+			},
+			{ startMs: 200, closeMs: 200 },
+			undefined,
+			{
+				read: () => 0,
+				forget: () => {
+					throw new Error("@oh-my-pi/pi-natives export `forgetDesktopEscapeStops` is missing");
+				},
+			},
+		);
+		await supervisor.run("1", 1_000, snapshot());
+		await supervisor.close();
+		expect(terminated).toBe(true);
+	});
+
 	it("routes nested menus, displays, observation, applications and bounded holds through the JS facade and worker", async () => {
 		const session = toolSession();
 		const native = new ZoomNativeSession();
