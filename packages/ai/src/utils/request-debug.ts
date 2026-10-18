@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
+import { SENSITIVE_HEADER_PATTERN } from "./http-inspector";
 import { decodeRequestBodyBytes } from "./request-body";
 
 const REQUEST_DEBUG_ENV = "PI_REQ_DEBUG";
@@ -62,7 +63,7 @@ export async function createRequestDebugSession(payload: RequestDebugPayload): P
 		method: payload.method,
 		url: payload.url,
 	};
-	const headers = headersToRecord(payload.headers);
+	const headers = redactedHeaderRecord(payload.headers);
 	if (headers) requestDump.headers = headers;
 	if (payload.body !== undefined) requestDump.body = payload.body;
 	if (payload.bodyText !== undefined) requestDump.bodyText = payload.bodyText;
@@ -303,7 +304,7 @@ function looksLikeJson(text: string): boolean {
 
 function formatResponseHeaderBlock(statusLine: string, headers?: RequestDebugHeaders): string {
 	const lines = [statusLine];
-	const record = headersToRecord(headers);
+	const record = redactedHeaderRecord(headers);
 	if (record) {
 		for (const name in record) {
 			const value = record[name];
@@ -317,21 +318,23 @@ function formatResponseHeaderBlock(statusLine: string, headers?: RequestDebugHea
 	return `${lines.join("\r\n")}\r\n\r\n`;
 }
 
-function headersToRecord(headers: RequestDebugHeaders): Record<string, string | string[]> | undefined {
+/** Header record for a dump file, with credential values replaced by `[redacted]`. */
+function redactedHeaderRecord(headers: RequestDebugHeaders): Record<string, string | string[]> | undefined {
 	if (!headers) return undefined;
 	const record: Record<string, string | string[]> = {};
 	let hasHeaders = false;
 	if (headers instanceof Headers) {
 		headers.forEach((value, key) => {
 			hasHeaders = true;
-			record[key] = value;
+			record[key] = SENSITIVE_HEADER_PATTERN.test(key) ? "[redacted]" : value;
 		});
 	} else {
 		for (const key in headers) {
 			const value = headers[key];
 			if (value === undefined || value === null) continue;
 			hasHeaders = true;
-			record[key] = Array.isArray(value) ? value.map(String) : String(value);
+			if (SENSITIVE_HEADER_PATTERN.test(key)) record[key] = "[redacted]";
+			else record[key] = Array.isArray(value) ? value.map(String) : String(value);
 		}
 	}
 	return hasHeaders ? record : undefined;

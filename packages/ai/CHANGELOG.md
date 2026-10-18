@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `PI_REQ_DEBUG=1` request dumps writing your API key, bearer token and response cookies to disk in plain text: credential headers now read `[redacted]`, as in rejected-request dumps
+
 ## [18.12.2] - 2026-10-18
 
 ### Added

@@ -30,7 +30,7 @@ export type CapturedHttpErrorResponse = {
  * header that happens to match is harmless: dumps exist to diagnose the request
  * body, not its transport headers.
  */
-const SENSITIVE_HEADER_PATTERN = /key|token|secret|auth|credential|cookie/i;
+export const SENSITIVE_HEADER_PATTERN = /key|token|secret|auth|credential|cookie/i;
 
 /**
  * Build the JSON persisted for a rejected request. Request fields stay at the
