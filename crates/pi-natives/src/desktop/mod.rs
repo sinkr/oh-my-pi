@@ -1041,7 +1041,7 @@ impl Worker {
 				// The user's input into a panel another process draws goes to
 				// that process from the first read on, before any input of the
 				// session's names it.
-				let input = app.as_ref().map(|(pid, _)| backend.window_input(id, *pid));
+				let input = app.map(|pid| backend.window_input(id, pid));
 				(app, input)
 			},
 			AppAccess::Element(reference) => match self.element_app(reference)? {
@@ -1049,7 +1049,7 @@ impl Worker {
 				None => (None, None),
 			},
 		};
-		let Some((pid, name)) = app else {
+		let Some(pid) = app else {
 			// Input whose app cannot be named fails like the input itself
 			// would; a ref that no longer resolves fails in `process`.
 			return match access {
@@ -1059,7 +1059,7 @@ impl Worker {
 				_ => Ok(AppWatch::default()),
 			};
 		};
-		self.enrol(pid, name, input);
+		self.enrol(pid, input);
 		Ok(match access {
 			AppAccess::Read(_) => AppWatch { read: Some((pid, started)), _input: None },
 			AppAccess::Look(_) => AppWatch::default(),
@@ -1069,14 +1069,18 @@ impl Worker {
 		})
 	}
 
-	/// Records the user's input into `pid`, the app `name`, from now on, with
-	/// their input into process `input`, which draws its content, as input into
-	/// it.
+	/// Records the user's input into app `pid` from now on, with their input
+	/// into process `input`, which draws its content, as input into it. The
+	/// app's name is looked up only when the app is new to the watch.
 	#[cfg(target_os = "macos")]
-	fn enrol(&self, pid: libc::pid_t, name: String, input: Option<libc::pid_t>) {
+	fn enrol(&mut self, pid: libc::pid_t, input: Option<libc::pid_t>) {
+		let backend = &mut self.backend;
 		self
 			.listener
-			.touch(pid, macos::process_started(pid), || name);
+			.touch(pid, macos::process_started(pid), || match backend {
+				Ok(backend) => backend.app_name(pid),
+				Err(_) => format!("process {pid}"),
+			});
 		if let Some(input) = input {
 			self.listener.route(input, pid);
 		}
@@ -1094,8 +1098,8 @@ impl Worker {
 		if request.app_access().is_some() || !self.listener.listening() {
 			return;
 		}
-		if let Ok(Some(((pid, name), input))) = self.element_app(&node.ref_) {
-			self.enrol(pid, name, Some(input));
+		if let Ok(Some((pid, input))) = self.element_app(&node.ref_) {
+			self.enrol(pid, Some(input));
 		}
 	}
 
@@ -1105,14 +1109,11 @@ impl Worker {
 	/// Open or Save panel; elements read from the desktop belong to their own
 	/// process. `None` when the ref no longer resolves.
 	#[cfg(target_os = "macos")]
-	fn element_app(
-		&mut self,
-		reference: &str,
-	) -> CoreResult<Option<((libc::pid_t, String), libc::pid_t)>> {
+	fn element_app(&mut self, reference: &str) -> CoreResult<Option<(libc::pid_t, libc::pid_t)>> {
 		let Ok(handle) = self.registry.resolve(reference) else {
 			return Ok(None);
 		};
-		let (pid, name) = macos::element_app(&handle)?;
+		let pid = macos::element_app(&handle)?;
 		let window = match self
 			.registry
 			.target(reference)
@@ -1121,7 +1122,7 @@ impl Worker {
 			Ok(Target::Window(id)) => self.backend()?.window_app(&id),
 			_ => None,
 		};
-		Ok(Some((window.unwrap_or((pid, name)), pid)))
+		Ok(Some((window.unwrap_or(pid), pid)))
 	}
 
 	fn ax(&mut self) -> CoreResult<&mut dyn backend::AxBackend> {
@@ -2444,12 +2445,15 @@ mod capture_tests {
 		/// Another process drawing the window, such as an Open panel's.
 		#[cfg(target_os = "macos")]
 		drawn_by:               Option<libc::pid_t>,
+		/// How many times the app's name was looked up.
+		#[cfg(target_os = "macos")]
+		name_lookups:           Arc<Mutex<u32>>,
 	}
 
 	impl FakeWaylandBackend {
 		fn new() -> Self {
 			Self {
-				window:                 DesktopWindow {
+				window: DesktopWindow {
 					id:      WAYLAND_ID.to_string(),
 					title:   "Obsidian".to_string(),
 					app:     "obsidian".to_string(),
@@ -2460,12 +2464,12 @@ mod capture_tests {
 					height:  48,
 					focused: true,
 				},
-				overlap:                None,
-				window_present:         true,
-				tree:                   None,
-				clicks:                 Arc::new(Mutex::new(Vec::new())),
-				modes:                  Arc::new(Mutex::new(Vec::new())),
-				layout:                 Arc::new(Mutex::new(vec![DesktopDisplay {
+				overlap: None,
+				window_present: true,
+				tree: None,
+				clicks: Arc::new(Mutex::new(Vec::new())),
+				modes: Arc::new(Mutex::new(Vec::new())),
+				layout: Arc::new(Mutex::new(vec![DesktopDisplay {
 					id:           "screen-1".to_string(),
 					name:         "Test screen".to_string(),
 					x:            0,
@@ -2479,20 +2483,22 @@ mod capture_tests {
 					pixel_height: 48,
 					is_primary:   true,
 				}])),
-				active_display:         Arc::new(Mutex::new("screen-1".to_string())),
-				captures:               Arc::new(Mutex::new(0)),
-				window_queries:         Arc::new(Mutex::new(0)),
+				active_display: Arc::new(Mutex::new("screen-1".to_string())),
+				captures: Arc::new(Mutex::new(0)),
+				window_queries: Arc::new(Mutex::new(0)),
 				cancel_on_capabilities: Arc::new(Mutex::new(None)),
-				snapshot_error:         Arc::new(Mutex::new(false)),
-				cancel_on_snapshot:     Arc::new(Mutex::new(None)),
-				screen:                 Arc::new(Mutex::new(ScreenState::default())),
-				screen_displays:        Arc::new(Mutex::new(Vec::new())),
-				awake:                  Arc::new(Mutex::new(Vec::new())),
-				unlock_on_layout:       Arc::new(Mutex::new(false)),
-				hang_windows:           None,
-				on_menu_read:           None,
+				snapshot_error: Arc::new(Mutex::new(false)),
+				cancel_on_snapshot: Arc::new(Mutex::new(None)),
+				screen: Arc::new(Mutex::new(ScreenState::default())),
+				screen_displays: Arc::new(Mutex::new(Vec::new())),
+				awake: Arc::new(Mutex::new(Vec::new())),
+				unlock_on_layout: Arc::new(Mutex::new(false)),
+				hang_windows: None,
+				on_menu_read: None,
 				#[cfg(target_os = "macos")]
-				drawn_by:               None,
+				drawn_by: None,
+				#[cfg(target_os = "macos")]
+				name_lookups: Arc::new(Mutex::new(0)),
 			}
 		}
 	}
@@ -2694,8 +2700,14 @@ mod capture_tests {
 		}
 
 		#[cfg(target_os = "macos")]
-		fn window_app(&mut self, id: &str) -> Option<(libc::pid_t, String)> {
-			(id == self.window.id || id == OFF_SPACE_ID).then(|| (1234, self.window.app.clone()))
+		fn window_app(&mut self, id: &str) -> Option<libc::pid_t> {
+			(id == self.window.id || id == OFF_SPACE_ID).then_some(1234)
+		}
+
+		#[cfg(target_os = "macos")]
+		fn app_name(&mut self, _: libc::pid_t) -> String {
+			*self.name_lookups.lock() += 1;
+			self.window.app.clone()
 		}
 
 		#[cfg(target_os = "macos")]
@@ -3893,9 +3905,23 @@ mod capture_tests {
 
 	#[cfg(target_os = "macos")]
 	#[test]
+	fn an_apps_name_is_looked_up_once_however_often_the_session_uses_it() {
+		let backend = FakeWaylandBackend::new();
+		let lookups = Arc::clone(&backend.name_lookups);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let target = Target::Window(WAYLAND_ID.to_string());
+		for _ in 0..3 {
+			worker.dispatch(capture_request(target.clone()), &token);
+		}
+		assert_eq!(*lookups.lock(), 1);
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
 	fn the_users_input_into_a_panel_another_process_draws_counts_from_the_first_read() {
 		let mut backend = FakeWaylandBackend::new();
-		// The window is an Open panel that process 4321 draws and takes input for.
+		// An Open panel, which process 4321 draws and takes input for.
 		backend.drawn_by = Some(4321);
 		let clicks = Arc::clone(&backend.clicks);
 		let mut worker = worker_with(backend);

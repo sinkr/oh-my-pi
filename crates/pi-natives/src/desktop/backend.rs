@@ -116,10 +116,13 @@ pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>>;
-	/// The process owning window `id` and its application's name, found even
-	/// when the window is off the current Space, without listing every window.
+	/// The process owning window `id`, found even when the window is off the
+	/// current Space, without listing every window.
 	#[cfg(target_os = "macos")]
-	fn window_app(&mut self, id: &str) -> Option<(libc::pid_t, String)>;
+	fn window_app(&mut self, id: &str) -> Option<libc::pid_t>;
+	/// The name of process `pid`'s application.
+	#[cfg(target_os = "macos")]
+	fn app_name(&mut self, pid: libc::pid_t) -> String;
 	/// The process that draws window `id` of process `pid` and takes the
 	/// user's input there, such as `openAndSavePanelService` for a system Open
 	/// or Save panel; `pid` itself when the window draws its own content or

@@ -100,9 +100,21 @@ impl Backend for MacosBackend {
 		self.capture.windows()
 	}
 
-	fn window_app(&mut self, id: &str) -> Option<(libc::pid_t, String)> {
-		let pid = skylight::window_owner_pid(id.parse().ok()?)?;
-		Some((pid, app_name(pid)))
+	fn window_app(&mut self, id: &str) -> Option<libc::pid_t> {
+		window_owner(id, skylight::window_owner_pid, || {
+			self
+				.capture
+				.window(id)
+				.ok()?
+				.pid
+				.and_then(|pid| libc::pid_t::try_from(pid).ok())
+		})
+	}
+
+	fn app_name(&mut self, pid: libc::pid_t) -> String {
+		NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+			.and_then(|app| app.localizedName())
+			.map_or_else(|| format!("process {pid}"), |name| name.to_string())
 	}
 
 	fn window_input(&mut self, id: &str, pid: libc::pid_t) -> libc::pid_t {
@@ -242,16 +254,21 @@ impl Backend for MacosBackend {
 	}
 }
 
-/// The process owning the element `h` names, with its application's name.
-pub(super) fn element_app(h: &AxHandle) -> CoreResult<(libc::pid_t, String)> {
-	let pid = ax::handle_pid(h)?;
-	Ok((pid, app_name(pid)))
+/// The process owning the element `h` names.
+pub(super) fn element_app(h: &AxHandle) -> CoreResult<libc::pid_t> {
+	ax::handle_pid(h)
 }
 
-fn app_name(pid: libc::pid_t) -> String {
-	NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
-		.and_then(|app| app.localizedName())
-		.map_or_else(|| format!("process {pid}"), |name| name.to_string())
+/// The process owning window `id`: its `WindowServer` owner (`server_owner`),
+/// which answers for a window off the current Space too, else the owner the
+/// window list names (`listed_owner`), so a missing owner lookup fails only
+/// for a window that is gone.
+fn window_owner(
+	id: &str,
+	server_owner: impl FnOnce(u32) -> Option<libc::pid_t>,
+	listed_owner: impl FnOnce() -> Option<libc::pid_t>,
+) -> Option<libc::pid_t> {
+	id.parse().ok().and_then(server_owner).or_else(listed_owner)
 }
 
 fn permission_label(granted: bool) -> String {
@@ -259,5 +276,21 @@ fn permission_label(granted: bool) -> String {
 		"granted".to_string()
 	} else {
 		"denied".to_string()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::window_owner;
+
+	#[test]
+	fn a_window_owner_the_server_cannot_name_comes_from_the_window_list() {
+		let unasked = || -> Option<libc::pid_t> { panic!("the window list is not read") };
+		assert_eq!(window_owner("42", |_| Some(7), unasked), Some(7));
+		// `SLSGetWindowOwner` unavailable: the listed window still names its app.
+		assert_eq!(window_owner("42", |_| None, || Some(8)), Some(8));
+		// Only a window neither knows is gone.
+		assert_eq!(window_owner("42", |_| None, || None), None);
+		assert_eq!(window_owner("not-a-window", |_| Some(7), || None), None);
 	}
 }

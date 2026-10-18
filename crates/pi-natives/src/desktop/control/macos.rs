@@ -20,8 +20,9 @@ pub(crate) const SYNTHETIC_EVENT_TAG: i64 = 0x7069_6465_736b;
 const SOURCE_USER_DATA: u32 = 42;
 const SOURCE_UNIX_PID: u32 = 41;
 /// `kCGEventTargetUnixProcessID`: the process `WindowServer` routes the event
-/// to, filled in at the annotated session tap (to be confirmed live for keys
-/// and clicks).
+/// to, filled in at the annotated session tap. Verified on a macOS VM for
+/// hardware key presses and left clicks, from a USB keyboard and a VNC pointer;
+/// right and other clicks were not exercised.
 const TARGET_UNIX_PID: u32 = 40;
 const KEYBOARD_KEYCODE: u32 = 9;
 const LEFT_MOUSE_DOWN: u32 = 1;
