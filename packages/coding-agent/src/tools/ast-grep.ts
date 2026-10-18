@@ -22,7 +22,12 @@ import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file
 import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
 
-import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
+import {
+	relativeSearchResultPath,
+	resolveSearchResultPath,
+	resolveToolSearchScope,
+	searchPathTier,
+} from "./path-utils";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRawSelector } from "./read-selector";
 import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -135,7 +140,7 @@ async function runMultiTargetAstGrep(
 
 export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolDetails> {
 	readonly name = "ast_grep";
-	readonly approval = "read" as const;
+	readonly approval = searchPathTier;
 	readonly label = "AST Grep";
 	readonly summary = "Search code with AST patterns (structural grep)";
 	get description(): string {

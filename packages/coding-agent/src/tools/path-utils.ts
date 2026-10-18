@@ -1,3 +1,4 @@
+import type { ToolTier } from "@oh-my-pi/pi-agent-core";
 import { extractUriScheme } from "../internal-urls/parse";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
@@ -18,6 +19,7 @@ import { InternalUrlRouter } from "../internal-urls";
 import { type InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
@@ -1394,6 +1396,13 @@ export interface ToolScopeResolution {
 	exactFilePaths?: string[];
 	missingPaths: string[];
 	immutableSourcePaths: Set<string>;
+}
+
+/** Approval tier for a search tool's raw `path`/`paths` input: the highest scheme read tier named anywhere in it. */
+export function searchPathTier(args: unknown): ToolTier {
+	const a = args as { path?: string | string[]; paths?: string | string[] };
+	// Substring scan over the raw entries: delimited lists are only split after approval.
+	return InternalUrlRouter.instance().readTier(toPathList(a.path ?? a.paths).join("\n"));
 }
 
 /**

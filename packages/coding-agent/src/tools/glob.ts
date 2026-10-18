@@ -23,6 +23,7 @@ import {
 	resolveExplicitFindPatterns,
 	resolveSearchBase,
 	resolveSearchResultPath,
+	searchPathTier,
 } from "./path-utils";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -116,7 +117,7 @@ interface NativePreparedTarget {
 
 export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly name = "glob";
-	readonly approval = "read" as const;
+	readonly approval = searchPathTier;
 	readonly loadMode = "essential";
 	readonly label = "Glob";
 	get description(): string {
