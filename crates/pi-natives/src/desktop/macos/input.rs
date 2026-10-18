@@ -691,7 +691,7 @@ fn takes_overlay_focus(
 	let focused = match focus.window {
 		ax::FocusedWindow::Id(id) => Some(id),
 		ax::FocusedWindow::Unreported => focus.element_window,
-		ax::FocusedWindow::Unmapped => None,
+		ax::FocusedWindow::Unmapped | ax::FocusedWindow::Unreadable => None,
 	};
 	parent_of(wid).is_some()
 		&& (focused == Some(wid) || attached_under(wid, parent_of, |parent| Some(parent) == focused))
@@ -720,8 +720,10 @@ fn key_refusal(
 			))
 		},
 		ax::KeyDestination::Other(other) => {
-			let focused =
-				other.map_or_else(|| "an unidentified window".to_owned(), |id| format!("window {id}"));
+			let focused = other.map_or_else(
+				|| "a window it does not identify, or did not answer about,".to_owned(),
+				|id| format!("window {id}"),
+			);
 			DesktopError::background_unavailable(format!(
 				"window {wid} did not become its application's key window, and {focused} still is, so \
 				 background keystrokes would reach that window; nothing was sent; retry with \

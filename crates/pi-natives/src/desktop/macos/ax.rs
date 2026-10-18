@@ -316,6 +316,9 @@ pub(super) enum FocusedWindow {
 	Unreported,
 	/// `_AXUIElementGetWindow` cannot map the window it reports.
 	Unmapped,
+	/// The read failed, such as an application that did not answer in time,
+	/// so nothing is known about its focused window.
+	Unreadable,
 	Id(u32),
 }
 
@@ -370,7 +373,7 @@ impl KeyFocus {
 				KeyDestination::Target(pid)
 			},
 			FocusedWindow::Id(id) => KeyDestination::Other(Some(id)),
-			FocusedWindow::Unmapped => KeyDestination::Other(None),
+			FocusedWindow::Unmapped | FocusedWindow::Unreadable => KeyDestination::Other(None),
 			FocusedWindow::Unreported => match self.element_window {
 				Some(id) if [Some(id), parent_of(id)].contains(&Some(wid)) => {
 					KeyDestination::Target(pid)
@@ -412,7 +415,7 @@ impl KeyFocus {
 		let reported = match self.window {
 			FocusedWindow::Unreported => true,
 			FocusedWindow::Id(id) => id == wid,
-			FocusedWindow::Unmapped => false,
+			FocusedWindow::Unmapped | FocusedWindow::Unreadable => false,
 		};
 		let overlay = self.element_window.filter(|&id| id != wid);
 		reported && overlay.is_some_and(|id| parent_of(id) == Some(wid))
@@ -425,15 +428,33 @@ impl KeyFocus {
 	}
 }
 
-/// Reads where `pid` sends keystrokes; every part it cannot read is `None`.
+/// Reads where `pid` sends keystrokes; every part it cannot read is `None`,
+/// and a focused window that cannot be read is [`FocusedWindow::Unreadable`].
 pub(super) fn key_focus(pid: libc::pid_t) -> KeyFocus {
-	probe_application(pid).map_or_else(KeyFocus::default, |app| read_key_focus(&app).0)
+	let Some(app) = probe_application(pid) else {
+		return KeyFocus { window: FocusedWindow::Unreadable, ..KeyFocus::default() };
+	};
+	read_key_focus(&app).0
 }
 
 fn read_focused_window(app: &AXUIElement) -> FocusedWindow {
-	copy_element(app, "AXFocusedWindow").map_or(FocusedWindow::Unreported, |window| {
-		window_id(&window).map_or(FocusedWindow::Unmapped, FocusedWindow::Id)
-	})
+	let read = copy_attribute_result(app, "AXFocusedWindow")
+		.map(|window| window.and_then(|window| window.downcast::<AXUIElement>().ok()));
+	focused_window(read, |window| window_id(window))
+}
+
+/// An `AXFocusedWindow` `read`, its element mapped through `id_of`. Only an
+/// answer that there is no value says the application has no focused
+/// window; any other failure leaves it unknown.
+fn focused_window<E>(
+	read: Result<Option<E>, AXError>,
+	id_of: impl FnOnce(&E) -> Option<u32>,
+) -> FocusedWindow {
+	match read {
+		Ok(Some(window)) => id_of(&window).map_or(FocusedWindow::Unmapped, FocusedWindow::Id),
+		Ok(None) | Err(AXError::NoValue | AXError::AttributeUnsupported) => FocusedWindow::Unreported,
+		Err(_) => FocusedWindow::Unreadable,
+	}
 }
 
 fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement>>) {
@@ -2049,9 +2070,10 @@ mod tests {
 	use super::{
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, VALUE, WindowContent,
-		ax_result, content_owner, create_system_wide, element_action_result, may_borrow_focus,
-		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
-		select_attached, stringify_value, target_window, text_readback, window_records_of,
+		ax_result, content_owner, create_system_wide, element_action_result, focused_window,
+		may_borrow_focus, replace_utf16_selection, replace_whole_value, required_string,
+		secure_subrole, select_attached, stringify_value, target_window, text_readback,
+		window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -2590,6 +2612,22 @@ mod tests {
 		assert!(!focus.holds_text_for(7, 41732, attached));
 		assert_eq!(focus.destination(7, 41740, attached), KeyDestination::Target(7));
 		assert!(focus.holds_text_for(7, 41740, attached));
+	}
+
+	#[test]
+	fn a_failed_focused_window_read_is_not_an_app_without_one() {
+		let none = |_: &u32| -> Option<u32> { None };
+		// Only "no value" says the application has no focused window.
+		assert_eq!(focused_window(Ok(None), none), FocusedWindow::Unreported);
+		assert_eq!(focused_window(Err(AXError::NoValue), none), FocusedWindow::Unreported);
+		assert_eq!(focused_window(Ok(Some(5)), |&id| Some(id)), FocusedWindow::Id(5));
+		// An application that did not answer in time may have a new modal or
+		// sibling focused: keys must not go out as if the target were its only
+		// possible key window.
+		let unread = focused_window(Err(AXError::CannotComplete), none);
+		assert_eq!(unread, FocusedWindow::Unreadable);
+		let focus = KeyFocus { window: unread, ..KeyFocus::default() };
+		assert_eq!(focus.destination(7, 42, |_| None), KeyDestination::Other(None));
 	}
 
 	#[test]
