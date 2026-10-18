@@ -1,5 +1,6 @@
 mod enablement;
 pub(crate) mod menus;
+pub(super) mod open_menu;
 mod popup;
 mod selection;
 
@@ -31,7 +32,9 @@ use super::{
 		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
 		types::{AxTextSelection, DesktopWindow},
 	},
-	date, permission, process, skylight,
+	capture, date, input, permission, process,
+	release_guard::{self, Presses},
+	skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -563,6 +566,29 @@ fn target_window<E>(
 		.or_else(find)
 }
 
+/// How an error names a window: its id, title and, for anything but a
+/// standard window, its AX subrole or role (`AXDialog`, `AXSheet`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WindowLabel {
+	pub(super) id:    Option<u32>,
+	pub(super) title: Option<String>,
+	pub(super) kind:  Option<String>,
+}
+
+/// `pid`'s `AXFocusedWindow`, labelled for an error message.
+pub(super) fn focused_window_label(pid: libc::pid_t) -> Option<WindowLabel> {
+	let app = probe_application(pid)?;
+	let window = copy_element(&app, "AXFocusedWindow")?;
+	let kind = copy_string(&window, "AXSubrole")
+		.filter(|subrole| subrole != "AXStandardWindow")
+		.or_else(|| copy_string(&window, "AXRole").filter(|role| role != "AXWindow"));
+	Some(WindowLabel {
+		id: window_id(&window),
+		title: nonempty(copy_string(&window, "AXTitle")),
+		kind,
+	})
+}
+
 /// The window that should regain key status when `pid` is handed keyboard
 /// focus back: its focused window, else its main window.
 pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
@@ -1005,25 +1031,17 @@ impl AxBackend for MacAx {
 			.map(AxHandle::Mac))
 	}
 
+	/// An action that may open a menu can post the press that makes its window
+	/// key and the Escape that closes the menu; their release helper starts
+	/// only then.
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
-		let element = mac_handle(h)?;
-		let native = action_name(action);
-		let actions = copy_strings_from_action_names(element)?;
-		if !actions.contains(&native) {
-			return Err(DesktopError::ax_failed(format!(
-				"AX action '{native}' is not supported by this element; available actions: {}",
-				actions.join(", "),
-			)));
-		}
-		// AXRaise is an explicit request to change stacking, including the
-		// takeover preparation path. Other semantic actions must stay background.
-		if is_raise_action(action) {
-			return element_action_result(&native, send_action(element, &native));
-		}
-		let pid = element_pid(element)?;
-		let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
-		skylight::with_background_guard(pid, || {
-			press_into_view(&native, scroll_first, |action| send_action(element, action))
+		release_guard::scope(Presses::Nothing, || perform_choosing(mac_handle(h)?, action, None))
+	}
+
+	/// A menu path always waits for a menu, so the helper starts up front.
+	fn perform_menu(&mut self, h: &AxHandle, action: &str, path: &[String]) -> CoreResult<()> {
+		release_guard::scope(Presses::Process, || {
+			perform_choosing(mac_handle(h)?, action, Some(path))
 		})
 	}
 
@@ -1035,8 +1053,10 @@ impl AxBackend for MacAx {
 		let role = copy_held_attribute(element, "AXRole")?
 			.and_then(|value| value.downcast::<CFString>().ok());
 		if role.is_some_and(|role| role.to_string() == "AXPopUpButton") {
-			return skylight::with_background_guard(element_pid(element)?, || {
-				popup::choose(element, value)
+			// Choosing opens the popup's menu, so the release helper starts
+			// up front.
+			return release_guard::scope(Presses::Process, || {
+				skylight::with_background_guard(element_pid(element)?, || popup::choose(element, value))
 			});
 		}
 		// Web AXValue can echo a write without the renderer accepting it. The
@@ -1246,6 +1266,158 @@ fn answered<T>(read: &Result<Option<T>, AXError>) -> bool {
 		.is_none_or(|error| *error == AXError::NoValue || *error == AXError::AttributeUnsupported)
 }
 
+/// Performs `action` on `element`; with `path`, chooses that item path in the
+/// menu the action opens.
+fn perform_choosing(
+	element: &AXUIElement,
+	action: &str,
+	path: Option<&[String]>,
+) -> CoreResult<()> {
+	// Read before any probe of the target, as for background input
+	// ([`input::EntryFront`]).
+	let entry_front = input::EntryFront::now();
+	let native = action_name(action);
+	let actions = copy_strings_from_action_names(element)?;
+	if !actions.contains(&native) {
+		return Err(DesktopError::ax_failed(format!(
+			"AX action '{native}' is not supported by this element; available actions: {}",
+			actions.join(", "),
+		)));
+	}
+	// AXRaise is an explicit request to change stacking, including the
+	// takeover preparation path. Other semantic actions must stay background.
+	if is_raise_action(action) {
+		if path.is_some() {
+			return Err(DesktopError::invalid_target("AXRaise opens no menu to choose an item from"));
+		}
+		return element_action_result(&native, send_action(element, &native));
+	}
+	let pid = element_pid(element)?;
+	let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
+	let perform = || press_into_view(&native, scroll_first, |action| send_action(element, action));
+	// A menu that a background application opens takes the keyboard from the
+	// user's app, so it is closed before the action returns; a frontmost
+	// application's menu stays open for the next call unless an item is asked
+	// for.
+	let background = entry_front.behind(pid);
+	let watch = path.is_some()
+		|| (background && open_menu::may_open(&native, || copy_string(element, "AXRole")));
+	skylight::with_background_watch(pid, |visit| {
+		// A popup in a system Open or Save panel opens its menu in the
+		// process that draws the panel.
+		let drawn = if watch {
+			innermost_window_id(element).map(|(id, _)| id)
+		} else {
+			None
+		};
+		let menu_pid = open_menu::menu_process(pid, drawn, skylight::window_owner_pid);
+		let before = if watch {
+			let before = capture::menu_windows(menu_pid).ok_or_else(|| {
+				DesktopError::ax_failed(format!(
+					"cannot list the open menus of process {menu_pid}, so a menu that {native} opens \
+					 could not be closed; nothing was performed"
+				))
+			})?;
+			if background {
+				activate_for_menu(element, pid, entry_front, visit)?;
+			}
+			Some(before)
+		} else {
+			None
+		};
+		open_menu::guard(
+			open_menu::Press::Action(&native),
+			before.as_deref(),
+			path,
+			perform,
+			|before, path| {
+				// The user may have brought the target forward while its menu
+				// appeared.
+				let holds = || {
+					input::recheck_background(
+						background,
+						pid,
+						drawn.unwrap_or_default(),
+						skylight::front_pid,
+						|| visit.happened(),
+						|| Ok(()),
+					)
+				};
+				open_menu::settle(menu_pid, pid, before, path, open_menu::CONTROL_MENU_TIMEOUT, holds)
+			},
+		)
+	})
+}
+
+/// Makes the window holding `element` key within its background
+/// application, as a background click does, before an action that opens a
+/// menu: `AppKit` validates a menu's items when it opens, and an inactive
+/// Finder read every Action-menu command but three as disabled. An element
+/// whose window cannot be resolved is acted on as it is. An element in a
+/// sheet or popover is in that window ([`menu_window`]); on the focused
+/// window it gets only the activation, as a background click into it does,
+/// since the press that makes a window key would close a popover.
+fn activate_for_menu(
+	element: &AXUIElement,
+	pid: libc::pid_t,
+	entry_front: input::EntryFront,
+	visit: skylight::TargetVisit<'_>,
+) -> CoreResult<()> {
+	let Some(attached_to) = element_window(element).as_deref().and_then(window_id) else {
+		return Ok(());
+	};
+	let drawn = innermost_window_id(element).map(|(id, _)| id);
+	let wid = menu_window(attached_to, drawn, skylight::window_parent);
+	let Ok(window) = capture::window_by_id(&wid.to_string()) else {
+		return Ok(());
+	};
+	let in_overlay = input::takes_overlay_focus(wid, key_focus(pid), skylight::window_parent);
+	let prepared = input::make_key_in_background(
+		&input::source()?,
+		pid,
+		wid,
+		&window,
+		entry_front,
+		in_overlay,
+		visit,
+	)?;
+	// The press that makes the window key waits in the application's event
+	// queue, while the action that follows is handled as soon as it arrives:
+	// `AXShowMenu` sent right behind the press opened its menu first, and the
+	// press, landing outside the menu, closed it again.
+	if prepared && !in_overlay {
+		control::wait(input::POINTER_SETTLE)?;
+	}
+	// A popover never becomes the focused window; the one it is on already is.
+	if !in_overlay {
+		input::await_key_window(pid, wid)?;
+	}
+	input::recheck_background(
+		prepared,
+		pid,
+		wid,
+		skylight::front_pid,
+		|| visit.happened(),
+		|| Ok(()),
+	)
+}
+
+/// The window an element's menu action is aimed at: `drawn`, the window
+/// `_AXUIElementGetWindow` maps the element to, when it is a sheet or popover
+/// attached to `attached_to`, the element's `AXWindow`, which a sheet's or
+/// popover's controls report; otherwise `attached_to`.
+fn menu_window(
+	attached_to: u32,
+	drawn: Option<u32>,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> u32 {
+	drawn
+		.filter(|&id| {
+			id != attached_to && input::attached_under(id, parent_of, |parent| parent == attached_to)
+		})
+		.unwrap_or(attached_to)
+}
+
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
 	let mut pid = 0;
 	// SAFETY: `pid` is writable and the retained element outlives the query.
@@ -1283,14 +1455,13 @@ fn text_surface(element: &AXUIElement) -> TextSurface {
 fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
 	if process::is_terminal(element_pid(element)?) {
 		return Err(DesktopError::ax_failed(
-			"terminal AX text represents its rendered grid, not terminal input; use win.type or \
-			 takeover:true instead",
+			"terminal AX text represents its rendered grid, not terminal input; use win.type instead",
 		));
 	}
 	if text_surface(element) != TextSurface::Native {
 		return Err(DesktopError::ax_failed(
 			"AX text writes cannot be verified in web content or an incomplete AX ancestry; use a \
-			 pixel click followed by win.type, or takeover:true input instead",
+			 pixel click followed by win.type instead",
 		));
 	}
 	Ok(())
@@ -2169,7 +2340,7 @@ mod tests {
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
-		focused_window, may_borrow_focus, replace_utf16_selection, replace_whole_value,
+		focused_window, may_borrow_focus, menu_window, replace_utf16_selection, replace_whole_value,
 		required_string, secure_subrole, select_attached, stringify_value, takes_inserted_text,
 		target_window, text_readback, window_records_of,
 	};
@@ -2330,6 +2501,27 @@ mod tests {
 		assert_eq!(code(AXError::InvalidUIElement), ErrorCode::StaleRef);
 		assert_eq!(code(AXError::ActionUnsupported), ErrorCode::AxFailed);
 		assert!(element_action_result("AXPress", AXError::Success).is_ok());
+	}
+
+	#[test]
+	fn a_menu_action_in_a_popover_or_sheet_is_aimed_at_that_window() {
+		// Calendar's Repeat popup reports window 25567 as its AXWindow and maps
+		// to its event popover 25579; a field in Automator's Save sheet 25670
+		// maps to the sheet, attached to window 25656.
+		let parents = |id| match id {
+			25579 => Some(25567),
+			25670 => Some(25656),
+			_ => None,
+		};
+		assert_eq!(menu_window(25567, Some(25579), parents), 25579);
+		assert_eq!(menu_window(25656, Some(25670), parents), 25670);
+		// The window itself, an unmapped element, and a window that is not
+		// attached to the element's AXWindow, such as the one
+		// openAndSavePanelService draws a panel's controls in, keep AXWindow.
+		assert_eq!(menu_window(25567, Some(25567), parents), 25567);
+		assert_eq!(menu_window(25567, None, parents), 25567);
+		assert_eq!(menu_window(25656, Some(25579), parents), 25656);
+		assert_eq!(menu_window(25656, Some(31000), parents), 25656);
 	}
 
 	#[test]
