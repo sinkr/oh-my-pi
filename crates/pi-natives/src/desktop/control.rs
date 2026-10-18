@@ -301,6 +301,17 @@ pub(crate) fn settle(duration: Duration) {
 	thread::sleep(duration);
 }
 
+/// The pause `gap` after a press. Once a call's last press is out (`sent`)
+/// it is a [`settle`]; before that a cancel ends it.
+pub(crate) fn sent_gap_wait(gap: Duration, sent: bool) -> CoreResult<()> {
+	if sent {
+		settle(gap);
+		Ok(())
+	} else {
+		wait(gap)
+	}
+}
+
 /// Cleanup must release already-held input even after cancellation. This does
 /// not clear a token or authorize any later operation. Nested cleanup is safe.
 pub(crate) fn cleanup<T>(action: impl FnOnce() -> T) -> T {

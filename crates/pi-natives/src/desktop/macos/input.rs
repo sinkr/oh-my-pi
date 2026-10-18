@@ -2676,7 +2676,7 @@ fn background_left_click(
 	for click_state in 1..=count {
 		before_press()?;
 		post(CGEventType::LeftMouseDown, target, local, 3, i64::from(click_state), flags)?;
-		let result = sent_gap_wait(Duration::from_millis(1), click_state == count);
+		let result = control::sent_gap_wait(Duration::from_millis(1), click_state == count);
 		let release = control::cleanup(|| {
 			post(CGEventType::LeftMouseUp, target, local, 3, i64::from(click_state), flags)
 		});
@@ -2714,7 +2714,7 @@ fn background_button_click(
 		release.set_flags(flags);
 		let result =
 			post_window_pointer(pid, wid, window, &press, x, y, i64::from(click_state), number, group)
-				.and_then(|()| sent_gap_wait(PRESS_GAP, click_state == count));
+				.and_then(|()| control::sent_gap_wait(PRESS_GAP, click_state == count));
 		let cleanup = control::cleanup(|| {
 			post_window_pointer(
 				pid,
@@ -2917,7 +2917,7 @@ fn report_taps(
 	for click_state in 1..=count {
 		before_press()?;
 		let result = post(CGEventType::LeftMouseDown, click_state)
-			.and_then(|()| sent_gap_wait(TAP_HOLD, click_state == count));
+			.and_then(|()| control::sent_gap_wait(TAP_HOLD, click_state == count));
 		let release = control::cleanup(|| post(CGEventType::LeftMouseUp, click_state));
 		skylight::after_cleanup(result, release)?;
 		if click_state < count {
@@ -3153,10 +3153,10 @@ fn type_keys(
 			// Once the last key is pressed the text is out: a cancel then must
 			// not report it unsent.
 			let last = index + 1 == keys.len();
-			let result = post(&press).and_then(|()| sent_gap_wait(gap, last));
+			let result = post(&press).and_then(|()| control::sent_gap_wait(gap, last));
 			let cleanup = control::cleanup(|| post(&release));
 			skylight::after_cleanup(result, cleanup)?;
-			sent_gap_wait(gap, last)?;
+			control::sent_gap_wait(gap, last)?;
 		}
 		Ok(())
 	})();
@@ -3291,13 +3291,13 @@ fn hold_transitions(
 			guard()?;
 			held += 1;
 			post(key.code, true)?;
-			sent_gap_wait(gap, held == keys.len())?;
+			control::sent_gap_wait(gap, held == keys.len())?;
 		}
 		body()?;
 		while let Some(key) = keys[..held].last() {
 			post(key.code, false)?;
 			held -= 1;
-			sent_gap_wait(gap, true)?;
+			control::sent_gap_wait(gap, true)?;
 		}
 		Ok(())
 	})();
@@ -3338,7 +3338,7 @@ fn post_transitions(
 			}
 			post(code, down)?;
 			held[usize::from(code)] = down;
-			sent_gap_wait(gap, sent)
+			control::sent_gap_wait(gap, sent)
 		});
 		if result.is_err() {
 			break;
@@ -3354,17 +3354,6 @@ fn post_transitions(
 		result
 	});
 	skylight::after_cleanup(result, cleanup)
-}
-
-/// The pause `gap` after a key or button press. Once a call's last press is
-/// out (`sent`) it is a [`control::settle`].
-fn sent_gap_wait(gap: Duration, sent: bool) -> CoreResult<()> {
-	if sent {
-		control::settle(gap);
-		Ok(())
-	} else {
-		control::wait(gap)
-	}
 }
 
 /// Wait before the first foreground keystroke: a surface that was just
@@ -3501,7 +3490,7 @@ fn hold_presses(
 		pressed += 1;
 		if let Err(error) = control::check()
 			.and_then(|()| post_code(source, key.code, true, modifier_flags(active), &mut post))
-			.and_then(|()| sent_gap_wait(gap, pressed == keys.len()))
+			.and_then(|()| control::sent_gap_wait(gap, pressed == keys.len()))
 		{
 			result = Err(error);
 			break;
@@ -3961,7 +3950,7 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 						number,
 						flags,
 					)?;
-					let result = sent_gap_wait(PRESS_GAP, click_state == count);
+					let result = control::sent_gap_wait(PRESS_GAP, click_state == count);
 					let release = control::cleanup(|| {
 						post_global_mouse(
 							source,
@@ -4169,7 +4158,9 @@ fn global_drag(
 				post(dragged, location, true, flags)?;
 				last = location;
 			}
-			control::wait(Duration::from_millis(50))
+			// Every point is out and the release always goes.
+			control::settle(Duration::from_millis(50));
+			Ok(())
 		})();
 		let release = control::cleanup(|| post(up, last, false, flags));
 		skylight::after_cleanup(result, release)

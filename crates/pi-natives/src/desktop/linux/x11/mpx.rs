@@ -212,10 +212,19 @@ impl Mpx {
 			for index in 0..count {
 				this.check_target(target, x, y)?;
 				this.button(detail, true)?;
-				confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
-				control::wait(PRESS_HOLD)?;
-				this.button(detail, false)?;
-				confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
+				let mut finish = || -> CoreResult<bool> {
+					let pressed = this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
+					control::wait(PRESS_HOLD)?;
+					this.button(detail, false)?;
+					let released = this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
+					Ok(pressed && released)
+				};
+				// The last press is out: a cancel no longer cuts its click short.
+				confirmed &= if index + 1 == count {
+					control::cleanup(finish)?
+				} else {
+					finish()?
+				};
 				if index + 1 < count {
 					control::wait(CLICK_GAP)?;
 				}
@@ -248,17 +257,22 @@ impl Mpx {
 			let mut confirmed = this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
 			control::wait(DRAG_ARM)?;
 			this.drain();
-			for &(dx, dy) in &steps {
+			for (index, &(dx, dy)) in steps.iter().enumerate() {
 				this.motion(dx, dy)?;
-				control::wait(DRAG_STEP_DELAY)?;
+				control::sent_gap_wait(DRAG_STEP_DELAY, index + 1 == steps.len())?;
 			}
-			// The end warp must not overtake a relative step still in flight.
-			confirmed &= this.wait_raw(this.pointer_slave, Raw::Motion, steps.len())?;
-			this.warp(end.0, end.1)?;
-			control::wait(DRAG_RELEASE_SETTLE)?;
-			this.drain();
-			this.button(detail, false)?;
-			confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
+			// Every step is out: the end and the release follow even after a
+			// cancel.
+			confirmed &= control::cleanup(|| -> CoreResult<bool> {
+				// The end warp must not overtake a relative step still in flight.
+				let moved = this.wait_raw(this.pointer_slave, Raw::Motion, steps.len())?;
+				this.warp(end.0, end.1)?;
+				control::wait(DRAG_RELEASE_SETTLE)?;
+				this.drain();
+				this.button(detail, false)?;
+				let released = this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
+				Ok(moved && released)
+			})?;
 			Ok(confirmed)
 		})
 	}
