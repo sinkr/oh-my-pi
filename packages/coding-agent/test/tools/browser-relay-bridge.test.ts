@@ -101,6 +101,7 @@ function connectInstance(
 	instanceId: string,
 	tabs: TabSnapshot[],
 	attachedTabIds: number[] = [],
+	browserSession?: string,
 ): void {
 	bridge.extConnected(socket);
 	bridge.extMessage(
@@ -108,6 +109,7 @@ function connectInstance(
 		JSON.stringify({
 			t: "hello",
 			instanceId,
+			browserSession,
 			userAgent: "test",
 			browserVersion: instanceId === "edge" ? "Edg/151.0.0.0" : "Chrome/151.0.0.0",
 			discardedTabsProtocol: 1,
@@ -1461,6 +1463,83 @@ describe("RelayBridge multiple extension instances", () => {
 		);
 		expect(edge.rpcs("createTab")).toHaveLength(1);
 		expect(chrome.rpcs("createTab")).toHaveLength(0);
+	});
+
+	it("waits for the browser of nearTargetId to reconnect instead of opening the tab in another browser", async () => {
+		const bridge = new RelayBridge({});
+		const edge = new FakeExtSocket();
+		const chrome = new FakeExtSocket();
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
+		bridge.extClosed(edge);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.createTarget",
+				params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
+			}),
+		);
+		await flush();
+		expect(chrome.rpcs("createTab")).toHaveLength(0);
+		const back = new FakeExtSocket();
+		connectInstance(bridge, back, "edge", [tab({ tabId: 1 })]);
+		await flush();
+		expect(back.rpcs("createTab")).toHaveLength(1);
+		expect(chrome.rpcs("createTab")).toHaveLength(0);
+	});
+
+	it("opens the tab in another browser once the browser of nearTargetId stays offline past its reconnect window", async () => {
+		jest.useFakeTimers();
+		try {
+			const bridge = new RelayBridge({});
+			const edge = new FakeExtSocket();
+			const chrome = new FakeExtSocket();
+			connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })]);
+			connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
+			bridge.extClosed(edge);
+			const connId = bridge.cdpConnected(new FakeCdpSocket());
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					method: "Target.createTarget",
+					params: { url: "about:blank", nearTargetId: `PAGE${instanceCode("edge")}.1` },
+				}),
+			);
+			await flush();
+			jest.advanceTimersByTime(12_000);
+			await flush();
+			expect(chrome.rpcs("createTab")).toHaveLength(1);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	it("retires a browser's targets once it restarted, so an old target id never names a tab that reuses its id", async () => {
+		const bridge = new RelayBridge({});
+		const before = new FakeExtSocket();
+		connectInstance(bridge, before, "chrome", [tab({ tabId: 7 })], [], "run-1");
+		const oldTarget = bridge.listTargets()[0]?.id;
+		// A service-worker restart keeps the browser run, and with it the target id.
+		const reconnected = new FakeExtSocket();
+		connectInstance(bridge, reconnected, "chrome", [tab({ tabId: 7 })], [], "run-1");
+		expect(bridge.listTargets().map(target => target.id)).toEqual([oldTarget]);
+		// Chrome restarted: tab 7 is now a page the user opened.
+		const restarted = new FakeExtSocket();
+		connectInstance(bridge, restarted, "chrome", [tab({ tabId: 7, url: "https://mail.example/" })], [], "run-2");
+		expect(bridge.listTargets().map(target => target.id)).not.toContain(oldTarget);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const closeId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: closeId, method: "Target.closeTarget", params: { targetId: oldTarget } }),
+		);
+		await flush();
+		expect(cdp.messages.find(message => message.id === closeId)).toHaveProperty("error");
+		expect(restarted.rpcs("removeTab")).toHaveLength(0);
 	});
 
 	it("closes a tab Chrome creates after the createTab RPC timed out", async () => {
