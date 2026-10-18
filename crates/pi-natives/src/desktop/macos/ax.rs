@@ -1394,8 +1394,15 @@ fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult
 /// exact window: a field in a sheet belongs to the sheet, not to the window
 /// the sheet is attached to. `false` means no write was attempted; an
 /// attempted write never falls through to keystrokes, including timeouts or
-/// partial delivery.
-pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> CoreResult<bool> {
+/// partial delivery. `behind_user` runs after the probes, right before the
+/// write: the user may have brought the application forward while a probe
+/// blocked, and the write would then land in the field they just took over.
+pub(super) fn insert_native_text(
+	pid: libc::pid_t,
+	wid: u32,
+	text: &str,
+	behind_user: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<bool> {
 	let Some(app) = probe_application(pid) else {
 		return Ok(false);
 	};
@@ -1421,6 +1428,7 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	let Some(expected) = replace_utf16_selection(&before, range.location, range.length, text) else {
 		return Ok(false);
 	};
+	behind_user()?;
 	skylight::with_background_guard(pid, || {
 		set_string_value(&element, "AXSelectedText", text)?;
 		verify_text_value(&element, text, &expected)

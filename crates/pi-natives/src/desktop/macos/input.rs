@@ -127,13 +127,14 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
-						let (entry_front, inserted) = EntryFront::before(skylight::front_pid, || {
-							if process::is_screen_sharing(pid) {
-								return Err(screen_sharing_refusal(&window, "synthesized text"));
-							}
-							Ok(!process::is_terminal(pid) && ax::insert_native_text(pid, wid, text)?)
-						})?;
-						if inserted {
+						let entry_front = EntryFront::now();
+						if process::is_screen_sharing(pid) {
+							return Err(screen_sharing_refusal(&window, "synthesized text"));
+						}
+						let behind_user = || entry_front.require_behind(skylight::front_pid(), pid, wid);
+						if !process::is_terminal(pid)
+							&& ax::insert_native_text(pid, wid, text, behind_user)?
+						{
 							return Ok(());
 						}
 						with_background_keyboard(
@@ -947,6 +948,32 @@ impl EntryFront {
 		let entry = Self(front());
 		probe().map(|value| (entry, value))
 	}
+
+	/// Whether `pid`, which was not the front process as the input began, is
+	/// now (`front`): the user may have just picked one of its windows.
+	fn came_forward(self, front: Option<libc::pid_t>, pid: libc::pid_t) -> bool {
+		front == Some(pid) && self.0 != Some(pid)
+	}
+
+	/// Refuses once [`Self::came_forward`] holds for window `wid`'s `pid`.
+	pub(super) fn require_behind(
+		self,
+		front: Option<libc::pid_t>,
+		pid: libc::pid_t,
+		wid: u32,
+	) -> CoreResult<()> {
+		if self.came_forward(front, pid) {
+			return Err(came_forward_refusal(wid));
+		}
+		Ok(())
+	}
+}
+
+fn came_forward_refusal(wid: u32) -> DesktopError {
+	DesktopError::background_unavailable(format!(
+		"window {wid}'s application came to the front while background input was prepared; nothing \
+		 was sent; inspect the window, then retry with takeover:true or use ax actions",
+	))
 }
 
 fn front_target(
@@ -959,7 +986,7 @@ fn front_target(
 	match front {
 		None => FrontTarget::Unknown,
 		Some(front) if front != pid => FrontTarget::Background,
-		Some(_) if entry_front.0 != Some(pid) => FrontTarget::CameForward,
+		Some(_) if entry_front.came_forward(front, pid) => FrontTarget::CameForward,
 		Some(_) if focused() == Some(wid) => FrontTarget::Key,
 		Some(_) => FrontTarget::UserSibling,
 	}
@@ -1016,12 +1043,7 @@ pub(super) fn make_key_in_background(
 	match front_target(entry_front, skylight::front_pid(), pid, wid, focused) {
 		FrontTarget::Background => {},
 		FrontTarget::Key => return Ok(false),
-		FrontTarget::CameForward => {
-			return Err(DesktopError::background_unavailable(format!(
-				"window {wid}'s application came to the front while background input was prepared; \
-				 nothing was sent; inspect the window, then retry with takeover:true or use ax actions",
-			)));
-		},
+		FrontTarget::CameForward => return Err(came_forward_refusal(wid)),
 		FrontTarget::UserSibling => {
 			return Err(DesktopError::background_unavailable(format!(
 				"window {wid} belongs to the frontmost application but is not its key window; making \
@@ -3371,6 +3393,20 @@ mod tests {
 		.unwrap();
 		assert_eq!(entry, EntryFront(Some(9)));
 		assert_eq!(front_target(entry, Some(7), 7, 42, || Some(42)), FrontTarget::CameForward);
+	}
+
+	#[test]
+	fn a_native_text_write_refuses_once_its_app_came_forward() {
+		use crate::desktop::error::ErrorCode;
+		// The user (app 9) brought the target (7) forward while the write's
+		// probes blocked: the text would land in the field they took over.
+		let error = EntryFront(Some(9))
+			.require_behind(Some(7), 7, 42)
+			.unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		// Still behind the user, or already the user's own app: the write goes.
+		EntryFront(Some(9)).require_behind(Some(9), 7, 42).unwrap();
+		EntryFront(Some(7)).require_behind(Some(7), 7, 42).unwrap();
 	}
 
 	#[test]
