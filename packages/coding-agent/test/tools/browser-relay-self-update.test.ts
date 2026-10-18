@@ -98,6 +98,11 @@ function bridgeWithUpdater(): { bridge: RelayBridge; calls: string[]; finish: (u
 	return { bridge, calls, finish };
 }
 
+/** Let the bridge's promise chains for a CDP command or an extension answer run. */
+async function flushMicrotasks(): Promise<void> {
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
 describe("relay extension self-update decisions", () => {
 	it("rewrites an older extension that reloads on request, then asks it to reload", async () => {
 		const { bridge, calls, finish } = bridgeWithUpdater();
@@ -211,6 +216,62 @@ describe("relay extension self-update decisions", () => {
 		await finish(false);
 		expect(socket.reloads).toBe(0);
 		expect(bridge.ready).toBe(true);
+	});
+
+	it("waits out a tab create and its close when the client left mid-create, so the tab omp opened is closed", async () => {
+		const { bridge, calls, finish } = bridgeWithUpdater();
+		const conn = bridge.cdpConnected(FAKE_CDP);
+		const socket = new FakeExtSocket();
+		hello(bridge, socket);
+		bridge.cdpMessage(conn, JSON.stringify({ id: 1, method: "Target.createTarget", params: { background: true } }));
+		await flushMicrotasks();
+		const create = socket.messages.find(msg => msg.t === "rpc" && msg.op === "createTab") as { id: number };
+		bridge.cdpClosed(conn);
+		await finish(true);
+		// A reload now would cut the create off, and the reloaded extension's new browser session retires its tab id.
+		expect(calls).toEqual([]);
+		bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id: create.id, ok: true, result: { tab: tab(2) } }));
+		await flushMicrotasks();
+		const close = socket.messages.find(msg => msg.t === "rpc" && msg.op === "removeTab") as {
+			id: number;
+			tabId: number;
+		};
+		expect(close.tabId).toBe(2);
+		expect(calls).toEqual([]);
+		bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id: close.id, ok: true, result: {} }));
+		await flushMicrotasks();
+		expect(calls).toEqual([EXTENSION_ID]);
+		await finish(true);
+		expect(socket.reloads).toBe(1);
+	});
+
+	it("waits for a tab close queued for the next hello, which a reload's new browser session would drop", async () => {
+		const { bridge, calls, finish } = bridgeWithUpdater();
+		const conn = bridge.cdpConnected(FAKE_CDP);
+		const socket = new FakeExtSocket();
+		hello(bridge, socket);
+		const code = new Bun.CryptoHasher("sha256").update("chrome").digest("base64url").slice(0, 8);
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({ id: 1, method: "Target.closeTarget", params: { targetId: `PAGE${code}.1` } }),
+		);
+		await flushMicrotasks();
+		const refused = socket.messages.find(msg => msg.t === "rpc" && msg.op === "removeTab") as { id: number };
+		bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id: refused.id, ok: false, error: "dragging" }));
+		await flushMicrotasks();
+		bridge.cdpClosed(conn);
+		await finish(true);
+		expect(calls).toEqual([]);
+		// Its next hello retries the close; the update follows once Chrome confirms it.
+		const again = new FakeExtSocket();
+		hello(bridge, again);
+		const retry = again.messages.find(msg => msg.t === "rpc" && msg.op === "removeTab") as { id: number };
+		expect(calls).toEqual([]);
+		bridge.extMessage(again, JSON.stringify({ t: "rpcResult", id: retry.id, ok: true, result: {} }));
+		await flushMicrotasks();
+		expect(calls).toEqual([EXTENSION_ID]);
+		await finish(true);
+		expect(again.reloads).toBe(1);
 	});
 
 	it("reloads once per version, so an extension that comes back with a version it had is not reloaded again", async () => {

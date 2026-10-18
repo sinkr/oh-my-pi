@@ -707,7 +707,9 @@ export class RelayBridge {
 	/**
 	 * Why reloading this extension now would cost someone something, or null. A reload drops the extension's
 	 * socket and every debugger attachment it holds, so it waits for no CDP client to be connected (no claimed
-	 * tab, no held session) and none of the extension's tabs to be attached, attaching or detaching.
+	 * tab, no held session) and none of the extension's tabs to be attached, attaching or detaching. It also waits
+	 * out the extension's calls in flight and the tab closes queued for its next hello: the reloaded extension
+	 * reports a new browser session, which retires the target ids they name, so a tab omp opened would stay open.
 	 */
 	#reloadBlocker(inst: ExtInstance): string | null {
 		if (!inst.socket) return "disconnected";
@@ -716,6 +718,12 @@ export class RelayBridge {
 			if (tab.instanceId === inst.instanceId && (tab.attached || tab.attaching || tab.detaching)) {
 				return "tabs attached";
 			}
+		}
+		for (const key of this.#pendingRpc.keys()) {
+			if (key.startsWith(`${inst.instanceId}:`)) return "extension calls pending";
+		}
+		for (const key of this.#closeOnHello.keys()) {
+			if (key.startsWith(`${inst.code}:`)) return "tab closes queued";
 		}
 		return null;
 	}
@@ -1944,6 +1952,12 @@ export class RelayBridge {
 		}, timeoutMs);
 		this.#pendingRpc.set(`${inst.instanceId}:${id}`, { resolve, reject, timer });
 		inst.socket.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
+		// A pending call defers an extension update (see #reloadBlocker): retry it once the call settles.
+		void promise
+			.catch(() => undefined)
+			.then(() => {
+				if (this.#conns.size === 0) this.#maybeUpdateExtension(inst);
+			});
 		return promise;
 	}
 
