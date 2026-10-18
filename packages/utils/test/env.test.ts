@@ -344,7 +344,7 @@ describe("isBunTestRuntime", () => {
 		expect(await runRuntimeProbe({ NODE_ENV: undefined, BUN_ENV: undefined, PI_TEST_RUNTIME: "1" })).toBe(true);
 	});
 
-	it("recognizes Bun's underscore test entrypoints", async () => {
+	it("recognizes Bun's underscore test entrypoints even when the shell exports another NODE_ENV", async () => {
 		const dir = path.dirname(writeTempEnv(""));
 		const underscoreProbePath = path.join(dir, "runtime_test.ts");
 		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
@@ -354,7 +354,7 @@ describe("isBunTestRuntime", () => {
 		);
 		expect(
 			await runRuntimeProbe(
-				{ NODE_ENV: "test", BUN_ENV: undefined, PI_TEST_RUNTIME: undefined },
+				{ NODE_ENV: "development", BUN_ENV: undefined, PI_TEST_RUNTIME: undefined },
 				underscoreProbePath,
 			),
 		).toBe(true);
