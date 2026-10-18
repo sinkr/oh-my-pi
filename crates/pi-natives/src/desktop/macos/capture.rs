@@ -371,6 +371,30 @@ pub(in crate::desktop) fn has_onscreen_window(pid: libc::pid_t) -> Option<bool> 
 	}))
 }
 
+/// `pid`'s normal-layer window ids, on screen or not: windows on other Spaces,
+/// minimized ones and ones the application keeps ordered out. `None` when the
+/// list cannot be read.
+pub(in crate::desktop) fn normal_window_ids(pid: libc::pid_t) -> Option<Vec<u32>> {
+	let snapshot = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0)?;
+	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
+	// documented window keys are CFStrings and whose values are CFTypes.
+	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
+	let pid = i64::from(pid);
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated; the
+	// CoreGraphics key constants are process-lived.
+	Some(
+		unsafe { snapshot.iter_unchecked() }
+			.filter_map(|dictionary| unsafe {
+				(window_number(dictionary, kCGWindowOwnerPID) == Some(pid)
+					&& window_number(dictionary, kCGWindowLayer) == Some(0))
+				.then(|| window_number(dictionary, kCGWindowNumber))
+				.flatten()
+				.and_then(|id| u32::try_from(id).ok())
+			})
+			.collect(),
+	)
+}
+
 fn window_value<'a>(dictionary: &'a WindowDictionary, key: &CFString) -> Option<&'a CFType> {
 	// SAFETY: All callers borrow an immutable copy-rule Quartz snapshot.
 	unsafe { dictionary.get_unchecked(key) }

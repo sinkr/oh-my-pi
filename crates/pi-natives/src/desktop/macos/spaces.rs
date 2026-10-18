@@ -155,6 +155,32 @@ pub(super) fn bring_to_current_space(id: &str) -> CoreResult<()> {
 	result
 }
 
+/// Whether `pid` has a normal window on a Space other than the current one,
+/// which on-screen window lists leave out.
+pub(in crate::desktop) fn window_on_another_space(pid: libc::pid_t) -> bool {
+	super::capture::normal_window_ids(pid).and_then(|windows| on_another_space(&windows))
+		== Some(true)
+}
+
+/// Whether one of `windows` belongs to a Space other than the current one, as
+/// `WindowServer`'s memberships show; a window it keeps ordered out belongs to
+/// none. `None` when `WindowServer` cannot say.
+fn on_another_space(windows: &[u32]) -> Option<bool> {
+	let spi = SPI.as_ref()?;
+	// SAFETY: The runtime symbol has the exact no-argument connection ABI.
+	let connection = unsafe { (spi.connection)() };
+	if connection <= 0 {
+		return None;
+	}
+	let current = active_space(spi, connection).ok()?;
+	Some(windows.iter().any(|&wid| {
+		let number = CFNumber::new_i64(i64::from(wid));
+		let window = CFArray::from_objects(&[&*number]);
+		memberships(spi, connection, window.as_opaque())
+			.is_ok_and(|spaces| spaces.iter().any(|&space| space != current))
+	}))
+}
+
 fn verified_move(current: u64, observed: &[u64]) -> bool {
 	current != 0 && observed == [current]
 }
