@@ -637,6 +637,18 @@ pub(in crate::desktop) fn has_open_window(pid: libc::pid_t) -> Option<bool> {
 	)
 }
 
+/// The window ids of `pid`'s `AXWindows`: windows that can be key, without
+/// the compositor surfaces Chromium, Electron and `WebKit` add to Quartz's
+/// list. `None` when nothing can be read.
+pub(in crate::desktop) fn ax_window_ids(pid: libc::pid_t) -> Option<Vec<u32>> {
+	Some(
+		window_records(pid)?
+			.into_iter()
+			.filter_map(|record| record.id)
+			.collect(),
+	)
+}
+
 /// Hit-tests the global point `(x, y)` the way the pointer would, returning
 /// the process and window that own the frontmost surface there.
 pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
