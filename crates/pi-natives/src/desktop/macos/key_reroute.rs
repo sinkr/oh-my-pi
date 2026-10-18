@@ -17,12 +17,15 @@
 //! the theft ends: `WindowServer` can still deliver them to the target, which
 //! would otherwise get a release without its press. The taps stay until every
 //! key pressed into the user's app has come up; a newer action's taps on the
-//! same target take those keys over.
+//! same target take those keys over, and the theft too while the target still
+//! holds the keyboard. Notifications lost while the focus tap was disabled
+//! are made up by reading who holds the keyboard when it is re-enabled.
 //!
-//! Keys are never moved when the user chose the target (a mouse button
-//! pressed, a ⌘ or ⌃ held, or another process's panel taking the keyboard,
-//! as Spotlight's does), and no key pressed while secure keyboard entry is on
-//! is moved.
+//! Only keys typed on a keyboard are moved, never keys a process posted. Keys
+//! are never moved when the user chose the target (a mouse button pressed, a
+//! ⌘ or ⌃ held, or another process's panel taking the keyboard, as
+//! Spotlight's does), and no key pressed while secure keyboard entry is on is
+//! moved.
 use std::{
 	ffi::c_void,
 	ptr,
@@ -36,6 +39,9 @@ use std::{
 
 use libc::pid_t;
 use parking_lot::Mutex;
+
+use super::skylight;
+use crate::desktop::control::SYNTHETIC_EVENT_TAG;
 
 type Ref = *mut c_void;
 type ConstRef = *const c_void;
@@ -56,6 +62,9 @@ const PROCESS_NOTIFICATION: u32 = 21;
 const TAP_DISABLED_BY_TIMEOUT: u32 = 0xffff_fffe;
 const TAP_DISABLED_BY_USER_INPUT: u32 = 0xffff_ffff;
 const FIELD_SOURCE_PID: u32 = 41;
+/// `kCGEventSourceUserData`: [`SYNTHETIC_EVENT_TAG`] on events this process
+/// posts to the HID stream.
+const FIELD_SOURCE_USER_DATA: u32 = 42;
 /// `kCGKeyboardEventAutorepeat`: non-zero on a held key's repeats.
 const FIELD_AUTOREPEAT: u32 = 8;
 /// `kCGKeyboardEventKeycode`.
@@ -180,9 +189,10 @@ impl Stroke {
 /// One key event delivered to the target.
 #[derive(Clone, Copy, Debug)]
 struct Key {
-	source: pid_t,
-	code:   i64,
-	stroke: Option<Stroke>,
+	/// Typed on a keyboard: no process posted it, this one included.
+	physical: bool,
+	code:     i64,
+	stroke:   Option<Stroke>,
 }
 
 /// A key the user pressed through a target's tap and has not released.
@@ -198,14 +208,21 @@ struct Held {
 }
 
 /// What every action's taps share: the latest armed action and its target,
+/// whether the target holds the keyboard uninvited as that action sees it,
 /// and the keys pressed through any target's tap that have not come up.
 #[derive(Debug)]
 struct Registry {
 	latest: (u64, pid_t),
+	/// The latest action's [`Holder::Stolen`] mouse buttons while its target
+	/// holds the keyboard uninvited, for a newer action on the same target to
+	/// take over: the target already has the keyboard then, so no
+	/// notification tells the newer action.
+	stolen: Option<[u32; 6]>,
 	held:   Vec<Held>,
 }
 
-static REGISTRY: Mutex<Registry> = Mutex::new(Registry { latest: (0, -1), held: Vec::new() });
+static REGISTRY: Mutex<Registry> =
+	Mutex::new(Registry { latest: (0, -1), stolen: None, held: Vec::new() });
 
 /// Numbers armed actions.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -339,14 +356,67 @@ impl Theft {
 		}
 	}
 
+	/// After the focus tap was disabled, when `WindowServer` notifications
+	/// may have been missed: the holder from who has the keyboard now, the
+	/// `front` process or the `key_focus` one within it.
+	fn resync(
+		&mut self,
+		front: pid_t,
+		key_focus: Option<pid_t>,
+		signals: UserSignals,
+		now: Instant,
+	) {
+		if matches!(self.holder, Holder::UserChose | Holder::Ended) {
+			return;
+		}
+		let focus = key_focus.unwrap_or(front);
+		if front == self.target || focus == self.target {
+			if !self.stolen() {
+				self.take(signals, now);
+			}
+		} else if front == self.user && focus != self.user {
+			// Another process's panel has the user's keyboard.
+			self.holder = Holder::UserChose;
+		} else {
+			self.holder = Holder::Elsewhere;
+		}
+	}
+
+	/// Makes this the latest action, unless a newer one already is. A newer
+	/// action on the same target takes over its predecessor's theft, which
+	/// no notification repeats while the target keeps the keyboard.
+	fn register(&mut self, registry: &mut Registry) {
+		if registry.latest.0 >= self.generation {
+			return;
+		}
+		if registry.latest.1 == self.target
+			&& let Some(buttons) = registry.stolen
+		{
+			self.holder = Holder::Stolen { buttons };
+		}
+		registry.latest = (self.generation, self.target);
+		self.publish(registry);
+	}
+
+	/// Shares whether this, the latest action, sees its target holding the
+	/// keyboard uninvited ([`Registry::stolen`]).
+	const fn publish(&self, registry: &mut Registry) {
+		if registry.latest.0 == self.generation {
+			registry.stolen = match self.holder {
+				Holder::Stolen { buttons } => Some(buttons),
+				_ => None,
+			};
+		}
+	}
+
 	const fn stolen(&self) -> bool {
 		matches!(self.holder, Holder::Stolen { .. })
 	}
 
-	/// Whether a key pressed now goes to the user's app instead of the target.
-	/// A mouse button since the theft means the user is now working in the
-	/// target, which keeps its keys from then on.
-	fn reroutes(&mut self, source: pid_t, own: pid_t, secure: bool, buttons: [u32; 6]) -> bool {
+	/// Whether a key the user typed now goes to their app instead of the
+	/// target. A mouse button since the theft means the user is now working
+	/// in the target, which keeps its keys from then on.
+	fn reroutes(&mut self, secure: bool, buttons: [u32; 6]) -> bool {
 		let Holder::Stolen { buttons: at_theft } = self.holder else {
 			return false;
 		};
@@ -354,20 +424,21 @@ impl Theft {
 			self.holder = Holder::UserChose;
 			return false;
 		}
-		source != own && !secure
+		!secure
 	}
 
 	/// Where a key event delivered to the target goes: `Some(app)` posts it
-	/// there and drops the original, `None` lets it through. A held key's
-	/// repeats and release go where its press went, whoever holds the
-	/// keyboard by then; a key first seen repeating counts as pressed then.
-	/// Everything else is decided by [`Self::reroutes`]. Once a newer action
-	/// taps the same target, its taps decide alone.
+	/// there and drops the original, `None` lets it through. Only keys typed
+	/// on a keyboard move: a key a process posted, this one or an automation
+	/// tool, is meant for the target. A held key's repeats and release go
+	/// where its press went, whoever holds the keyboard by then; a key first
+	/// seen repeating counts as pressed then. Everything else is decided by
+	/// [`Self::reroutes`]. Once a newer action taps the same target, its taps
+	/// decide alone.
 	fn route(
 		&mut self,
 		registry: &mut Registry,
 		key: Key,
-		own: pid_t,
 		secure: bool,
 		buttons: [u32; 6],
 	) -> Option<pid_t> {
@@ -378,12 +449,11 @@ impl Theft {
 			}
 			self.end();
 		}
-		let fresh = self
-			.reroutes(key.source, own, secure, buttons)
-			.then_some(self.user);
-		if key.source == own {
+		if !key.physical {
 			return None;
 		}
+		let fresh = self.reroutes(secure, buttons).then_some(self.user);
+		self.publish(registry);
 		let target = self.target;
 		let held = registry
 			.held
@@ -443,7 +513,6 @@ fn key_down(code: i64) -> bool {
 
 struct TapContext {
 	theft:     Theft,
-	own:       pid_t,
 	chord:     Chord,
 	focus_tap: Ref,
 	key_tap:   Ref,
@@ -477,6 +546,14 @@ unsafe extern "C" fn observe_focus(_proxy: Ref, kind: u32, event: Ref, user: Ref
 	if kind == TAP_DISABLED_BY_TIMEOUT || kind == TAP_DISABLED_BY_USER_INPUT {
 		// SAFETY: the tap outlives its callbacks.
 		unsafe { CGEventTapEnable(context.focus_tap, true) };
+		// Notifications sent while the tap was off are lost: read who has the
+		// keyboard now instead of waiting for the next one.
+		if let Some((front, key_focus)) = skylight::keyboard_holders() {
+			let now = Instant::now();
+			let signals = context.signals(now);
+			context.theft.resync(front, key_focus, signals, now);
+			context.theft.publish(&mut REGISTRY.lock());
+		}
 		return event;
 	}
 	if event.is_null() {
@@ -501,6 +578,7 @@ unsafe extern "C" fn observe_focus(_proxy: Ref, kind: u32, event: Ref, user: Ref
 			signals,
 			now,
 		);
+		context.theft.publish(&mut REGISTRY.lock());
 	}
 	event
 }
@@ -524,12 +602,14 @@ unsafe extern "C" fn route_key(_proxy: Ref, kind: u32, event: Ref, user: Ref) ->
 		// SAFETY: a read-only query of a live event.
 		_ => Stroke::of_modifier(code, unsafe { CGEventGetFlags(event) }),
 	};
-	let key = Key { source: pid_field(event, FIELD_SOURCE_PID), code, stroke };
+	let physical = field(event, FIELD_SOURCE_PID) == 0
+		&& field(event, FIELD_SOURCE_USER_DATA) != SYNTHETIC_EVENT_TAG;
+	let key = Key { physical, code, stroke };
 	let secure = secure_entry();
 	let buttons = mouse_buttons();
 	let Some(to) = context
 		.theft
-		.route(&mut REGISTRY.lock(), key, context.own, secure, buttons)
+		.route(&mut REGISTRY.lock(), key, secure, buttons)
 	else {
 		return event;
 	};
@@ -574,7 +654,6 @@ impl KeyReroute {
 			.spawn(move || {
 				let mut context = TapContext {
 					theft:     Theft::new(user, target, mouse_buttons(), generation),
-					own:       pid_t::try_from(std::process::id()).unwrap_or(-1),
 					chord:     Chord::new(modifier_flags(), Instant::now()),
 					focus_tap: ptr::null_mut(),
 					key_tap:   ptr::null_mut(),
@@ -627,12 +706,7 @@ impl KeyReroute {
 						CGEventTapEnable(key_tap, true);
 						// From here this action's taps decide for its target, and
 						// older actions stop moving new keys.
-						{
-							let mut registry = REGISTRY.lock();
-							if registry.latest.0 < generation {
-								registry.latest = (generation, target);
-							}
-						}
+						context.theft.register(&mut REGISTRY.lock());
 						let _ = ready.send(true);
 						let mut ended_at = None;
 						loop {
@@ -654,6 +728,7 @@ impl KeyReroute {
 							let at = *ended_at.get_or_insert(now);
 							if now.saturating_duration_since(at) >= LINGER_MAX {
 								context.theft.end();
+								context.theft.publish(&mut registry);
 							}
 							forget_lifted(&mut registry.held, target, key_down, now);
 							if context.theft.settled(&registry.held) {
@@ -698,7 +773,6 @@ mod tests {
 	const USER: pid_t = 100;
 	const TARGET: pid_t = 200;
 	const SPOTLIGHT: pid_t = 300;
-	const OWN: pid_t = 400;
 	const BUTTONS: [u32; 6] = [5, 5, 0, 0, 0, 0];
 	const CLICKED: [u32; 6] = [6, 5, 0, 0, 0, 0];
 
@@ -720,7 +794,12 @@ mod tests {
 	const KEPT: Option<pid_t> = None;
 
 	fn user_key(code: i64, stroke: Stroke) -> Key {
-		Key { source: 0, code, stroke: Some(stroke) }
+		Key { physical: true, code, stroke: Some(stroke) }
+	}
+
+	/// A key a process posted: this one, or an automation tool.
+	fn posted_key(code: i64, stroke: Stroke) -> Key {
+		Key { physical: false, code, stroke: Some(stroke) }
 	}
 
 	/// One action's theft, the latest armed action in its registry.
@@ -731,25 +810,32 @@ mod tests {
 
 	impl Rig {
 		fn new() -> Self {
-			Self { theft: theft(), registry: Registry { latest: (1, TARGET), held: Vec::new() } }
+			let registry = Registry { latest: (0, -1), stolen: None, held: Vec::new() };
+			let mut rig = Self { theft: theft(), registry };
+			rig.theft.register(&mut rig.registry);
+			rig
+		}
+
+		/// One notification, as the focus tap handles it.
+		fn notify(&mut self, notification: i64, recipient: pid_t, subject: pid_t) {
+			self
+				.theft
+				.notify(notification, recipient, subject, quiet(), Instant::now());
+			self.theft.publish(&mut self.registry);
 		}
 
 		fn steal(&mut self) {
-			self
-				.theft
-				.notify(KEY_FOCUS_TAKEN, USER, TARGET, quiet(), Instant::now());
+			self.notify(KEY_FOCUS_TAKEN, USER, TARGET);
 		}
 
 		fn give_back(&mut self) {
-			self
-				.theft
-				.notify(KEY_FOCUS_RETURNED, USER, USER, quiet(), Instant::now());
+			self.notify(KEY_FOCUS_RETURNED, USER, USER);
 		}
 
 		fn key_with(&mut self, code: i64, stroke: Stroke, secure: bool) -> Option<pid_t> {
 			self
 				.theft
-				.route(&mut self.registry, user_key(code, stroke), OWN, secure, BUTTONS)
+				.route(&mut self.registry, user_key(code, stroke), secure, BUTTONS)
 		}
 
 		fn key(&mut self, code: i64, stroke: Stroke) -> Option<pid_t> {
@@ -842,10 +928,10 @@ mod tests {
 		// starts; the target takes the keyboard again.
 		let mut newer = Theft::new(OTHER_USER, TARGET, BUTTONS, 2);
 		let mut registry = old.registry;
-		registry.latest = (2, TARGET);
+		newer.register(&mut registry);
 		newer.notify(KEY_FOCUS_TAKEN, OTHER_USER, TARGET, quiet(), Instant::now());
 		let mut route = |theft: &mut Theft, code, stroke| {
-			theft.route(&mut registry, user_key(code, stroke), OWN, false, BUTTONS)
+			theft.route(&mut registry, user_key(code, stroke), false, BUTTONS)
 		};
 		let mut old = old.theft;
 		// The newer tap sees keys first: Q's release goes where its press went,
@@ -858,6 +944,87 @@ mod tests {
 		assert_eq!(route(&mut newer, LEFT_SHIFT, Stroke::Release), Some(OTHER_USER));
 		newer.notify(KEY_FOCUS_RETURNED, OTHER_USER, OTHER_USER, quiet(), Instant::now());
 		assert!(newer.settled(&registry.held));
+	}
+
+	#[test]
+	fn a_newer_action_on_the_same_target_takes_over_a_theft_in_progress() {
+		// The target's menu still has the keyboard after the last action when
+		// the next one on it starts: no notification repeats the theft.
+		let mut old = Rig::new();
+		old.steal();
+		let mut newer = Theft::new(USER, TARGET, BUTTONS, 2);
+		let mut registry = old.registry;
+		newer.register(&mut registry);
+		let mut old = old.theft;
+		assert_eq!(registry.latest, (2, TARGET));
+		assert_eq!(newer.route(&mut registry, user_key(Q, Stroke::Press), false, BUTTONS), MOVED);
+		assert_eq!(old.route(&mut registry, user_key(Q, Stroke::Release), false, BUTTONS), KEPT);
+		assert_eq!(newer.route(&mut registry, user_key(Q, Stroke::Release), false, BUTTONS), MOVED);
+		// Without a theft in progress, or for another target, there is none to
+		// take over.
+		for (given_back, target) in [(true, TARGET), (false, OTHER_TARGET)] {
+			let mut old = Rig::new();
+			old.steal();
+			if given_back {
+				old.give_back();
+			}
+			let mut newer = Theft::new(USER, target, BUTTONS, 2);
+			newer.register(&mut old.registry);
+			assert_eq!(newer.holder, Holder::Elsewhere, "target {target}");
+			assert_eq!(old.registry.stolen, None);
+		}
+		// An older action registering late changes nothing.
+		let mut rig = Rig::new();
+		rig.registry.latest = (5, OTHER_TARGET);
+		rig.theft.register(&mut rig.registry);
+		assert_eq!(rig.registry.latest, (5, OTHER_TARGET));
+	}
+
+	#[test]
+	fn the_holder_is_read_again_after_the_focus_tap_was_disabled() {
+		let now = Instant::now();
+		// The target took the keyboard, by menu or by coming forward, while the
+		// tap was off.
+		for (front, key_focus) in [(USER, Some(TARGET)), (TARGET, None), (TARGET, Some(TARGET))] {
+			let mut theft = theft();
+			theft.resync(front, key_focus, quiet(), now);
+			assert!(theft.reroutes(false, BUTTONS), "front {front}, focus {key_focus:?}");
+			// It still has it: the theft stands.
+			theft.resync(front, key_focus, quiet(), now);
+			assert!(theft.stolen());
+		}
+		// The keyboard came back to the user's app, or the user went to another.
+		for (front, key_focus) in [(USER, Some(USER)), (USER, None), (OTHER_USER, Some(OTHER_USER))] {
+			let mut theft = theft();
+			theft.notify(KEY_FOCUS_TAKEN, USER, TARGET, quiet(), now);
+			theft.resync(front, key_focus, quiet(), now);
+			assert_eq!(theft.holder, Holder::Elsewhere, "front {front}, focus {key_focus:?}");
+		}
+		// A click before the target came, or another process's panel in the
+		// user's app, is the user's choice.
+		let clicked = UserSignals { buttons: CLICKED, last_chord: None };
+		let mut theft = theft();
+		theft.resync(TARGET, None, clicked, now);
+		assert_eq!(theft.holder, Holder::UserChose);
+		let mut theft = self::theft();
+		theft.resync(USER, Some(SPOTLIGHT), quiet(), now);
+		assert_eq!(theft.holder, Holder::UserChose);
+	}
+
+	#[test]
+	fn keys_a_process_posts_to_the_target_are_never_moved() {
+		// An automation tool's shortcut for the target, while it holds the
+		// keyboard, stays the target's, and leaves the user's held key alone.
+		let mut rig = Rig::new();
+		rig.steal();
+		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+		let mut posted = |code, stroke| {
+			rig.theft.route(&mut rig.registry, posted_key(code, stroke), false, BUTTONS)
+		};
+		assert_eq!(posted(LEFT_SHIFT, Stroke::Press), KEPT);
+		assert_eq!(posted(Q, Stroke::Press), KEPT);
+		assert_eq!(posted(Q, Stroke::Release), KEPT);
+		assert_eq!(rig.key(Q, Stroke::Release), MOVED);
 	}
 
 	#[test]
@@ -876,13 +1043,7 @@ mod tests {
 		let mut rig = Rig::new();
 		rig.steal();
 		let mut own = |stroke| {
-			rig.theft.route(
-				&mut rig.registry,
-				Key { source: OWN, code: Q, stroke: Some(stroke) },
-				OWN,
-				false,
-				BUTTONS,
-			)
+			rig.theft.route(&mut rig.registry, posted_key(Q, stroke), false, BUTTONS)
 		};
 		assert_eq!(own(Stroke::Press), KEPT);
 		assert_eq!(own(Stroke::Release), KEPT);
@@ -890,13 +1051,7 @@ mod tests {
 		rig.steal();
 		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
 		assert_eq!(
-			rig.theft.route(
-				&mut rig.registry,
-				Key { source: OWN, code: Q, stroke: Some(Stroke::Release) },
-				OWN,
-				false,
-				BUTTONS,
-			),
+			rig.theft.route(&mut rig.registry, posted_key(Q, Stroke::Release), false, BUTTONS),
 			KEPT
 		);
 		rig.give_back();
@@ -935,7 +1090,7 @@ mod tests {
 		let at = t0 + ms(605);
 		let signals = UserSignals { buttons: BUTTONS, last_chord: chord.last(false, at) };
 		theft.notify(NEW_FRONT, 1, TARGET, signals, at);
-		assert!(!theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(!theft.reroutes(false, BUTTONS));
 		// ⌃ already held as the action starts, or held without a flags change
 		// seen: it is down now.
 		assert_eq!(Chord::new(CONTROL, t0).last(false, t0 + ms(900)), Some(t0 + ms(900)));
@@ -951,26 +1106,26 @@ mod tests {
 	fn target_coming_forward_unasked_reroutes_the_users_keys() {
 		let mut theft = theft();
 		theft.notify(NEW_FRONT, 1, TARGET, quiet(), Instant::now());
-		assert!(theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(theft.reroutes(false, BUTTONS));
 	}
 
 	#[test]
 	fn target_menu_taking_key_focus_reroutes_the_users_keys() {
 		let mut theft = theft();
 		theft.notify(KEY_FOCUS_TAKEN, USER, TARGET, quiet(), Instant::now());
-		assert!(theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(theft.reroutes(false, BUTTONS));
 	}
 
 	#[test]
 	fn nothing_moves_before_a_theft_or_after_the_user_gets_focus_back() {
 		let mut theft = theft();
-		assert!(!theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(!theft.reroutes(false, BUTTONS));
 		theft.notify(KEY_FOCUS_TAKEN, USER, TARGET, quiet(), Instant::now());
 		theft.notify(KEY_FOCUS_RETURNED, USER, USER, quiet(), Instant::now());
-		assert!(!theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(!theft.reroutes(false, BUTTONS));
 		theft.notify(NEW_FRONT, 1, TARGET, quiet(), Instant::now());
 		theft.notify(NEW_FRONT, 1, USER, quiet(), Instant::now());
-		assert!(!theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(!theft.reroutes(false, BUTTONS));
 	}
 
 	#[test]
@@ -978,11 +1133,11 @@ mod tests {
 		let mut theft = theft();
 		let clicked = UserSignals { buttons: CLICKED, last_chord: None };
 		theft.notify(NEW_FRONT, 1, TARGET, clicked, Instant::now());
-		assert!(!theft.reroutes(0, OWN, false, CLICKED));
+		assert!(!theft.reroutes(false, CLICKED));
 		// Sticky: a later return and theft move nothing either.
 		theft.notify(NEW_FRONT, 1, USER, clicked, Instant::now());
 		theft.notify(NEW_FRONT, 1, TARGET, clicked, Instant::now());
-		assert!(!theft.reroutes(0, OWN, false, CLICKED));
+		assert!(!theft.reroutes(false, CLICKED));
 	}
 
 	#[test]
@@ -991,18 +1146,18 @@ mod tests {
 		let mut theft = theft();
 		let tabbed = UserSignals { buttons: BUTTONS, last_chord: Some(now) };
 		theft.notify(NEW_FRONT, 1, TARGET, tabbed, now + Duration::from_millis(5));
-		assert!(!theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(!theft.reroutes(false, BUTTONS));
 		let mut stale = self::theft();
 		stale.notify(NEW_FRONT, 1, TARGET, tabbed, now + CHORD_WINDOW + Duration::from_millis(1));
-		assert!(stale.reroutes(0, OWN, false, BUTTONS));
+		assert!(stale.reroutes(false, BUTTONS));
 	}
 
 	#[test]
 	fn a_click_while_stolen_hands_the_target_its_keys() {
 		let mut theft = theft();
 		theft.notify(NEW_FRONT, 1, TARGET, quiet(), Instant::now());
-		assert!(!theft.reroutes(0, OWN, false, CLICKED));
-		assert!(!theft.reroutes(0, OWN, false, CLICKED));
+		assert!(!theft.reroutes(false, CLICKED));
+		assert!(!theft.reroutes(false, CLICKED));
 		assert_eq!(theft.holder, Holder::UserChose);
 	}
 
@@ -1011,16 +1166,15 @@ mod tests {
 		let mut theft = theft();
 		theft.notify(KEY_FOCUS_TAKEN, USER, SPOTLIGHT, quiet(), Instant::now());
 		theft.notify(NEW_FRONT, 1, TARGET, quiet(), Instant::now());
-		assert!(!theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(!theft.reroutes(false, BUTTONS));
 	}
 
 	#[test]
-	fn secure_entry_and_our_own_keys_are_never_moved() {
+	fn no_key_moves_during_secure_entry() {
 		let mut theft = theft();
 		theft.notify(NEW_FRONT, 1, TARGET, quiet(), Instant::now());
-		assert!(!theft.reroutes(0, OWN, true, BUTTONS));
-		assert!(!theft.reroutes(OWN, OWN, false, BUTTONS));
-		assert!(theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(!theft.reroutes(true, BUTTONS));
+		assert!(theft.reroutes(false, BUTTONS));
 	}
 
 	#[test]
@@ -1029,6 +1183,6 @@ mod tests {
 		theft.notify(KEY_FOCUS_TAKEN, USER, TARGET, quiet(), Instant::now());
 		theft.notify(KEY_FOCUS_RETURNED, SPOTLIGHT, SPOTLIGHT, quiet(), Instant::now());
 		theft.notify(KEY_FOCUS_TAKEN, SPOTLIGHT, TARGET, quiet(), Instant::now());
-		assert!(theft.reroutes(0, OWN, false, BUTTONS));
+		assert!(theft.reroutes(false, BUTTONS));
 	}
 }

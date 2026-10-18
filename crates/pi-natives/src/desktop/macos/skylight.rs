@@ -422,6 +422,24 @@ fn front_process(get_front: SLPSGetFrontProcessFn) -> Option<FrontProcess> {
 	Some(FrontProcess { psn, pid: psn_pid(&psn) })
 }
 
+/// The front process and the process that has the keyboard, by pid: `None`
+/// when `WindowServer` cannot name the front one, and no keyboard holder when
+/// it cannot name that one.
+pub(super) fn keyboard_holders() -> Option<(pid_t, Option<pid_t>)> {
+	let spi = FOREGROUND.as_ref()?;
+	let front = front_process(spi.get_front)?.pid?;
+	let focus = spi.get_key_focus.and_then(|get_key_focus| {
+		let mut psn = ProcessSerialNumber::default();
+		let mut status = 0u8;
+		// SAFETY: Both out-pointers are writable for the synchronous call, which
+		// writes the 8-byte PSN and one status byte.
+		(unsafe { get_key_focus(&mut psn, &mut status) } == 0)
+			.then(|| psn_pid(&psn))
+			.flatten()
+	});
+	Some((front, focus))
+}
+
 /// Joins the action and its cleanup without hiding a failed restoration or
 /// encouraging an unsafe blind retry of an action that may already have landed.
 pub(super) fn after_cleanup<T>(result: CoreResult<T>, cleanup: CoreResult<()>) -> CoreResult<T> {
