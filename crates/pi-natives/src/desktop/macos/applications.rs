@@ -1,4 +1,5 @@
 use std::{
+	cell::RefCell,
 	collections::{HashMap, HashSet},
 	ffi::c_void,
 	mem::size_of,
@@ -250,20 +251,20 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 		Ok(())
 	};
 	if let Some(pid) = app.pid.filter(|_| app.running && !activate) {
-		let window = first_window(
-			true,
-			FIRST_WINDOW_WAIT,
-			|| application_windows(pid).ok(),
+		let path = app.path.clone();
+		return open_running(
+			app,
+			pid,
+			|pid| application_windows(pid).ok(),
 			|| {
 				libc::pid_t::try_from(pid)
 					.ok()
 					.and_then(has_onscreen_window)
 					== Some(true)
 			},
-			|| show_in_background(pid, &app.path),
+			|relaunched| show_in_background(pid, &path, relaunched),
 			wait,
-		)?;
-		return Ok(OpenedApplication::new(app, window));
+		);
 	}
 	let application = launch(&app.path, activate)?;
 	let window = match application.pid {
@@ -278,6 +279,39 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 		None => None,
 	};
 	Ok(OpenedApplication::new(application, window))
+}
+
+/// [`open`] for application `app`, running as `pid`: its first window
+/// ([`first_window`]), asking for one through `request_window` when it shows
+/// none. The application may have exited since it was listed, and the reopen
+/// event then launches it again under a new pid, which `request_window`
+/// passes to its argument: the windows are then read, and the application
+/// returned, as that process.
+fn open_running(
+	app: Application,
+	pid: u32,
+	mut windows_of: impl FnMut(u32) -> Option<Vec<DesktopWindow>>,
+	unlisted_window: impl FnOnce() -> bool,
+	request_window: impl FnOnce(&mut dyn FnMut(Application)) -> bool,
+	wait: impl FnMut() -> CoreResult<()>,
+) -> CoreResult<OpenedApplication> {
+	let relaunched = RefCell::new(None::<Application>);
+	let current = || {
+		relaunched
+			.borrow()
+			.as_ref()
+			.and_then(|app| app.pid)
+			.unwrap_or(pid)
+	};
+	let window = first_window(
+		true,
+		FIRST_WINDOW_WAIT,
+		|| windows_of(current()),
+		unlisted_window,
+		|| request_window(&mut |launched| *relaunched.borrow_mut() = Some(launched)),
+		wait,
+	)?;
+	Ok(OpenedApplication::new(relaunched.into_inner().unwrap_or(app), window))
 }
 
 /// The application's frontmost window, given until `timeout` to show its
@@ -316,7 +350,7 @@ fn first_window(
 /// VM both showed the window of Contacts, Notes, `TextEdit`, Calendar and Font
 /// Book in 0.1–0.4 s, and no application came to the front. `false` when
 /// neither could be requested.
-fn show_in_background(pid: u32, path: &str) -> bool {
+fn show_in_background(pid: u32, path: &str, relaunched: &mut dyn FnMut(Application)) -> bool {
 	let Ok(pid) = libc::pid_t::try_from(pid) else {
 		return false;
 	};
@@ -338,8 +372,9 @@ fn show_in_background(pid: u32, path: &str) -> bool {
 		// stay valid for the synchronous setter.
 		|| unsafe { app.set_attribute_value(&hidden, CFBoolean::new(false)) == AXError::Success },
 		|| has_open_window(pid) != Some(false),
-		|| window_on_another_space(pid),
-		|| launch(path, false).is_ok(),
+		// A window elsewhere that cannot be ruled out counts.
+		|| window_on_another_space(pid) != Some(false),
+		|| launch(path, false).map(&mut *relaunched).is_ok(),
 	)
 }
 
@@ -602,5 +637,39 @@ mod tests {
 		));
 		// Hidden, unhiding shows no window here: the one elsewhere still stands.
 		assert!(!ask_for_window(true, || true, || false, || true, reopen));
+	}
+
+	#[test]
+	fn an_application_that_exited_since_it_was_listed_is_read_as_its_new_process() {
+		// Contacts was listed as pid 4105 but quit before apps.open asked it for
+		// a window; the reopen event launched it again as 4200.
+		let contacts = Application {
+			id:      "com.apple.AddressBook".into(),
+			name:    "Contacts".into(),
+			path:    "/System/Applications/Contacts.app".into(),
+			running: true,
+			pid:     Some(4105),
+		};
+		let relaunched = Application { pid: Some(4200), ..contacts.clone() };
+		let opened = open_running(
+			contacts,
+			4105,
+			|pid| {
+				Some(if pid == 4200 {
+					vec![window("187")]
+				} else {
+					vec![]
+				})
+			},
+			|| false,
+			|launched| {
+				launched(relaunched);
+				true
+			},
+			|| Ok(()),
+		)
+		.expect("opened");
+		assert_eq!(opened.pid, Some(4200));
+		assert_eq!(opened.window.map(|window| window.id).as_deref(), Some("187"));
 	}
 }
