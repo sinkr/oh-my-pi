@@ -352,7 +352,7 @@ impl MacInput {
 					confirm_shortcut_answered(window, keys, || {
 						// The shortcut is out: a cancel now must not report it
 						// unsent.
-						std::thread::sleep(SHORTCUT_REPLY_DELAY);
+						control::settle(SHORTCUT_REPLY_DELAY);
 						Ok(ax::stopped_answering(pid, SHORTCUT_REPLY_TIMEOUT_SECONDS))
 					})?;
 				}
@@ -3946,7 +3946,7 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 				}
 				Ok(())
 			});
-			result.and_then(|()| control::wait(POINTER_SETTLE))
+			result.inspect(|()| control::settle(POINTER_SETTLE))
 		},
 		PointerEvent::Move { x, y } => post_global_mouse(
 			source,
@@ -4141,7 +4141,7 @@ fn global_drag(
 		skylight::after_cleanup(result, release)
 	});
 	// Lets the target release its pointer capture before focus is restored.
-	result.and_then(|()| control::wait(Duration::from_millis(100)))
+	result.inspect(|()| control::settle(Duration::from_millis(100)))
 }
 
 fn post_global_mouse(

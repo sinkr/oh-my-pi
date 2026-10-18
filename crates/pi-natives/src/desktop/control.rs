@@ -293,6 +293,14 @@ pub(crate) fn wait(duration: Duration) -> CoreResult<()> {
 	})
 }
 
+/// Waits after a call's input went out, for the target to take it in before
+/// the call goes on. A cancel neither cuts it short nor fails the call: the
+/// input already landed, so the call reports it, and the cancel stops the next
+/// call instead.
+pub(crate) fn settle(duration: Duration) {
+	thread::sleep(duration);
+}
+
 /// Cleanup must release already-held input even after cancellation. This does
 /// not clear a token or authorize any later operation. Nested cleanup is safe.
 pub(crate) fn cleanup<T>(action: impl FnOnce() -> T) -> T {

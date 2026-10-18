@@ -993,9 +993,9 @@ mod foreground {
 
 		fn run(mut self, operation: impl FnOnce(HWND) -> CoreResult<()>) -> CoreResult<()> {
 			let result = control::check().and_then(|()| operation(self.target));
-			// Preserve the target's consumption window after partial delivery,
-			// but stop waiting immediately when the operation is cancelled.
-			let result = super::completed(result, control::wait(self.settle));
+			// Preserve the target's consumption window after any delivery, even
+			// a partial one; a cancel during it leaves sent input reported sent.
+			control::settle(self.settle);
 			super::completed(result, self.restore())
 		}
 

@@ -361,7 +361,7 @@ impl Mpx {
 			self.uncertain = true;
 			return Err(error);
 		}
-		control::wait(KEY_SETTLE)?;
+		control::settle(KEY_SETTLE);
 		Ok(())
 	}
 
@@ -477,7 +477,8 @@ impl Mpx {
 	}
 
 	/// Emits `steps` through the keyboard slave and waits until the server
-	/// reports the last one.
+	/// reports the last one. Once the last key is out, a cancel no longer
+	/// fails the call: it waits for the server's report all the same.
 	fn emit_keys(&mut self, steps: &[KeyStep]) -> CoreResult<()> {
 		self.drain();
 		self.sent = true;
@@ -486,10 +487,12 @@ impl Mpx {
 			.as_mut()
 			.ok_or_else(|| DesktopError::internal("virtual keyboard used before it was attached"))?;
 		let slave = keyboard.slave;
+		let mut first = true;
 		keymap::run_steps(steps, |step| {
-			keyboard.device.key(step.keycode, step.press)?;
-			control::wait(KEY_DELAY)?;
-			Ok(())
+			if !std::mem::take(&mut first) {
+				control::wait(KEY_DELAY)?;
+			}
+			keyboard.device.key(step.keycode, step.press)
 		})?;
 		let Some(last) = steps.last() else {
 			return Ok(());
@@ -499,7 +502,7 @@ impl Mpx {
 		} else {
 			Raw::KeyRelease(last.keycode)
 		};
-		if self.wait_raw(slave, raw, 1)? {
+		if control::cleanup(|| self.wait_raw(slave, raw, 1))? {
 			Ok(())
 		} else {
 			Err(DesktopError::input_failed(format!(
