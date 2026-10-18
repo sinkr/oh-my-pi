@@ -3789,8 +3789,15 @@ mod capture_tests {
 		}
 	}
 
+	/// Background input runs without the physical-Escape stop; takeover input,
+	/// desktop and display input, raises and activating launches run under it,
+	/// so a physical Escape cancels them. Served through the worker against
+	/// the test Escape monitor, which refuses a lease after arming it.
+	#[cfg(target_os = "macos")]
 	#[test]
-	fn only_takeover_requests_arm_the_physical_escape_stop() {
+	fn only_takeover_requests_run_under_the_physical_escape_stop() {
+		let (mut worker, _tree) = read_buttons(&[(2, "Go")]);
+		control::press_escape_for_test();
 		let window = Target::Window("42".to_string());
 		let reply = || flume::unbounded().0;
 		let typing = |target: &Target, takeover| Request::TypeText {
@@ -3827,10 +3834,11 @@ mod capture_tests {
 			options: ApplicationOpenOptions { activate },
 			reply:   reply(),
 		};
+		// Held keys reach the fake backend only as takeover, which the test
+		// Escape monitor refuses before they are sent.
 		let background = [
 			typing(&window, None),
 			typing(&window, Some(false)),
-			holding(&window, None),
 			clicking(&window, Some(false)),
 			perform("AXPress"),
 			perform("showMenu"),
@@ -3838,7 +3846,17 @@ mod capture_tests {
 			open(Some(false)),
 		];
 		for request in background {
-			assert!(!request.takes_over(), "background input leaves Escape to the user");
+			let source = CancellationSource::default();
+			let result = worker.execute(&request, &source.token());
+			assert!(
+				result
+					.err()
+					.is_none_or(|error| error.code != ErrorCode::PermissionDenied),
+				"background input needs no Escape stop"
+			);
+			let token = source.token();
+			assert_eq!(control::press_escape_for_test(), 0, "background input arms no Escape stop");
+			assert!(token.check().is_ok(), "the user's Escape leaves background input running");
 		}
 		let display = Target::parse("display:screen-1");
 		let takeover = [
@@ -3854,7 +3872,19 @@ mod capture_tests {
 			open(Some(true)),
 		];
 		for request in takeover {
-			assert!(request.takes_over(), "takeover input keeps the Escape stop");
+			let source = CancellationSource::default();
+			let error = worker
+				.execute(&request, &source.token())
+				.err()
+				.expect("no Escape stop starts in tests");
+			assert_eq!(
+				error.code,
+				ErrorCode::PermissionDenied,
+				"takeover input needs the Escape stop"
+			);
+			let token = source.token();
+			assert_eq!(control::press_escape_for_test(), 1, "takeover input arms the Escape stop");
+			assert!(token.check().is_err(), "physical Escape stops takeover input");
 		}
 	}
 
