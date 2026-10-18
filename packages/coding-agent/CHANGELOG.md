@@ -687,6 +687,10 @@
 - Fixed `omp --restore` and `/retry` reporting nothing to retry for a turn cut off by a process exit in a session that had used `eval`; the interrupted turn now continues ([#16195](https://github.com/can1357/oh-my-pi/issues/16195))
 - Fixed session loading on Windows treating a session path with a regular-file component as a missing session (an empty session) instead of rejecting it with `ENOTDIR` like POSIX does ([#16145](https://github.com/can1357/oh-my-pi/pull/16145) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed models from extension providers listed in `enabledModels` or `--models` missing from `/model`, the Ctrl+P cycle and the startup model scope notice until the background catalog refresh finished ([#16096](https://github.com/can1357/oh-my-pi/pull/16096) by [@skipper019](https://github.com/skipper019))
+### Fixed
+
+- Fixed terminals that restore sessions by file path (such as Tern) reopening a plain shell instead of `omp --restore` for sessions stored in PostgreSQL: omp now keeps an empty local placeholder at each such session's path, and `scripts/backfill-session-placeholders.ts` adds them for existing sessions
+- Fixed moving a PostgreSQL-stored session to another directory failing because the move looked for the transcript on local disk
 
 ## [18.12.1] - 2026-10-17
 
