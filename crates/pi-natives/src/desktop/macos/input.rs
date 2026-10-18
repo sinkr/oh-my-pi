@@ -21,7 +21,7 @@ use super::{
 	super::{
 		backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
 		control,
-		error::{CoreResult, DesktopError},
+		error::{CoreResult, DesktopError, ErrorCode},
 		keys::KeyName,
 		types::{DesktopWindow, Target},
 	},
@@ -1771,14 +1771,33 @@ enum Posted {
 type Post<'a> = &'a dyn Fn(Posted, libc::pid_t, &CGEvent) -> CoreResult<()>;
 
 /// `post` with `guard` run before each key press it posts ([`post_guarded`]);
-/// pointer events and key releases go out as they are.
+/// pointer events and key releases go out as they are. A guard that refuses
+/// once an earlier held key went out reports partial input (`InputFailed`),
+/// never `BackgroundUnavailable`, which says nothing was sent.
 fn guarded_keys<'a>(
 	post: Post<'a>,
 	guard: &'a dyn Fn() -> CoreResult<()>,
 ) -> impl Fn(Posted, libc::pid_t, &CGEvent) -> CoreResult<()> + 'a {
+	let pressed = std::cell::Cell::new(false);
 	move |posted, to, event| match posted {
 		Posted::Pointer => post(posted, to, event),
-		Posted::Key => post_guarded(event, guard, |event| post(posted, to, event)),
+		Posted::Key => {
+			let checked = || {
+				guard().map_err(|error| match error.code {
+					ErrorCode::BackgroundUnavailable if pressed.get() => {
+						DesktopError::input_failed(format!(
+							"{}; keys held before this may already have landed and were released, and \
+							 nothing more was sent; inspect the window before retrying",
+							error.message
+						))
+					},
+					_ => error,
+				})
+			};
+			post_guarded(event, checked, |event| post(posted, to, event))?;
+			pressed.set(pressed.get() || is_key_press(event));
+			Ok(())
+		},
 	}
 }
 
@@ -1965,7 +1984,10 @@ fn stroke_path(
 			last = at;
 			post(Stroke::Dragged, at)?;
 		}
-		control::wait(DRAG_RELEASE_GAP)
+		// Every point is out and the release always goes: a cancel now must
+		// not report the drag unsent.
+		std::thread::sleep(DRAG_RELEASE_GAP);
+		Ok(())
 	})();
 	let release = control::cleanup(|| {
 		if session && (last.x, last.y) != (path[0].x, path[0].y) {
@@ -4763,6 +4785,46 @@ mod tests {
 	}
 
 	#[test]
+	fn a_held_key_refused_after_an_earlier_one_went_out_reports_partial_input() {
+		let source = source().expect("event source");
+		let downs = std::cell::Cell::new(0);
+		let post = |_: Posted, _, event: &CGEvent| {
+			if event.get_type() as u32 == CGEventType::KeyDown as u32 {
+				downs.set(downs.get() + 1);
+			}
+			Ok(())
+		};
+		// The user brings the target forward after Space went down.
+		let refused = || {
+			if downs.get() == 0 {
+				Ok(())
+			} else {
+				Err(DesktopError::background_unavailable(
+					"window 42 of TextEdit: it came to the front during background input; nothing was \
+					 sent",
+				))
+			}
+		};
+		let guarded = guarded_keys(&post, &refused);
+		let window = background_window("TextEdit");
+		let result = background_hold(
+			&source,
+			7,
+			42,
+			&window,
+			CGPoint::new(10.0, 10.0),
+			MouseButton::Left,
+			&[KeyName::Space, KeyName::Tab],
+			Duration::from_millis(1),
+			&guarded,
+		);
+		assert_eq!(downs.get(), 1);
+		let error = result.expect_err("refused");
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(error.message.contains("may already have landed"), "{}", error.message);
+	}
+
+	#[test]
 	fn a_held_key_is_pressed_only_while_its_check_passes() {
 		let source = source().expect("event source");
 		let posted = std::cell::RefCell::new(Vec::new());
@@ -4824,6 +4886,32 @@ mod tests {
 		assert_eq!(run(Some((Down, 1.0))), (false, vec![(Down, 1.0), (Up, 1.0)]));
 		// The release goes where the failed move may have taken the target.
 		assert_eq!(run(Some((Dragged, 5.0))), (false, vec![(Down, 1.0), (Dragged, 5.0), (Up, 5.0)]));
+	}
+
+	#[test]
+	fn a_drag_cancelled_after_its_last_point_reports_the_delivered_stroke() {
+		let cancellation = control::CancellationSource::default();
+		let token = cancellation.token();
+		let path = [CGPoint::new(1.0, 1.0), CGPoint::new(9.0, 9.0)];
+		let mut posted = Vec::new();
+		// The user stops the agent once every point is out: the release still
+		// goes, so the drag landed and must not report `Cancelled`.
+		let result = control::with_token_for_test(&token, || {
+			stroke_path(
+				&path,
+				|| false,
+				|stroke, at| {
+					posted.push((stroke, at.x));
+					if stroke == Stroke::Dragged {
+						cancellation.cancel();
+					}
+					Ok(())
+				},
+			)
+		});
+		use Stroke::{Down, Dragged, Up};
+		assert_eq!(posted, [(Down, 1.0), (Dragged, 9.0), (Up, 9.0)]);
+		assert_eq!(result.expect("the stroke was delivered"), false);
 	}
 
 	#[test]
