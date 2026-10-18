@@ -3320,7 +3320,13 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			}
 			// Read before finalization: a schema-bearing agent that answered in
 			// prose gets a missing-yield warning prepended to `result.output`.
-			const turnText = turnMonitor.lastReportTurnText() ?? "";
+			// Like a first run's message result, the answer is the final report
+			// turn; the session's last assistant text stands in only when the
+			// monitor saw no assistant message, never for narration it set aside.
+			const turnText =
+				turnMonitor.lastReportTurnText() ??
+				(turnMonitor.progress.requests === 0 ? turnMonitor.lastAssistantSalvageText() : undefined) ??
+				"";
 			const abortReason = aborted ? turnMonitor.resolveAbortReasonText() : undefined;
 			let result: SingleResult | undefined;
 			let finalizeError: unknown;

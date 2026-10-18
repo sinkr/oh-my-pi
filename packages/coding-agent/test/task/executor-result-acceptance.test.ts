@@ -6,7 +6,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
+import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -730,7 +731,8 @@ describe("runSubprocess result acceptance", () => {
 		}
 	});
 
-	it("relays only a woken agent's final report, not the narration before its tool calls", async () => {
+	/** Wake an idle agent from a peer, play `turn`, and return the relay body the peer receives. */
+	async function peerWakeRelay(turn: (harness: SessionHarness) => void): Promise<string | undefined> {
 		const harness = createHarness();
 		const registry = AgentRegistry.global();
 		registry.register({
@@ -764,14 +766,35 @@ describe("runSubprocess result acceptance", () => {
 			} as unknown as AgentMessage,
 		]);
 		const relay = IrcBus.global().wait("OtherAgent", { from: AGENT_ID }, 1000);
-		harness.emitAssistantContent([
-			{ type: "text", text: "Checking." },
-			{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "src/a.ts" } },
-		]);
-		harness.emitAssistantText("Answer.");
+		turn(harness);
 		harness.emitAgentEnd();
 		await finish?.(undefined);
+		return (await relay)?.body;
+	}
 
-		expect((await relay)?.body).toBe("Answer.");
+	it("relays only a woken agent's final report, not the narration before its tool calls", async () => {
+		const body = await peerWakeRelay(harness => {
+			harness.emitAssistantContent([
+				{ type: "text", text: "Checking." },
+				{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "src/a.ts" } },
+			]);
+			harness.emitAssistantText("Answer.");
+		});
+		expect(body).toBe("Answer.");
+	});
+
+	it("does not relay narration that preceded a woken agent's last Cursor-resolved call", async () => {
+		const body = await peerWakeRelay(harness => {
+			const resolvedCall: ToolCall & CursorExecResolvedCarrier = {
+				type: "toolCall",
+				id: "exec-1",
+				name: "bash",
+				arguments: { command: "bun test" },
+			};
+			resolvedCall[kCursorExecResolved] = true;
+			harness.emitAssistantContent([{ type: "text", text: "Running the tests." }, resolvedCall]);
+		});
+		expect(body).not.toContain("Running the tests.");
+		expect(body).toContain("produced no output");
 	});
 });
