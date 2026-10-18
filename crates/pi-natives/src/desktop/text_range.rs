@@ -102,6 +102,10 @@ impl TextSelectRequest {
 				 selected",
 				self.text
 			))),
+			(0, _) if self.text.is_empty() => Err(DesktopError::ax_failed(format!(
+				"no position in the element's value is {}; nothing was selected",
+				self.context()
+			))),
 			(0, _) => Err(DesktopError::ax_failed(format!(
 				"{:?} occurs {occurrences} time(s) in the element's value, but none {}; nothing was \
 				 selected",
@@ -317,6 +321,15 @@ mod tests {
 			.locate("")
 			.unwrap_err();
 		assert!(unplaced.message.contains("text is empty"), "{unplaced}");
+		let unmatched = request("", "third ", "", SelectPart::Text)
+			.locate(value)
+			.unwrap_err();
+		assert!(
+			unmatched
+				.message
+				.contains("no position in the element's value is after prefix \"third \""),
+			"{unmatched}"
+		);
 	}
 
 	#[test]
