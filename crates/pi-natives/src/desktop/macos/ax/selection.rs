@@ -95,10 +95,13 @@ fn apply(
 		poll(settle, || (read_range() == Some(wanted)).then_some(()));
 		Ok(())
 	})?;
+	// The write was accepted, so a selection that cannot be read back, as when
+	// the app does not reply in time, may already be in place: unconfirmed,
+	// not failed.
 	let applied = read_range().ok_or_else(|| {
-		DesktopError::ax_failed(format!(
-			"AX accepted the selection but {SELECTED_RANGE} could not be read back; inspect the \
-			 element before typing"
+		DesktopError::ax_unconfirmed(format!(
+			"AX accepted the selection but {SELECTED_RANGE} could not be read back, so it may \
+			 already apply: inspect the element's selection before retrying or typing"
 		))
 	})?;
 	if read_value().as_deref() != Some(before) {
@@ -245,6 +248,7 @@ mod tests {
 	fn a_selection_lost_during_the_guard_settle_is_reported() {
 		let lost = |_, settled: bool| (!settled).then_some(WANTED);
 		let error = run(lost, VALUE).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed, "{error}");
 		assert!(error.message.contains("could not be read back"), "{error}");
 	}
 
