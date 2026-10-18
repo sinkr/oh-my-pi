@@ -84,8 +84,131 @@ const OUTSIDE_TOKENS = [
 	...DSML_ORPHAN_CLOSE_TOKENS,
 	...CONTROL_TOKENS,
 ] as const;
+/** Outside-state tokens dropped from visible text (closers with nothing open, template control tokens). */
+const OUTSIDE_DROPPED_TOKENS: Readonly<Record<string, true>> = Object.fromEntries(
+	[
+		DEEPSEEK_TOOL_CALLS_END,
+		THINK_CLOSE,
+		DSML_TOOL_CALLS_CLOSE_FULLWIDTH,
+		DSML_TOOL_CALLS_CLOSE_ASCII,
+		...CONTROL_TOKENS,
+	].map(token => [token, true]),
+);
 
-const SECTION_TOKENS = [DEEPSEEK_TOOL_CALL_BEGIN, DEEPSEEK_TOOL_CALLS_END] as const;
+// DeepSeek's chat template delimits special tokens with fullwidth bars (U+FF5C)
+// and joins words with the tokenizer's `▁` (U+2581). Hosts that detokenize them
+// into text, and models degraded by long contexts, re-spell them: `_` for `▁`
+// (wholly or partly), or one bar dropped (`<tool_call_begin｜>`). Those spellings
+// resolve to the canonical token wherever the grammar expects one. At least one
+// fullwidth bar is required: ASCII `<|…|>` tokens belong to other templates
+// (Kimi's `<|tool_call_begin|>`, Harmony), and a bare `<word>` is prose or XML.
+const TEMPLATE_TOKEN_SPELLING = /<(｜?)([A-Za-z]+(?:[▁_][A-Za-z]+)*)(｜?)>/gu;
+const TEMPLATE_TOKEN_SPELLING_AT_START = new RegExp(TEMPLATE_TOKEN_SPELLING.source, "uy");
+// A trailing fragment that may still grow into a template token spelling.
+const TEMPLATE_TOKEN_PARTIAL = /^<｜?([A-Za-z▁_]*)(｜?)$/u;
+// Every accepted spelling carries at least one bar, so text without one cannot
+// complete a template token; argument bodies are deferred until a bar arrives.
+const TEMPLATE_TOKEN_BAR = "｜";
+/**
+ * Canonical template token by spelling-independent key (`tool_calls_begin`).
+ * A Map, not a Record: keys come from model output, so `constructor` and friends
+ * must not resolve through the prototype.
+ */
+const TEMPLATE_TOKEN_BY_KEY: ReadonlyMap<string, string> = new Map(
+	[
+		DEEPSEEK_TOOL_CALLS_BEGIN,
+		DEEPSEEK_TOOL_CALLS_END,
+		DEEPSEEK_TOOL_CALL_BEGIN,
+		DEEPSEEK_TOOL_CALL_END,
+		DEEPSEEK_TOOL_SEPARATOR,
+		...CONTROL_TOKENS,
+	].flatMap(token => {
+		// `<｜▁pad▁｜>` and ASCII `<|EOT|>` fall outside the re-spelling grammar and stay literal.
+		const name = /^<｜([A-Za-z]+(?:▁[A-Za-z]+)*)｜>$/u.exec(token)?.[1];
+		return name === undefined ? [] : [[templateTokenKey(name), token] as const];
+	}),
+);
+const TEMPLATE_TOKEN_KEYS = [...TEMPLATE_TOKEN_BY_KEY.keys()];
+// `<`, both bars, the longest name, `>`.
+const TEMPLATE_TOKEN_MAX_SPELLING = Math.max(...TEMPLATE_TOKEN_KEYS.map(key => key.length)) + 4;
+
+const OUTSIDE_TEMPLATE_TOKENS: Readonly<Record<string, true>> = Object.fromEntries(
+	[DEEPSEEK_TOOL_CALLS_BEGIN, DEEPSEEK_TOOL_CALLS_END, DEEPSEEK_TOOL_CALL_BEGIN, ...CONTROL_TOKENS].map(token => [
+		token,
+		true,
+	]),
+);
+const SEPARATOR_TOKENS: Readonly<Record<string, true>> = { [DEEPSEEK_TOOL_SEPARATOR]: true };
+// A call's arguments end at its own close or, when the model skips that close,
+// at the section close or the next call's open — neither can occur inside
+// arguments. Those two are left in the buffer for the next state to consume.
+const ARGS_TERMINATOR_TOKENS: Readonly<Record<string, true>> = {
+	[DEEPSEEK_TOOL_CALL_END]: true,
+	[DEEPSEEK_TOOL_CALLS_END]: true,
+	[DEEPSEEK_TOOL_CALL_BEGIN]: true,
+};
+/** DeepSeek template tokens that structure a tool call. */
+export const DEEPSEEK_TOOL_CALL_TOKENS: Readonly<Record<string, true>> = {
+	[DEEPSEEK_TOOL_CALLS_BEGIN]: true,
+	[DEEPSEEK_TOOL_CALLS_END]: true,
+	[DEEPSEEK_TOOL_CALL_BEGIN]: true,
+	[DEEPSEEK_TOOL_CALL_END]: true,
+	[DEEPSEEK_TOOL_SEPARATOR]: true,
+};
+
+/** A token found in text: its canonical spelling and the text actually written. */
+export interface DeepSeekTokenMatch {
+	readonly token: string;
+	readonly raw: string;
+	readonly index: number;
+}
+
+function templateTokenKey(name: string): string {
+	return name.replaceAll("▁", "_");
+}
+
+function resolveTemplateSpelling(match: RegExpExecArray): string | undefined {
+	if (match[1]!.length === 0 && match[3]!.length === 0) return undefined;
+	return TEMPLATE_TOKEN_BY_KEY.get(templateTokenKey(match[2]!));
+}
+
+/**
+ * Find the earliest of `tokens` in `text` at or after `from`, in its canonical
+ * spelling or any re-spelling described at {@link TEMPLATE_TOKEN_SPELLING}.
+ */
+export function findDeepSeekTemplateToken(
+	text: string,
+	tokens: Readonly<Record<string, true>>,
+	from = 0,
+): DeepSeekTokenMatch | undefined {
+	TEMPLATE_TOKEN_SPELLING.lastIndex = from;
+	for (let match = TEMPLATE_TOKEN_SPELLING.exec(text); match; match = TEMPLATE_TOKEN_SPELLING.exec(text)) {
+		const token = resolveTemplateSpelling(match);
+		if (token !== undefined && tokens[token]) return { token, raw: match[0], index: match.index };
+	}
+	return undefined;
+}
+
+function templateTokenAtStart(text: string): DeepSeekTokenMatch | undefined {
+	TEMPLATE_TOKEN_SPELLING_AT_START.lastIndex = 0;
+	const match = TEMPLATE_TOKEN_SPELLING_AT_START.exec(text);
+	if (!match) return undefined;
+	const token = resolveTemplateSpelling(match);
+	return token === undefined ? undefined : { token, raw: match[0], index: 0 };
+}
+
+/** Length of a trailing fragment of `text` that could still complete into a template token spelling. */
+function templateTokenPartialLength(text: string): number {
+	const start = text.lastIndexOf("<");
+	if (start === -1 || text.length - start >= TEMPLATE_TOKEN_MAX_SPELLING) return 0;
+	const match = TEMPLATE_TOKEN_PARTIAL.exec(text.slice(start));
+	if (!match) return 0;
+	const key = templateTokenKey(match[1]!);
+	const viable =
+		match[2]!.length > 0 ? TEMPLATE_TOKEN_BY_KEY.has(key) : TEMPLATE_TOKEN_KEYS.some(known => known.startsWith(key));
+	return viable ? text.length - start : 0;
+}
+
 const DSML_SECTION_TOKENS = [
 	DSML_TOOL_CALLS_CLOSE_FULLWIDTH,
 	DSML_TOOL_CALLS_CLOSE_ASCII,
@@ -153,8 +276,11 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		if (this.#closeWait.absorb(text)) return [];
 		this.#buffer = this.#closeWait.release(this.#buffer) + text;
 		const events = this.#consume(false);
-		if (this.#state === "args" || this.#state === "legacyArgs") {
-			this.#closeWait.arm(DEEPSEEK_TOOL_CALL_END, this.#buffer);
+		// Arguments end at a template token in any accepted spelling, so defer
+		// deltas until a bar arrives — unless a fragment already pending at the
+		// tail could complete without one (`<tool_call_end` + `｜>`).
+		if ((this.#state === "args" || this.#state === "legacyArgs") && templateTokenPartialLength(this.#buffer) === 0) {
+			this.#closeWait.arm(TEMPLATE_TOKEN_BAR, this.#buffer);
 		}
 		return events;
 	}
@@ -178,7 +304,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				continue;
 			}
 			if (this.#state === "section") {
-				if (!this.#consumeSection(final)) break;
+				if (!this.#consumeSection(final, events)) break;
 				continue;
 			}
 			if (this.#state === "header") {
@@ -228,69 +354,56 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				this.#buffer = trimmed;
 				this.#stripLeadingWhitespace = false;
 			}
-			const match = findEarliestToken(this.#buffer, OUTSIDE_TOKENS);
+			const match = this.#findOutsideToken();
 			if (!match) {
-				const hold = final ? 0 : partialSuffixOverlapAny(this.#buffer, OUTSIDE_TOKENS);
+				const hold = final
+					? 0
+					: Math.max(
+							partialSuffixOverlapAny(this.#buffer, OUTSIDE_TOKENS),
+							templateTokenPartialLength(this.#buffer),
+						);
 				this.#emitText(this.#buffer.slice(0, this.#buffer.length - hold), events);
 				this.#buffer = this.#buffer.slice(this.#buffer.length - hold);
 				return;
 			}
 			this.#emitText(this.#buffer.slice(0, match.index), events);
-			this.#buffer = this.#buffer.slice(match.index);
-			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_BEGIN)) {
-				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALLS_BEGIN.length);
+			this.#buffer = this.#buffer.slice(match.index + match.raw.length);
+			if (match.token === DEEPSEEK_TOOL_CALLS_BEGIN) {
 				this.#inToolSection = true;
 				this.#state = "section";
 				return;
 			}
-			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALL_BEGIN)) {
-				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALL_BEGIN.length);
-				this.#rawBlock = DEEPSEEK_TOOL_CALL_BEGIN;
+			if (match.token === DEEPSEEK_TOOL_CALL_BEGIN) {
+				this.#rawBlock = match.raw;
 				this.#inToolSection = false;
 				this.#state = "header";
 				return;
 			}
-			if (this.#buffer.startsWith(THINK_OPEN)) {
-				this.#buffer = this.#buffer.slice(THINK_OPEN.length);
+			if (match.token === THINK_OPEN) {
 				this.#state = "thinking";
 				this.#thinking = "";
 				if (this.#parseThinking) events.push({ type: "thinkingStart" });
 				return;
 			}
-			if (
-				this.#buffer.startsWith(DSML_TOOL_CALLS_OPEN_FULLWIDTH) ||
-				this.#buffer.startsWith(DSML_TOOL_CALLS_OPEN_ASCII)
-			) {
-				const openToken = this.#buffer.startsWith(DSML_TOOL_CALLS_OPEN_FULLWIDTH)
-					? DSML_TOOL_CALLS_OPEN_FULLWIDTH
-					: DSML_TOOL_CALLS_OPEN_ASCII;
-				this.#buffer = this.#buffer.slice(openToken.length);
-				this.#pendingDsmlSection = openToken;
+			if (match.token === DSML_TOOL_CALLS_OPEN_FULLWIDTH || match.token === DSML_TOOL_CALLS_OPEN_ASCII) {
+				this.#pendingDsmlSection = match.raw;
 				this.#state = "dsmlSection";
 				return;
 			}
-			const orphanClose = this.#matchingOrphanDsmlClose();
-			if (orphanClose) {
-				if (this.#bareDsmlOpenVisible) this.#emitText(orphanClose, events);
-				this.#buffer = this.#buffer.slice(orphanClose.length);
+			if ((DSML_ORPHAN_CLOSE_TOKENS as readonly string[]).includes(match.token)) {
+				if (this.#bareDsmlOpenVisible) this.#emitText(match.raw, events);
 				continue;
 			}
-			const control = this.#matchingControlToken();
-			if (control) {
-				this.#buffer = this.#buffer.slice(control.length);
-				if (
-					this.#bareDsmlOpenVisible &&
-					(control === DSML_TOOL_CALLS_CLOSE_FULLWIDTH || control === DSML_TOOL_CALLS_CLOSE_ASCII)
-				) {
-					// Closes the malformed call: keep it as its end marker.
-					this.#emitText(control, events);
-					this.#bareDsmlOpenVisible = false;
-					continue;
-				}
-				this.#stripLeadingWhitespace = true;
+			if (
+				this.#bareDsmlOpenVisible &&
+				(match.token === DSML_TOOL_CALLS_CLOSE_FULLWIDTH || match.token === DSML_TOOL_CALLS_CLOSE_ASCII)
+			) {
+				// Closes the malformed call: keep it as its end marker.
+				this.#emitText(match.raw, events);
+				this.#bareDsmlOpenVisible = false;
 				continue;
 			}
-			this.#buffer = this.#buffer.slice(match.token.length);
+			if (OUTSIDE_DROPPED_TOKENS[match.token]) this.#stripLeadingWhitespace = true;
 		}
 	}
 
@@ -315,36 +428,42 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		this.#endThinking(events);
 	}
 
-	#consumeSection(final: boolean): boolean {
+	#consumeSection(final: boolean, events: InbandScanEvent[]): boolean {
 		while (this.#buffer.length > 0) {
 			this.#skipWhitespace();
-			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_END)) {
-				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALLS_END.length);
+			const lead = templateTokenAtStart(this.#buffer);
+			if (lead?.token === DEEPSEEK_TOOL_CALLS_END) {
+				this.#buffer = this.#buffer.slice(lead.raw.length);
 				this.#inToolSection = false;
 				this.#state = "outside";
 				return true;
 			}
-			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALL_BEGIN)) {
-				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALL_BEGIN.length);
-				this.#rawBlock = DEEPSEEK_TOOL_CALL_BEGIN;
+			if (lead?.token === DEEPSEEK_TOOL_CALL_BEGIN) {
+				this.#buffer = this.#buffer.slice(lead.raw.length);
+				this.#rawBlock = lead.raw;
 				this.#state = "header";
 				return true;
 			}
-			if (!final && partialSuffixOverlapAny(this.#buffer, SECTION_TOKENS) === this.#buffer.length) return false;
+			if (!final && templateTokenPartialLength(this.#buffer) === this.#buffer.length) return false;
 			if (this.#buffer.length === 0) return false;
-			this.#buffer = this.#buffer.slice(1);
+			// The template puts nothing but calls in a section, so anything else is
+			// the model writing prose after a stray section open: keep it visible.
+			const next = this.#buffer.indexOf("<", 1);
+			const prose = next === -1 ? this.#buffer : this.#buffer.slice(0, next);
+			this.#emitText(prose, events);
+			this.#buffer = this.#buffer.slice(prose.length);
 		}
 		return final;
 	}
 
 	#consumeHeader(final: boolean, events: InbandScanEvent[]): boolean {
-		const sep = this.#buffer.indexOf(DEEPSEEK_TOOL_SEPARATOR);
-		if (sep === -1) {
+		const sep = findDeepSeekTemplateToken(this.#buffer, SEPARATOR_TOKENS);
+		if (!sep) {
 			if (final) this.#resetTool();
 			return false;
 		}
-		const rawHead = this.#buffer.slice(0, sep + DEEPSEEK_TOOL_SEPARATOR.length);
-		const head = this.#buffer.slice(0, sep).trim();
+		const rawHead = this.#buffer.slice(0, sep.index + sep.raw.length);
+		const head = this.#buffer.slice(0, sep.index).trim();
 		this.#rawBlock += rawHead;
 		this.#buffer = this.#buffer.slice(rawHead.length);
 		if (head === LEGACY_TOOL_TYPE) {
@@ -373,18 +492,20 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	}
 
 	#consumeArgs(final: boolean, events: InbandScanEvent[]): boolean {
-		const end = this.#buffer.indexOf(DEEPSEEK_TOOL_CALL_END);
-		if (end === -1) {
+		const end = findDeepSeekTemplateToken(this.#buffer, ARGS_TERMINATOR_TOKENS);
+		if (!end) {
 			if (final) this.#resetTool();
 			return false;
 		}
-		let rawArgs = this.#buffer.slice(0, end);
+		let rawArgs = this.#buffer.slice(0, end.index);
 		if (this.#state === "legacyArgs") {
 			const fence = rawArgs.lastIndexOf(CODE_FENCE);
 			if (fence !== -1) rawArgs = rawArgs.slice(0, fence);
 		}
-		const rawTail = this.#buffer.slice(0, end + DEEPSEEK_TOOL_CALL_END.length);
-		this.#rawBlock += rawTail;
+		// Only the call's own close belongs to it; a section close or the next
+		// call's open stays buffered for the state that owns it.
+		const consumed = end.index + (end.token === DEEPSEEK_TOOL_CALL_END ? end.raw.length : 0);
+		this.#rawBlock += this.#buffer.slice(0, consumed);
 		events.push({
 			type: "toolEnd",
 			id: this.#id,
@@ -392,7 +513,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			arguments: this.#parseArgs(rawArgs),
 			rawBlock: this.#rawBlock,
 		});
-		this.#buffer = this.#buffer.slice(rawTail.length);
+		this.#buffer = this.#buffer.slice(consumed);
 		this.#resetTool(this.#inToolSection ? "section" : "outside");
 		return true;
 	}
@@ -561,22 +682,15 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		return "";
 	}
 
-	#matchingOrphanDsmlClose(): string | undefined {
-		for (const token of DSML_ORPHAN_CLOSE_TOKENS) {
-			if (this.#buffer.startsWith(token)) return token;
-		}
-		return undefined;
-	}
-
-	#matchingControlToken(): string | undefined {
-		if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_END)) return DEEPSEEK_TOOL_CALLS_END;
-		if (this.#buffer.startsWith(THINK_CLOSE)) return THINK_CLOSE;
-		if (this.#buffer.startsWith(DSML_TOOL_CALLS_CLOSE_FULLWIDTH)) return DSML_TOOL_CALLS_CLOSE_FULLWIDTH;
-		if (this.#buffer.startsWith(DSML_TOOL_CALLS_CLOSE_ASCII)) return DSML_TOOL_CALLS_CLOSE_ASCII;
-		for (const token of CONTROL_TOKENS) {
-			if (this.#buffer.startsWith(token)) return token;
-		}
-		return undefined;
+	/**
+	 * Earliest outside-state token: a literal (`<think>`, DSML tags, canonical
+	 * template tokens) or a re-spelled template token. Ties keep the literal.
+	 */
+	#findOutsideToken(): DeepSeekTokenMatch | undefined {
+		const literal = findEarliestToken(this.#buffer, OUTSIDE_TOKENS);
+		const template = findDeepSeekTemplateToken(this.#buffer, OUTSIDE_TEMPLATE_TOKENS);
+		if (template && (!literal || template.index < literal.index)) return template;
+		return literal && { token: literal.token, raw: literal.token, index: literal.index };
 	}
 
 	#matchingDsmlClose(fullwidth: string, ascii: string): string | undefined {

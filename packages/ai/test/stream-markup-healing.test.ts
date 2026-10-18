@@ -553,6 +553,61 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 	});
 });
 
+// Tool calls a degraded DeepSeek V4.1 Flash on Fireworks wrote as text: chat-template
+// tokens re-spelled with `_` for `▁` (wholly or partly), a dropped bar, and calls
+// closed by the section close instead of `<｜tool▁call▁end｜>`.
+const RESPELLED_TEMPLATE_ARGS =
+	'{"command":"grep -n \\"report_endpoint_changes\\" game.log","i":"Listing hotplug events"}';
+const RESPELLED_TEMPLATE_LEAKS = {
+	"underscores, section close ends the call": `\n\n<｜tool_calls_begin｜><｜tool_call_begin｜>bash<｜tool_sep｜>${RESPELLED_TEMPLATE_ARGS}\n\n<｜tool_calls_end｜>`,
+	"dropped bar, doubled section close": `\n\n<｜tool_calls_begin｜><tool_call_begin｜>bash<｜tool_sep｜>${RESPELLED_TEMPLATE_ARGS}<｜tool_calls_end｜><｜tool_calls_end｜>`,
+	"mixed ▁ and _": `\n\n<｜tool▁calls_begin｜><｜tool_call_begin｜>bash<｜tool_sep｜>${RESPELLED_TEMPLATE_ARGS}<｜tool_calls_end｜><｜tool_calls_end｜>`,
+};
+
+describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
+	for (const [shape, leak] of Object.entries(RESPELLED_TEMPLATE_LEAKS)) {
+		for (const step of [leak.length, 1]) {
+			it(`heals a re-spelled call (${shape}) fed ${step === 1 ? "char by char" : "whole"}`, () => {
+				const healing = new StreamMarkupHealing({ pattern: "dsml" });
+				let visible = "";
+				for (let i = 0; i < leak.length; i += step) visible += healing.feed(leak.slice(i, i + step));
+				visible += healing.flushPending();
+				expect(visible.trim()).toBe("");
+				const calls = healing.drainCompleted();
+				expect(calls).toHaveLength(1);
+				expect(calls[0].name).toBe("bash");
+				expect(JSON.parse(calls[0].arguments)).toEqual(JSON.parse(RESPELLED_TEMPLATE_ARGS));
+			});
+		}
+	}
+
+	it("heals consecutive calls when the model skips each call's close", () => {
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		const visible =
+			healing.feed(
+				'<｜tool_calls_begin｜><｜tool_call_begin｜>read<｜tool_sep｜>{"path":"a"}<｜tool_call_begin｜>read<｜tool_sep｜>{"path":"b"}<｜tool_calls_end｜>Done.',
+			) + healing.flushPending();
+		expect(visible).toBe("Done.");
+		expect(healing.drainCompleted().map(call => JSON.parse(call.arguments))).toEqual([{ path: "a" }, { path: "b" }]);
+	});
+
+	it("leaves ASCII-pipe tokens from other templates visible", () => {
+		// Kimi's `<|tool_call_begin|>` shares a name with DeepSeek's token; without a
+		// fullwidth bar it is not DeepSeek markup and must not open a call.
+		const input =
+			'Kimi writes <|tool_call_begin|>functions.read:0<|tool_call_argument_begin|>{"path":"a"}<|tool_call_end|> here.';
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		expect(healing.feed(input) + healing.flushPending()).toBe(input);
+		expect(healing.drainCompleted()).toEqual([]);
+	});
+
+	it("strips an unhealed re-spelled call from history text but keeps quoted tokens and later prose", () => {
+		const text = `I'll grep the log.${RESPELLED_TEMPLATE_LEAKS["underscores, section close ends the call"]}\n\nThe log is large.`;
+		expect(stripDsmlToolMarkup(text)).toBe("I'll grep the log.\n\nThe log is large.");
+		expect(stripDsmlToolMarkup("The template opens calls with `<｜tool▁calls▁begin｜>`.")).toBeUndefined();
+	});
+});
+
 describe("StreamMarkupHealing Qwen XML pattern", () => {
 	const leaked = '<tool_calls>\n<read path="/etc/hostname" />\n</tool_calls>';
 
@@ -1259,6 +1314,31 @@ describe("OpenAI completions provider DSML envelope healing", () => {
 			[INTENT_FIELD]: "Check Fedora 42 available packages",
 			timeout: 15,
 		});
+		expect(result.stopReason).toBe("toolUse");
+	});
+
+	it("dispatches a Fireworks DeepSeek V4.1 Flash call written in re-spelled template tokens", async () => {
+		const model = getBundledModel<"openai-completions">("fireworks", "deepseek-v4.1-flash");
+		const leak = RESPELLED_TEMPLATE_LEAKS["dropped bar, doubled section close"];
+		const fetchMock = mockFetch([
+			chunk(model.id, { content: leak.slice(0, 40) }),
+			chunk(model.id, { content: leak.slice(40) }),
+			chunk(model.id, {}, "stop"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(
+			model,
+			{ messages: [{ role: "user", content: "grep the log", timestamp: Date.now() }], tools: [bashTool] },
+			{ apiKey: "test-key", fetch: fetchMock },
+		).result();
+
+		const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
+		expect(text).not.toContain("｜");
+		const toolCalls = result.content.filter((b): b is ToolCall => b.type === "toolCall");
+		expect(toolCalls.map(call => [call.name, call.arguments])).toEqual([
+			["bash", JSON.parse(RESPELLED_TEMPLATE_ARGS)],
+		]);
 		expect(result.stopReason).toBe("toolUse");
 	});
 
