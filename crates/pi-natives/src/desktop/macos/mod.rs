@@ -3,6 +3,7 @@ mod capture;
 mod date;
 mod input;
 mod key_reroute;
+mod keymap;
 mod permission;
 mod process;
 mod session;
