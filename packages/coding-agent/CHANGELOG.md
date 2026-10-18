@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a parked subagent waking up with the `todo` tool and its instructions when messaged, though subagents are spawned without them
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
