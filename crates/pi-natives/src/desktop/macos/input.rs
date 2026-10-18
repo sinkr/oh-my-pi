@@ -1700,7 +1700,8 @@ fn background_scroll(
 /// a report, addressed to the window. The device moves its own pointer only
 /// for a button event and scrolls whatever is under that pointer, so a scroll
 /// first aims it with a lone release, which taps nothing. Other events take
-/// the ordinary route.
+/// the ordinary route. Like every background pointer event, each post first
+/// passes [`pointer_recheck`]; nothing here makes the window key.
 fn report_pointer(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1721,29 +1722,59 @@ fn report_pointer(
 		skylight::set_window_location(&event, window_local(window, x, y))?;
 		skylight::post_routed(pid, &event)
 	};
+	let before_post =
+		|| pointer_recheck(false, entry_front, pid, wid, skylight::front_pid, || visit.happened());
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			let count = i64::from(count.max(1));
-			for click_state in 1..=count {
-				let result = post(CGEventType::LeftMouseDown, x, y, click_state)
-					.and_then(|()| control::wait(TAP_HOLD));
-				let release = control::cleanup(|| post(CGEventType::LeftMouseUp, x, y, click_state));
-				skylight::after_cleanup(result, release)?;
-				if click_state < count {
-					control::wait(MULTI_CLICK_GAP)?;
-				}
-			}
-			Ok(())
+			report_taps(count, before_post, |event_type, click_state| {
+				post(event_type, x, y, click_state)
+			})
 		},
-		PointerEvent::Scroll { x, y, dx, dy } => {
-			post(CGEventType::LeftMouseUp, x, y, 1)?;
-			control::wait(TAP_HOLD)?;
-			background_scroll(source, pid, wid, window, x, y, dx, dy)
-		},
+		PointerEvent::Scroll { x, y, dx, dy } => report_scroll(
+			before_post,
+			|| post(CGEventType::LeftMouseUp, x, y, 1),
+			|| background_scroll(source, pid, wid, window, x, y, dx, dy),
+		),
 		event => {
 			background_pointer(source, pid, wid, window, event, entry_front, owner, in_overlay, visit)
 		},
 	}
+}
+
+/// `count` taps for [`report_pointer`]: each press, posted through `post`
+/// with its click state once `before_press` passes, is held for a report and
+/// always released.
+fn report_taps(
+	count: u32,
+	before_press: impl Fn() -> CoreResult<()>,
+	post: impl Fn(CGEventType, i64) -> CoreResult<()>,
+) -> CoreResult<()> {
+	let count = i64::from(count.max(1));
+	for click_state in 1..=count {
+		before_press()?;
+		let result =
+			post(CGEventType::LeftMouseDown, click_state).and_then(|()| control::wait(TAP_HOLD));
+		let release = control::cleanup(|| post(CGEventType::LeftMouseUp, click_state));
+		skylight::after_cleanup(result, release)?;
+		if click_state < count {
+			control::wait(MULTI_CLICK_GAP)?;
+		}
+	}
+	Ok(())
+}
+
+/// A [`report_pointer`] scroll: `aim` moves the device's pointer, then
+/// `scroll` posts; each first passes `before_post`.
+fn report_scroll(
+	before_post: impl Fn() -> CoreResult<()>,
+	aim: impl FnOnce() -> CoreResult<()>,
+	scroll: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<()> {
+	before_post()?;
+	aim()?;
+	control::wait(TAP_HOLD)?;
+	before_post()?;
+	scroll()
 }
 
 /// A pointer event whose flags carry no modifiers: a `HIDSystemState` source
@@ -4222,6 +4253,49 @@ mod tests {
 		pointer_recheck(false, EntryFront(Some(7)), 7, 42, || Some(7), || false).unwrap();
 		// A left click that made the window key refuses once the target is front.
 		assert!(pointer_recheck(true, user, 7, 42, || None, || false).is_err());
+	}
+
+	#[test]
+	fn iphone_mirroring_taps_and_scrolls_stop_once_the_user_brings_it_forward() {
+		use crate::desktop::error::ErrorCode;
+		let (down, up) = (CGEventType::LeftMouseDown as u32, CGEventType::LeftMouseUp as u32);
+		// The user (9) brings iPhone Mirroring (7) forward after the first tap
+		// of a double tap: the second press would land in the window they took.
+		let front = std::cell::Cell::new(9);
+		let before_post =
+			|| pointer_recheck(false, EntryFront(Some(9)), 7, 42, || Some(front.get()), || false);
+		let posted = std::cell::RefCell::new(Vec::new());
+		let error = report_taps(2, before_post, |event_type, click_state| {
+			posted.borrow_mut().push((event_type as u32, click_state));
+			if event_type as u32 == up {
+				front.set(7);
+			}
+			Ok(())
+		})
+		.unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(*posted.borrow(), [(down, 1), (up, 1)]);
+		// A scroll checks before its aiming release and again before it scrolls.
+		front.set(9);
+		let scrolled = std::cell::Cell::new(false);
+		let aim = || {
+			front.set(7);
+			Ok(())
+		};
+		let scroll = || {
+			scrolled.set(true);
+			Ok(())
+		};
+		let error = report_scroll(before_post, aim, scroll).unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert!(!scrolled.get(), "nothing scrolls once the user has the target");
+		let aimed = std::cell::Cell::new(false);
+		let aim = || {
+			aimed.set(true);
+			Ok(())
+		};
+		assert!(report_scroll(before_post, aim, || Ok(())).is_err());
+		assert!(!aimed.get(), "no aiming release once the user has the target");
 	}
 
 	#[test]
