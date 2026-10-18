@@ -45,9 +45,9 @@ const ACTIVATION_POLL: Duration = Duration::from_millis(10);
 /// count as the user's own switch. Measured on a VM: ⌘-Tab activates the chosen
 /// app about 3 ms after ⌘ is released.
 const USER_SWITCH_WINDOW: Duration = Duration::from_millis(250);
-/// How often the sampler reads whether ⌘ or ⌃ is held and which app is in
-/// front: well inside the ~100 ms a ⌘-Tab holds ⌘, on a thread no AX probe
-/// blocks.
+/// How often the sampler reads whether ⌘ or ⌃ is held, which app is in front
+/// and which has the keyboard: well inside the ~100 ms a ⌘-Tab holds ⌘, on a
+/// thread no AX probe blocks.
 const CHORD_SAMPLE: Duration = Duration::from_millis(5);
 /// Keeps the target frontmost until it has consumed foreground input.
 const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
@@ -428,6 +428,9 @@ struct SwitchSignals {
 	/// The app the sampler last saw in front and when it first saw it there,
 	/// however long this poll was blocked.
 	front_since: Option<(ProcessSerialNumber, Instant)>,
+	/// The other process the sampler last saw holding the keyboard as a panel
+	/// and when ([`sample_panel`]), however long this poll was blocked.
+	last_panel:  Option<(ProcessSerialNumber, Instant)>,
 }
 
 impl SwitchSignals {
@@ -445,6 +448,7 @@ impl SwitchSignals {
 			last_chord,
 			key_focus,
 			front_since: None,
+			last_panel: None,
 		}
 	}
 
@@ -452,6 +456,12 @@ impl SwitchSignals {
 	/// `at`.
 	const fn with_front_since(self, front: ProcessSerialNumber, at: Instant) -> Self {
 		Self { front_since: Some((front, at)), ..self }
+	}
+
+	/// These signals with the sampler's reading that `panel` held the keyboard
+	/// at `at`.
+	const fn with_last_panel(self, panel: ProcessSerialNumber, at: Instant) -> Self {
+		Self { last_panel: Some((panel, at)), ..self }
 	}
 
 	fn read(spi: &ForegroundSpi, now: Instant, sampled: &Sampled) -> Self {
@@ -471,20 +481,27 @@ impl SwitchSignals {
 			.and_then(|since| now.checked_sub(since));
 		let flags = modifier_flags();
 		let last_chord = *sampled.chord.lock();
-		let key_focus = spi.get_key_focus.and_then(|get_key_focus| {
-			let mut psn = ProcessSerialNumber::default();
-			let mut status = 0u8;
-			// SAFETY: Both out-pointers are writable for the synchronous call,
-			// which writes the 8-byte PSN and one status byte.
-			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
-		});
-		let signals = Self::new(buttons, last_click, flags, last_chord, key_focus);
-		let front_since = *sampled.front.lock();
-		match front_since {
+		let signals = Self::new(buttons, last_click, flags, last_chord, key_focus(spi));
+		let signals = match *sampled.front.lock() {
 			Some((front, at)) => signals.with_front_since(front, at),
+			None => signals,
+		};
+		match *sampled.panel.lock() {
+			Some((panel, at)) => signals.with_last_panel(panel, at),
 			None => signals,
 		}
 	}
+}
+
+/// The process that has the keyboard.
+fn key_focus(spi: &ForegroundSpi) -> Option<ProcessSerialNumber> {
+	spi.get_key_focus.and_then(|get_key_focus| {
+		let mut psn = ProcessSerialNumber::default();
+		let mut status = 0u8;
+		// SAFETY: Both out-pointers are writable for the synchronous call, which
+		// writes the 8-byte PSN and one status byte.
+		(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
+	})
 }
 
 fn modifier_flags() -> u64 {
@@ -499,6 +516,8 @@ struct Sampled {
 	chord: Mutex<Option<Instant>>,
 	/// The app in front and when it was first seen there ([`sample_front`]).
 	front: Mutex<Option<(ProcessSerialNumber, Instant)>>,
+	/// The last panel seen holding the keyboard and when ([`sample_panel`]).
+	panel: Mutex<Option<(ProcessSerialNumber, Instant)>>,
 }
 
 /// One chord-sampler reading: `now` becomes the latest time ⌘ or ⌃ was seen
@@ -523,6 +542,33 @@ fn sample_front(
 	}
 }
 
+/// Whether the keyboard is in a process other than the front app and the
+/// action's two apps: a panel such as Spotlight's or a launcher's, which takes
+/// the keyboard while the user's app stays in front.
+fn is_panel(
+	focus: ProcessSerialNumber,
+	front: ProcessSerialNumber,
+	user: ProcessSerialNumber,
+	target: ProcessSerialNumber,
+) -> bool {
+	focus != front && focus != user && focus != target
+}
+
+/// One key-focus reading: a panel holding the keyboard is remembered with
+/// `now`, so a poll blocked while a launcher panel came and went still sees
+/// the user picked the app that came forward from it.
+fn sample_panel(
+	seen: &Mutex<Option<(ProcessSerialNumber, Instant)>>,
+	focus: ProcessSerialNumber,
+	front: ProcessSerialNumber,
+	[user, target]: [ProcessSerialNumber; 2],
+	now: Instant,
+) {
+	if is_panel(focus, front, user, target) {
+		*seen.lock() = Some((focus, now));
+	}
+}
+
 /// How the user, rather than an app, changed the front app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserSwitch {
@@ -540,9 +586,9 @@ enum UserSwitch {
 /// Answers "did the user switch apps on purpose since T, and how?" for an
 /// action between the user's app and the `target`, whose own focus grabs are
 /// not the user's doing. Clicks are timed exactly from the HID state, and a
-/// held ⌘/⌃ from the chord sampler, so a poll blocked in an AX probe neither
-/// loses a whole ⌘-Tab nor makes an older modifier change look like a recent
-/// chord. A panel is seen while it lasts.
+/// held ⌘/⌃ and a panel holding the keyboard from the sampler, so a poll
+/// blocked in an AX probe neither loses a whole ⌘-Tab or launcher pick nor
+/// makes an older modifier change look like a recent chord.
 struct UserSwitchWatch {
 	user:    ProcessSerialNumber,
 	target:  ProcessSerialNumber,
@@ -582,6 +628,14 @@ impl UserSwitchWatch {
 			self.click = Some(signals.last_click.unwrap_or(now));
 		}
 		self.chord = self.chord.max(signals.last_chord);
+		// A process that had the keyboard before coming forward is that app
+		// taking focus a moment before `WindowServer` lists it in front, not a
+		// panel it was picked from.
+		if let Some((panel, at)) = signals.last_panel
+			&& panel != front
+		{
+			self.panel = self.panel.max(Some(at));
+		}
 		self.observe_held(signals, front, now);
 	}
 
@@ -591,7 +645,7 @@ impl UserSwitchWatch {
 		}
 		if signals
 			.key_focus
-			.is_some_and(|focus| focus != front && focus != self.user && focus != self.target)
+			.is_some_and(|focus| is_panel(focus, front, self.user, self.target))
 		{
 			self.panel = Some(now);
 		}
@@ -791,6 +845,7 @@ pub(super) fn with_background_watch<T>(
 	thread::scope(|scope| {
 		let visit = &visited;
 		let sampled = &sampled;
+		let action_apps = [previous.psn, target];
 		let desktop =
 			WindowServerDesktop { spi, sampled, previous, key: previous_key, stopped: &stopped };
 		let observer = thread::Builder::new()
@@ -808,8 +863,9 @@ pub(super) fn with_background_watch<T>(
 			}
 		}
 		let stop = StopObserver { stopped: &stopped, thread: observer.thread().clone() };
-		// Watches ⌘/⌃ and the front app apart from the observer, whose AX probes
-		// can block it for up to half a second, until the action ends.
+		// Watches ⌘/⌃, the front app and panels holding the keyboard apart from
+		// the observer, whose AX probes can block it for up to half a second,
+		// until the action ends.
 		let stopped = &stopped;
 		thread::Builder::new()
 			.name("desktop-switch-sampler".to_string())
@@ -819,6 +875,9 @@ pub(super) fn with_background_watch<T>(
 					sample_chord(&sampled.chord, modifier_flags(), now);
 					if let Some(front) = front_process(spi.get_front) {
 						sample_front(&sampled.front, front.psn, now);
+						if let Some(focus) = key_focus(spi) {
+							sample_panel(&sampled.panel, focus, front.psn, action_apps, now);
+						}
 					}
 					thread::sleep(CHORD_SAMPLE);
 				}
@@ -1845,6 +1904,51 @@ mod tests {
 		sample_front(&seen, TARGET, t0 + ms(20));
 		sample_front(&seen, TARGET, t0 + ms(25));
 		assert!(*seen.lock() == Some((TARGET, t0 + ms(20))));
+	}
+
+	#[test]
+	fn a_launcher_panel_that_came_and_went_while_the_poll_was_blocked_is_the_users_switch() {
+		// An ⌥-Space launcher took the keyboard, and the user typed the target's
+		// name and pressed Return, all while the observer's AX probe stalled.
+		// Its next poll sees the target in front with the keyboard; only the
+		// sampler saw the panel hold the keyboard until the target came.
+		let t0 = Instant::now();
+		let panel = Mutex::new(None);
+		for (focus, front, at) in [
+			(PREVIOUS, PREVIOUS, t0 + ms(100)),
+			(THIRD, PREVIOUS, t0 + ms(105)),
+			(THIRD, PREVIOUS, t0 + ms(400)),
+			// The action's own apps holding the keyboard are no panel.
+			(TARGET, PREVIOUS, t0 + ms(402)),
+			(TARGET, TARGET, t0 + ms(405)),
+		] {
+			sample_panel(&panel, focus, front, [PREVIOUS, TARGET], at);
+		}
+		assert!(*panel.lock() == Some((THIRD, t0 + ms(400))));
+		let late = t0 + ms(520);
+		let target_came = keyboard_in(TARGET).with_front_since(TARGET, t0 + ms(405));
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(42), keyboard_in(PREVIOUS), t0 + ms(10)),
+			FocusDecision::Observe
+		);
+		assert_eq!(
+			guard.observe(TARGET, None, target_came.with_last_panel(THIRD, t0 + ms(400)), late),
+			FocusDecision::Disarm
+		);
+		// A panel long before the target came does not pick it.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(TARGET, None, target_came.with_last_panel(THIRD, t0 + ms(100)), late),
+			FocusDecision::Restore
+		);
+		// An app the action brings forward can take the keyboard a moment before
+		// `WindowServer` lists it in front: that is no panel it was picked from.
+		let mut guard = lease_at(t0, None);
+		let third_came = keyboard_in(THIRD)
+			.with_front_since(THIRD, t0 + ms(405))
+			.with_last_panel(THIRD, t0 + ms(400));
+		assert_eq!(guard.observe(THIRD, None, third_came, late), FocusDecision::Restore);
 	}
 
 	#[test]
