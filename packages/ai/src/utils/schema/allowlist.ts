@@ -83,6 +83,23 @@ function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredM
 	return merged;
 }
 
+/** Fields the proxy accepts beside `anyOf`; anything else there is a 400. */
+const ANY_OF_SIBLING_KEYS: Record<string, true> = {
+	title: true,
+	description: true,
+	default: true,
+	example: true,
+};
+
+/** The proxy 400s on `required` names a schema's own `properties` lacks. */
+function withoutUndefinedRequired(branch: JsonObject): JsonObject {
+	if (!Array.isArray(branch.required)) return branch;
+	const properties = isJsonObject(branch.properties) ? branch.properties : {};
+	const required = (branch.required as unknown[]).filter(name => typeof name === "string" && name in properties);
+	const { required: _dropped, ...rest } = branch;
+	return required.length > 0 ? { ...rest, required } : rest;
+}
+
 function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 	if (!isJsonObject(node)) return undefined;
 
@@ -109,20 +126,30 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 	// anyOf/oneOf unions: merge the non-null branches (a field stays required
 	// only when every branch requires it), marking the result nullable when a
 	// `type: "null"` branch is present, then fold that into this node so its
-	// own properties/required survive. Branches of different types cannot merge
-	// into one Schema (`string` gaining `items` is a 400), so they stay an
-	// `anyOf`, as the CLI sends them.
+	// own properties/required survive. Typed branches of different types cannot
+	// merge into one Schema (`string` gaining `items` is a 400), so they stay an
+	// `anyOf` when the node has nothing else the proxy forbids beside it.
 	const unionKey = Array.isArray(node.anyOf) ? "anyOf" : Array.isArray(node.oneOf) ? "oneOf" : undefined;
 	if (unionKey) {
 		const branches = (node[unionKey] as unknown[])
 			.map(copyFactoryDroidSchema)
 			.filter((branch): branch is JsonObject => branch !== undefined);
-		const nonNull = branches.filter(branch => !typeIncludesNull(branch));
+		let nonNull = branches.filter(branch => !typeIncludesNull(branch));
 		const nullable = nonNull.length < branches.length;
-		if (new Set(nonNull.map(branch => branch.type)).size > 1) {
-			out.anyOf = nonNull;
+		const mixedTypes =
+			nonNull.every(branch => typeof branch.type === "string") &&
+			new Set(nonNull.map(branch => branch.type)).size > 1;
+		if (mixedTypes && Object.keys(out).every(key => key in ANY_OF_SIBLING_KEYS)) {
+			out.anyOf = nonNull.map(withoutUndefinedRequired);
 			if (nullable) out.nullable = true;
 		} else {
+			if (mixedTypes) {
+				// `anyOf` must be the only structural field: keep the branches
+				// matching the node's own type, or merge them all as before.
+				const ownType = out.type ?? (isJsonObject(out.properties) ? "object" : undefined);
+				const matching = nonNull.filter(branch => branch.type === ownType);
+				if (matching.length > 0) nonNull = matching;
+			}
 			let collapsed: JsonObject | undefined;
 			for (const branch of nonNull) {
 				collapsed = collapsed ? mergeFactoryDroidSchemas(collapsed, branch, "intersection") : { ...branch };

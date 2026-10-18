@@ -1512,6 +1512,36 @@ describe("normalizeSchemaForFactoryDroid", () => {
 		});
 	});
 
+	it("never sends anyOf beside the node's own type or properties", () => {
+		const withProperties = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { a: { type: "string" } },
+			anyOf: [{ type: "string" }, { type: "integer" }],
+		});
+		expect(withProperties).toEqual({ type: "object", properties: { a: { type: "string" } }, nullable: false });
+
+		const withType = normalizeSchemaForFactoryDroid({
+			type: "string",
+			anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+		});
+		expect(withType).toEqual({ type: "string", nullable: false });
+	});
+
+	it("drops required names a mixed-union branch does not define", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			anyOf: [{ type: "object", required: ["a"] }, { type: "string" }],
+		});
+		expect(normalized).toEqual({ anyOf: [{ type: "object" }, { type: "string" }] });
+	});
+
+	it("merges an untyped branch into its typed sibling", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { value: { anyOf: [{ type: "string" }, {}] } },
+		}) as { properties: Record<string, unknown> };
+		expect(normalized.properties.value).toEqual({ type: "string", nullable: false });
+	});
+
 	it("keeps parent properties/required when collapsing an anyOf of object branches", () => {
 		const normalized = normalizeSchemaForFactoryDroid({
 			type: "object",
