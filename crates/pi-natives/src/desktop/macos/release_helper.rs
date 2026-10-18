@@ -173,7 +173,8 @@ fn close_tap() {
 	}
 }
 
-/// Closes the tap when dropped, also while a panic unwinds `main`.
+/// Closes the tap when `main` returns. The helper is built to abort on a
+/// panic, which unwinds nothing.
 struct ClosesTap;
 
 impl Drop for ClosesTap {
