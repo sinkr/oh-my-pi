@@ -173,6 +173,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
@@ -3019,6 +3020,23 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Live widgets of this session's running async jobs (the owner scope of
+	 * {@link getAsyncJobSnapshot}), in job order. Reading a widget marks it
+	 * shown, which is what lets its spec be written.
+	 */
+	getRunningJobWidgets(): JobWidgetEntry[] {
+		const manager = this.#asyncJobManager;
+		const widgets = manager?.widgets;
+		if (!manager || !widgets) return [];
+		const entries: JobWidgetEntry[] = [];
+		for (const job of manager.getRunningJobs(this.#agentId ? { ownerId: this.#agentId } : undefined)) {
+			const view = widgets.view(job);
+			if (view) entries.push({ id: job.id, type: job.type, view });
+		}
+		return entries;
+	}
+
+	/**
 	 * Async jobs of this agent and every subagent below it: the running ones and
 	 * the `recentLimit` (default 10) newest settled ones across the tree, with the subagents
 	 * that own them and the ancestors linking those to this agent. Lineage comes
@@ -3070,6 +3088,7 @@ export class AgentSession implements SettingsScope {
 			exitCode,
 			output,
 			artifactId: details?.meta?.truncation?.artifactId,
+			widget: this.#asyncJobManager?.widgets?.view(job),
 		};
 	}
 

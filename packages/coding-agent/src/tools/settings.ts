@@ -937,6 +937,19 @@ export const cfgAsyncMaxJobs = register({
 	default: 100,
 });
 
+export const cfgAsyncWidgets = register({
+	id: "async.widgets",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Live Job Widgets",
+		description:
+			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet. The `widget` model role (default: `smol`) writes one spec per job; updates need no further model calls",
+	},
+});
+
 export const cfgToolsXdev = register({
 	id: "tools.xdev",
 	type: "boolean",

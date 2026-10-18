@@ -430,7 +430,7 @@ enabledModels:
   - claude-sonnet-4-5
 ```
 
-Built-in chat roles are `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `memory`, `task`, and `advisor`. The `tiny` and `memory` roles accept both `tiny` catalog models and ordinary chat models. Built-in model-kind roles are `image`, `web`, `speech`, `dictation`, and `judge`; they select image, search/grounded-chat, TTS, STT, and judgment runners respectively. `judge` also accepts tiny and chat models, which is why aliases such as `@tiny` are valid fallbacks. Catalog kinds are `chat`, `tiny`, `image`, `tts`, `stt`, `search`, and `judge`; a custom model with no `kind` remains a chat model.
+Built-in chat roles are `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `memory`, `task`, `advisor`, and `widget`. The `tiny` and `memory` roles accept both `tiny` catalog models and ordinary chat models. `widget` writes the spec behind each background job's live widget and resolves like `smol` until assigned. Built-in model-kind roles are `image`, `web`, `speech`, `dictation`, and `judge`; they select image, search/grounded-chat, TTS, STT, and judgment runners respectively. `judge` also accepts tiny and chat models, which is why aliases such as `@tiny` are valid fallbacks. Catalog kinds are `chat`, `tiny`, `image`, `tts`, `stt`, `search`, and `judge`; a custom model with no `kind` remains a chat model.
 
 Open `/model` and enter the **Roles** view to assign roles and edit their fallback rows. Chat roles and model-kind roles appear in separate capability sections, and the picker filters assignments to models accepted by the selected role. List the same catalog directly with `omp models --kind chat`, `omp models --kind tiny`, `omp models --kind image`, `omp models --kind tts`, `omp models --kind stt`, `omp models --kind search`, or `omp models --kind judge`; use `--kind all` for everything.
 
@@ -621,6 +621,7 @@ tools:
 | `tools.xdevInlineDevices` | array | `[]` | Dynamic-device name globs to inline in `builtins` mode; ignored in `catalog` mode. |
 | `async.enabled` | boolean | `true` | Enable async bash commands and background task execution. |
 | `async.maxJobs` | number | `100` | Running background-job cap, floored to at least 1; parked/queued jobs do not consume execution slots. |
+| `async.widgets` | boolean | `true` | Live widgets for running background jobs (charts, bars, status grids derived from the job's output) in the `wait` card, the jobs pill and its hover card, and the jobs sheet. The `widget` model role writes one spec per job; every later update is computed locally without model calls. Off: plain job rows. |
 
 Mounting still follows the session's explicit tool allow-list. A session that permits `read` but omits `write` can receive a device-only write transport; this does not grant filesystem writes.
 
