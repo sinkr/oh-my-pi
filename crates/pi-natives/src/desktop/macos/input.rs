@@ -6916,11 +6916,13 @@ mod tests {
 	}
 
 	#[test]
-	fn iphone_mirroring_taps_and_scrolls_stop_once_the_user_brings_it_forward() {
+	fn iphone_mirroring_taps_and_scrolls_stop_as_user_intervened_once_brought_forward() {
 		use crate::desktop::error::ErrorCode;
 		let (down, up) = (CGEventType::LeftMouseDown as u32, CGEventType::LeftMouseUp as u32);
 		// The user (9) brings iPhone Mirroring (7) forward after the first tap
 		// of a double tap: the second press would land in the window they took.
+		// The user stepped into the target, so the stop is `UserIntervened`,
+		// which computer.backgroundFallback never reruns in takeover.
 		let front = std::cell::Cell::new(9);
 		let before_post = || {
 			pointer_recheck(
@@ -6940,7 +6942,7 @@ mod tests {
 			Ok(())
 		})
 		.unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert_eq!(*posted.borrow(), [(down, 1), (up, 1)]);
 		// A scroll checks before its aiming release and again before it scrolls.
 		front.set(9);
@@ -6954,14 +6956,15 @@ mod tests {
 			Ok(())
 		};
 		let error = report_scroll(before_post, aim, scroll).unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(!scrolled.get(), "nothing scrolls once the user has the target");
 		let aimed = std::cell::Cell::new(false);
 		let aim = || {
 			aimed.set(true);
 			Ok(())
 		};
-		assert!(report_scroll(before_post, aim, || Ok(())).is_err());
+		let error = report_scroll(before_post, aim, || Ok(())).unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(!aimed.get(), "no aiming release once the user has the target");
 	}
 
