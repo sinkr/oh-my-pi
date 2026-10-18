@@ -1017,29 +1017,29 @@ impl GitRepo {
 		Ok(None)
 	}
 
-	fn walk_commit_ids(&self, rev: &str, retain: usize) -> Result<Vec<gix::ObjectId>> {
+	/// The first `limit` commits reachable from `rev`, newest first. Like
+	/// `git log -n<limit>`, the walk stops there, so older history is never
+	/// read.
+	fn walk_commit_ids(&self, rev: &str, limit: usize) -> Result<Vec<gix::ObjectId>> {
 		let repo = self.gix()?;
 		let id = repo
 			.rev_parse_single(rev)
 			.map_err(|err| Error::backend("git rev-list", err))?
 			.detach();
-		let walk = repo
+		repo
 			.rev_walk([id])
 			.sorting(gix::revision::walk::Sorting::ByCommitTime(
 				gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
 			))
 			.all()
-			.map_err(|err| Error::backend("git rev-list", err))?;
-		let mut ids = Vec::new();
-		// Keep traversing after the requested prefix: failures in older history
-		// must still surface before callers start reading commit messages.
-		for item in walk {
-			let info = item.map_err(|err| Error::backend("git rev-list", err))?;
-			if ids.len() < retain {
-				ids.push(info.id);
-			}
-		}
-		Ok(ids)
+			.map_err(|err| Error::backend("git rev-list", err))?
+			.take(limit)
+			.map(|item| {
+				item
+					.map(|info| info.id)
+					.map_err(|err| Error::backend("git rev-list", err))
+			})
+			.collect()
 	}
 }
 
@@ -1372,7 +1372,7 @@ mod tests {
 	}
 
 	#[test]
-	fn bounded_logs_preserve_prefixes_and_report_broken_older_history() -> TestResult {
+	fn bounded_logs_read_only_the_requested_prefix_like_git_log() -> TestResult {
 		let (dir, repo) = repo()?;
 		commit(dir.path(), "one", "one\n", "first")?;
 		let first = repo.head_sha()?.ok_or("missing HEAD")?;
@@ -1395,11 +1395,13 @@ mod tests {
 				.join(&first[2..]),
 		)?;
 		// A fresh handle cannot satisfy the missing ancestor from an object
-		// cache.
+		// cache. A prefix that stops before it never reads it, as `git log -1`
+		// does not; a walk that reaches it reports it.
 		let repo = GitRepo::require(dir.path())?;
-		for result in
-			[repo.log_subjects(1), repo.log_onelines(1), repo.log_subjects(0), repo.log_onelines(0)]
-		{
+		assert_eq!(repo.log_subjects(1)?, ["third"]);
+		assert_eq!(repo.log_onelines(1)?.len(), 1);
+		assert!(repo.log_subjects(0)?.is_empty());
+		for result in [repo.log_subjects(3), repo.log_onelines(3)] {
 			assert!(matches!(result, Err(Error::Backend { context: "git rev-list", .. })));
 		}
 		Ok(())
