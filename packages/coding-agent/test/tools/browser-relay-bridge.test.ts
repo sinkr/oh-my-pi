@@ -1641,32 +1641,6 @@ describe("closeRelayTarget", () => {
 		expect(back.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
 	});
 
-	it("retries a tab close a connected browser refused", async () => {
-		jest.useFakeTimers();
-		try {
-			const bridge = new RelayBridge({});
-			const chrome = new FakeExtSocket();
-			connectInstance(bridge, chrome, "chrome", [tab({ tabId: 7 })]);
-			const connId = bridge.cdpConnected(new FakeCdpSocket());
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({
-					id: ++msgSeq,
-					method: "Target.closeTarget",
-					params: { targetId: `PAGE${instanceCode("chrome")}.7` },
-				}),
-			);
-			await flush();
-			nack(bridge, chrome, "removeTab");
-			await flush();
-			jest.advanceTimersByTime(5_000);
-			await flush();
-			expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7, 7]);
-		} finally {
-			jest.useRealTimers();
-		}
-	});
-
 	it("reports a tab the relay no longer knows as closed", async () => {
 		const bridge = new RelayBridge({});
 		connectInstance(bridge, new FakeExtSocket(), "chrome", [tab({ tabId: 7 })]);

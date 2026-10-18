@@ -16,6 +16,8 @@ const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 10_000;
+const REMOVE_TAB_ATTEMPTS = 3;
+const REMOVE_TAB_RETRY_MS = 500;
 
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -138,14 +140,34 @@ async function restoreGroups(): Promise<void> {
 }
 
 /**
- * RPC results that finished while the socket was down, sent after the next hello: the relay keeps the undo of a
- * call it gave up on (a tab created for an open that already failed), and a result it does not know it drops.
+ * RPC results that finished while the relay had not heard this socket's hello (the socket down, or open but the
+ * hello not sent yet), sent right after the next hello: the relay keeps the undo of a call it gave up on (a tab
+ * created for an open that already failed), and drops a result that arrives before the hello names the browser.
  */
 const unsentResults: ExtToRelayMessage[] = [];
+/** The socket whose hello has been sent; null until then. */
+let helloSocket: WebSocket | null = null;
 
 function post(msg: ExtToRelayMessage): void {
-	if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-	else if (msg.t === "rpcResult") unsentResults.push(msg);
+	if (msg.t === "rpcResult" && (helloSocket === null || helloSocket !== ws)) unsentResults.push(msg);
+	else if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
+/** Chrome can refuse a tab close for a moment (a tab being dragged, an unload in progress); try again before failing. */
+async function removeTab(tabId: number): Promise<void> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			await chrome.tabs.remove(tabId);
+			return;
+		} catch (error) {
+			// Already closed: the close the relay asked for has happened.
+			if (/No tab with id/.test(String(error))) return;
+			if (attempt >= REMOVE_TAB_ATTEMPTS) throw error;
+			const pause = Promise.withResolvers<void>();
+			setTimeout(pause.resolve, REMOVE_TAB_RETRY_MS);
+			await pause.promise;
+		}
+	}
 }
 
 async function setBadge(connected: boolean): Promise<void> {
@@ -207,7 +229,7 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 			return { tab: snap };
 		}
 		case "removeTab":
-			await chrome.tabs.remove(msg.tabId);
+			await removeTab(msg.tabId);
 			return {};
 		case "activateTab": {
 			const tab = await chrome.tabs.get(msg.tabId);
@@ -254,7 +276,9 @@ async function connect(): Promise<void> {
 		reconnectDelay = RECONNECT_MIN_MS;
 		void setBadge(true);
 		void buildHello().then(hello => {
+			if (ws !== socket) return;
 			post(hello);
+			helloSocket = socket;
 			for (const result of unsentResults.splice(0)) post(result);
 		});
 		clearInterval(pingTimer ?? undefined);

@@ -245,8 +245,6 @@ const CHROME_DETACH_REPORT_MS = 1_000;
  * browser counts as gone and new tabs open by the other rules.
  */
 const OFFLINE_BROWSER_HOLD_MS = 60_000;
-/** How long after a connected browser fails a tab close the relay tries it once more. */
-const CLOSE_RETRY_MS = 5_000;
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -1780,10 +1778,11 @@ export class RelayBridge {
 	}
 
 	/**
-	 * Close a tab omp opened. One whose close fails is closed at that browser's next hello, unless the user closed
-	 * it meanwhile; a browser still connected (Chrome refused or never answered) also gets one retry before then.
+	 * Close a tab omp opened. The extension retries a close Chrome refuses before answering, so the caller holds
+	 * its relay lease through the retry. One whose close still fails (its browser offline, the socket dropping
+	 * mid-call, or Chrome refusing every try) is closed at that browser's next hello, unless the user closed it.
 	 */
-	async #closeTab(key: string, tabId: number, inst: ExtInstance, retried = false): Promise<void> {
+	async #closeTab(key: string, tabId: number, inst: ExtInstance): Promise<void> {
 		const tab = this.#tabs.get(key);
 		if (tab) tab.closing = true;
 		try {
@@ -1792,16 +1791,6 @@ export class RelayBridge {
 			// The tab stays open, so a later detach is Chrome's own again.
 			if (tab) tab.closing = false;
 			this.#closeOnHello.add(key);
-			if (!retried && inst.socket) {
-				const retry = setTimeout(() => {
-					// A hello took it already, or the next one will.
-					if (!this.#closeOnHello.has(key) || !inst.socket) return;
-					this.#closeOnHello.delete(key);
-					const open = this.#tabs.get(key);
-					if (open) void this.#closeTab(key, open.tabId, inst, true).catch(() => undefined);
-				}, CLOSE_RETRY_MS);
-				retry.unref?.();
-			}
 			throw err;
 		}
 	}
