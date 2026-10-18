@@ -570,21 +570,28 @@ const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
 /// characters on German, Polish, French and Nordic layouts, and alone it
 /// picks no app (⌥-click counts as a click).
 const SWITCH_MODIFIERS: u64 = 0x0010_0000 | 0x0004_0000;
+/// How soon after a click a reading still places it where the pointer is.
+const CLICK_PLACE: Duration = Duration::from_millis(30);
 
 /// What one reading sees of how the user could be switching apps. Typing,
 /// Shift and Caps Lock pick no app, so none of them appear here.
 #[derive(Clone, Copy)]
 struct SwitchSignals {
 	/// HID counters of `MOUSE_BUTTON_EVENTS`.
-	buttons:    [u32; 6],
+	buttons:     [u32; 6],
 	/// When a mouse button last went down or up.
-	last_click: Option<Instant>,
+	last_click:  Option<Instant>,
 	/// A switch modifier is held now.
-	chord:      bool,
+	chord:       bool,
 	/// The process that has the keyboard.
-	key_focus:  Option<ProcessSerialNumber>,
+	key_focus:   Option<ProcessSerialNumber>,
 	/// When the action last acted on its target ([`note_send`]).
-	last_send:  Option<Instant>,
+	last_send:   Option<Instant>,
+	/// The latest click, read within [`CLICK_PLACE`] of it, landed on the
+	/// user's own app, by the accessibility hit-test the pointer's position
+	/// gets: menus and Dock tiles over a window count as theirs, not the
+	/// window's.
+	in_user_app: bool,
 }
 
 impl SwitchSignals {
@@ -594,7 +601,14 @@ impl SwitchSignals {
 		flags: u64,
 		key_focus: Option<ProcessSerialNumber>,
 	) -> Self {
-		Self { buttons, last_click, chord: flags & SWITCH_MODIFIERS != 0, key_focus, last_send: None }
+		Self {
+			buttons,
+			last_click,
+			chord: flags & SWITCH_MODIFIERS != 0,
+			key_focus,
+			last_send: None,
+			in_user_app: false,
+		}
 	}
 
 	/// These signals after the action acted on its target at `at`.
@@ -602,7 +616,15 @@ impl SwitchSignals {
 		Self { last_send: Some(at), ..self }
 	}
 
-	fn read(spi: &ForegroundSpi, now: Instant) -> Self {
+	/// These signals with their latest click placed in the user's own app.
+	#[cfg(test)]
+	const fn in_user_app(self) -> Self {
+		Self { in_user_app: true, ..self }
+	}
+
+	/// Reads the signals at `now`; a click within [`CLICK_PLACE`] is placed by
+	/// hit-test, so one in the app of process `user` is told apart.
+	fn read(spi: &ForegroundSpi, now: Instant, user: Option<pid_t>) -> Self {
 		// SAFETY: HIDSystemState and these public CGEventType values are defined
 		// by CGEventSource.h / CGEventTypes.h; these are read-only queries.
 		let buttons = MOUSE_BUTTON_EVENTS.map(|event_type| unsafe {
@@ -627,8 +649,14 @@ impl SwitchSignals {
 			// which writes the 8-byte PSN and one status byte.
 			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 		});
-		let signals = Self::new(buttons, last_click, flags, key_focus);
-		match *LAST_SEND.lock() {
+		let in_user_app = user.is_some_and(|pid| {
+			last_click.is_some_and(|at| now.saturating_duration_since(at) <= CLICK_PLACE)
+				&& pointer_over(pid)
+		});
+		let mut signals = Self::new(buttons, last_click, flags, key_focus);
+		signals.in_user_app = in_user_app;
+		let last_send = *LAST_SEND.lock();
+		match last_send {
 			Some(at) => signals.sent_at(at),
 			None => signals,
 		}
@@ -638,9 +666,9 @@ impl SwitchSignals {
 /// How the user, rather than an app, changed the front app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserSwitch {
-	/// A hardware mouse button went down or up anywhere: on another app's
-	/// window, the Dock, the app switcher, a Spotlight result, or the user's
-	/// own app just before the target came forward.
+	/// A hardware mouse button went down or up outside the user's own app: on
+	/// the target's or another app's window, the Dock, the app switcher or a
+	/// Spotlight result.
 	Click,
 	/// ⌘ or ⌃ was held: ⌘-Tab, ⌘-H, Spaces, launcher hotkeys.
 	Chord,
@@ -684,7 +712,7 @@ impl UserSwitchWatch {
 			buttons: signals.buttons,
 			click: signals
 				.last_click
-				.filter(|at| now.saturating_duration_since(*at) <= lookback),
+				.filter(|at| !signals.in_user_app && now.saturating_duration_since(*at) <= lookback),
 			chord: None,
 			panel: None,
 			before: None,
@@ -696,7 +724,11 @@ impl UserSwitchWatch {
 	fn observe(&mut self, signals: SwitchSignals, front: ProcessSerialNumber, now: Instant) {
 		if signals.buttons != self.buttons {
 			self.buttons = signals.buttons;
-			self.click = Some(signals.last_click.unwrap_or(now));
+			// A click in the user's own app, menus included, picks no app: the
+			// target activating itself right after is still sent back.
+			if !signals.in_user_app {
+				self.click = Some(signals.last_click.unwrap_or(now));
+			}
 		}
 		self.observe_held(signals, front, now);
 	}
@@ -956,7 +988,7 @@ pub(super) fn with_background_watch<T>(
 		previous.psn,
 		target,
 		previous_key,
-		SwitchSignals::read(spi, now),
+		SwitchSignals::read(spi, now, previous.pid),
 		now,
 	));
 	let stopped = AtomicBool::new(false);
@@ -996,7 +1028,8 @@ pub(super) fn with_background_watch<T>(
 				while !stopped.load(Ordering::Acquire) {
 					let now = Instant::now();
 					if let Some(front) = front_process(spi.get_front) {
-						sample_switches(lease, front.psn, SwitchSignals::read(spi, now), now, visit);
+						let signals = SwitchSignals::read(spi, now, previous.pid);
+						sample_switches(lease, front.psn, signals, now, visit);
 					}
 					thread::sleep(SWITCH_SAMPLE);
 				}
@@ -1067,7 +1100,7 @@ impl GuardedDesktop for WindowServerDesktop<'_> {
 	}
 
 	fn signals(&self, now: Instant) -> SwitchSignals {
-		SwitchSignals::read(self.spi, now)
+		SwitchSignals::read(self.spi, now, self.previous.pid)
 	}
 
 	fn event_clock(&self) -> u64 {
@@ -2188,24 +2221,31 @@ mod tests {
 	}
 
 	#[test]
-	fn a_click_in_the_users_app_right_before_the_target_comes_forward_leaves_the_target_in_front() {
+	fn a_click_placed_in_the_users_app_does_not_let_the_target_keep_the_front() {
 		let t0 = Instant::now();
 		let idle = input(0, NO_MODIFIERS);
-		// The user clicks a link in their app that opens in the target, during
-		// the action: the target stays in front for good.
+		// The user clicks in their own app, a menu of it included, and the
+		// target activates itself right after: it is sent back.
+		let mut guard = lease_at(t0, None);
+		let own = clicked_at(t0 + ms(5)).in_user_app();
+		assert_eq!(guard.observe(PREVIOUS, Some(42), own, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, own, t0 + ms(100)), FocusDecision::Restore);
+		// The same click just before the action began.
+		let mut guard = BackgroundFocusLease::new(
+			PREVIOUS,
+			TARGET,
+			Some(42),
+			clicked_at(t0).in_user_app(),
+			t0 + ms(50),
+		);
+		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(60)), FocusDecision::Restore);
+		// A click outside the user's app, or one no reading placed in time,
+		// may be the one that picked the target: it stays in front.
 		let mut guard = lease_at(t0, None);
 		let click = clicked_at(t0 + ms(5));
 		assert_eq!(guard.observe(PREVIOUS, Some(42), click, t0 + ms(10)), FocusDecision::Observe);
 		assert_eq!(guard.observe(TARGET, None, click, t0 + ms(100)), FocusDecision::Disarm);
 		assert_eq!(guard.observe(TARGET, None, click, t0 + ms(1000)), FocusDecision::Disarm);
-		// The same click just before the action began.
-		let mut guard =
-			BackgroundFocusLease::new(PREVIOUS, TARGET, Some(42), clicked_at(t0), t0 + ms(50));
-		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(60)), FocusDecision::Disarm);
-		// Without the click, typing in the user's app still restores it.
-		let mut guard = lease_at(t0, None);
-		assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(10)), FocusDecision::Observe);
-		assert_eq!(guard.observe(TARGET, None, idle, t0 + ms(100)), FocusDecision::Restore);
 	}
 
 	#[test]
