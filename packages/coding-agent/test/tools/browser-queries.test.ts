@@ -3,6 +3,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -72,7 +73,12 @@ beforeAll(async () => {
 		<button><div>Next</div><div>step</div></button>
 		<button><span aria-label="Close dialog">×</span></button>
 		<input type="submit">
-		<input placeholder="Email">`;
+		<input placeholder="Email">
+		<input aria-placeholder="Search records">
+		<button><span style="visibility:hidden">x</span>Keep</button>
+		<button><span style="visibility:hidden">Hid<b style="visibility:visible">Shown</b></span></button>
+		<button>Pick <select><option>Red</option><option selected>Blue</option></select></button>
+		<label for="quantity">Size <input value="10"></label><input id="quantity">`;
 	await invoke({ action: "open", name: namesTab, url: `data:text/html,${encodeURIComponent(namesHtml)}` });
 });
 
@@ -105,6 +111,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		["a child's aria-label replaces its text", "button", "Close dialog"],
 		["a submit input has no value", "button", "Submit"],
 		["a textbox is named by its placeholder", "textbox", "Email"],
+		["a textbox is named by its aria-placeholder", "textbox", "Search records"],
+		["visibility: hidden text is left out", "button", "Keep"],
+		["visible text inside a visibility: hidden parent stays", "button", "Shown"],
+		["a nested select contributes its selected option", "button", "Pick Blue"],
+		["a label contributes another field's value", "textbox", "Size 10"],
 	])("matches role/ exact names to the name observe() shows when %s", async (_, role, elementName) => {
 		const result = (await invoke({
 			action: "run",
@@ -113,6 +124,26 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 			return observed && await tab.count(\`role/${role}[name="\${observed.name}" exact]\`);`,
 		})) as { details?: { value?: number } };
 		expect(result.details?.value).toBe(1);
+	});
+
+	it("matches role/ exact names to every name the Tern page kit's observe() shows", async () => {
+		const result = (await invoke({
+			action: "run",
+			name: namesTab,
+			// The Tern kit is plain page script embedding the same role/ handler, so it runs on this page too.
+			code: `await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+			return await tab.evaluate(() => {
+				const kit = globalThis.__ompTernKit;
+				return kit.observe({}).elements
+					.filter(entry => entry.name && ["button", "textbox"].includes(entry.role))
+					.map(entry => [entry.name, kit.count({ engine: "role", query: entry.role + '[name="' + entry.name + '" exact]' })]);
+			});`,
+		})) as { details?: { value?: [string, number][] } };
+		const named = result.details?.value ?? [];
+		expect(named.map(([observed]) => observed)).toEqual(
+			expect.arrayContaining(["Cart", "Settings", "Keep", "Shown", "Pick Blue", "Size 10", "Search records"]),
+		);
+		expect(named.filter(([, matched]) => matched !== 1)).toEqual([]);
 	});
 
 	it("collapses whitespace in the queried role/ name and skips a title that is not the button's name", async () => {

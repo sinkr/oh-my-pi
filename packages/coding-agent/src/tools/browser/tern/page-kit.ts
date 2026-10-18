@@ -481,12 +481,13 @@ const hiddenForA11y = el => {
 	return style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse";
 };
 // Text an element contributes as name-from-content: text nodes, embedded image alts, nested labels.
+// Text under visibility: hidden is left out, as Chromium's accessibility tree leaves it out.
 const contentText = (el, skip) => {
 	let out = "";
-	const walk = node => {
+	const walk = (node, visibility) => {
 		for (let child = node.firstChild; child; child = child.nextSibling) {
 			if (child.nodeType === Node.TEXT_NODE) {
-				out += child.nodeValue || "";
+				if (visibility === "visible") out += child.nodeValue || "";
 				continue;
 			}
 			if (child.nodeType !== Node.ELEMENT_NODE || child === skip || SKIP_TAGS.has(child.localName)) continue;
@@ -495,18 +496,19 @@ const contentText = (el, skip) => {
 			if (style.display === "none") continue;
 			const block = style.display !== "inline" && style.display !== "contents";
 			if (block) out += " ";
+			const shown = style.visibility === "visible";
 			const label = child.getAttribute("aria-label");
-			if (label) out += label;
-			else if (child.localName === "img") out += child.getAttribute("alt") || "";
+			if (label) out += shown ? label : "";
+			else if (child.localName === "img") out += shown ? child.getAttribute("alt") || "" : "";
 			else if (child.localName === "input" || child.localName === "select" || child.localName === "textarea") {
-				out += child.localName === "select" ? (child.selectedOptions[0] ? child.selectedOptions[0].text : "") : child.value || "";
-			} else if (child.shadowRoot) walk(child.shadowRoot);
-			else walk(child);
+				if (shown) out += child.localName === "select" ? (child.selectedOptions[0] ? child.selectedOptions[0].text : "") : child.value || "";
+			} else if (child.shadowRoot) walk(child.shadowRoot, style.visibility);
+			else walk(child, style.visibility);
 			if (block) out += " ";
 		}
 	};
-	if (el.shadowRoot) walk(el.shadowRoot);
-	else walk(el);
+	if (el.shadowRoot) walk(el.shadowRoot, "visible");
+	else walk(el, "visible");
 	return normalizeSpace(out);
 };
 const accessibleName = (el, role) => {
