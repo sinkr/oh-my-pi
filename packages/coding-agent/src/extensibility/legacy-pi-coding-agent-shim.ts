@@ -43,7 +43,7 @@ import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, Settings } from "../config/settings";
-import { cfgShellPath } from "../exec/settings";
+import { cfgLegacyShellCommandPrefix, cfgShellPath } from "../exec/settings";
 import { EditTool } from "../edit";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
@@ -815,7 +815,7 @@ function withLegacyShellAccessors(settings: Settings): Settings & LegacyShellAcc
 			const shellPath = cfgShellPath.get(settings);
 			return shellPath ? expandTilde(shellPath) : shellPath;
 		},
-		getShellCommandPrefix: () => undefined,
+		getShellCommandPrefix: () => cfgLegacyShellCommandPrefix.get(settings),
 	});
 }
 

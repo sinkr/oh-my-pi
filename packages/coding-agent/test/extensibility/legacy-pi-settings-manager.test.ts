@@ -45,7 +45,10 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 	it("reads arbitrary extension-namespaced keys from the global and project layers", async () => {
 		// Keys the typed, schema-bound `get(path)` cannot reach — an extension's own block.
-		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ piVim: { mode: "normal" } }, null, 2));
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({ piVim: { mode: "normal" }, shellCommandPrefix: "export GLOBAL=1" }, null, 2),
+		);
 		fs.mkdirSync(path.join(projectDir, ".claude"), { recursive: true });
 		await Bun.write(path.join(projectDir, ".claude", "settings.json"), JSON.stringify({ piVim: { leader: "," } }));
 
@@ -54,6 +57,7 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 		expect(s.getGlobalSettings().piVim).toEqual({ mode: "normal" });
 		expect(s.getProjectSettings().piVim).toEqual({ leader: "," });
+		expect(s.getShellCommandPrefix()).toBe("export GLOBAL=1");
 	});
 
 	it("returns a deep clone so callers cannot mutate internal state", async () => {
@@ -109,11 +113,20 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 		fs.mkdirSync(sdkAgentDir, { recursive: true });
 		await Bun.write(
 			path.join(agentDir, "config.yml"),
-			YAML.stringify({ piVim: { session: "default" }, shellPath: "/bin/sh" }),
+			YAML.stringify({ piVim: { session: "default" }, shellPath: "/bin/sh", shellCommandPrefix: "export OTHER=1" }),
 		);
 		await Bun.write(
 			path.join(sdkAgentDir, "config.yml"),
-			YAML.stringify({ piVim: { session: "sdk" }, shellPath: "~/.local/bin/bash" }),
+			YAML.stringify({
+				piVim: { session: "sdk" },
+				shellPath: "~/.local/bin/bash",
+				shellCommandPrefix: "export GLOBAL=1",
+			}),
+		);
+		fs.mkdirSync(path.join(projectDir, ".claude"), { recursive: true });
+		await Bun.write(
+			path.join(projectDir, ".claude", "settings.json"),
+			JSON.stringify({ shellCommandPrefix: "export PROJECT=1" }),
 		);
 
 		// Construct the explicit SDK instance first, then the same-cwd singleton.
@@ -158,7 +171,10 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 			expect(observed).toBe(sdkSettings);
 			expect(observed?.getGlobalSettings().piVim).toEqual({ session: "sdk" });
 			// Legacy Pi expands `~`; a literal tilde path cannot be spawned.
-			expect(shellOptions).toEqual({ shellPath: `${os.homedir()}/.local/bin/bash`, commandPrefix: undefined });
+			expect(shellOptions).toEqual({
+				shellPath: `${os.homedir()}/.local/bin/bash`,
+				commandPrefix: "export PROJECT=1",
+			});
 		} finally {
 			authStorage.close();
 		}
