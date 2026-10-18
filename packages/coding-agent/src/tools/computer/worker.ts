@@ -40,10 +40,13 @@ import {
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
+	type ComputerEscapeScope,
 	type ComputerScreenshot,
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
+	ESCAPE_AFTER_CALL_MESSAGE,
+	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
 	SCREEN_LOCKED_CAPTURE_NOTE,
 	screenStateNotice,
@@ -56,6 +59,8 @@ export interface NativeDesktopSession {
 	readonly capabilities: DesktopCapabilities;
 	/** Lock and display-sleep state, read without waiting behind queued native work. */
 	readonly screenState: DesktopScreenState;
+	/** Physical-Escape stops of takeover input under the session's key; host cancels never count. */
+	readonly escapeStops: number;
 	listDisplays(): Promise<DesktopDisplay[]>;
 	listWindows(): Promise<DesktopWindow[]>;
 	capture(target: string, caps?: { maxWidth?: number; maxHeight?: number } | null): Promise<DesktopCapture>;
@@ -105,6 +110,8 @@ export interface NativeDesktopSession {
 	axSelectText(ref: string, text: string, opts?: AxSelectTextOptions | null): Promise<AxTextSelection>;
 	axFocus(ref: string): Promise<void>;
 	axClick(ref: string, opts?: PointerOptions | null): Promise<void>;
+	axType(ref: string, text: string, opts?: PointerOptions | null): Promise<void>;
+	axKeyChord(ref: string, keys: string[], opts?: PointerOptions | null): Promise<void>;
 	close(): Promise<void>;
 }
 
@@ -133,11 +140,15 @@ type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; tru
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
 interface ActiveRun {
 	id: string;
+	/** Escape stops the user acknowledged; any more stop the run. */
+	acknowledgedEscapeStops: number;
 	ac: AbortController;
 	signal: AbortSignal;
 	pendingTools: Map<string, PendingTool>;
 	/** The agent turn the run belongs to, if any; a resume while it starts carries it into the turn that went on. */
 	displayTurn?: number;
+	/** The stop the user's Escape set on this run, reported as its result. */
+	escapeStop?: ToolError;
 }
 
 interface ComputerRunContext {
@@ -205,13 +216,20 @@ function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): Po
 	return mapped;
 }
 
-function chordKeys(chord: string | string[]): string[] {
-	return typeof chord === "string"
-		? chord
-				.split("+")
-				.map(key => key.trim())
-				.filter(Boolean)
-		: chord;
+function chordKeys(chord: unknown): string[] {
+	const keys =
+		typeof chord === "string"
+			? chord
+					.split("+")
+					.map(key => key.trim())
+					.filter(Boolean)
+			: chord;
+	if (!isStringList(keys) || keys.length === 0) {
+		throw new ToolError(
+			`press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got ${describeArgument(chord)}`,
+		);
+	}
+	return keys;
 }
 
 /** Keys and menu titles share one rule: an array of strings, none blank. */
@@ -428,10 +446,23 @@ class El {
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action));
 	}
 
-	async press(): Promise<void> {
+	/** Without a chord, the element's native press action; with one, that chord typed into the element. */
+	async press(chord?: string | string[], options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
+		if (chord === undefined) {
+			await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
+			return;
+		}
+		const keys = chordKeys(chord);
+		await nativeCall(context.signal, () => this.#session.axKeyChord(this.ref, keys, pointerOptions(options)));
+	}
+
+	async type(text: string, options?: InputOptions): Promise<void> {
+		const context = this.#getContext();
+		guardRun(context, "type");
+		validateString(text, "type(text)");
+		await nativeCall(context.signal, () => this.#session.axType(this.ref, text, pointerOptions(options)));
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
@@ -561,8 +592,16 @@ class ElRef implements PromiseLike<El> {
 		await (await this.#resolve()).perform(action);
 	}
 
-	async press(): Promise<void> {
-		await (await this.#resolve()).press();
+	async press(chord?: string | string[], options?: InputOptions): Promise<void> {
+		guardRun(this.#getContext(), "press");
+		if (chord !== undefined) chordKeys(chord);
+		await (await this.#resolve()).press(chord, options);
+	}
+
+	async type(text: string, options?: InputOptions): Promise<void> {
+		guardRun(this.#getContext(), "type");
+		validateString(text, "type(text)");
+		await (await this.#resolve()).type(text, options);
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
@@ -669,11 +708,6 @@ class Win {
 		const context = this.#getContext();
 		guardRun(context, "press");
 		const keys = chordKeys(chord);
-		if (!isStringList(keys) || keys.length === 0) {
-			throw new ToolError(
-				`press(chord) requires a key chord such as "cmd+shift+p" or ["cmd", "shift", "p"], got ${describeArgument(chord)}`,
-			);
-		}
 		await nativeCall(context.signal, () => this.#session.keyChord(this.id, keys, pointerOptions(options)));
 	}
 
@@ -782,6 +816,10 @@ export class ComputerWorkerCore {
 	#sessionInit?: Promise<NativeDesktopSession>;
 	#runtime?: JsRuntime;
 	#active: ActiveRun | null = null;
+	/** `#session` as the desktop scope sees it, checking for the user's Escape on every access. */
+	#guarded?: NativeDesktopSession;
+	/** Settles when this worker's latest `clipboard.write` finished. */
+	#clipboardWrite: Promise<void> = Promise.resolve();
 	/**
 	 * Per-run context, carried through AsyncLocalStorage so async work leaked
 	 * from an ended run (timers, dangling promises) keeps that run's aborted
@@ -836,7 +874,8 @@ export class ComputerWorkerCore {
 		}
 	}
 
-	async #ensureSession(snapshot: ComputerSessionSnapshot): Promise<NativeDesktopSession> {
+	/** Returns the raw session; the desktop scope gets `#guarded`, which checks for the user's Escape on every access. */
+	async #ensureSession(snapshot: ComputerSessionSnapshot, escape: ComputerEscapeScope): Promise<NativeDesktopSession> {
 		if (this.#session) return this.#session;
 		// Single-flight: share one creation promise so a run and a capabilities
 		// request racing on a cold worker cannot each build (and leak) a session.
@@ -846,8 +885,10 @@ export class ComputerWorkerCore {
 				// addon; normal CLI startup and selector pings never execute desktop code.
 				const createSession =
 					this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
-				const session = await createSession({ display: snapshot.display });
+				const session = await createSession({ display: snapshot.display, escapeStopKey: escape.key });
+				const guarded = this.#guard(session);
 				this.#session = session;
+				this.#guarded = guarded;
 				return session;
 			} catch (error) {
 				throw nativeError(error);
@@ -893,6 +934,7 @@ export class ComputerWorkerCore {
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
 		const active: ActiveRun = {
 			id: message.id,
+			acknowledgedEscapeStops: message.escape.acknowledged,
 			ac,
 			signal,
 			pendingTools: new Map(),
@@ -924,8 +966,11 @@ export class ComputerWorkerCore {
 		let completed = false;
 		try {
 			throwIfAborted(signal);
-			const session = await this.#ensureSession(message.session);
+			await this.#ensureSession(message.session, message.escape);
+			const session = this.#guarded!;
 			throwIfAborted(signal);
+			// An Escape after the host's check still ends the run before the script starts.
+			this.#checkEscape();
 			const { displayTurn } = active;
 			if (displayTurn !== undefined && displayTurn > this.#releasedTurn) session.holdDisplayUntilReleased();
 			const runtime = this.#ensureRuntime(message.session);
@@ -949,8 +994,10 @@ export class ComputerWorkerCore {
 			});
 			const { promise: cancelRejection, reject: rejectCancel } = Promise.withResolvers<never>();
 			const onCancel = (): void => {
+				// The user's Escape ends the run with its own message, not as a bare abort, so the host reports it
+				// even when the user's next message already lifted the stop.
 				const abortError =
-					signal.reason instanceof ToolAbortError
+					signal.reason === active.escapeStop || signal.reason instanceof ToolAbortError
 						? signal.reason
 						: new ToolAbortError(undefined, { cause: signal.reason });
 				rejectCancel(
@@ -1003,7 +1050,7 @@ export class ComputerWorkerCore {
 		if (completed) {
 			let capabilities: DesktopCapabilities;
 			try {
-				capabilities = (await this.#ensureSession(message.session)).capabilities;
+				capabilities = (await this.#ensureSession(message.session, message.escape)).capabilities;
 			} catch (error) {
 				this.#transport.send({
 					type: "result",
@@ -1020,6 +1067,49 @@ export class ComputerWorkerCore {
 				payload: { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots, capabilities },
 			});
 		}
+	}
+
+	/**
+	 * The user's physical Escape ends the active run for good: the run is
+	 * aborted and this access refused, so a script that catches the cancelled
+	 * operation sends nothing more.
+	 */
+	#checkEscape(cause?: unknown, notice = ESCAPE_STOPPED_MESSAGE): void {
+		const active = this.#active;
+		if (!active || !this.#session || this.#session.escapeStops <= active.acknowledgedEscapeStops) return;
+		if (active.escapeStop) throw active.escapeStop;
+		// What the stopped operation reported (a key left held, the user's app not handed back) stays first.
+		const stopped = new ToolError(cause === undefined ? notice : `${nativeError(cause).message}\n\n${notice}`);
+		active.escapeStop = stopped;
+		active.ac.abort(stopped);
+		throw stopped;
+	}
+
+	/** Checks for the user's Escape before every access to the session and again when each native promise settles. */
+	#guard(session: NativeDesktopSession): NativeDesktopSession {
+		return new Proxy(session, {
+			get: (target, property) => {
+				this.#checkEscape();
+				const value = Reflect.get(target, property, target);
+				if (typeof value !== "function") return value;
+				return (...args: unknown[]): unknown => {
+					this.#checkEscape();
+					const result = Reflect.apply(value, target, args);
+					if (!(result instanceof Promise)) return result;
+					return result.then(
+						settled => {
+							// The call finished and its input went out; the stop ends the run after it.
+							this.#checkEscape(undefined, ESCAPE_AFTER_CALL_MESSAGE);
+							return settled;
+						},
+						error => {
+							this.#checkEscape(error);
+							throw error;
+						},
+					);
+				};
+			},
+		});
 	}
 
 	/**
@@ -1054,7 +1144,7 @@ export class ComputerWorkerCore {
 			return;
 		}
 		try {
-			const session = await this.#ensureSession(message.session);
+			const session = await this.#ensureSession(message.session, message.escape);
 			this.#transport.send({ type: "capabilities", id: message.id, ok: true, capabilities: session.capabilities });
 		} catch (error) {
 			this.#transport.send({
@@ -1077,6 +1167,8 @@ export class ComputerWorkerCore {
 				output.pushDisplay(display);
 			},
 			callTool: (name, args) => {
+				// A bridged tool acts outside the desktop session, so the user's Escape is checked here too.
+				this.#checkEscape();
 				throwIfAborted(active.signal);
 				return this.#callTool(active, name, args);
 			},
@@ -1108,9 +1200,11 @@ export class ComputerWorkerCore {
 		else pending.reject(replyError(reply.error));
 	}
 
+	/** Every desktop facade operation starts here, so the user's Escape stops clipboard and other non-native work too. */
 	#currentRunContext = (): ComputerRunContext => {
 		const context = this.#runContexts.getStore();
 		if (!context) throw new ToolError("no active computer run");
+		this.#checkEscape();
 		return context;
 	};
 
@@ -1299,7 +1393,18 @@ export class ComputerWorkerCore {
 					// Clipboard access is part of the native desktop surface and remains
 					// outside the worker's readiness-only import graph.
 					const { copyToClipboard } = await import("../../utils/clipboard");
-					await copyToClipboard(text);
+					// `copyToClipboard` queues behind the previous write; wait out this worker's own writes
+					// first, so the Escape check below is the last step before this one starts.
+					const previous = this.#clipboardWrite;
+					const { promise, resolve } = Promise.withResolvers<void>();
+					this.#clipboardWrite = promise;
+					try {
+						await previous;
+						guardRun(getContext(), "clipboard.write");
+						await copyToClipboard(text);
+					} finally {
+						resolve();
+					}
 					throwIfAborted(context.signal);
 				},
 			},
@@ -1316,6 +1421,7 @@ export class ComputerWorkerCore {
 			// Closing is best-effort; the worker is exiting and has no request to report this against.
 		} finally {
 			this.#session = undefined;
+			this.#guarded = undefined;
 			this.#sessionInit = undefined;
 			this.#unsubscribe();
 			this.#transport.send({ type: "closed" });

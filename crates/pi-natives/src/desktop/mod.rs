@@ -22,7 +22,7 @@ use std::{
 	panic::AssertUnwindSafe,
 	sync::{
 		Arc,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicU32, AtomicUsize, Ordering},
 	},
 	thread::{self, JoinHandle},
 	time::{Duration, Instant},
@@ -30,7 +30,10 @@ use std::{
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
 use ax::{AxRegistry, register_node};
-use backend::{Backend, DeliveryMode, DisplayAwakeHold, MouseButton, PointerEvent};
+use backend::{
+	Backend, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput, KeyboardFocus,
+	MouseButton, PointerEvent, is_raise_action,
+};
 use control::{CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError, ErrorCode};
 use frame::{FrameGeometry, apply_capture_caps, encode_png};
@@ -341,6 +344,12 @@ enum Request {
 		options:   ParsedPointerOptions,
 		reply:     Reply,
 	},
+	AxInput {
+		reference: String,
+		input:     ElementInput,
+		takeover:  Option<bool>,
+		reply:     Reply,
+	},
 	Close {
 		reply: Reply,
 	},
@@ -382,6 +391,7 @@ impl Request {
 			| Self::AxSelectText { reply, .. }
 			| Self::AxFocus { reply, .. }
 			| Self::AxClick { reply, .. }
+			| Self::AxInput { reply, .. }
 			| Self::Close { reply } => reply,
 		};
 		reply.send(result).is_ok()
@@ -404,6 +414,7 @@ impl Request {
 				| Self::AxSelectText { .. }
 				| Self::AxFocus { .. }
 				| Self::AxClick { .. }
+				| Self::AxInput { .. }
 				| Self::OpenApplication { .. }
 				| Self::MenuItems { .. }
 				| Self::MenuSelect { .. }
@@ -411,6 +422,57 @@ impl Request {
 				| Self::HoldKeys { .. }
 				| Self::HoldMouse { .. }
 		)
+	}
+
+	/// Whether this mutation takes over the user's own input or foreground,
+	/// which arms the physical-Escape stop: `takeover: true` delivery, input
+	/// to a desktop or display target (it drives the user's real pointer and
+	/// keyboard), an explicit raise, and an activating launch. Held control
+	/// armed the stop when it was granted, so every operation under it keeps
+	/// the stop.
+	fn takes_over(&self) -> bool {
+		let (target, takeover) = match self {
+			Self::HoldKeys { target, takeover, .. }
+			| Self::HoldMouse { target, takeover, .. }
+			| Self::MoveMouse { target, takeover, .. }
+			| Self::Scroll { target, takeover, .. }
+			| Self::TypeText { target, takeover, .. }
+			| Self::KeyChord { target, takeover, .. } => (Some(target), *takeover),
+			Self::Click { target, options, .. } | Self::Drag { target, options, .. } => {
+				(Some(target), options.takeover)
+			},
+			Self::AxClick { options, .. } => (None, options.takeover),
+			Self::AxInput { takeover, .. } => (None, *takeover),
+			Self::RaiseWindow { .. } => return true,
+			Self::OpenApplication { options, .. } => return options.activate.unwrap_or(false),
+			Self::AxPerform { action, .. } => return is_raise_action(action),
+			// Background-only mutations and reads: listed by name so a new
+			// request variant must decide whether it arms the stop.
+			Self::MenuItems { .. }
+			| Self::MenuSelect { .. }
+			| Self::BringToCurrentSpace { .. }
+			| Self::AxSetValue { .. }
+			| Self::AxSelectText { .. }
+			| Self::AxFocus { .. }
+			| Self::Capabilities { .. }
+			| Self::ListDisplays { .. }
+			| Self::ListWindows { .. }
+			| Self::Capture { .. }
+			| Self::CaptureRegion { .. }
+			| Self::Observe { .. }
+			| Self::ListApplications { .. }
+			| Self::AxSnapshot { .. }
+			| Self::AxQuery { .. }
+			| Self::AxElementAt { .. }
+			| Self::AxFocused { .. }
+			| Self::AxNode { .. }
+			| Self::AxAttributes { .. }
+			| Self::AxChildren { .. }
+			| Self::AxParent { .. }
+			| Self::Close { .. } => return false,
+		};
+		target.is_some_and(|target| !matches!(target, Target::Window(_)))
+			|| DeliveryMode::from_takeover(takeover) == DeliveryMode::Foreground
 	}
 
 	const fn frame_target(&self) -> Option<&Target> {
@@ -454,6 +516,7 @@ impl Request {
 			| Self::AxPerform { reference, .. }
 			| Self::AxSetValue { reference, .. }
 			| Self::AxSelectText { reference, .. }
+			| Self::AxInput { reference, .. }
 			| Self::AxFocus { reference, .. }
 			| Self::AxClick { reference, .. } => Some(reference),
 			_ => None,
@@ -806,7 +869,7 @@ impl Worker {
 		let _scope = token.enter();
 		let lease = request
 			.is_mutation()
-			.then(|| InputLease::acquire(token))
+			.then(|| InputLease::acquire(token, request.takes_over()))
 			.transpose()?;
 		token.check()?;
 		// A full capture replaces coordinates only if it completes in its
@@ -1243,7 +1306,77 @@ impl Worker {
 				)?;
 				Ok(Response::Unit)
 			},
+			Request::AxInput { reference, input, takeover, .. } => {
+				let h = self.registry.resolve(reference)?;
+				let windows = self.backend()?.windows()?;
+				let target = Target::Window(self.ax()?.window_id(&h, &windows)?);
+				let mode = DeliveryMode::from_takeover(*takeover);
+				match self
+					.backend()?
+					.element_input(&target, &h, input, mode, token)?
+				{
+					ElementDelivery::Delivered => Ok(Response::Unit),
+					ElementDelivery::Unfocused(focus) => {
+						Err(self.element_focus_refusal(reference, focus, mode))
+					},
+				}
+			},
 			Request::Close { .. } => Ok(Response::Unit),
+		}
+	}
+}
+
+impl Worker {
+	/// The error for keys addressed to `reference` that were never sent
+	/// because the element did not take keyboard focus: where focus is now,
+	/// with the focused element's `ax()` line and a ref for it.
+	fn element_focus_refusal(
+		&mut self,
+		reference: &str,
+		focus: KeyboardFocus,
+		mode: DeliveryMode,
+	) -> DesktopError {
+		let window = match focus.window.as_deref() {
+			None => "an unidentified window".to_owned(),
+			Some(id) => {
+				let title = self
+					.backend()
+					.and_then(|backend| backend.windows())
+					.ok()
+					.and_then(|windows| windows.into_iter().find(|window| window.id == id))
+					.map(|window| window.title);
+				match title {
+					Some(title) => format!("window {id} ({title:?})"),
+					None => format!("window {id}"),
+				}
+			},
+		};
+		let target = focus
+			.window
+			.or_else(|| self.registry.target(reference).ok())
+			.unwrap_or_else(|| "desktop".to_owned());
+		let element = match focus.element {
+			None => "no element".to_owned(),
+			Some(handle) => {
+				let (backend, registry) = (&mut self.backend, &mut self.registry);
+				backend
+					.as_mut()
+					.ok()
+					.and_then(|backend| backend.ax())
+					.and_then(|ax| ax::element_line(ax, registry, &target, handle).ok())
+					.unwrap_or_else(|| "an element that could not be read".to_owned())
+			},
+		};
+		let message = format!(
+			"{reference} did not take keyboard focus, so nothing was sent; its application's \
+			 keyboard focus is in {window}, on {element}. Re-read with win.ax() or win.observe() \
+			 before retrying"
+		);
+		match mode {
+			DeliveryMode::Background => {
+				DesktopError::background_unavailable(format!("{message}, or retry with takeover:true"))
+			},
+			DeliveryMode::Foreground => DesktopError::input_failed(message),
 		}
 	}
 }
@@ -1292,11 +1425,15 @@ struct SessionCore {
 	operation_timeout: Duration,
 }
 impl SessionCore {
-	fn new(selector: DisplaySelector) -> Arc<Self> {
-		Self::with_operation_timeout(selector, OPERATION_TIMEOUT)
+	fn new(selector: DisplaySelector, escape_stops: Arc<AtomicU32>) -> Arc<Self> {
+		Self::with_operation_timeout(selector, escape_stops, OPERATION_TIMEOUT)
 	}
 
-	fn with_operation_timeout(selector: DisplaySelector, operation_timeout: Duration) -> Arc<Self> {
+	fn with_operation_timeout(
+		selector: DisplaySelector,
+		escape_stops: Arc<AtomicU32>,
+		operation_timeout: Duration,
+	) -> Arc<Self> {
 		Arc::new(Self {
 			selector,
 			lifecycle: Mutex::new(Lifecycle {
@@ -1308,7 +1445,7 @@ impl SessionCore {
 			capabilities: Arc::default(),
 			display_awake: Arc::default(),
 			in_flight: AtomicUsize::new(0),
-			cancellation: CancellationSource::default(),
+			cancellation: CancellationSource::counting_escapes(escape_stops),
 			operation_timeout,
 		})
 	}
@@ -1419,6 +1556,19 @@ fn response_unit(response: Response) -> CoreResult<()> {
 	}
 }
 
+/// Physical-Escape stops counted under `key` by every desktop session created
+/// with it, including closed ones, until the key is forgotten.
+#[napi]
+pub fn desktop_escape_stops(key: String) -> u32 {
+	control::escape_stops(&key)
+}
+
+/// Drops the stop count kept under `key` once no session will use it again.
+#[napi]
+pub fn forget_desktop_escape_stops(key: String) {
+	control::forget_escape_stops(&key);
+}
+
 /// Persistent, serialized native desktop capture/input/accessibility session.
 #[napi]
 pub struct DesktopSession {
@@ -1436,7 +1586,9 @@ impl Drop for DesktopSession {
 impl DesktopSession {
 	#[napi(constructor)]
 	pub fn new(options: Option<DesktopSessionOptions>) -> Result<Self> {
-		Ok(Self { core: SessionCore::new(DisplaySelector::parse(options.and_then(|o| o.display))) })
+		let options = options.unwrap_or_default();
+		let escape_stops = control::escape_stop_counter(options.escape_stop_key.as_deref());
+		Ok(Self { core: SessionCore::new(DisplaySelector::parse(options.display), escape_stops) })
 	}
 
 	/// Asks the worker when it is idle, so permissions are read live. While
@@ -1486,6 +1638,14 @@ impl DesktopSession {
 	#[napi]
 	pub fn release_display_awake(&self) {
 		self.core.display_awake.release_turn();
+	}
+
+	/// How many times the user's physical Escape has stopped takeover input in
+	/// this session, or under its `escapeStopKey`. Host cancels, retirement and
+	/// release never count, so a rise tells the host the user stopped the work.
+	#[napi(getter)]
+	pub fn escape_stops(&self) -> u32 {
+		self.core.cancellation.escape_stops()
 	}
 
 	#[napi]
@@ -2020,6 +2180,46 @@ impl DesktopSession {
 		}))
 	}
 
+	/// Types `text` into the element: native text fields take it by AX
+	/// insertion, other elements as keystrokes once they hold keyboard focus.
+	#[napi]
+	pub fn ax_type(
+		&self,
+		reference: String,
+		text: String,
+		opts: Option<PointerOptions>,
+	) -> Result<task::Promise<()>> {
+		let takeover = ParsedPointerOptions::parse(opts)
+			.map_err(napi::Error::from)?
+			.takeover;
+		Ok(self.unit("desktop.axType", move |reply| Request::AxInput {
+			reference,
+			input: ElementInput::Text(text),
+			takeover,
+			reply,
+		}))
+	}
+
+	/// Presses a key chord in the element once it holds keyboard focus.
+	#[napi]
+	pub fn ax_key_chord(
+		&self,
+		reference: String,
+		keys: Vec<String>,
+		opts: Option<PointerOptions>,
+	) -> Result<task::Promise<()>> {
+		let keys = parse_keys(&keys).map_err(napi::Error::from)?;
+		let takeover = ParsedPointerOptions::parse(opts)
+			.map_err(napi::Error::from)?
+			.takeover;
+		Ok(self.unit("desktop.axKeyChord", move |reply| Request::AxInput {
+			reference,
+			input: ElementInput::Chord(keys),
+			takeover,
+			reply,
+		}))
+	}
+
 	/// Immediately cancel operations submitted before this call. Later
 	/// operations may proceed.
 	#[napi]
@@ -2509,6 +2709,25 @@ mod capture_tests {
 			unreachable!("hold_keys not exercised")
 		}
 
+		/// The element never takes focus, which stays on element 7 of the
+		/// window.
+		fn element_input(
+			&mut self,
+			_: &Target,
+			h: &AxHandle,
+			_: &ElementInput,
+			_: DeliveryMode,
+			_: &OperationToken,
+		) -> CoreResult<ElementDelivery> {
+			if let Some(tree) = &self.tree {
+				tree.lock().element(h)?;
+			}
+			Ok(ElementDelivery::Unfocused(KeyboardFocus {
+				window:  Some(self.window.id.clone()),
+				element: Some(AxHandle::Test(7)),
+			}))
+		}
+
 		fn menu_items(
 			&mut self,
 			_: &DesktopWindow,
@@ -2787,7 +3006,11 @@ mod capture_tests {
 	/// A session serving `backend` with an hour's grace, so while a request
 	/// hangs only the session giving up can release the display.
 	fn session_serving(backend: FakeWaylandBackend) -> Arc<SessionCore> {
-		let core = SessionCore::with_operation_timeout(DisplaySelector::Active, HUNG_CALL_TIMEOUT);
+		let core = SessionCore::with_operation_timeout(
+			DisplaySelector::Active,
+			Arc::default(),
+			HUNG_CALL_TIMEOUT,
+		);
 		let display_awake = Arc::clone(&core.display_awake);
 		let (tx, rx) = flume::unbounded();
 		let (done_tx, done) = flume::bounded(1);
@@ -3147,7 +3370,7 @@ mod capture_tests {
 		}
 		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
 		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
-		let requests: [fn(Reply) -> Request; 9] = [
+		let requests: [fn(Reply) -> Request; 10] = [
 			|reply| Request::AxNode { reference: e2(), reply },
 			|reply| Request::AxAttributes { reference: e2(), reply },
 			|reply| Request::AxChildren { reference: e2(), reply },
@@ -3157,6 +3380,12 @@ mod capture_tests {
 			|reply| Request::AxSelectText {
 				reference: e2(),
 				request: text_range::TextSelectRequest { text: "Go".to_string(), ..Default::default() },
+				reply,
+			},
+			|reply| Request::AxInput {
+				reference: e2(),
+				input: ElementInput::Text("Stop".to_owned()),
+				takeover: None,
 				reply,
 			},
 			|reply| Request::AxFocus { reference: e2(), reply },
@@ -3249,7 +3478,7 @@ mod capture_tests {
 		let (other, seen) = (source.clone(), Arc::clone(&free));
 		let mut backend = FakeWaylandBackend::new();
 		backend.on_menu_read = Some(Box::new(move || {
-			seen.store(InputLease::acquire(&other.token()).is_ok(), Ordering::SeqCst);
+			seen.store(InputLease::acquire(&other.token(), false).is_ok(), Ordering::SeqCst);
 		}));
 		// The worker holds the ownership tests' lock, which the grant needs.
 		let mut worker = worker_with(backend);
@@ -3269,7 +3498,7 @@ mod capture_tests {
 		let free = Arc::new(AtomicBool::new(false));
 		let (other, seen) = (source.clone(), Arc::clone(&free));
 		tree.lock().on_call = Some(Box::new(move |_| {
-			seen.store(InputLease::acquire(&other.token()).is_ok(), Ordering::SeqCst);
+			seen.store(InputLease::acquire(&other.token(), false).is_ok(), Ordering::SeqCst);
 		}));
 		let error = call(&mut worker, press_request("e2"), &source)
 			.err()
@@ -3294,6 +3523,45 @@ mod capture_tests {
 		assert_eq!(tree.lock().reads, reads, "the walk read on after the cancel");
 	}
 
+	#[test]
+	fn element_keys_refused_for_focus_name_where_focus_is_with_a_usable_ref() {
+		for (takeover, code) in
+			[(None, ErrorCode::BackgroundUnavailable), (Some(true), ErrorCode::InputFailed)]
+		{
+			let mut worker = worker_with(FakeWaylandBackend::new());
+			let inner: &mut Worker = &mut worker;
+			let (backend, registry) = (&mut inner.backend, &mut inner.registry);
+			let ax = backend
+				.as_mut()
+				.ok()
+				.and_then(|backend| backend.ax())
+				.unwrap();
+			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
+				.unwrap()
+				.ref_;
+			let (reply, _rx) = flume::bounded(1);
+			let request = Request::AxInput {
+				reference: reference.clone(),
+				input: ElementInput::Text("4".to_owned()),
+				takeover,
+				reply,
+			};
+			let Err(error) = worker.process(&request, &CancellationSource::default().token()) else {
+				panic!("keys for an element without focus must be refused");
+			};
+			assert_eq!(error.code, code);
+			let message = &error.message;
+			assert!(
+				message.starts_with(&format!("{reference} did not take keyboard focus")),
+				"{message}"
+			);
+			assert!(message.contains(&format!("window {WAYLAND_ID} (\"Obsidian\")")), "{message}");
+			assert!(message.contains("on - button [ref=e2]."), "{message}");
+			assert!(message.contains("win.ax()"), "{message}");
+			assert!(worker.registry.resolve("e2").unwrap() == AxHandle::Test(7));
+		}
+	}
+
 	fn capture_request(target: Target) -> Request {
 		let (reply, _rx) = flume::bounded(1);
 		Request::Capture { target, caps: CaptureCaps::default(), reply }
@@ -3306,7 +3574,7 @@ mod capture_tests {
 
 	#[test]
 	fn capture_refreshes_the_nonblocking_capabilities_snapshot() {
-		let core = SessionCore::new(DisplaySelector::Active);
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
 		let mut worker = worker_with(FakeWaylandBackend::new());
 		worker.capabilities = Arc::clone(&core.capabilities);
 		worker
@@ -3325,7 +3593,7 @@ mod capture_tests {
 
 	#[test]
 	fn screen_state_never_queues_behind_a_stuck_request() {
-		let core = SessionCore::new(DisplaySelector::Active);
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
 		// A worker that never serves its queue, with a request outstanding and
 		// no capabilities snapshot: a queued read would wait out its timeout.
 		let (tx, stuck) = flume::unbounded();
@@ -3338,7 +3606,7 @@ mod capture_tests {
 
 	#[test]
 	fn cancelled_calls_never_start_the_worker_or_count_as_in_flight() {
-		let core = SessionCore::new(DisplaySelector::Active);
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
 		let token = core.cancellation.token();
 		core.cancellation.cancel();
 		assert_eq!(
@@ -3355,7 +3623,7 @@ mod capture_tests {
 
 	#[test]
 	fn failed_queue_delivery_releases_the_in_flight_count() {
-		let core = SessionCore::new(DisplaySelector::Active);
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
 		let (tx, rx) = flume::unbounded();
 		core.lifecycle.lock().tx = Some(tx);
 		drop(rx);
@@ -3743,6 +4011,148 @@ mod capture_tests {
 			background, background, background, background, foreground, foreground, foreground,
 			foreground
 		]);
+	}
+
+	/// A raise takes the user's foreground, so the worker serves it under the
+	/// physical-Escape stop; a press stays background input the user's Escape
+	/// leaves alone. Tests start no event tap, so a takeover lease is refused
+	/// after arming, as it is without the permission.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn a_raise_runs_under_the_escape_stop_and_a_press_does_not() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go")]);
+		control::press_escape_for_test();
+		let perform = |action: &'static str| {
+			move |reply| Request::AxPerform {
+				reference: "e2".to_string(),
+				action: action.to_string(),
+				reply,
+			}
+		};
+		for action in ["press", "AXPress", "axraise"] {
+			let source = CancellationSource::default();
+			let result = call(&mut worker, perform(action), &source);
+			assert!(
+				result
+					.as_ref()
+					.err()
+					.is_none_or(|error| error.code != ErrorCode::PermissionDenied),
+				"{action} needs no Escape stop"
+			);
+			let token = source.token();
+			assert_eq!(control::press_escape_for_test(), 0, "{action} arms no Escape stop");
+			assert!(token.check().is_ok(), "the user's Escape leaves {action} running");
+		}
+		assert_eq!(tree.lock().pressed, [2], "the fake tree runs only `press`");
+		for action in ["raise", " Raise ", "AXRaise"] {
+			let source = CancellationSource::default();
+			let error = call(&mut worker, perform(action), &source)
+				.err()
+				.expect("no Escape stop starts in tests");
+			assert_eq!(error.code, ErrorCode::PermissionDenied, "{action}");
+			let token = source.token();
+			assert_eq!(control::press_escape_for_test(), 1, "{action} arms the Escape stop");
+			assert!(token.check().is_err(), "physical Escape stops {action}");
+		}
+	}
+
+	/// Background input runs without the physical-Escape stop; takeover input,
+	/// desktop and display input, raises and activating launches run under it,
+	/// so a physical Escape cancels them. Served through the worker against
+	/// the test Escape monitor, which refuses a lease after arming it.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn only_takeover_requests_run_under_the_physical_escape_stop() {
+		let (mut worker, _tree) = read_buttons(&[(2, "Go")]);
+		control::press_escape_for_test();
+		let window = Target::Window("42".to_string());
+		let reply = || flume::unbounded().0;
+		let typing = |target: &Target, takeover| Request::TypeText {
+			target: target.clone(),
+			text: "abc".to_string(),
+			takeover,
+			reply: reply(),
+		};
+		let holding = |target: &Target, takeover| Request::HoldKeys {
+			target: target.clone(),
+			keys: parse_keys(&["shift".to_string()]).unwrap(),
+			duration: Duration::ZERO,
+			takeover,
+			reply: reply(),
+		};
+		let clicking = |target: &Target, takeover| Request::Click {
+			target:  target.clone(),
+			x:       0.0,
+			y:       0.0,
+			options: ParsedPointerOptions::parse(Some(PointerOptions {
+				takeover,
+				..PointerOptions::default()
+			}))
+			.unwrap(),
+			reply:   reply(),
+		};
+		let perform = |action: &str| Request::AxPerform {
+			reference: "e1".to_string(),
+			action:    action.to_string(),
+			reply:     reply(),
+		};
+		let open = |activate| Request::OpenApplication {
+			id:      "com.apple.TextEdit".to_string(),
+			options: ApplicationOpenOptions { activate },
+			reply:   reply(),
+		};
+		// Held keys reach the fake backend only as takeover, which the test
+		// Escape monitor refuses before they are sent.
+		let background = [
+			typing(&window, None),
+			typing(&window, Some(false)),
+			clicking(&window, Some(false)),
+			perform("AXPress"),
+			perform("showMenu"),
+			open(None),
+			open(Some(false)),
+		];
+		for request in background {
+			let source = CancellationSource::default();
+			let result = worker.execute(&request, &source.token());
+			assert!(
+				result
+					.err()
+					.is_none_or(|error| error.code != ErrorCode::PermissionDenied),
+				"background input needs no Escape stop"
+			);
+			let token = source.token();
+			assert_eq!(control::press_escape_for_test(), 0, "background input arms no Escape stop");
+			assert!(token.check().is_ok(), "the user's Escape leaves background input running");
+		}
+		let display = Target::parse("display:screen-1");
+		let takeover = [
+			typing(&window, Some(true)),
+			holding(&window, Some(true)),
+			clicking(&window, Some(true)),
+			typing(&Target::Desktop, None),
+			holding(&Target::Desktop, Some(false)),
+			clicking(&display, None),
+			Request::RaiseWindow { id: "42".to_string(), reply: reply() },
+			perform("raise"),
+			perform("AXRaise"),
+			open(Some(true)),
+		];
+		for request in takeover {
+			let source = CancellationSource::default();
+			let error = worker
+				.execute(&request, &source.token())
+				.err()
+				.expect("no Escape stop starts in tests");
+			assert_eq!(
+				error.code,
+				ErrorCode::PermissionDenied,
+				"takeover input needs the Escape stop"
+			);
+			let token = source.token();
+			assert_eq!(control::press_escape_for_test(), 1, "takeover input arms the Escape stop");
+			assert!(token.check().is_err(), "physical Escape stops takeover input");
+		}
 	}
 
 	#[test]

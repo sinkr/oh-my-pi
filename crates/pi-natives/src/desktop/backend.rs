@@ -16,6 +16,13 @@ use super::{
 	},
 };
 
+/// Whether an AX `perform` action names a raise: `raise` in any case, or the
+/// native `AXRaise`. Matches the macOS action naming, so a raise that arms the
+/// physical-Escape stop is exactly a raise that runs as `AXRaise`.
+pub(crate) fn is_raise_action(action: &str) -> bool {
+	action.trim().eq_ignore_ascii_case("raise") || action == "AXRaise"
+}
+
 /// How window-targeted input reaches its target.
 ///
 /// `Background` avoids deliberate activation and physical pointer movement;
@@ -105,6 +112,34 @@ pub enum PointerEvent {
 /// A held prevent-idle-display-sleep assertion; dropping it releases it.
 pub type DisplayAwakeHold = Box<dyn Send>;
 
+/// Keyboard input addressed to one accessibility element.
+#[derive(Debug, Clone)]
+pub enum ElementInput {
+	Text(String),
+	Chord(Vec<KeyName>),
+}
+
+/// Where an application's keyboard focus is, read when an element it was
+/// given to did not report holding it.
+#[derive(Clone, Default)]
+pub struct KeyboardFocus {
+	/// The window holding keyboard focus, when it can be identified.
+	pub window:  Option<String>,
+	/// The application's focused element, when it reports one.
+	pub element: Option<AxHandle>,
+}
+
+/// Outcome of keyboard input addressed to an element.
+pub enum ElementDelivery {
+	Delivered,
+	/// The element never reported keyboard focus; nothing was sent.
+	#[cfg_attr(
+		not(target_os = "macos"),
+		allow(dead_code, reason = "only macOS reads which element holds keyboard focus")
+	)]
+	Unfocused(KeyboardFocus),
+}
+
 pub trait Backend: Send {
 	fn capabilities(&mut self) -> DesktopCapabilities;
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>>;
@@ -167,6 +202,27 @@ pub trait Backend: Send {
 		mode: DeliveryMode,
 		token: &OperationToken,
 	) -> CoreResult<()>;
+	/// Types or presses `input` into `element`, a live element of window
+	/// `target`. Backends that cannot read which element holds keyboard focus
+	/// focus it and send through the window's keyboard path.
+	fn element_input(
+		&mut self,
+		target: &Target,
+		element: &AxHandle,
+		input: &ElementInput,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<ElementDelivery> {
+		self
+			.ax()
+			.ok_or_else(DesktopError::ax_unsupported)?
+			.focus(element)?;
+		match input {
+			ElementInput::Text(text) => self.type_text(target, text, mode, token)?,
+			ElementInput::Chord(keys) => self.key_chord(target, keys, mode, token)?,
+		}
+		Ok(ElementDelivery::Delivered)
+	}
 	fn hold_keys(
 		&mut self,
 		target: &Target,
