@@ -1061,6 +1061,7 @@ async function startWindowsPty(
 
 // ─── Tool ────────────────────────────────────────────────────────────────────
 
+// Keep bounds aligned with PtySession::{start, start_argv, resize} in crates/pi-natives/src/pty.rs.
 function ptyDimension(value: number, min: number, max: number): number {
 	return process.platform === "win32"
 		? Math.min(max, Math.max(min, Math.trunc(value)))
