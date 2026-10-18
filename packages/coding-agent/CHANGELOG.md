@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `%pip install` in Python eval failing with "No module named pip" when the kernel's interpreter is a venv without pip, such as one made by `uv venv`: it now installs through `uv` when that is on your PATH, and otherwise bootstraps pip first
+
 ## [18.12.2] - 2026-10-18
 
 ### Added

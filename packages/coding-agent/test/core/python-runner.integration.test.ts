@@ -43,6 +43,17 @@ async function hasModule(cwd: string, module: string): Promise<boolean> {
 
 const HAS_MATPLOTLIB = await hasModule(MATPLOTLIB_TEST_CWD, "matplotlib");
 const HAS_PANDAS = await hasModule(MATPLOTLIB_TEST_CWD, "pandas");
+const HAS_ENSUREPIP = await hasModule(MATPLOTLIB_TEST_CWD, "ensurepip");
+
+/** A venv like the ones `uv venv` makes: no pip installed. Returns its interpreter. */
+async function createPiplessVenv(dir: string): Promise<string> {
+	const { env } = (await Settings.init()).getShellConfig();
+	const base = resolvePythonRuntime(dir, filterEnv(env)).pythonPath;
+	const venv = path.join(dir, "venv");
+	const created = Bun.spawnSync([base, "-m", "venv", "--without-pip", venv], { stdout: "ignore", stderr: "pipe" });
+	if (created.exitCode !== 0) throw new Error(`venv creation failed: ${created.stderr.toString()}`);
+	return path.join(venv, "bin", "python");
+}
 
 describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
@@ -179,6 +190,66 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			await kernel.shutdown();
 		}
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"%pip installs through uv for the kernel's interpreter when the venv has no pip",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-uv-");
+			const python = await createPiplessVenv(tempDir.path());
+			const binDir = path.join(tempDir.path(), "bin");
+			const uvLog = path.join(tempDir.path(), "uv.log");
+			await fs.mkdir(binDir);
+			await Bun.write(
+				path.join(binDir, "uv"),
+				`#!/bin/sh\nprintf '%s\\n' "$*" "$UV_PYTHON" > '${uvLog}'\necho 'Installed 1 package in 1ms'\necho ' + six==1.17.0'\n`,
+			);
+			await fs.chmod(path.join(binDir, "uv"), 0o755);
+			const kernel = await PythonKernel.start({
+				cwd: tempDir.path(),
+				interpreter: python,
+				env: { PATH: `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}` },
+			});
+			try {
+				const result = await executePythonWithKernel(kernel, "%pip install six");
+				expect(result.output).not.toContain("No module named pip");
+				const [args, uvPython] = (await Bun.file(uvLog).text()).trimEnd().split("\n");
+				expect(args).toBe("pip install six");
+				expect(await fs.realpath(uvPython)).toBe(await fs.realpath(python));
+				expect(result.displayOutputs).toContainEqual({
+					type: "status",
+					event: { op: "pip", args: "install six", installed: ["six"], exit_code: 0 },
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
+
+	it.skipIf(process.platform === "win32" || !HAS_ENSUREPIP)(
+		"%pip bootstraps pip with ensurepip when the venv has no pip and uv is not on PATH",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-ensurepip-");
+			const python = await createPiplessVenv(tempDir.path());
+			const kernel = await PythonKernel.start({
+				cwd: tempDir.path(),
+				interpreter: python,
+				env: { PATH: "/usr/bin:/bin" },
+			});
+			try {
+				const result = await executePythonWithKernel(kernel, "%pip --version");
+				expect(result.output).not.toContain("No module named pip");
+				expect(result.output).toContain(path.join("venv", "lib"));
+				expect(result.displayOutputs).toContainEqual({
+					type: "status",
+					event: { op: "pip", args: "--version", installed: [], exit_code: 0 },
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		60_000,
+	);
 
 	it("loads quoted scripts without source echo, retaining namespace, filename and async execution", async () => {
 		using tempDir = TempDir.createSync("@python-runner-load-");

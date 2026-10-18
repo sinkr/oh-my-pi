@@ -1310,23 +1310,51 @@ class _BoundedLineScanner:
 @line_magic("pip")
 def _magic_pip(args: str) -> None:
     argv = shlex.split(args) if args else ["--help"]
-    cmd = [sys.executable, "-m", "pip", *argv]
     # Installs are host work, not cell compute: suspend the eval watchdog (same
     # protocol as bridge waits in bridge-timeout.ts). Caller aborts still apply.
     _emit_status("timeout-pause")
     try:
-        _run_pip(cmd, args)
+        _run_pip(argv, args)
     finally:
         _emit_status("timeout-resume")
 
 
-def _run_pip(cmd: list[str], args: str) -> None:
+def _has_pip() -> bool:
+    import importlib.util
+
+    importlib.invalidate_caches()
+    try:
+        return importlib.util.find_spec("pip") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _run_pip(argv: list[str], args: str) -> None:
+    cmd = [sys.executable, "-m", "pip", *argv]
+    env: dict[str, str] | None = None
+    if not _has_pip():
+        # Environments made by `uv venv` ship without pip. uv installs into
+        # them directly; without uv, bootstrap pip from the stdlib wheel.
+        uv = shutil.which("uv")
+        if uv is not None:
+            cmd = [uv, "pip", *argv]
+            env = {**os.environ, "UV_PYTHON": sys.executable}
+        else:
+            bootstrap = subprocess.Popen(
+                [sys.executable, "-m", "ensurepip"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            _stream_process_output(bootstrap)
+            bootstrap.wait()
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=env,
     )
     installed_packages: list[str] = []
 
@@ -1337,6 +1365,11 @@ def _run_pip(cmd: list[str], args: str) -> None:
                 # Token is name-version; drop the version suffix.
                 pkg = token.rsplit("-", 1)[0]
                 installed_packages.append(pkg.replace("_", "-"))
+            return
+        # uv lists each installed distribution as ` + name==version`.
+        m = re.match(r" \+ ([A-Za-z0-9][A-Za-z0-9._-]*)(?:==| @ )", raw_line)
+        if m:
+            installed_packages.append(m.group(1).replace("_", "-"))
 
     scanner = _BoundedLineScanner(_PIP_LINE_SCAN_CHARS, scan_pip_line)
     _stream_process_output(proc, scanner.add)
