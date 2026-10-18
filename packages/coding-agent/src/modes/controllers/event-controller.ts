@@ -80,6 +80,7 @@ import {
 	cfgTerminalShowImages,
 	cfgTerminalShowProgress,
 } from "../settings";
+import { getCacheWarmingDelayMs } from "../../session/cache-warmer";
 import { cfgCompaction } from "../../session/context-settings";
 import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
 import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
@@ -99,6 +100,11 @@ const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
 const MAX_LIVE_IRC_CARDS = 4;
 const IDLE_RECAP_MIN_SECONDS = 1;
 const IDLE_RECAP_MAX_SECONDS = 3600;
+/**
+ * Idle compaction fires this long before the warmer's own refresh point, so the
+ * compaction request (not a one-token warm replay) reads the still-warm prefix.
+ */
+const IDLE_COMPACTION_CACHE_LEAD_MS = 5_000;
 
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
 
@@ -2789,7 +2795,17 @@ export class EventController {
 		if (threshold <= 0) return;
 		if (this.#currentContextTokens() < threshold) return;
 
-		const timeoutMs = Math.max(60, Math.min(3600, idleSettings.idleTimeoutSeconds)) * 1000;
+		// Compact just before the prompt cache entry expires, while the summary
+		// request can still read the cached prefix; a turn that settles past that
+		// point but before expiry compacts right away. Without a known lifetime, or
+		// once the entry has expired, fall back to the configured delay.
+		const cacheEntry = this.ctx.viewSession.promptCacheEntry;
+		const refreshDelayMs = cacheEntry ? getCacheWarmingDelayMs(cacheEntry.ttlMs) : undefined;
+		const now = Date.now();
+		const timeoutMs =
+			cacheEntry && refreshDelayMs !== undefined && cacheEntry.touchedAt + cacheEntry.ttlMs > now
+				? Math.max(0, cacheEntry.touchedAt + refreshDelayMs - IDLE_COMPACTION_CACHE_LEAD_MS - now)
+				: Math.max(60, Math.min(3600, idleSettings.idleTimeoutSeconds)) * 1000;
 		this.#idleCompactionTimer = setTimeout(() => {
 			this.#idleCompactionTimer = undefined;
 			// Re-check conditions before firing. Pruning may have run between arming
