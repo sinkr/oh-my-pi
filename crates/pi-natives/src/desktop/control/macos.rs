@@ -413,7 +413,7 @@ mod tests {
 
 	#[test]
 	fn clicks_and_command_shortcuts_choose_while_plain_typing_does_not() {
-		for kind in POINTER_PRESS_TYPES {
+		for kind in [LEFT_MOUSE_DOWN, RIGHT_MOUSE_DOWN, OTHER_MOUSE_DOWN] {
 			assert_eq!(user_input(kind, 0, 0, 0, 0), Some(UserInput::Choice));
 			assert_eq!(user_input(kind, 0, 0, 0, SYNTHETIC_EVENT_TAG), None);
 			assert_eq!(user_input(kind, 0, 0, 42, 0), None);
@@ -487,10 +487,11 @@ mod tests {
 
 	#[test]
 	fn the_monitor_counts_only_events_the_hid_counters_count() {
-		for (index, kind) in MONITORED_TYPES.into_iter().enumerate() {
+		for kind in [LEFT_MOUSE_DOWN, RIGHT_MOUSE_DOWN, OTHER_MOUSE_DOWN, 10, 12] {
 			// Hardware input and omp's own HID-tap posts.
-			assert_eq!(seen_index(kind, 0, 0), Some(index));
-			assert_eq!(seen_index(kind, 4242, SYNTHETIC_EVENT_TAG), Some(index));
+			let index = seen_index(kind, 0, 0);
+			assert!(index.is_some(), "{kind}");
+			assert_eq!(seen_index(kind, 4242, SYNTHETIC_EVENT_TAG), index);
 			// Another process's event, perhaps posted to the session, which the
 			// HID counters skip: it must not cover a click still queued.
 			assert_eq!(seen_index(kind, 4242, 0), None);
@@ -498,16 +499,26 @@ mod tests {
 		assert_eq!(seen_index(11, 0, 0), None, "key releases are not watched");
 	}
 
+	/// `CGEventType` values from `CGEventTypes.h`, spelled out here rather
+	/// than taken from the lists under test.
+	const LEFT_MOUSE_DOWN: u32 = 1;
+	const RIGHT_MOUSE_DOWN: u32 = 3;
+	const OTHER_MOUSE_DOWN: u32 = 25;
+
 	#[test]
-	fn the_monitor_watches_every_pointer_press_the_counters_classify() {
-		for kind in POINTER_PRESS_TYPES {
-			assert!(is_pointer_press(kind));
-			assert_ne!(monitor_mask() & (1 << kind), 0);
+	fn the_monitor_sees_and_counts_every_mouse_button_press() {
+		for kind in [LEFT_MOUSE_DOWN, RIGHT_MOUSE_DOWN, OTHER_MOUSE_DOWN, 10, 12] {
+			assert_ne!(monitor_mask() & (1 << kind), 0, "the tap listens for {kind}");
+			assert!(seen_index(kind, 0, 0).is_some(), "{kind} counts toward the monitor's progress");
 		}
-		assert_ne!(monitor_mask() & (1 << KEY_DOWN), 0);
-		assert_ne!(monitor_mask() & (1 << FLAGS_CHANGED), 0);
-		for kind in [0, 2, 4, 5, 6, KEY_DOWN, FLAGS_CHANGED, 22, 26] {
-			assert!(!is_pointer_press(kind));
+		for kind in [LEFT_MOUSE_DOWN, RIGHT_MOUSE_DOWN, OTHER_MOUSE_DOWN] {
+			assert_eq!(user_input(kind, 0, 0, 0, 0), Some(UserInput::Choice), "{kind}");
+		}
+		// Releases, moves, drags and scrolling are neither choices nor watched.
+		for kind in [2, 4, 26, 5, 6, 7, 27, 22] {
+			assert_eq!(monitor_mask() & (1 << kind), 0, "{kind}");
+			assert_eq!(seen_index(kind, 0, 0), None, "{kind}");
+			assert_eq!(user_input(kind, 0, 0, 0, 0), None, "{kind}");
 		}
 	}
 }
