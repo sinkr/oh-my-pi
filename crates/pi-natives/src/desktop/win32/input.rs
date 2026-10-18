@@ -879,29 +879,44 @@ mod background {
 	}
 
 	/// Types `text` into window `id`: into `element`, one of its control
-	/// windows, when given, else into its focused control.
+	/// windows, when given, else into its focused control. Once the last
+	/// unit is out the waits after it settle: a cancel then stops the next
+	/// call, not this one.
 	pub(super) fn type_text(id: &str, text: &str, element: Option<HWND>) -> CoreResult<()> {
 		control::check()?;
 		let root = hwnd(id)?;
 		ensure_text_supported(id, root)?;
 		let mut emitter = KeyEmitter::to(id, root, element, EventKind::TextInput)?;
+		let mut left: usize = graphemes_str(text)
+			.map(|grapheme| text_units(grapheme).count())
+			.sum();
+		let gap = |duration: std::time::Duration, sent: bool| {
+			if sent {
+				control::settle(duration);
+				Ok(())
+			} else {
+				control::wait(duration)
+			}
+		};
 		for grapheme in graphemes_str(text) {
 			control::check()?;
 			for unit in text_units(grapheme) {
+				left -= 1;
+				let sent = left == 0;
 				match unit {
 					TextUnit::Enter => {
 						emitter.transition(VK_RETURN, true)?;
-						let result = control::wait(KEY_GAP);
+						let result = gap(KEY_GAP, sent);
 						let release = control::cleanup(|| emitter.transition(VK_RETURN, false));
 						super::completed(result, release)?;
-						control::wait(KEY_GAP + ENTER_SETTLE)?;
+						gap(KEY_GAP + ENTER_SETTLE, sent)?;
 					},
 					TextUnit::Char(character) => {
 						let mut units = [0; 2];
 						for &unit in character.encode_utf16(&mut units).iter() {
 							post(emitter.hwnd, WM_CHAR, usize::from(unit), 1)?;
 						}
-						control::wait(KEY_GAP)?;
+						gap(KEY_GAP, sent)?;
 					},
 				}
 			}
@@ -1521,7 +1536,8 @@ mod foreground {
 				}
 			}
 		}
-		control::check()
+		// Every unit is out: a cancel now stops the next call.
+		Ok(())
 	}
 
 	pub(super) fn type_text(id: &str, text: &str) -> CoreResult<()> {
