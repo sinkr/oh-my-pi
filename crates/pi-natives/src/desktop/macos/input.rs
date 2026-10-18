@@ -211,7 +211,9 @@ impl MacInput {
 							|to, guard| background_chord(&self.source, to, keys, guard),
 						)?;
 						confirm_shortcut_answered(&window, keys, || {
-							control::wait(SHORTCUT_REPLY_DELAY)?;
+							// The shortcut is out: a cancel now must not report it
+							// unsent.
+							std::thread::sleep(SHORTCUT_REPLY_DELAY);
 							Ok(ax::stopped_answering(pid, SHORTCUT_REPLY_TIMEOUT_SECONDS))
 						})
 					},
