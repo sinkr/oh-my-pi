@@ -112,7 +112,7 @@ const title = await tab.run(
 );
 ```
 
-Functions receive `{ tab, page, browser, wait, assert }` as their first argument. Additional `args` follow it. Plain data, functions, and `RegExp` values are serialized; the function cannot capture Eval-cell closures. Code strings use the same names as globals and allow top-level `await`.
+Functions receive `{ tab, page, browser, wait, assert }` as their first argument. Additional `args` follow it. `args` that is not an array, or a non-empty `args` with a code string, throws before the run starts. Plain data, functions, and `RegExp` values are serialized; the function cannot capture Eval-cell closures. Code strings use the same names as globals and allow top-level `await`.
 
 The inner `tab` is the full worker helper API. In addition to the direct surface it includes handle-returning `waitFor`/`waitForSelector` and run-scoped `waitForNavigation`/`waitForResponse`. Start a navigation/response wait before the action that triggers it.
 

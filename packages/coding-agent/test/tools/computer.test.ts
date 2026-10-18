@@ -742,6 +742,42 @@ describe("computer prelude", () => {
 		);
 	});
 
+	it("refuses run args it would drop before anything runs, and still runs empty or null args", async () => {
+		const prelude = createComputerPrelude(toolSession(), () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		const calls: unknown[] = [];
+		const realm = createContext({
+			__omp_log__: () => {},
+			__omp_prelude__: async (_name: unknown, parameters: unknown) => {
+				calls.push(parameters);
+				return { text: "", details: { value: "ran" } };
+			},
+		});
+		runInContext(prelude.javascript, realm);
+
+		await expect(
+			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
+		).rejects.toThrow("computer.run() args must be an array of the function's arguments after its scope");
+		await expect(runInContext('computer.run("return 1;", { args: ["/tmp"] })', realm)).rejects.toThrow(
+			"computer.run() passes args only to a function; a code string receives none",
+		);
+		expect(calls).toEqual([]);
+
+		expect(await runInContext('computer.run("return 1;", { args: [] })', realm)).toBe("ran");
+		expect(await runInContext("computer.run(async () => 1, { args: null })", realm)).toBe("ran");
+		expect(calls).toEqual([
+			{ code: "return 1;", action: "run" },
+			{ fn: "async () => 1", args: [], action: "run" },
+		]);
+	});
+
 	it("returns direct values and prints inner display text from the Python facade in a real kernel", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];
