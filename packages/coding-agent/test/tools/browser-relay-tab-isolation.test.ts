@@ -247,6 +247,15 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 				session,
 			});
 			expect(hovered.returnValue).toBe("hovered");
+			// A screenshot of the unselected tab is captured in place: it never selects the tab.
+			const shot = await runInTab(names[0]!, {
+				code: "return typeof (await tab.screenshot());",
+				timeoutMs: 10_000,
+				session,
+			});
+			expect(shot.returnValue).toBe("string");
+			expect(await activeChromeTabUrl(fixture)).toBe(humanUrl);
+			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toEqual({ active: false });
 
 			await releaseTab(names[0]!);
 			expect(await chromeTab(fixture, chromeTabId(first.tab.targetId))).toBeNull();
