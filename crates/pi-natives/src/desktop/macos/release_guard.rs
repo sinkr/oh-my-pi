@@ -21,7 +21,9 @@ use std::{
 	},
 	path::{Path, PathBuf},
 	process::{Child, Command, Stdio},
-	ptr, slice, thread,
+	ptr, slice,
+	sync::{Arc, Mutex, PoisonError},
+	thread,
 	time::{Duration, Instant},
 };
 
@@ -149,15 +151,37 @@ fn end() {
 		stop(&mut child);
 		return;
 	}
-	// Reaped off the input thread, keeping its share of input ownership until
-	// then; a failed spawn leaves a zombie rather than a panic during
-	// unwinding.
-	let _ = thread::Builder::new()
-		.name("desktop-release-reaper".into())
-		.spawn(move || {
+	reap_detached(child, ownership, spawn_reaper);
+}
+
+/// Reaps a helper still posting releases off the input thread, keeping its
+/// share of input ownership until it exits. When no thread can start for
+/// that (`spawn` fails), it is reaped here: the share must not end while the
+/// helper can still post. The helper ends itself within its release deadline.
+fn reap_detached(
+	child: Child,
+	ownership: Option<control::HandedOwnership>,
+	spawn: fn(Box<dyn FnOnce() + Send>) -> io::Result<()>,
+) {
+	let helper = Arc::new(Mutex::new(Some((child, ownership))));
+	let reap = |helper: &Mutex<Option<(Child, Option<control::HandedOwnership>)>>| {
+		let taken = helper.lock().unwrap_or_else(PoisonError::into_inner).take();
+		if let Some((mut child, ownership)) = taken {
 			let _ = child.wait();
 			drop(ownership);
-		});
+		}
+	};
+	let detached = Arc::clone(&helper);
+	if spawn(Box::new(move || reap(&detached))).is_err() {
+		reap(&helper);
+	}
+}
+
+fn spawn_reaper(reap: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+	thread::Builder::new()
+		.name("desktop-release-reaper".into())
+		.spawn(reap)
+		.map(drop)
 }
 
 /// Stops and reaps a helper. It is asked with `SIGTERM` first and closes its
@@ -921,6 +945,19 @@ mod tests {
 		// request.
 		assert!(!running(STARTED.get()), "the helper was stopped");
 		assert!(began.elapsed() < Duration::from_secs(3), "{:?}", began.elapsed());
+	}
+
+	#[test]
+	fn a_helper_whose_reaper_cannot_start_is_reaped_before_the_request_returns() {
+		let Helper { child, socket, .. } = slow_helper().expect("helper");
+		// The stream ends; the helper takes a while to finish, as one posting
+		// releases does.
+		drop(socket);
+		let failing: fn(Box<dyn FnOnce() + Send>) -> io::Result<()> =
+			|_| Err(io::Error::other("no thread"));
+		reap_detached(child.expect("child"), None, failing);
+		// Reaped, so its share of input ownership ended only once it exited.
+		assert!(!running(STARTED.get()), "the helper was reaped");
 	}
 
 	#[test]
