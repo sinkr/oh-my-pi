@@ -132,9 +132,11 @@ impl MacInput {
 							return Err(screen_sharing_refusal(&window, "synthesized text"));
 						}
 						let behind_user = || entry_front.require_behind(skylight::front_pid(), pid, wid);
-						if !process::is_terminal(pid)
-							&& ax::insert_native_text(pid, wid, text, behind_user)?
-						{
+						let inserted = inserts_first(text, || {
+							Ok(!process::is_terminal(pid)
+								&& ax::insert_native_text(pid, wid, text, behind_user)?)
+						})?;
+						if inserted {
 							return Ok(());
 						}
 						with_background_keyboard(
@@ -403,6 +405,16 @@ fn keyboard_conflict_now(pid: libc::pid_t, wid: u32) -> Option<KeyboardConflict>
 				})
 		})
 	})
+}
+
+/// Whether background text was delivered by AX insertion (`insert`) before
+/// any key. Empty text is done without it: writing `""` to `AXSelectedText`
+/// deletes the field's selection.
+fn inserts_first(text: &str, insert: impl FnOnce() -> CoreResult<bool>) -> CoreResult<bool> {
+	if text.is_empty() {
+		return Ok(true);
+	}
+	insert()
 }
 
 /// Before background keys go to `owner`, a process other than `pid` that
@@ -2983,6 +2995,18 @@ mod tests {
 		let scroll = PointerEvent::Scroll { x: 10.0, y: 10.0, dx: 0.0, dy: 3.0 };
 		let owned = pointer_owner(&scroll, || panic!("a scroll must not make its window key"), owner);
 		assert_eq!(owned.unwrap_err().code, ErrorCode::BackgroundUnavailable);
+	}
+
+	#[test]
+	fn empty_text_is_done_without_an_insertion_or_keys() {
+		let done = inserts_first("", || {
+			panic!("an empty AXSelectedText write deletes the field's selection")
+		});
+		assert!(done.unwrap(), "empty text falls through to keys");
+		// Other text tries the insertion, and keys follow only when it was not
+		// attempted.
+		assert!(inserts_first("x", || Ok(true)).unwrap());
+		assert!(!inserts_first("x", || Ok(false)).unwrap());
 	}
 
 	#[test]
