@@ -24,6 +24,7 @@
 - Fixed the macOS `computer` tool's `StaleRef` for an element the app rebuilt in place, such as an Automator rule popup after its neighbour changed, leaving the agent to re-read the window: it now names the one element of the window with the fields the ref was read with, for the agent to check before acting on it ([#15574](https://github.com/can1357/oh-my-pi/pull/15574) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the Up arrow crashing omp with `text.replace is not a function` when `history.db` was damaged; recall skips unreadable rows, and a damaged store is moved aside to `history.db.corrupt-*` with every readable prompt, session title, and recap copied into its replacement ([#15751](https://github.com/can1357/oh-my-pi/pull/15751) by [@Shadorain](https://github.com/Shadorain))
 - Fixed browser `tab.screenshot()` raising Chrome over the app you were typing in and switching its visible tab; background tabs and windows behind other apps are now captured in place, including ones idle long enough that Chrome stopped drawing them, as is a relay or `app.cdp_url` tab the user switched away from ([#15174](https://github.com/can1357/oh-my-pi/pull/15174) by [@will-bogusz](https://github.com/will-bogusz))
+- Commands in `bash` can hand `skill://`, `local://`, and other file-backed URLs to external programs again (`python skill://example-skill/tool.py "query"`), and can run them from a `cd`'d URL directory ([#14838](https://github.com/can1357/oh-my-pi/pull/14838) by [@koyzdev](https://github.com/koyzdev))
 
 ## [18.12.1] - 2026-10-17
 
@@ -613,9 +614,6 @@
 - Fixed interrupting a reply to send a queued steer message briefly showing omp as idle (title, progress, working indicator) before the steer ran; RPC and SDK clients also no longer see a final `agent_end` for that interrupt.
 - Fixed browser tab recordings and video frame/contact-sheet extraction creating `omp-browser-recording-*` and `omp-video-*` scratch directories in your working directory instead of the system temp directory.
 - Fixed edit snapshots retaining excess history when metadata or displayed-line provenance grows; the 64 MiB snapshot budget now counts UTF-8 bytes, so CJK- and emoji-heavy files keep fewer versions ([#14975](https://github.com/can1357/oh-my-pi/pull/14975) by [@iliaal](https://github.com/iliaal)).
-### Fixed
-
-- Commands in `bash` can hand `skill://`, `local://`, and other file-backed URLs to external programs again (`python skill://example-skill/tool.py "query"`), and can run them from a `cd`'d URL directory ([#14838](https://github.com/can1357/oh-my-pi/pull/14838) by [@koyzdev](https://github.com/koyzdev)).
 
 ## [18.8.6] - 2026-10-08
 
