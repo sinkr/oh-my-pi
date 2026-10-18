@@ -174,7 +174,12 @@ export async function whileDrawing<T>(
 	let session: CDPSession | undefined;
 	try {
 		try {
-			const screencast = await page.createCDPSession();
+			const creating = page.createCDPSession();
+			const screencast = await untilAborted(signal, creating).catch((error: unknown) => {
+				// A session that attaches after the abort is detached once it arrives.
+				void creating.then(late => late.detach()).catch(() => undefined);
+				throw error;
+			});
 			session = screencast;
 			await untilAborted(signal, () =>
 				screencast.send("Page.startScreencast", { format: "jpeg", quality: 1, maxWidth: 1, maxHeight: 1 }),
