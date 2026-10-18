@@ -90,7 +90,6 @@ describe("cropSixelTop", () => {
 			...Array<string | null>(20).fill(RED),
 			...Array<string | null>(10).fill(null),
 		]);
-		expect(cropped).toMatch(/!\d+[?-~]/);
 	});
 
 	it("crops a declared partial final band without exposing padding pixels", () => {

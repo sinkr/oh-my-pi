@@ -47,9 +47,10 @@ function appendBand(output: string[], band: SixelBand | undefined, shift: number
  * The supported grammar is the native icy_sixel encoder's: one leading raster
  * declaration with positive dimensions and square pixels, prefix RGB/HLS palette
  * definitions, register selections, sixel characters, repeats, `$` and `-`.
- * Both ESC and C1 DCS/ST framing are accepted. Palette definitions after drawing,
- * additional raster declarations, other controls and malformed input throw;
- * forwarding an unsupported image uncropped would reintroduce raster overflow.
+ * ESC DCS/ST framing only, as the TUI emits it. Palette definitions after
+ * drawing, additional raster declarations, other controls and malformed input
+ * throw; forwarding an unsupported image uncropped would reintroduce raster
+ * overflow.
  *
  * Without maxHeightPixels the crop is exact, including a partial final band with
  * zero padding bits and the exact declared raster height. Some terminals still
@@ -64,11 +65,10 @@ export function cropSixelTop(sequence: string, pixels: number, maxHeightPixels?:
 		throw new RangeError("SIXEL height limit must be a nonnegative finite pixel count");
 	}
 
-	const header = /^(?:\x1bP|\x90)[0-9;]*q/.exec(sequence);
+	const header = /^\x1bP[0-9;]*q/.exec(sequence);
 	if (!header) invalidSixel("missing DCS introducer");
-	const terminator = sequence.endsWith("\x1b\\") ? "\x1b\\" : sequence.endsWith("\x9c") ? "\x9c" : "";
-	if (!terminator) invalidSixel("missing string terminator");
-	const end = sequence.length - terminator.length;
+	if (!sequence.endsWith("\x1b\\")) invalidSixel("missing string terminator");
+	const end = sequence.length - 2;
 	const tokenPattern = /[?-~]|!\d+[?-~]|#\d+(?:;\d+)*|"\d+(?:;\d+)*|[-$]/y;
 	const palette: string[] = [];
 	const bands: SixelBand[] = [];
@@ -168,6 +168,6 @@ export function cropSixelTop(sequence: string, pixels: number, maxHeightPixels?:
 			appendBand(output, bands[firstBand + index + 1], shift - 6, mask);
 		}
 	}
-	output.push(terminator);
+	output.push("\x1b\\");
 	return output.join("");
 }

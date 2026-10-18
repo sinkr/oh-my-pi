@@ -194,4 +194,32 @@ describe("SIXEL block repaint", () => {
 			}
 		});
 	}
+
+	it("drops a top-clipped SIXEL the cropper cannot parse instead of failing the frame", async () => {
+		const term = new VirtualTerminal(40, 8);
+		const raster = trackSixelRaster(term);
+		const tui = new TUI(term);
+		// A palette definition after drawing is outside the cropper's grammar.
+		const foreign = '\x1bP0;1;0q"1;1;40;80#1;2;100;0;0#1!40~#2;2;0;100;0#2!40~\x1b\\';
+		const block = ["", "", "", `\x1b7\x1b[3A${foreign}\x1b8`];
+		let clip = false;
+		tui.setFrameProvider({
+			renderFrame: () => ({ viewport: [...block.slice(clip ? 2 : 0), "following text"] }),
+			acknowledgeHistory() {},
+		});
+		try {
+			tui.start();
+			await settle(term);
+			const paints = raster.paints;
+			expect(paints).toBeGreaterThan(0);
+
+			clip = true;
+			tui.requestRender();
+			await settle(term);
+			expect(raster.paints).toBe(paints);
+			expect(term.getViewport()[2]?.trimEnd()).toBe("following text");
+		} finally {
+			tui.stop();
+		}
+	});
 });

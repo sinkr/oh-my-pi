@@ -1006,6 +1006,8 @@ export class TUI extends Container {
 	#screenImagePlacements = new Map<number, LiveImagePlacement>();
 	#altImagePlacements = new Map<number, LiveImagePlacement>();
 	#nextImagePlacementId = 1;
+	/** Last top-clipped SIXEL crop; only the block straddling row 0 is ever cropped. */
+	#sixelCrop: { source: string; pixels: number; maxHeightPixels: number; output: string } | undefined;
 	#ghosttyInitialImageDelayDone = false;
 	#ghosttyInitialImageDelayTimer: RenderTimer | undefined;
 	#ghosttyImageReadyAtMs = 0;
@@ -3290,9 +3292,10 @@ export class TUI extends Container {
 
 	/**
 	 * Clip direct placements to the visible source slice: Kitty tracks a live
-	 * placement owner, while SIXEL crops the encoded raster. SIXEL and iTerm2
-	 * have no delete command and composite over existing pixels, so erase the
-	 * visible rows they paint above `screenRow` before repainting.
+	 * placement owner, while SIXEL crops the encoded raster (iTerm2 images are
+	 * not cropped). SIXEL and iTerm2 have no delete command and composite over
+	 * existing pixels, so erase the visible rows they paint above `screenRow`
+	 * before repainting.
 	 */
 	#imageLineSequence(
 		line: string,
@@ -3310,7 +3313,7 @@ export class TUI extends Container {
 				const cropPixels = Math.round((requestedLift - lift) * cellHeight);
 				const maxHeightPixels = Math.floor((screenRow + 1) * cellHeight);
 				line = line.replace(/\x1bP[0-9;]*q[\s\S]*?\x1b\\/g, sequence =>
-					cropSixelTop(sequence, cropPixels, maxHeightPixels),
+					this.#cropSixel(sequence, cropPixels, maxHeightPixels),
 				);
 			}
 			return lift > 0 ? `\x1b[${lift}A${`${ERASE_LINE}\x1b[B`.repeat(lift)}${line}` : line;
@@ -3330,6 +3333,32 @@ export class TUI extends Container {
 				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
 			})
 		);
+	}
+
+	/**
+	 * Crop a SIXEL raster whose top rows lie above the viewport. A raster the
+	 * cropper cannot parse is dropped: painting it whole would overwrite the
+	 * rows below the visible slice.
+	 */
+	#cropSixel(source: string, pixels: number, maxHeightPixels: number): string {
+		const cached = this.#sixelCrop;
+		if (
+			cached !== undefined &&
+			cached.pixels === pixels &&
+			cached.maxHeightPixels === maxHeightPixels &&
+			cached.source === source
+		) {
+			return cached.output;
+		}
+		let output: string;
+		try {
+			output = cropSixelTop(source, pixels, maxHeightPixels);
+		} catch (err) {
+			logger.warn("Dropping top-clipped SIXEL image that cannot be cropped", { err });
+			output = "";
+		}
+		this.#sixelCrop = { source, pixels, maxHeightPixels, output };
+		return output;
 	}
 
 	#terminalLine(line: PreparedLine): string {
