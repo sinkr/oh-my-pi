@@ -13,14 +13,25 @@ export function sanitizeFactoryDroidToolName(name: string): string {
 }
 
 /**
+ * Chat-completions names go out verbatim (the route accepts dots) unless they
+ * exceed the 64-char bound; only those take the capped, sanitized form.
+ */
+export function encodeFactoryDroidCompletionsToolName(name: string): string {
+	return name.length > 64 ? sanitizeFactoryDroidToolName(name) : name;
+}
+
+/**
  * Wire name -> caller tool name for the declared tools, so returned calls
  * dispatch to the tool that was advertised. Two tools sharing one wire name
  * could not be told apart, so that request is rejected.
  */
-export function factoryDroidToolNamesByWire(tools: Tool[] | undefined): Map<string, string> {
+export function factoryDroidToolNamesByWire(
+	tools: Tool[] | undefined,
+	encode: (name: string) => string = sanitizeFactoryDroidToolName,
+): Map<string, string> {
 	const names = new Map<string, string>();
 	for (const tool of tools ?? []) {
-		const wire = sanitizeFactoryDroidToolName(tool.name);
+		const wire = encode(tool.name);
 		const existing = names.get(wire);
 		if (existing !== undefined && existing !== tool.name) {
 			throw new Error(`Factory tool names "${existing}" and "${tool.name}" both encode as "${wire}"`);

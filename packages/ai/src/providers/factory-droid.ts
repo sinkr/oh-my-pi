@@ -37,7 +37,7 @@ import { type AnthropicOptions, mapStainlessArch, mapStainlessOs, shouldStripThi
 import { createProviderErrorMessage } from "./error-message";
 import droidIdentity from "./factory-droid/droid-identity.md" with { type: "text" };
 import { streamFactoryDroidGemini } from "./factory-droid/gemini";
-import { factoryDroidToolNamesByWire, sanitizeFactoryDroidToolName } from "./factory-droid/tool-names";
+import { factoryDroidToolNamesByWire, encodeFactoryDroidCompletionsToolName } from "./factory-droid/tool-names";
 import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from "./register-builtins";
 
 /**
@@ -501,23 +501,25 @@ function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): Assi
 }
 
 /**
- * The CLI sends chat-completions tool names in the same sanitized, 64-char
- * shape as its Gemini names: declarations and replayed calls and results go
- * out encoded, and returned calls come back under the caller's tool name.
+ * Chat-completions tool names over the route's 64-char bound go out in the
+ * CLI's capped form on declarations and replayed calls and results; shorter
+ * names go out verbatim. Returned calls come back under the caller's tool name.
  */
 function encodeCompletionsToolNames(context: Context): Context {
 	return {
 		...context,
-		tools: context.tools?.map(tool => ({ ...tool, name: sanitizeFactoryDroidToolName(tool.name) })),
+		tools: context.tools?.map(tool => ({ ...tool, name: encodeFactoryDroidCompletionsToolName(tool.name) })),
 		messages: context.messages.map(message => {
 			if (message.role === "toolResult") {
-				return { ...message, toolName: sanitizeFactoryDroidToolName(message.toolName) };
+				return { ...message, toolName: encodeFactoryDroidCompletionsToolName(message.toolName) };
 			}
 			if (message.role !== "assistant") return message;
 			return {
 				...message,
 				content: message.content.map(block =>
-					block.type === "toolCall" ? { ...block, name: sanitizeFactoryDroidToolName(block.name) } : block,
+					block.type === "toolCall"
+						? { ...block, name: encodeFactoryDroidCompletionsToolName(block.name) }
+						: block,
 				),
 			};
 		}),
@@ -526,7 +528,7 @@ function encodeCompletionsToolNames(context: Context): Context {
 
 function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): AssistantMessageEventStream {
 	const { options } = a;
-	const toolNamesByWire = factoryDroidToolNamesByWire(a.context.tools);
+	const toolNamesByWire = factoryDroidToolNamesByWire(a.context.tools, encodeFactoryDroidCompletionsToolName);
 	// The selected dialect owns every reasoning field, so the shared encoder gets none.
 	const extraBody = buildCompletionsReasoningBody(a.route.policy, a.effort, a.disabled);
 	const source = streamOpenAICompletions(
@@ -554,10 +556,10 @@ function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): 
 				typeof options?.toolChoice === "object" && "function" in options.toolChoice
 					? {
 							...options.toolChoice,
-							function: { name: sanitizeFactoryDroidToolName(options.toolChoice.function.name) },
+							function: { name: encodeFactoryDroidCompletionsToolName(options.toolChoice.function.name) },
 						}
 					: typeof options?.toolChoice === "object" && "name" in options.toolChoice
-						? { ...options.toolChoice, name: sanitizeFactoryDroidToolName(options.toolChoice.name) }
+						? { ...options.toolChoice, name: encodeFactoryDroidCompletionsToolName(options.toolChoice.name) }
 						: options?.toolChoice,
 		},
 	);

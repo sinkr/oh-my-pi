@@ -18,6 +18,7 @@
 - Fixed finalized signed reasoning disappearing from displayed thinking when no deltas streamed ([#16227](https://github.com/can1357/oh-my-pi/issues/16227))
 - Fixed Factory Droid Gemini dropping calls to tools with names over 64 characters (most MCP tools) and their results from later requests, so the model called the tool again; such names now shorten to 64 characters
 - Fixed Factory Droid Core models (Kimi, GLM, DeepSeek and others) dropping calls to tools with names over 64 characters (most MCP tools) and their results from later requests; such names now shorten to 64 characters, as droid sends them
+- Fixed Factory Droid Gemini and Droid Core models (Kimi, GLM, DeepSeek and others) dropping calls to tools with names over 64 characters (most MCP tools) and their results from later requests, so the model called the tool again; such names now shorten to 64 characters
 
 ## [18.12.2] - 2026-10-18
 
