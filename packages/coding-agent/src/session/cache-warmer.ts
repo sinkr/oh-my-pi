@@ -88,6 +88,9 @@ function supportsLongCacheRetention(model: Model<Api>): boolean {
 			compat !== undefined && "supportsLongCacheRetention" in compat && compat.supportsLongCacheRetention === true
 		);
 	}
+	// Factory Droid resolves long retention per upstream at request time, so
+	// warming starts on the 5m tier and adopts 1h once a response reports it.
+	if (model.api === "factory-droid-agent") return false;
 	if (model.api === "bedrock-converse-stream") {
 		return (
 			compat !== undefined &&

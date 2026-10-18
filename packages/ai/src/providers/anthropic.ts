@@ -2495,13 +2495,14 @@ const streamAnthropicOnce = (
 				// buildParams resolve the breakpoint behind the same flags so the
 				// header and the body can never disagree. Routes that honor
 				// `ttl: "1h"` without the beta and reject it (Vertex rawPredict,
-				// Factory's proxy) turn it off through `extendedCacheTtlBeta`.
+				// Factory's proxy) skip it: Vertex by URL, others via `extendedCacheTtlBeta: false`.
 				const isOAuth = options?.isOAuth ?? isAnthropicOAuthToken(apiKey);
 				if (
 					!isOAuth &&
 					!dropCacheControl &&
 					!dropCacheControlOptions &&
-					model.compat.extendedCacheTtlBeta &&
+					!isVertexRawPredictUrl(baseUrl) &&
+					model.compat.extendedCacheTtlBeta !== false &&
 					getCacheControl(model, options?.cacheRetention, isOAuth).cacheControl?.ttl === "1h" &&
 					!extraBetas.includes(extendedCacheTtlBeta)
 				) {

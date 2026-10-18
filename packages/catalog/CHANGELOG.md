@@ -53,7 +53,9 @@
 
 ### Added
 
-- Added the `extended-cache-ttl-beta` compat axis, off for Vertex rawPredict and Factory Droid, and prompt-cache lifetimes and long-retention support for Factory Droid's Claude models
+- Added the `extended-cache-ttl-beta` compat axis so a route can opt out of the `extended-cache-ttl-2025-04-11` beta (Factory Droid does), and prompt-cache lifetimes and long-retention support for Factory Droid's Claude models
+
+## [18.12.2] - 2026-10-18
 
 ### Changed
 

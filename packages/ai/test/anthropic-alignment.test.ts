@@ -725,6 +725,31 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(capturedBody.anthropic_beta ?? []).not.toContain("extended-cache-ttl-2025-04-11");
 	});
 
+	it("withholds the extended-cache beta when ANTHROPIC_BASE_URL reroutes a first-party model to Vertex", async () => {
+		let capturedHeader = "";
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			capturedHeader = new Headers(init?.headers).get("anthropic-beta") ?? "";
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
+		}) as typeof fetch;
+		const previous = process.env.ANTHROPIC_BASE_URL;
+		process.env.ANTHROPIC_BASE_URL =
+			"https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-opus-5-5@default:streamRawPredict";
+		try {
+			await streamAnthropic(
+				ANTHROPIC_MODEL,
+				{ systemPrompt: ["Stay concise."], messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+				{ apiKey: "sk-ant-api-test", cacheRetention: "long", fetch: fetchMock },
+			).result();
+		} finally {
+			if (previous === undefined) delete process.env.ANTHROPIC_BASE_URL;
+			else process.env.ANTHROPIC_BASE_URL = previous;
+		}
+		expect(capturedHeader).not.toContain("extended-cache-ttl-2025-04-11");
+	});
+
 	it("retries once with the version a claude_code_version_too_old rejection requires", async () => {
 		const tooOld = JSON.stringify({
 			type: "error",

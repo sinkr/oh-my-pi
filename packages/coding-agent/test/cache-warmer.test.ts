@@ -453,12 +453,25 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.status.reason).toBe("cache entry outlives the 30-minute idle window");
 	});
 
-	test("schedules Factory Droid Claude models at the lifetime of the tier they write", () => {
+	test("schedules Factory Droid Claude models at the tier their upstream actually writes", () => {
+		const model = factoryModel("claude-opus-4-6", ["snowflake"]);
+		const reply = (cttl: Usage["cttl"]) => ({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl })),
+			provider: model.provider,
+			model: model.id,
+		});
 		const h = harness();
-		const model = factoryModel("claude-opus-4-6");
 		h.warmer.start({ model, context: { messages: [] }, options: {} }, () => h.current);
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+
+		// Long retention on an upstream that writes 5m entries keeps the 5m schedule.
 		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+
+		// A reported 1h write moves the schedule to the 1h lifetime.
+		h.warmer.onResponse(reply({ ephemeral1h: 500 }));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
 	});
 
