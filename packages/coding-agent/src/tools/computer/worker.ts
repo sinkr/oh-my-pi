@@ -880,7 +880,11 @@ export class ComputerWorkerCore {
 				type: "result",
 				id: message.id,
 				ok: false,
-				error: errorPayload(new ToolError("Computer worker is busy")),
+				error: errorPayload(
+					new ToolError(
+						"Computer worker is busy: another computer call from this session is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one computer.run(...)",
+					),
+				),
 			});
 			return;
 		}

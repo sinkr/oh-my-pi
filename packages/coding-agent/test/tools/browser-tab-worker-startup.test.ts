@@ -324,6 +324,35 @@ describe("OMP-owned browser evaluation", () => {
 		},
 		45_000,
 	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"tells a caller running calls on one tab together to await each one or use one run",
+		async () => {
+			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			const name = `parallel-calls-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, browser, { url: `data:text/html,<title>${name}</title>`, timeoutMs: 30_000 });
+				const results = await Promise.allSettled([
+					runInTab(name, { code: "return await page.title();", timeoutMs: 10_000, session }),
+					runInTab(name, { code: "return await page.title();", timeoutMs: 10_000, session }),
+				]);
+				expect(results[0]?.status).toBe("fulfilled");
+				const refused = String(results[1]?.status === "rejected" ? results[1].reason : "");
+				expect(refused).toContain("is busy");
+				expect(refused).toContain("Await each call before starting the next");
+				expect(refused).toContain("tab.run(");
+			} finally {
+				await releaseTab(name, { kill: true });
+				await releaseBrowser(browser, { kill: true });
+			}
+		},
+		45_000,
+	);
 });
 
 describe("OMP-owned browser input", () => {
