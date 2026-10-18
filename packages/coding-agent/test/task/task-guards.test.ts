@@ -70,6 +70,20 @@ function yieldToolEnd(): AgentSessionEvent {
 	} as AgentSessionEvent;
 }
 
+function assistantMessageStart(): AgentSessionEvent {
+	return { type: "message_start", message: { role: "assistant", content: [] } } as unknown as AgentSessionEvent;
+}
+
+function readToolEnd(toolCallId: string): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "read",
+		result: { content: [{ type: "text", text: "file contents" }] },
+		isError: false,
+	} as AgentSessionEvent;
+}
+
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 	let abortCount = 0;
 	const steerCalls: SteerCall[] = [];
@@ -305,6 +319,48 @@ describe("runSubprocess request guards", () => {
 		expect(result.abortReason).toContain("request budget exceeded");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(handle.steerCalls.length).toBe(1);
+	});
+
+	it("budgets the steps of a tool loop the provider runs inside one streaming response", async () => {
+		// Cursor executes tools while its single assistant message still streams;
+		// each result feeds another model step. Budget 2: notice at the second
+		// step, force-stop at the third, all before the message ever ends.
+		const settings = Settings.isolated({
+			"task.maxRuntimeMs": 0,
+			"task.softRequestBudget": 2,
+			"task.softRequestBudgetNotice": true,
+		});
+		const handle = createFakeSession({
+			hang: true,
+			events: [assistantMessageStart(), readToolEnd("read-1"), readToolEnd("read-2"), readToolEnd("read-3")],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-server-steps", settings });
+
+		expect(handle.steerCalls.length).toBe(1);
+		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
+		expect(result.abortReason).toContain("request budget exceeded");
+	});
+
+	it("does not count tools run after the response ended as extra requests", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const handle = createFakeSession({
+			events: [
+				assistantMessageStart(),
+				assistantMessageEnd("reading"),
+				readToolEnd("read-1"),
+				readToolEnd("read-2"),
+				assistantMessageStart(),
+				assistantMessageEnd("done"),
+				yieldToolEnd(),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-client-tools", settings });
+
+		expect(result.requests).toBe(2);
 	});
 
 	it("salvages the last assistant text for an aborted child with no completed output", async () => {
