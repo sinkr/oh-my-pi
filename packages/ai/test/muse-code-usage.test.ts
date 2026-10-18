@@ -239,6 +239,34 @@ describe("Muse Code subscription usage", () => {
 		expect(firstSeen?.limits.map(limit => limit.id)).toEqual(["300m"]);
 	});
 
+	test("reports no quota when a response without usage is not an active paid subscription", async () => {
+		const previousReport = {
+			provider: "muse-code",
+			fetchedAt: Date.now() - 3_600_000,
+			limits: [
+				{
+					id: "1w",
+					label: "Weekly",
+					scope: { provider: "muse-code" },
+					window: { id: "1w", label: "Weekly", durationMs: 604_800_000, resetsAt: Date.now() + 86_400_000 },
+					amount: { usedFraction: 0.4, unit: "percent" as const },
+				},
+			],
+		};
+		const responses = [
+			{ require_payment: true, require_payment_action_url: "https://dev.meta.ai/subscribe" },
+			{ is_subs_active: true, require_payment: true },
+		];
+
+		for (const body of responses) {
+			const report = await museCodeUsageProvider.fetchUsage(
+				{ provider: "muse-code", credential },
+				{ fetch: () => Promise.resolve(Response.json(body)), previousReport },
+			);
+			expect(report).toBeNull();
+		}
+	});
+
 	test("reports inactive subscriptions through credential validation", async () => {
 		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
 			usageFetch: Object.assign(() => Promise.resolve(Response.json({ is_subs_active: false }, { status: 200 })), {

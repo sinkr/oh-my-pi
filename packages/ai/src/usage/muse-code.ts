@@ -201,9 +201,14 @@ export const museCodeUsageProvider: UsageProvider = {
 		const accountId = payload.user_id?.trim() || params.credential.accountId || email;
 		const tier = payload.subs_tier_name?.trim() || payload.subs_tier_id?.trim() || undefined;
 		const now = Date.now();
+		// Payment-required responses omit `subs_usage` too; only an explicitly
+		// active, paid subscription's omission means an idle window.
+		const idle = payload.is_subs_active === true && payload.require_payment !== true;
 		const limits = payload.subs_usage
 			? buildLimits(payload.subs_usage, tier, accountId)
-			: buildIdleLimits(ctx.previousReport, tier, accountId, now);
+			: idle
+				? buildIdleLimits(ctx.previousReport, tier, accountId, now)
+				: [];
 		if (limits.length === 0) return null;
 		const raw = { ...payload };
 		delete raw.api_key;
