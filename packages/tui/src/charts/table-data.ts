@@ -527,7 +527,7 @@ export function parseCell(markdown: string): Cell {
 	return { ...cell, fit: "prose" };
 }
 
-/** The value of a number written as {@link NUMBER} matches it. */
+/** The value of a number {@link NUMBER} matched, its comma or space group separators removed. */
 function toNumber(written: string): number {
 	return Number(written.replace(/[,\s]/g, ""));
 }
