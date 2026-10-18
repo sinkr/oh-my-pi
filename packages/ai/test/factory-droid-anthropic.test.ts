@@ -61,6 +61,33 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 	});
 
 	it.each([
+		["anthropic", "1h"],
+		["vertex_anthropic", "1h"],
+		["bedrock_anthropic", "1h"],
+		["azure_anthropic", "1h"],
+		["snowflake", undefined],
+	] as const)(
+		"writes long retention on the %s upstream as ttl %p without the extended-cache beta",
+		async (upstream, ttl) => {
+			const captured: CapturedRequest[] = [];
+			await streamFactoryDroid(
+				factoryModel("claude-opus-4-6", [upstream]),
+				{ systemPrompt: ["Stay concise."], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+				{ apiKey: WORKOS_TOKEN, cacheRetention: "long", fetch: captureFetch(captured, anthropicChunks("OK")) },
+			).result();
+
+			const request = captured[0]!;
+			expect(request.headers["x-api-provider"]).toBe(upstream);
+			const breakpoints = [...JSON.stringify(request.body).matchAll(/"cache_control":(\{[^}]*\})/g)].map(
+				match => JSON.parse(match[1]!) as { ttl?: string },
+			);
+			expect(breakpoints.length).toBeGreaterThan(0);
+			expect(breakpoints.map(breakpoint => breakpoint.ttl)).toEqual(breakpoints.map(() => ttl));
+			expect(request.headers["anthropic-beta"] ?? "").not.toContain("extended-cache-ttl-2025-04-11");
+		},
+	);
+
+	it.each([
 		["required", () => ({ type: "any" })],
 		[{ type: "function", function: { name: "Read" } }, (toolName: string) => ({ type: "tool", name: toolName })],
 	] as const)("maps caller tool choice %j onto Anthropic's tool_choice", async (toolChoice, expected) => {

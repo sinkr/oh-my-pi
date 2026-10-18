@@ -51,6 +51,10 @@
 
 ## [18.12.2] - 2026-10-18
 
+### Added
+
+- Added the `extended-cache-ttl-beta` compat axis, off for Vertex rawPredict and Factory Droid, and prompt-cache lifetimes and long-retention support for Factory Droid's Claude models
+
 ### Changed
 
 - Seeded TypeSafe `jev-1.14.0` and OpenRouter `typesafe/jev-1.14`, and made them the `judge` role defaults and TypeSafe's default model; TypeSafe discovery keeps seeded ids its alias-only `/v1/models` listing omits

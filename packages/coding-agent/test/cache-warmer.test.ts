@@ -3,6 +3,7 @@ import type { AssistantMessage, AssistantMessageEvent, SimpleStreamOptions, Usag
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { factoryModel } from "../../ai/test/helpers/factory-droid";
 import {
 	CacheWarmer,
 	type CacheWarmerDeps,
@@ -450,6 +451,15 @@ describe("cache warmer lifecycle", () => {
 		// A settled 1h run no longer idle-warms every 4.5 minutes.
 		h.warmer.onAgentSettled();
 		expect(h.warmer.status.reason).toBe("cache entry outlives the 30-minute idle window");
+	});
+
+	test("schedules Factory Droid Claude models at the lifetime of the tier they write", () => {
+		const h = harness();
+		const model = factoryModel("claude-opus-4-6");
+		h.warmer.start({ model, context: { messages: [] }, options: {} }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
 	});
 
 	test("streaming mode stops when the agent settles", () => {

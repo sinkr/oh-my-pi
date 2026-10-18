@@ -671,6 +671,8 @@ export interface AnthropicCompat {
 	supportsEagerToolInputStreaming?: boolean;
 	/** Whether long prompt-cache retention (`ttl: "1h"`) is supported. Default: true for canonical Anthropic API. */
 	supportsLongCacheRetention?: boolean;
+	/** Whether a `ttl: "1h"` breakpoint on API-key requests adds the `extended-cache-ttl-2025-04-11` beta. Default: true except Vertex rawPredict. */
+	extendedCacheTtlBeta?: boolean;
 	/**
 	 * Whether mid-conversation `role: "system"` messages are accepted in the
 	 * `messages` array. When unset, auto-detected from model and deployment policy.

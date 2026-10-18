@@ -16,7 +16,7 @@
  * fallbacks cover unmatched targets.
  */
 import { Effort, THINKING_EFFORTS } from "../effort";
-import { hostMatchesUrl, modelMatchesHost } from "../hosts";
+import { hostMatchesUrl, isVertexRawPredictUrl, modelMatchesHost } from "../hosts";
 import { withoutUnverifiedThinking } from "../model-thinking";
 import type {
 	Api,
@@ -914,6 +914,7 @@ function resolveAnthropicPolicy(
 		allowAnthropicHeaderOverrides: false,
 		supportsEagerToolInputStreaming: official,
 		supportsLongCacheRetention: official,
+		extendedCacheTtlBeta: !isVertexRawPredictUrl(baseUrl),
 		supportsMidConversationSystem: official && !facts.family("sonnet") && facts.anthropicAdaptiveGenAtLeast("4.8"),
 		supportsTurnScopedSystem: false,
 		supportsMidConversationToolChanges: false,
