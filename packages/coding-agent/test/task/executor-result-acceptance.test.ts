@@ -40,10 +40,10 @@ const baseAgent: AgentDefinition = {
 	source: "bundled",
 };
 
-function assistantStopMessage(text: string): AssistantMessage {
+function assistantStopMessage(content: AssistantMessage["content"]): AssistantMessage {
 	return {
 		role: "assistant",
-		content: [{ type: "text", text }],
+		content,
 		api: "openai-responses",
 		provider: "openai",
 		model: "mock",
@@ -68,6 +68,10 @@ interface SessionHarness {
 	emitTerminalYield: (data: unknown) => void;
 	/** End an assistant message carrying `text` and no tool calls. */
 	emitAssistantText: (text: string) => void;
+	/** End an assistant message carrying `content`, tool calls included. */
+	emitAssistantContent: (content: AssistantMessage["content"]) => void;
+	/** End the agent loop with every assistant message emitted so far. */
+	emitAgentEnd: () => void;
 	/** The observer factory installed by {@link attachIrcWakeTurnMonitor}, if any. */
 	wakeObserver: () =>
 		| ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
@@ -91,11 +95,13 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 		for (const listener of [...listeners]) listener(event);
 	};
-	const emitAssistantText = (text: string) => {
-		const message = assistantStopMessage(text);
+	const emitAssistantContent = (content: AssistantMessage["content"]) => {
+		const message = assistantStopMessage(content);
 		messages.push(message);
 		emit({ type: "message_end", message } as AgentSessionEvent);
 	};
+	const emitAssistantText = (text: string) => emitAssistantContent([{ type: "text", text }]);
+	const emitAgentEnd = () => emit({ type: "agent_end", messages: [...messages] } as AgentSessionEvent);
 	const emitTerminalYield = (data: unknown) => {
 		yieldSeq += 1;
 		emit({
@@ -160,6 +166,8 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		promptEntered: promptEntered.promise,
 		emitTerminalYield,
 		emitAssistantText,
+		emitAssistantContent,
+		emitAgentEnd,
 		wakeObserver: () => wakeObserver,
 	};
 }
@@ -720,5 +728,50 @@ describe("runSubprocess result acceptance", () => {
 		} finally {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
+	});
+
+	it("relays only a woken agent's final report, not the narration before its tool calls", async () => {
+		const harness = createHarness();
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "OtherAgent",
+			displayName: "OtherAgent",
+			kind: "sub",
+			session: createHarness().session,
+			status: "running",
+		});
+		registry.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Parent",
+			session: harness.session,
+			status: "idle",
+		});
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+
+		const finish = observer([
+			{
+				role: "custom",
+				customType: "irc:incoming",
+				content: "is line 42 fine?",
+				display: false,
+				details: { id: "msg-peer", from: "OtherAgent", message: "is line 42 fine?" },
+				attribution: "agent",
+				timestamp: Date.now(),
+			} as unknown as AgentMessage,
+		]);
+		const relay = IrcBus.global().wait("OtherAgent", { from: AGENT_ID }, 1000);
+		harness.emitAssistantContent([
+			{ type: "text", text: "Checking." },
+			{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "src/a.ts" } },
+		]);
+		harness.emitAssistantText("Answer.");
+		harness.emitAgentEnd();
+		await finish?.(undefined);
+
+		expect((await relay)?.body).toBe("Answer.");
 	});
 });
