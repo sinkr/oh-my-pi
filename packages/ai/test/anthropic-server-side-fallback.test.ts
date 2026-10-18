@@ -818,6 +818,112 @@ describe("mid-turn fallback a gateway opted into", () => {
 	});
 });
 
+describe("output the primary streamed before declining", () => {
+	const usage = { input_tokens: 10, output_tokens: 8, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+	// The primary reasons, starts a tool call, then declines; the fallback model
+	// answers in text without calling any tool.
+	const declinedTurnEvents: MockAnthropicEvent[] = [
+		{ type: "message_start", message: { id: "msg_turn", model: "claude-fable-5", usage } },
+		{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "primary plan" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig-primary" } },
+		{ type: "content_block_stop", index: 0 },
+		{ type: "content_block_start", index: 1, content_block: { type: "redacted_thinking", data: "opaque-primary" } },
+		{ type: "content_block_stop", index: 1 },
+		{ type: "content_block_start", index: 2, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 2, delta: { type: "text_delta", text: "Let me look." } },
+		{ type: "content_block_stop", index: 2 },
+		{
+			type: "content_block_start",
+			index: 3,
+			content_block: { type: "tool_use", id: "toolu_declined", name: "read", input: {} },
+		},
+		{ type: "content_block_delta", index: 3, delta: { type: "input_json_delta", partial_json: '{"path":"a.txt"}' } },
+		{ type: "content_block_stop", index: 3 },
+		{
+			type: "content_block_start",
+			index: 4,
+			content_block: {
+				type: "fallback",
+				from: { model: "claude-fable-5" },
+				to: { model: "claude-opus-4-8" },
+				trigger: { type: "refusal", category: "cyber" },
+			},
+		},
+		{ type: "content_block_stop", index: 4 },
+		{ type: "content_block_start", index: 5, content_block: { type: "thinking", thinking: "" } },
+		{ type: "content_block_delta", index: 5, delta: { type: "thinking_delta", thinking: "fallback plan" } },
+		{ type: "content_block_delta", index: 5, delta: { type: "signature_delta", signature: "sig-fallback" } },
+		{ type: "content_block_stop", index: 5 },
+		{ type: "content_block_start", index: 6, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 6, delta: { type: "text_delta", text: "Here is the answer." } },
+		{ type: "content_block_stop", index: 6 },
+		{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage },
+		{ type: "message_stop" },
+	];
+	const nextTurnEvents: MockAnthropicEvent[] = [
+		{ type: "message_start", message: { id: "msg_next", usage } },
+		{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage },
+		{ type: "message_stop" },
+	];
+
+	async function runTurns(
+		model: Model<"anthropic-messages">,
+		options: Parameters<typeof streamAnthropic>[2],
+	): Promise<{ turn: AssistantMessage; replayed: unknown[] }> {
+		const requests: Array<{ messages: MessageParam[] }> = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			requests.push(params as { messages: MessageParam[] });
+			return createMockRequest(requests.length === 1 ? declinedTurnEvents : nextTurnEvents) as never;
+		});
+		const user = { role: "user", content: "Read a.txt", timestamp: 0 } as const;
+		const turn = await streamAnthropic(model, { messages: [user] }, options).result();
+		const followUp = { role: "user", content: "Thanks", timestamp: 0 } as const;
+		await streamAnthropic(model, { messages: [user, turn, followUp] }, options).result();
+		const replayed = requests[1]?.messages.find(message => message.role === "assistant")?.content;
+		if (!Array.isArray(replayed)) throw new Error("expected the fallback turn on the wire");
+		return { turn, replayed };
+	}
+
+	it("never surfaces the declined tool call or reasoning in the finished turn", async () => {
+		const { turn } = await runTurns(fableModel, {
+			apiKey: "sk-ant-test",
+			thinkingEnabled: true,
+			fallbacks: [{ model: "claude-opus-4-8" }],
+		});
+
+		expect(turn.stopReason).toBe("stop");
+		expect(turn.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(turn.content.map(block => block.type)).toEqual(["text", "fallback", "thinking", "text"]);
+		expect(turn.content[2]).toMatchObject({ thinking: "fallback plan", thinkingSignature: "sig-fallback" });
+	});
+
+	it("replays only the retained output with the boundary when the request opts in", async () => {
+		const { replayed } = await runTurns(fableModel, {
+			apiKey: "sk-ant-test",
+			thinkingEnabled: true,
+			fallbacks: [{ model: "claude-opus-4-8" }],
+		});
+
+		expect(replayed).toMatchObject([
+			{ type: "text", text: "Let me look." },
+			{ type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-4-8" } },
+			{ type: "thinking", thinking: "fallback plan", signature: "sig-fallback" },
+			{ type: "text", text: "Here is the answer." },
+		]);
+	});
+
+	it("replays only the retained output without the boundary when the request does not opt in", async () => {
+		const { replayed } = await runTurns(fableModel, { apiKey: "sk-ant-test", thinkingEnabled: true });
+
+		expect(replayed).toMatchObject([
+			{ type: "text", text: "Let me look." },
+			{ type: "thinking", thinking: "fallback plan", signature: "sig-fallback" },
+			{ type: "text", text: "Here is the answer." },
+		]);
+	});
+});
+
 describe("fallback-credit continuation after a mid-turn fallback", () => {
 	// The continuation echoes the refused response's content. A `fallback`
 	// boundary is accepted without the beta and validates the thinking around

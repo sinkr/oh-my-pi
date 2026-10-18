@@ -1603,6 +1603,26 @@ function unwrapAnthropicThinkingEnvelope(text: string): string | undefined {
 }
 
 /**
+ * Remove the output a model streamed before declining at a server-side
+ * fallback handoff: its reasoning and its tool calls. The serving model never
+ * saw those tool calls, so they must not run, and replaying reasoning signed
+ * on both sides of a handoff is refused by the API. Text stays: the serving
+ * model continued from it. Mutates `content` in place.
+ */
+function dropDeclinedFallbackOutput(content: AssistantMessage["content"]): void {
+	const boundary = content.findLastIndex(block => block.type === "fallback");
+	if (boundary <= 0) return;
+	let kept = 0;
+	for (let i = 0; i < content.length; i++) {
+		const block = content[i]!;
+		const declined =
+			i < boundary && (block.type === "thinking" || block.type === "redactedThinking" || block.type === "toolCall");
+		if (!declined) content[kept++] = block;
+	}
+	content.length = kept;
+}
+
+/**
  * The refused response's content as the continuation prefix: client tool
  * calls (no matching tool_result) are omitted and a trailing text block is
  * right-trimmed, per the fallback-credit continuation contract.
@@ -3960,6 +3980,8 @@ const streamAnthropicOnce = (
 					firstTokenTime = undefined;
 				}
 			}
+			// Done here, not at the boundary, so the streamed content indices stay stable.
+			dropDeclinedFallbackOutput(output.content);
 			if (usingFallbackCredit && fallbackCreditShape === "continuation" && frozenRedemption?.refusedContent) {
 				// The response continues the echoed prefix; keep it, signatures included, in
 				// the stored turn. A tool loop requires the turn to open with its thinking
