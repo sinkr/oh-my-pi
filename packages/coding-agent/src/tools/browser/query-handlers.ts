@@ -101,7 +101,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 	const roleMatch = /^\s*([^\s[]+)/.exec(selector);
 	const wantedRole = (roleMatch?.[1] ?? "").toLocaleLowerCase();
 	const nameMatch = /\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\]/i.exec(selector);
-	const wantedName = (nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3])?.trim().toLocaleLowerCase();
+	const normalizeSpace = (value: string): string => value.replace(/\s+/g, " ").trim();
+	const nameText = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
+	const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
 	const exact = nameMatch?.[4]?.toLocaleLowerCase() === "exact";
 	const implicitRole = (element: Element): string | null => {
 		const tag = element.tagName.toLocaleLowerCase();
@@ -138,35 +140,60 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		}
 		return null;
 	};
+	// Roles named by their content, so `title` names them only when the content is empty.
+	const namedByContent =
+		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|tooltip|treeitem)$/.test(
+			wantedRole,
+		);
+	// Text as the accessibility tree reads it: `aria-hidden` subtrees skipped, embedded images give their alt.
+	const contentText = (element: Pick<Element, "childNodes">): string => {
+		let text = "";
+		for (const child of Array.from(element.childNodes)) {
+			// 3 = Node.TEXT_NODE, 1 = Node.ELEMENT_NODE
+			if (child.nodeType === 3) text += child.nodeValue ?? "";
+			if (child.nodeType !== 1) continue;
+			const childElement = child as Element;
+			if (childElement.getAttribute("aria-hidden") === "true") continue;
+			text +=
+				childElement.tagName.toLocaleLowerCase() === "img"
+					? (childElement.getAttribute("alt") ?? "")
+					: contentText(childElement);
+		}
+		return text;
+	};
 	const accessibleName = (element: Element): string => {
 		const ariaLabel = element.getAttribute("aria-label");
-		if (ariaLabel) return ariaLabel.trim();
+		if (ariaLabel) return normalizeSpace(ariaLabel);
 		const labelledBy = element.getAttribute("aria-labelledby");
 		if (labelledBy) {
-			const value = labelledBy
-				.split(/\s+/)
-				.map(id => element.ownerDocument?.getElementById(id)?.textContent ?? "")
-				.join(" ")
-				.trim();
+			const value = normalizeSpace(
+				labelledBy
+					.split(/\s+/)
+					.map(id => {
+						const target = element.ownerDocument?.getElementById(id);
+						return target ? contentText(target) : "";
+					})
+					.join(" "),
+			);
 			if (value) return value;
 		}
 		if (element.id) {
 			for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
-				if (label.getAttribute("for") === element.id) return (label.textContent ?? "").trim();
+				if (label.getAttribute("for") === element.id) return normalizeSpace(contentText(label));
 			}
 		}
 		const wrappingLabel = element.closest("label");
-		if (wrappingLabel) return (wrappingLabel.textContent ?? "").trim();
-		return (
-			element.getAttribute("alt") ??
-			element.getAttribute("title") ??
-			(element.tagName.toLocaleLowerCase() === "input" &&
-			["button", "submit", "reset"].includes((element as unknown as { type: string }).type.toLocaleLowerCase())
+		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel));
+		const alt = element.getAttribute("alt");
+		if (alt !== null) return normalizeSpace(alt);
+		const content = normalizeSpace(
+			element.tagName.toLocaleLowerCase() === "input" &&
+				["button", "submit", "reset"].includes((element as unknown as { type: string }).type.toLocaleLowerCase())
 				? (element as unknown as { value: string }).value
-				: element.textContent) ??
-			element.getAttribute("placeholder") ??
-			""
-		).trim();
+				: contentText(element),
+		);
+		if (content && namedByContent) return content;
+		return normalizeSpace(element.getAttribute("title") ?? content);
 	};
 	return Array.from(root.querySelectorAll("*")).filter(element => {
 		const role = (element.getAttribute("role")?.trim().split(/\s+/)[0] ?? implicitRole(element))?.toLocaleLowerCase();

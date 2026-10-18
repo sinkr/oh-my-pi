@@ -23,6 +23,7 @@ const session: ToolSession = {
 const prelude = createBrowserPrelude(session);
 const context = { session, toolCallId: "browser-queries-test" };
 const name = "queries";
+const namesTab = "queries-role-names";
 
 async function invoke(parameters: unknown) {
 	return await prelude.invoke(parameters, context);
@@ -61,6 +62,13 @@ beforeAll(async () => {
 		<input id="checked" type="checkbox" checked><input id="unchecked" type="checkbox">
 		<div id="empty"></div>`;
 	await invoke({ action: "open", name, url: `data:text/html,${encodeURIComponent(html)}` });
+	const namesHtml = `<!doctype html>
+		<button title="Open the cart">Cart</button>
+		<button><span aria-hidden="true">⚙</span> Settings</button>
+		<button><img alt="bogusz's logo" src="data:,"> bogusz</button>
+		<button>Sign
+			in</button>`;
+	await invoke({ action: "open", name: namesTab, url: `data:text/html,${encodeURIComponent(namesHtml)}` });
 });
 
 afterAll(async () => {
@@ -80,6 +88,21 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		expect(await call("text", ['role/button[name="save"]'])).toBe("Save Changes");
 		expect(await call("text", ['role/button[name="save" exact]'])).toBe("Save");
 		expect(await call("count", ["role/button"])).toBe(4);
+	});
+
+	it.each([
+		["a title does not replace the text content", "Cart"],
+		["aria-hidden text is left out", "Settings"],
+		["an embedded image contributes its alt", "bogusz's logo bogusz"],
+		["whitespace collapses", "Sign in"],
+	])("matches role/ exact names to the name observe() shows when %s", async (_, buttonName) => {
+		const result = (await invoke({
+			action: "run",
+			name: namesTab,
+			code: `const observed = (await tab.observe()).elements.find(entry => entry.role === "button" && entry.name.trim() === ${JSON.stringify(buttonName)});
+			return observed && await tab.count(\`role/button[name="\${observed.name}" exact]\`);`,
+		})) as { details?: { value?: number } };
+		expect(result.details?.value).toBe(1);
 	});
 
 	it("returns DOM content, values, attributes, counts, boxes, styles, and query state branches", async () => {
