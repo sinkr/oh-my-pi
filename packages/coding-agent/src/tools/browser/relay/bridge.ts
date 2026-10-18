@@ -768,9 +768,21 @@ export class RelayBridge {
 			});
 	}
 
-	/** After the last CDP client leaves, once its tabs' detaches settle: update the extensions it kept busy. */
+	/**
+	 * With no CDP client left, once every tab's attach and detach has settled (their cleanup included, which can start
+	 * another detach): update the extensions that were kept busy. An attach left running after its tab was discarded
+	 * is not awaited twice; its own RPC retries the update when it settles.
+	 */
 	async #updateIdleExtensions(): Promise<void> {
-		await Promise.all(Array.from(this.#tabs.values(), tab => tab.detaching));
+		const awaited = new Set<Promise<unknown>>();
+		for (;;) {
+			const busy = Array.from(this.#tabs.values(), tab => tab.attaching ?? tab.detaching).filter(
+				(p): p is Promise<boolean> | Promise<void> => p !== null && !awaited.has(p),
+			);
+			if (busy.length === 0) break;
+			for (const p of busy) awaited.add(p);
+			await Promise.all(busy);
+		}
 		if (this.#conns.size > 0) return;
 		for (const inst of this.#instances.values()) this.#maybeUpdateExtension(inst);
 	}
@@ -1872,6 +1884,8 @@ export class RelayBridge {
 				const retry = tab.retryAttachAfterDiscard;
 				tab.retryAttachAfterDiscard = false;
 				if (retry && !tab.discarded) this.#attachForAutoAttach(tab);
+				// Every client left while Chrome attached: nobody can take a session on the tab, so release it.
+				if (this.#conns.size === 0) this.#detachIfUnheld(tab.tabKey);
 			});
 		// Stop waiting for discarded tabs without dropping the extension RPC's late result.
 		const attempt = Promise.race([request, cancelled.promise]);
@@ -1952,11 +1966,11 @@ export class RelayBridge {
 		}, timeoutMs);
 		this.#pendingRpc.set(`${inst.instanceId}:${id}`, { resolve, reject, timer });
 		inst.socket.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
-		// A pending call defers an extension update (see #reloadBlocker): retry it once the call settles.
+		// A pending call defers an extension update (see #reloadBlocker): retry it once the call and its cleanup settle.
 		void promise
 			.catch(() => undefined)
 			.then(() => {
-				if (this.#conns.size === 0) this.#maybeUpdateExtension(inst);
+				if (this.#conns.size === 0) void this.#updateIdleExtensions();
 			});
 		return promise;
 	}
