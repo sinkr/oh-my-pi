@@ -380,11 +380,13 @@ export function $envpos(name: string, defaultValue: number): number {
 
 const BUN_TEST_ENTRY_PATTERN = /[._](?:test|spec)\.[cm]?[jt]sx?$/;
 
-/** True when the process is an explicitly marked test child or Bun is running a test entrypoint. */
+/**
+ * True when the process is an explicitly marked test child or Bun is running a test entrypoint.
+ * The entrypoint alone decides: `bun test` sets `NODE_ENV=test` only when it is unset, so a shell
+ * exporting `NODE_ENV=development` would otherwise let tests read and write the user's caches.
+ */
 export function isBunTestRuntime(): boolean {
-	if (Bun.env.PI_TEST_RUNTIME === "1") return true;
-	const hasTestEnvironment = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
-	return hasTestEnvironment && BUN_TEST_ENTRY_PATTERN.test(Bun.main);
+	return Bun.env.PI_TEST_RUNTIME === "1" || BUN_TEST_ENTRY_PATTERN.test(Bun.main);
 }
 
 let terminalHeadless = isBunTestRuntime();
