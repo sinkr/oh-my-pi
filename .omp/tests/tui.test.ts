@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import * as zod from "@oh-my-pi/omptype/zod";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import createTool, { type TuiParams } from "../tools/tui";
@@ -111,10 +112,11 @@ process.stdout.write("READY\\r\\n");
 		async () => {
 			using dir = TempDir.createSync("@omp-tui-dimensions-fixture-");
 			const preload = dir.join("interactive.ts");
+			const envModuleUrl = pathToFileURL(path.resolve(import.meta.dir, "../../packages/utils/src/env.ts")).href;
 			// CI marks test children headless; opt only this real-PTY child back into terminal I/O.
 			await Bun.write(
 				preload,
-				`import { setTerminalHeadless } from ${JSON.stringify(path.resolve(import.meta.dir, "../../packages/utils/src/env.ts"))};
+				`import { setTerminalHeadless } from ${JSON.stringify(envModuleUrl)};
 setTerminalHeadless(false);
 `,
 			);
