@@ -9,7 +9,7 @@ import type { Browser } from "puppeteer-core";
 import { gracefulKillTreeOnce } from "../tools/browser/attach";
 import {
 	DISABLE_AUTOMATION_CONTROLLED_ARG,
-	ensureChromiumExecutable,
+	ensureSignInChromiumExecutable,
 	loadPuppeteer,
 	removeUserDataDir,
 	stealthIgnoreDefaultArgs,
@@ -33,7 +33,7 @@ export async function captureBrowserSession(
 	let userDataDir: string | undefined;
 	try {
 		const [puppeteer, executablePath] = await untilAborted(lifetime, () =>
-			Promise.all([loadPuppeteer(), ensureChromiumExecutable()]),
+			Promise.all([loadPuppeteer(), ensureSignInChromiumExecutable()]),
 		);
 		userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-sso-profile-"));
 		lifetime.throwIfAborted();

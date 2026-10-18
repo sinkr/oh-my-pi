@@ -48,7 +48,7 @@ function browserFixture() {
 		return browser as unknown as Browser;
 	};
 	const launch = vi.fn(launchBrowser);
-	vi.spyOn(launchModule, "ensureChromiumExecutable").mockResolvedValue("/fake/chromium");
+	vi.spyOn(launchModule, "ensureSignInChromiumExecutable").mockResolvedValue("/fake/chromium");
 	const load = vi.spyOn(launchModule, "loadPuppeteer").mockResolvedValue({ launch } as unknown as PuppeteerNode);
 	return { browser, page, readCookies, launch, launchBrowser, load };
 }
