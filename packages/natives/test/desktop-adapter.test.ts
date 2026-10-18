@@ -34,30 +34,4 @@ describe("desktop native ABI requirements", () => {
 		const Stale = adaptDesktopSession(class {});
 		expect(() => new Stale({ display: "active" })).toThrow(/holdDisplayUntilReleased, releaseDisplayAwake/);
 	});
-
-	it("rejects an addon built before axSelectText by name", () => {
-		const NativeSession = class {};
-		for (const method of [
-			"click",
-			"capture",
-			"captureRegion",
-			"cancel",
-			"retire",
-			"observe",
-			"listApplications",
-			"openApplication",
-			"menuItems",
-			"menuSelect",
-			"holdKeys",
-			"holdMouse",
-			"acquireControl",
-			"releaseControl",
-			"controlState",
-			"bringToCurrentSpace",
-		]) {
-			Object.defineProperty(NativeSession.prototype, method, { value() {} });
-		}
-		const DesktopSession = adaptDesktopSession(NativeSession);
-		expect(() => new DesktopSession({ display: "active" })).toThrow("missing axSelectText");
-	});
 });

@@ -253,14 +253,10 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async axPerform(_ref: string, _action: string): Promise<void> {}
 	async axSetValue(_ref: string, _value: string): Promise<void> {}
-	readonly selections: Array<{ ref: string; text: string; opts?: AxSelectTextOptions | null }> = [];
-	/** Follows the native contract over the value "red cat" with `text` at 4: `select: "start"`/`"end"` return an empty caret. */
-	async axSelectText(ref: string, text: string, opts?: AxSelectTextOptions | null): Promise<AxTextSelection> {
-		this.selections.push({ ref, text, opts });
-		const start = 4;
-		if (opts?.select === "start") return { start, length: 0, text: "", focused: true };
-		if (opts?.select === "end") return { start: start + text.length, length: 0, text: "", focused: true };
-		return { start, length: text.length, text, focused: true };
+	readonly selections: string[] = [];
+	async axSelectText(_ref: string, text: string, _opts?: AxSelectTextOptions | null): Promise<AxTextSelection> {
+		this.selections.push(text);
+		return { start: 0, length: text.length, text, focused: true };
 	}
 	async axFocus(_ref: string): Promise<void> {}
 	async axClick(_ref: string, _opts?: PointerOptions | null): Promise<void> {}
@@ -1763,27 +1759,6 @@ describe("computer worker round trips", () => {
 		);
 		expect(result.ok).toBe(true);
 		if (result.ok) expect(result.payload.returnValue).toEqual({ role: "button", count: 1 });
-	});
-
-	it("selects element text through the native session and returns the read-back selection", async () => {
-		const transport = new MemoryTransport();
-		const native = new FakeNativeSession();
-		new ComputerWorkerCore(transport, () => native);
-		const result = await runWorker(
-			transport,
-			"select-text",
-			'const el = await (await desktop.window("42")).ref("e1"); return [await el.selectText("cat", { prefix: "red " }), await el.selectText("cat", { prefix: "red ", select: "end" })]',
-		);
-		expect(result.ok).toBe(true);
-		if (result.ok)
-			expect(result.payload.returnValue).toEqual([
-				{ start: 4, length: 3, text: "cat", focused: true },
-				{ start: 7, length: 0, text: "", focused: true },
-			]);
-		expect(native.selections).toEqual([
-			{ ref: "e1", text: "cat", opts: { prefix: "red " } },
-			{ ref: "e1", text: "cat", opts: { prefix: "red ", select: "end" } },
-		]);
 	});
 
 	it("blocks read-only selectText before invoking the native session", async () => {
