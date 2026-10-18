@@ -1837,13 +1837,16 @@ export class RelayBridge {
 	async #closeTab(key: string, tabId: number, inst: ExtInstance): Promise<void> {
 		const tab = this.#tabs.get(key);
 		if (tab) tab.closing = true;
+		// Recorded before the extension is asked, so a relay stopped while it answers leaves the close to the next.
+		if (!this.#closeOnHello.has(key)) {
+			this.#closeOnHello.set(key, { instanceId: inst.instanceId, durable: inst.browserSession !== undefined });
+			this.#savePendingCloses();
+		}
 		try {
 			await this.#rpc({ op: "removeTab", tabId }, inst);
 		} catch (err) {
 			// The tab stays open, so a later detach is Chrome's own again.
 			if (tab) tab.closing = false;
-			this.#closeOnHello.set(key, { instanceId: inst.instanceId, durable: inst.browserSession !== undefined });
-			this.#savePendingCloses();
 			throw err;
 		}
 		if (this.#closeOnHello.delete(key)) this.#savePendingCloses();

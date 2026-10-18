@@ -462,8 +462,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			const kept = fixture.extension.evaluate(`(() => {
 				const kept = Promise.withResolvers();
 				chrome.storage.onChanged.addListener((changes, area) => {
-					const list = changes.relayOrphanTabs?.newValue;
-					if (area === "session" && Array.isArray(list) && list.length > 0) kept.resolve(list[0]);
+					const list = changes.relayOrphanTabs?.newValue?.ids;
+					if (area === "local" && Array.isArray(list) && list.length > 0) kept.resolve(list[0]);
 				});
 				return kept.promise;
 			})()`);

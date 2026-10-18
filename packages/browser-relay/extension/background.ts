@@ -42,36 +42,65 @@ async function ensureInstanceId(): Promise<string> {
 }
 
 const BROWSER_SESSION_KEY = "relayBrowserSession";
+/** Set in `chrome.storage.session` once this worker's browser session is settled; cleared with the browser. */
+const SESSION_SETTLED_KEY = "relayBrowserSessionSettled";
+/**
+ * How long a worker without that mark (the browser just started, or this extension was loaded, reloaded, updated
+ * or re-enabled) waits for `runtime.onStartup` before keeping the stored id: without a browser start, tab ids hold.
+ */
+const SESSION_EVENT_WAIT_MS = 2_000;
+const sessionEvent = Promise.withResolvers<void>();
+/** True once the wait above is over, by `runtime.onStartup` or the timeout. */
+let sessionDecided = false;
+/** True when this worker created the session id itself (first run): it is new, so a browser start need not replace it. */
+let sessionCreatedHere = false;
+function decideSession(): void {
+	sessionDecided = true;
+	sessionEvent.resolve();
+}
+setTimeout(decideSession, SESSION_EVENT_WAIT_MS);
 
 /**
  * A random id for this browser session. Chrome reuses tab ids after a restart, so the relay scopes target ids and
  * saved closes to it. It lives in `chrome.storage.local`, so reloading or updating the extension keeps it, and is
- * replaced when the browser starts (`runtime.onStartup`).
+ * replaced when the browser starts (`runtime.onStartup`); until a fresh worker knows which happened, no hello or
+ * orphan close uses it.
  */
 async function ensureBrowserSession(): Promise<string> {
+	const settled = await chrome.storage.session.get({ [SESSION_SETTLED_KEY]: false });
+	if (settled[SESSION_SETTLED_KEY] !== true) {
+		await sessionEvent.promise;
+		await chrome.storage.session.set({ [SESSION_SETTLED_KEY]: true });
+	}
 	const stored = await chrome.storage.local.get({ [BROWSER_SESSION_KEY]: "" });
 	const existing = stored[BROWSER_SESSION_KEY];
 	if (typeof existing === "string" && existing.length > 0) return existing;
 	const created = crypto.randomUUID();
+	sessionCreatedHere = true;
 	await chrome.storage.local.set({ [BROWSER_SESSION_KEY]: created });
 	return created;
 }
 
+/** Orphan tab ids, with the browser session they belong to, in `chrome.storage.local`. */
 const ORPHAN_TABS_KEY = "relayOrphanTabs";
 /** Serializes edits of the stored orphan-tab list, so concurrent passes do not overwrite each other's changes. */
 let orphanEdits: Promise<number[]> = Promise.resolve([]);
 
-/** Apply `edit` to the stored orphan-tab ids; resolves with the list as stored. */
+/** Apply `edit` to this browser session's stored orphan-tab ids; resolves with the list as stored. */
 function editOrphanTabs(edit: (ids: number[]) => number[]): Promise<number[]> {
 	orphanEdits = orphanEdits
 		.catch(() => [])
 		.then(async () => {
-			const stored = await chrome.storage.session.get({ [ORPHAN_TABS_KEY]: [] });
-			const listed = stored[ORPHAN_TABS_KEY];
-			const before = Array.isArray(listed) ? listed.filter(id => typeof id === "number") : [];
+			const session = await ensureBrowserSession();
+			const stored = (await chrome.storage.local.get({ [ORPHAN_TABS_KEY]: null }))[ORPHAN_TABS_KEY];
+			// Ids saved in an earlier browser session may name other tabs now.
+			const current =
+				typeof stored === "object" && stored !== null && "session" in stored && stored.session === session;
+			const listed = current && "ids" in stored && Array.isArray(stored.ids) ? stored.ids : [];
+			const before = listed.filter((id): id is number => typeof id === "number");
 			const ids = edit(before);
 			if (ids.length !== before.length || ids.some((id, i) => id !== before[i])) {
-				await chrome.storage.session.set({ [ORPHAN_TABS_KEY]: ids });
+				await chrome.storage.local.set({ [ORPHAN_TABS_KEY]: { session, ids } });
 			}
 			return ids;
 		});
@@ -79,9 +108,9 @@ function editOrphanTabs(edit: (ids: number[]) => number[]): Promise<number[]> {
 }
 
 /**
- * Close tabs created for RPCs whose relay connection was gone. Each is kept in `chrome.storage.session`, which
- * outlives a service-worker restart, until Chrome confirms its close, and tried again on the next connect and
- * keepalive; `added` is stored before any close is tried.
+ * Close tabs created for RPCs whose relay connection was gone. Each is kept in `chrome.storage.local`, which
+ * outlives service-worker restarts and extension reloads, until Chrome confirms its close, and tried again on the
+ * next connect and keepalive; `added` is stored before any close is tried.
  */
 async function closeOrphanTabs(added?: number): Promise<void> {
 	try {
@@ -255,6 +284,8 @@ async function setBadge(connected: boolean): Promise<void> {
 }
 
 async function buildHello(): Promise<ExtToRelayMessage> {
+	// First: the session may wait for the browser's startup event, and tabs change meanwhile.
+	const browserSession = await ensureBrowserSession();
 	const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
 	const snapshots: TabSnapshot[] = [];
 	for (const tab of tabs) {
@@ -269,7 +300,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 	return {
 		t: "hello",
 		instanceId: await ensureInstanceId(),
-		browserSession: await ensureBrowserSession(),
+		browserSession,
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
@@ -353,7 +384,10 @@ async function connect(): Promise<void> {
 		reconnectDelay = RECONNECT_MIN_MS;
 		void setBadge(true);
 		void closeOrphanTabs();
-		void buildHello().then(hello => post(hello));
+		// Only on this socket: a hello finishing after a reconnect would otherwise land on the next one too.
+		void buildHello().then(hello => {
+			if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
+		});
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
@@ -423,20 +457,30 @@ chrome.alarms.onAlarm.addListener(alarm => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
 	if (areaName !== "local") return;
-	if (Object.keys(changes).every(key => key === BROWSER_SESSION_KEY)) return;
+	// The extension's own bookkeeping is not a settings change.
+	if (Object.keys(changes).every(key => key === BROWSER_SESSION_KEY || key === ORPHAN_TABS_KEY)) return;
 	// Settings changed: drop the current connection and re-dial with new ones.
 	ws?.close();
 	void connect();
 });
 
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
+// Not a session decision: an install event also comes with a browser start (Chrome or this extension updated).
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => {
-	// The browser just started, so tab ids from before may be reused: take a new session id and say hello again
-	// with it, replacing a hello already sent with the old one.
+	// The browser just started, so tab ids from before may be reused: take a new session id before any hello uses
+	// one. If the wait for this event already ran out, say hello again with the new id.
+	if (sessionCreatedHere) {
+		decideSession();
+		return;
+	}
+	const late = sessionDecided;
 	void chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() }).then(() => {
-		ws?.close();
-		void connect();
+		decideSession();
+		if (late) {
+			ws?.close();
+			void connect();
+		}
 	});
 });
 

@@ -36,12 +36,28 @@ async function ensureInstanceId() {
   return instanceId;
 }
 var BROWSER_SESSION_KEY = "relayBrowserSession";
+var SESSION_SETTLED_KEY = "relayBrowserSessionSettled";
+var SESSION_EVENT_WAIT_MS = 2000;
+var sessionEvent = Promise.withResolvers();
+var sessionDecided = false;
+var sessionCreatedHere = false;
+function decideSession() {
+  sessionDecided = true;
+  sessionEvent.resolve();
+}
+setTimeout(decideSession, SESSION_EVENT_WAIT_MS);
 async function ensureBrowserSession() {
+  const settled = await chrome.storage.session.get({ [SESSION_SETTLED_KEY]: false });
+  if (settled[SESSION_SETTLED_KEY] !== true) {
+    await sessionEvent.promise;
+    await chrome.storage.session.set({ [SESSION_SETTLED_KEY]: true });
+  }
   const stored = await chrome.storage.local.get({ [BROWSER_SESSION_KEY]: "" });
   const existing = stored[BROWSER_SESSION_KEY];
   if (typeof existing === "string" && existing.length > 0)
     return existing;
   const created = crypto.randomUUID();
+  sessionCreatedHere = true;
   await chrome.storage.local.set({ [BROWSER_SESSION_KEY]: created });
   return created;
 }
@@ -49,12 +65,14 @@ var ORPHAN_TABS_KEY = "relayOrphanTabs";
 var orphanEdits = Promise.resolve([]);
 function editOrphanTabs(edit) {
   orphanEdits = orphanEdits.catch(() => []).then(async () => {
-    const stored = await chrome.storage.session.get({ [ORPHAN_TABS_KEY]: [] });
-    const listed = stored[ORPHAN_TABS_KEY];
-    const before = Array.isArray(listed) ? listed.filter((id) => typeof id === "number") : [];
+    const session = await ensureBrowserSession();
+    const stored = (await chrome.storage.local.get({ [ORPHAN_TABS_KEY]: null }))[ORPHAN_TABS_KEY];
+    const current = typeof stored === "object" && stored !== null && "session" in stored && stored.session === session;
+    const listed = current && "ids" in stored && Array.isArray(stored.ids) ? stored.ids : [];
+    const before = listed.filter((id) => typeof id === "number");
     const ids = edit(before);
     if (ids.length !== before.length || ids.some((id, i) => id !== before[i])) {
-      await chrome.storage.session.set({ [ORPHAN_TABS_KEY]: ids });
+      await chrome.storage.local.set({ [ORPHAN_TABS_KEY]: { session, ids } });
     }
     return ids;
   });
@@ -196,6 +214,7 @@ async function setBadge(connected) {
   } catch {}
 }
 async function buildHello() {
+  const browserSession = await ensureBrowserSession();
   const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
   const snapshots = [];
   for (const tab of tabs) {
@@ -208,7 +227,7 @@ async function buildHello() {
   return {
     t: "hello",
     instanceId: await ensureInstanceId(),
-    browserSession: await ensureBrowserSession(),
+    browserSession,
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     discardedTabsProtocol: 1,
@@ -284,7 +303,10 @@ async function connect() {
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
     closeOrphanTabs();
-    buildHello().then((hello) => post(hello));
+    buildHello().then((hello) => {
+      if (ws === socket && socket.readyState === WebSocket.OPEN)
+        socket.send(JSON.stringify(hello));
+    });
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
   };
@@ -349,7 +371,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local")
     return;
-  if (Object.keys(changes).every((key) => key === BROWSER_SESSION_KEY))
+  if (Object.keys(changes).every((key) => key === BROWSER_SESSION_KEY || key === ORPHAN_TABS_KEY))
     return;
   ws?.close();
   connect();
@@ -357,9 +379,17 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => {
+  if (sessionCreatedHere) {
+    decideSession();
+    return;
+  }
+  const late = sessionDecided;
   chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() }).then(() => {
-    ws?.close();
-    connect();
+    decideSession();
+    if (late) {
+      ws?.close();
+      connect();
+    }
   });
 });
 connect();

@@ -1721,6 +1721,29 @@ describe("RelayBridge pending closes across relay processes", () => {
 		expect(left).toEqual([]);
 	});
 
+	it("keeps a close while the extension has not answered it, so a relay stopping meanwhile leaves it to the next", async () => {
+		let kept: RelayPendingClose[] = [];
+		const bridge = new RelayBridge({});
+		bridge.keepPendingClosesIn({ load: () => [], save: closes => (kept = closes) });
+		const chrome = new FakeExtSocket();
+		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.closeTarget",
+				params: { targetId: `PAGE${instanceCode("chrome", "session-1")}.7` },
+			}),
+		);
+		await flush();
+		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
+		expect(kept).toEqual([{ key: `${instanceCode("chrome", "session-1")}:7`, instanceId: "chrome" }]);
+		ack(bridge, chrome, "removeTab");
+		await flush();
+		expect(kept).toEqual([]);
+	});
+
 	it("retires a browser's targets once it restarted, so a reused tab id is not closed by the old target id", async () => {
 		const bridge = new RelayBridge({});
 		const before = new FakeExtSocket();
