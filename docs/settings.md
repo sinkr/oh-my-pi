@@ -397,7 +397,7 @@ modelRoles:
   web: web/duckduckgo
   speech: local/kokoro
   dictation: local/parakeet-tdt-0.6b-v3
-  judge: typesafe/jev-latest
+  judge: typesafe/jev-1.14.0
 
 retry:
   fallbackChains:
@@ -469,6 +469,7 @@ Advisors review primary turns on a configurable cadence and can inject advice. E
 | `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
 | `advisor.syncBacklog` | enum    | `off`   | Default catch-up policy. `off` never waits; `1`, `3`, or `5` wait up to 30 seconds at that backlog threshold; `strict` waits for scheduled reviews without a wall-clock cap. Abort, failure, quota pause, transition, and disposal release waits. Optional `WATCHDOG.yml` per-advisor `syncBacklog` overrides this policy; omission inherits it. |
 | `advisor.immuneTurns` | number  | `3`     | After a concern or blocker interrupts, route further concerns as non-interrupting asides for this many primary turns, including tool-loop continuations. Blockers remain exempt. |
+| `advisor.continueSeverity` | enum | `concern` | Minimum note severity (`nit`, `concern`, `blocker`) that wakes the agent after it finished with a final answer. Lower-severity notes stay as a card at the end of the transcript and reach the agent with your next message. Applies to every advisor, live. |
 | `advisor.reviewMode` | enum | `turn` | Default advisor cadence when no `WATCHDOG.yml` roster exists: review every primary turn, or only final yields with `agent-end`. Roster entries set their own `reviewMode` (default `turn`). Applies live. |
 | `advisor.reviewInterval` | number | `1` | Default advisor only: review every Nth eligible update. Skipped updates are sent with the next scheduled review; pending advice delivery never depends on cadence. Applies live. |
 | `advisor.maxNotesPerUpdate` | number | `4` | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
@@ -643,6 +644,7 @@ computer:
 | `computer.display`   | string  | `all`   | Controls the `desktop` target only: composite all active displays, or use one numeric display ID.                                                                                                                                                            |
 | `computer.maxWidth`  | number  | `3840`  | Maximum composite screenshot width in pixels. Image transports that cannot preserve original detail, including GitHub Copilot Responses and xAI OAuth, cap the effective width at `1280`; Claude-family models use the same cap as a compatibility fallback. |
 | `computer.maxHeight` | number  | `2400`  | Maximum composite screenshot height in pixels. Those coordinate-safe transports cap the effective height at `896`; other models retain the configured limit.                                                                                                 |
+| `computer.backgroundFallback` | enum | `takeover` | When a window input call's background route is unavailable: `takeover` reruns that one call in takeover, returns focus to the user's app (on macOS even if they kept typing; X11 and Windows run it as plain takeover), and says so in the result; `refuse` fails the call with `BackgroundUnavailable` and takes nothing over. Under `takeover`, a call that passes `takeover` itself is never rerun. Under `refuse`, the model's own `takeover: true`, `raise()`, activating `apps.open`, `control.acquire`, desktop-root input, off macOS `el.focus()`, and on macOS calls that open a menu (right-click, Control-click, `AXShowMenu`, a `menu` option; a press, or a left click, hold or drag, on a popup button or menu button, `setValue` on a popup button) are refused before anything is sent. |
 
 Computer settings and the active model's coordinate-safe image limits are read for every call; runtime changes and successfully reloaded file edits apply to the next call. Direct `computer` helpers and code passed to `computer.run(fnOrCode, options)` select a target through the desktop root or `window(...)`. Switching targets invalidates the prior coordinate frame, so capture the new target before pointer input. Before enabling input, configure `tools.approvalMode` or `tools.approval.computer` and grant platform permissions. See [Window-scoped computer use](computer-use.md).
 

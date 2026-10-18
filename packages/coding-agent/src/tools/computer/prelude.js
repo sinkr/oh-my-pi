@@ -28,7 +28,7 @@
 	const invoke = async (action, options) => {
 		const response = await globalThis.__omp_prelude__("computer", { ...options, action });
 		if (response && typeof response.text === "string" && response.text.length > 0) {
-			globalThis.__omp_display__(response.text);
+			globalThis.__omp_log__("log", response.text);
 		}
 		return response && typeof response.details === "object" && response.details !== null ? response.details : {};
 	};
@@ -66,11 +66,13 @@
 	const elementValueMethods = [
 		"value",
 		"setValue",
+		"selectText",
 		"bounds",
 		"attributes",
 		"actions",
 		"perform",
 		"press",
+		"type",
 		"click",
 		"doubleClick",
 		"focus",
@@ -171,7 +173,7 @@
 			foundElements((await callValue(via(step("find", [query])))).map(makeElement)),
 		);
 		// A non-silent observe() already printed its tree; `ax` stays readable but is left out
-		// of display, spread and serialization, so a trailing `await win.observe()` shows it once.
+		// of printing, spread and serialization, so a trailing `await win.observe()` shows it once.
 		defineMethod(win, "observe", async options => {
 			const silent = Boolean(options?.silent);
 			const observation = await callValue(via(step("observe", [options])));
@@ -204,12 +206,18 @@
 	defineValueMethods(computer, desktopValueMethods, next => [next]);
 	computer.display = async selector => makeDisplay(await callValue([step("display", [selector])]));
 	for (const [namespace, methods] of [
-		["apps", ["list", "open"]],
+		["apps", ["list"]],
 		["control", ["acquire", "release", "state"]],
 	]) {
 		const nested = {};
 		for (const method of methods)
 			defineMethod(nested, method, (...args) => callValue([step(`${namespace}.${method}`, args)]));
+		if (namespace === "apps") {
+			defineMethod(nested, "open", async (...args) => {
+				const app = await callValue([step("apps.open", args)]);
+				return app?.window ? { ...app, window: makeWindow(app.window) } : app;
+			});
+		}
 		computer[namespace] = Object.freeze(nested);
 	}
 	computer.window = selector => resolveWindow([step("window", [selector])]);
