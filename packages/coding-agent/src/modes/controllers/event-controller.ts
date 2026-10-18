@@ -2801,6 +2801,11 @@ export class EventController {
 		// lapses too soon after a turn for compaction to be worth starting on its
 		// schedule, so it, an unknown lifetime, and an expired entry all fall back
 		// to the configured delay.
+		// Deliberate cost: the delay counts from agent_end while the entry's TTL
+		// counts from the request send (`touchedAt`), so with the default 300s
+		// delay a short-tier idle summary always runs after the 5-minute entry
+		// expired and pays a cold full-prefix read. That is the price of never
+		// compacting after a short break; do not re-time short entries to dodge it.
 		const promptCacheEntry = this.ctx.viewSession.promptCacheEntry;
 		const cacheEntry = promptCacheEntry?.tier === "long" ? promptCacheEntry : undefined;
 		const refreshDelayMs = cacheEntry ? getCacheWarmingDelayMs(cacheEntry.ttlMs) : undefined;
