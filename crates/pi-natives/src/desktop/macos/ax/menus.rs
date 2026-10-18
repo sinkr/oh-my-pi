@@ -5,11 +5,13 @@ use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
 use super::{
 	super::input::{
-		EntryFront, await_key_window, make_key_in_background, recheck_background, source,
+		EntryFront, attached_under, await_key_window, make_key_in_background, recheck_background,
+		source,
 	},
-	MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element, copy_required_string,
-	copy_string, copy_strings_from_action_names, create_application, element_pid, key_focus,
-	mac_handle, perform_action, reports_active, set_timeout, skylight, window_id,
+	FocusedWindow, KeyFocus, MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element,
+	copy_required_string, copy_string, copy_strings_from_action_names, create_application,
+	element_pid, key_focus, mac_handle, perform_action, reports_active, set_timeout, skylight,
+	window_id,
 };
 use crate::desktop::{
 	control,
@@ -32,7 +34,7 @@ pub(crate) fn items(window: &DesktopWindow, path: &[String]) -> CoreResult<Vec<D
 		let (menu, actual_path) = resolve_menu(app, path, pid)?;
 		let read = || children(&menu, &actual_path, pid).map(|(_, items)| items);
 		let first = read()?;
-		if !activated {
+		if !may_be_stale(activated, &first) {
 			return Ok(first);
 		}
 		// The listing still shows the inactive state until the app revalidates.
@@ -46,6 +48,14 @@ pub(crate) fn items(window: &DesktopWindow, path: &[String]) -> CoreResult<Vec<D
 			|| control::wait(MENU_SETTLE_POLL),
 		)
 	})
+}
+
+/// Whether a menu listing read right after this call activated the
+/// application (`activated`) may still show the inactive state: an inactive
+/// application's menus show commands disabled that it enables once it
+/// revalidates, so a listing without a disabled item has nothing to catch up.
+fn may_be_stale(activated: bool, items: &[DesktopMenuItem]) -> bool {
+	activated && items.iter().any(|item| !item.enabled)
 }
 
 pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> {
@@ -188,13 +198,11 @@ fn with_window_menu<T>(
 	// Application menus validate and dispatch through the key window, not their
 	// AX parent.
 	skylight::with_background_watch(pid, |visit| {
+		let overlay = access == MenuAccess::Read
+			&& read_leaves_focus(key_focus(pid), wid, skylight::window_parent);
 		let prepared = enter_menu_context(access, || {
-			// A read must not end an overlay's editing, such as a popover's: the
-			// press that makes `wid` key would close it.
-			let in_overlay = access == MenuAccess::Read
-				&& key_focus(pid).in_overlay_of(wid, skylight::window_parent);
 			let prepared =
-				make_key_in_background(&source()?, pid, wid, window, entry_front, in_overlay, visit)?;
+				make_key_in_background(&source()?, pid, wid, window, entry_front, overlay, visit)?;
 			// The user may have brought the app forward while its key window
 			// settled.
 			recheck_background(
@@ -203,7 +211,7 @@ fn with_window_menu<T>(
 				wid,
 				skylight::front_pid,
 				|| visit.happened(),
-				|| require_key_context(pid, wid),
+				|| key_context(pid, wid, overlay),
 			)?;
 			Ok(prepared)
 		})?;
@@ -214,11 +222,33 @@ fn with_window_menu<T>(
 				wid,
 				skylight::front_pid,
 				|| visit.happened(),
-				|| require_key_context(pid, wid),
+				|| key_context(pid, wid, overlay),
 			)
 		};
 		action(&app, pid, &context_holds, activated)
 	})
+}
+
+/// Whether a menu read of window `wid` leaves the keyboard focus where it is
+/// (`focus`): in an overlay attached to `wid`, such as a popover, an inline
+/// editor, or a sheet like Finder's Go to Folder that is itself the focused
+/// window. The press that makes `wid` key would close a popover or end the
+/// editing; the menus then validate against the overlay, as the user's own
+/// menu bar would show them.
+fn read_leaves_focus(focus: KeyFocus, wid: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
+	focus.in_overlay_of(wid, &parent_of)
+		|| matches!(focus.window, FocusedWindow::Id(id)
+			if id != wid && attached_under(id, &parent_of, |parent| parent == wid))
+}
+
+/// The key-window context a menu call needs: `wid` key, or, for a read that
+/// left focus in an overlay attached to it ([`read_leaves_focus`]), nothing
+/// more.
+fn key_context(pid: libc::pid_t, wid: u32, overlay: bool) -> CoreResult<()> {
+	if overlay {
+		return control::check();
+	}
+	require_key_context(pid, wid)
 }
 
 fn require_key_context(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
@@ -403,6 +433,43 @@ mod tests {
 	use std::cell::Cell;
 
 	use super::*;
+
+	#[test]
+	fn a_menu_read_leaves_a_focused_attached_sheet_alone() {
+		// Finder's Go to Folder sheet 41740 on window 41732 is the focused
+		// window: the press that makes 41732 key would end its editing.
+		let attached = |id| (id == 41740).then_some(41732);
+		let sheet = KeyFocus {
+			window:         FocusedWindow::Id(41740),
+			element_window: Some(41740),
+			element_mapped: true,
+		};
+		assert!(read_leaves_focus(sheet, 41732, attached));
+		// The window itself or an unrelated window focused: the read makes 41732
+		// key as before.
+		let own = KeyFocus { window: FocusedWindow::Id(41732), element_window: Some(41732), ..sheet };
+		assert!(!read_leaves_focus(own, 41732, attached));
+		let other = KeyFocus { window: FocusedWindow::Id(5), element_window: Some(5), ..sheet };
+		assert!(!read_leaves_focus(other, 41732, attached));
+	}
+
+	#[test]
+	fn a_menu_read_waits_for_revalidation_only_while_an_item_shows_disabled() {
+		let item = |enabled| DesktopMenuItem {
+			title: "New Collection".into(),
+			path: vec!["File".into(), "New Collection".into()],
+			enabled,
+			checked: false,
+			has_submenu: false,
+			shortcut: None,
+		};
+		// Every command already enabled: nothing to wait for.
+		assert!(!may_be_stale(true, &[item(true), item(true)]));
+		// Font Book's New Collection read disabled right after the activation.
+		assert!(may_be_stale(true, &[item(true), item(false)]));
+		// An application that was already active shows its real state.
+		assert!(!may_be_stale(false, &[item(false)]));
+	}
 
 	#[test]
 	fn a_menu_read_prepares_the_key_window_and_reads_even_when_that_is_refused() {
