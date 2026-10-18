@@ -216,4 +216,59 @@ describe("server-side fallback handoff", () => {
 		expect(replayed).toContainEqual(expect.objectContaining({ type: "thinking", signature: "sig-fallback" }));
 		expect(JSON.stringify(replayed)).not.toContain("toolu_declined");
 	});
+
+	it("streams tool-call events at their own blocks on a fallback-credit continuation", async () => {
+		const creditTurn: WireEvent[] = [
+			{ type: "message_start", message: { id: "msg_credit", model: "claude-opus-4-8", usage } },
+			{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+			{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Reading it." } },
+			{ type: "content_block_stop", index: 0 },
+			{
+				type: "content_block_start",
+				index: 1,
+				content_block: { type: "tool_use", id: "toolu_credit", name: "read", input: {} },
+			},
+			{
+				type: "content_block_delta",
+				index: 1,
+				delta: { type: "input_json_delta", partial_json: '{"path":"a.txt"}' },
+			},
+			{ type: "content_block_stop", index: 1 },
+			{ type: "message_delta", delta: { stop_reason: "tool_use" }, usage },
+			{ type: "message_stop" },
+		];
+		const { options } = scriptedAnthropic([creditTurn]);
+		const stream = streamAnthropic(
+			model,
+			{ messages: [user] },
+			{
+				...options,
+				fallbacks,
+				fallbackCreditRedemption: {
+					token: "fct_credit",
+					prefillClaim: true,
+					params: {
+						model: "claude-fable-5",
+						messages: [{ role: "user", content: "Read a.txt" }],
+						max_tokens: 1024,
+						stream: true,
+						fallbacks,
+					},
+					betas: ["fallback-credit-2026-06-01"],
+					expiresAt: Date.now() + 60_000,
+					refusedContent: [
+						{ type: "thinking", thinking: "primary plan", thinkingSignature: "sig-primary" },
+						{ type: "text", text: "Partial " },
+					],
+				},
+			},
+		);
+
+		// Resolve each event's block when it is consumed, as the agent loop does.
+		const ids: string[] = [];
+		for await (const event of stream) ids.push(...toolCallIds([event]));
+		const toolEventCount = ids.length;
+		expect(toolEventCount).toBeGreaterThan(0);
+		expect(ids).toEqual(Array(toolEventCount).fill("toolu_credit"));
+	});
 });

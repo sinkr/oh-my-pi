@@ -1609,7 +1609,8 @@ function unwrapAnthropicThinkingEnvelope(text: string): string | undefined {
  * reasoning or a tool call. The serving model never saw those tool calls, so
  * they must not run, and replaying reasoning signed on both sides of a
  * handoff is refused by the API. Text is not: the serving model continued
- * from it.
+ * from it. Server tool blocks are kept as they are: an unpaired
+ * `server_tool_use` before the boundary is still replayed.
  */
 function isDeclinedBeforeFallback(
 	block: AssistantMessage["content"][number],
@@ -2278,14 +2279,16 @@ const streamAnthropicOnce = (
 		// hands it to the fallback model, and its tool calls must not reach
 		// speculative execution, a gateway client or the UI first. Each event keeps
 		// the block it belongs to, so a retry that resets the content releases none.
+		type ToolCallEvent = Extract<
+			AssistantMessageEvent,
+			{ type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }
+		>;
 		let holdToolCallEvents = false;
 		const heldToolCallEvents: Array<{
-			event: Extract<AssistantMessageEvent, { type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }>;
+			event: ToolCallEvent;
 			block: AssistantMessage["content"][number] | undefined;
 		}> = [];
-		const pushToolCallEvent = (
-			event: Extract<AssistantMessageEvent, { type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }>,
-		): void => {
+		const pushToolCallEvent = (event: ToolCallEvent): void => {
 			if (holdToolCallEvents) heldToolCallEvents.push({ event, block: output.content[event.contentIndex] });
 			else stream.push(event);
 		};
@@ -2783,7 +2786,9 @@ const streamAnthropicOnce = (
 			// server-side-fallback beta chain. Leaving `fallbacks` unset preserves
 			// the pre-fallback stream shape on every event.
 			const serverSideFallback = !!fallbacks?.length;
-			holdToolCallEvents = serverSideFallback;
+			// A fallback-credit redemption sends its frozen body without `fallbacks`, so
+			// no handoff can happen on it until the credit is forfeited.
+			holdToolCallEvents = serverSideFallback && !usingFallbackCredit;
 			type Block = (
 				| ThinkingContent
 				| RedactedThinkingContent
@@ -2883,6 +2888,7 @@ const streamAnthropicOnce = (
 				}
 				usingFallbackCredit = false;
 				fallbackCreditShape = undefined;
+				holdToolCallEvents = serverSideFallback;
 			};
 			const rebuildParams = async (streamFailure: unknown): Promise<MessageCreateParamsStreaming> => {
 				if (usingFallbackCredit) forfeitFallbackCredit(streamFailure);
