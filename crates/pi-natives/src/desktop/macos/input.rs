@@ -80,12 +80,9 @@ impl MacInput {
 						let in_overlay =
 							takes_overlay_focus(wid, ax::focused_window_id(pid), skylight::window_parent);
 						background_guard(&window, pid, &event)?;
-						let to = input_owner(
-							pid,
-							wid,
-							ax::focused_window_content(pid, wid),
-							ax::focused_window_id,
-						)?;
+						let owner = || {
+							input_owner(pid, wid, ax::window_content(pid, &window), ax::focused_window_id)
+						};
 						let entry_front = skylight::front_pid();
 						skylight::with_background_guard(pid, || {
 							background_pointer(
@@ -95,7 +92,7 @@ impl MacInput {
 								&window,
 								event,
 								entry_front,
-								to,
+								owner,
 								in_overlay,
 							)
 						})
@@ -306,8 +303,8 @@ enum KeyboardConflict {
 /// panels such as Finder's Go to Folder; such a target counts as a window of
 /// the process while it is the focused window or attached to a listed one.
 /// Keys for a system Open or Save panel go to the process that draws its
-/// content ([`key_process`]). Before every press the application's focused
-/// window must still be the one that proved this ([`keys_still_reach`]).
+/// content ([`key_process`]). Before every press the focus that proved this
+/// must still hold ([`keys_still_reach`]).
 fn with_background_keyboard<T>(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -344,43 +341,48 @@ fn with_background_keyboard<T>(
 	skylight::with_background_guard(pid, || {
 		let prepared = make_key_in_background(source, pid, wid, window, entry_front, in_overlay)?;
 		let (to, focus) = await_key_destination(pid, wid, conflict)?;
-		let to = key_process(
-			to,
-			wid,
-			&focus,
-			|| ax::focused_window_content(pid, wid),
-			ax::focused_window_id,
-		)?;
+		let to =
+			key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
 		if prepared {
 			still_behind_user(pid, wid)?;
 		}
-		deliver(to, &|| keys_still_reach(wid, conflict, focus.window, || ax::focused_window(pid)))
+		deliver(to, &|| {
+			keys_still_reach(pid, wid, conflict, focus, || ax::key_focus(pid), skylight::window_parent)
+		})
 	})
 }
 
 /// Before a background press: keys posted to the process now still reach
-/// `wid`. The application's focused window must be `proven`, the one it
-/// reported when delivery began, or `wid`; once the user or the application
+/// `wid` as `proven`, the focus that admitted delivery, showed. The focus read
+/// now must pass the same [`key_route`]; once the user or the application
 /// makes another window key, including one opened since, the press would land
-/// there. A focused window no longer reported proves nothing while a sibling
-/// could take the keys.
+/// there. When the focused element decided, because the application did not
+/// report `wid` as its focused window (Finder's rename field, Reminders'
+/// popover), the element must still be in the window it was in: once that
+/// overlay closes or another takes focus, the press would land in the window
+/// under it or in the new overlay.
 fn keys_still_reach(
+	pid: libc::pid_t,
 	wid: u32,
 	conflict: Option<KeyboardConflict>,
-	proven: ax::FocusedWindow,
-	focused: impl FnOnce() -> ax::FocusedWindow,
+	proven: ax::KeyFocus,
+	focus: impl FnOnce() -> ax::KeyFocus,
+	parent_of: impl Fn(u32) -> Option<u32>,
 ) -> CoreResult<()> {
-	let now = focused();
-	if now == proven
-		|| now == ax::FocusedWindow::Id(wid)
-		|| (now == ax::FocusedWindow::Unreported && conflict.is_none())
-	{
+	let now = focus();
+	let element_decided =
+		proven.window != ax::FocusedWindow::Id(wid) && proven.element_window.is_some();
+	let routed = matches!(
+		key_route(pid, now.destination(pid, wid, parent_of), conflict),
+		KeyRoute::Deliver(_)
+	);
+	if routed && (!element_decided || now.element_window == proven.element_window) {
 		return Ok(());
 	}
 	Err(DesktopError::input_failed(format!(
-		"window {wid} stopped being its application's key window during background input; keys sent \
-		 before that may already have landed, and nothing more was sent; inspect the window before \
-		 retrying",
+		"keyboard focus left window {wid}, or the overlay it was in, during background input; keys \
+		 sent before that may already have landed, and nothing more was sent; inspect the window \
+		 before retrying",
 	)))
 }
 
@@ -1134,13 +1136,13 @@ const fn button_types(
 	}
 }
 
-/// Background pointer input for window `wid` of `pid`. The events go to `to`,
-/// the process and window that take the window's input ([`input_owner`]);
-/// making the window key still goes to its own application. `in_overlay`
-/// says `wid` is a sheet or popover on the application's focused window
-/// ([`takes_overlay_focus`]), so a left click sends only the activation,
-/// without the press outside its frame that would close a popover or reach
-/// the window the sheet is attached to.
+/// Background pointer input for window `wid` of `pid`. The events go to the
+/// process and window that take the window's input, which `owner` reads
+/// ([`input_owner`], through [`pointer_owner`]); making the window key still
+/// goes to its own application. `in_overlay` says `wid` is a sheet or popover
+/// on the application's focused window ([`takes_overlay_focus`]), so a left
+/// click sends only the activation, without the press outside its frame that
+/// would close a popover or reach the window the sheet is attached to.
 fn background_pointer(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1148,14 +1150,18 @@ fn background_pointer(
 	window: &DesktopWindow,
 	event: PointerEvent,
 	entry_front: Option<libc::pid_t>,
-	(to, to_wid): (libc::pid_t, u32),
+	owner: impl FnOnce() -> CoreResult<(libc::pid_t, u32)>,
 	in_overlay: bool,
 ) -> CoreResult<()> {
+	let prepare = || {
+		if make_key_in_background(source, pid, wid, window, entry_front, in_overlay)? {
+			still_behind_user(pid, wid)?;
+		}
+		Ok(())
+	};
+	let (to, to_wid) = pointer_owner(&event, prepare, owner)?;
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			if make_key_in_background(source, pid, wid, window, entry_front, in_overlay)? {
-				still_behind_user(pid, wid)?;
-			}
 			background_left_click(source, to, to_wid, window, x, y, count)
 		},
 		PointerEvent::Click { x, y, button, count, .. } => {
@@ -1172,6 +1178,21 @@ fn background_pointer(
 			)))
 		},
 	}
+}
+
+/// Where background pointer `event` goes: `owner`'s answer. A left click first
+/// makes its window key through `prepare`, and a system Open or Save panel's
+/// drawing process reports focus in its window only once the panel is key, so
+/// the owner is read after that; other events never make the window key.
+fn pointer_owner(
+	event: &PointerEvent,
+	prepare: impl FnOnce() -> CoreResult<()>,
+	owner: impl FnOnce() -> CoreResult<(libc::pid_t, u32)>,
+) -> CoreResult<(libc::pid_t, u32)> {
+	if matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) {
+		prepare()?;
+	}
+	owner()
 }
 
 /// Background left click on the Chromium-compatible route: a hover primer at
@@ -2486,19 +2507,26 @@ mod tests {
 		assert_eq!(events, [(59, true), (59, false)]);
 	}
 
+	/// Where an application sends keys: its focused window and the window of
+	/// its focused element.
+	fn focus_in(window: ax::FocusedWindow, element: Option<u32>) -> ax::KeyFocus {
+		ax::KeyFocus { window, element_window: element, element_mapped: element.is_some() }
+	}
+
 	#[test]
 	fn background_keys_stop_once_another_window_becomes_key() {
 		use crate::desktop::error::ErrorCode;
 		let source = source().expect("event source");
-		let focused = std::cell::Cell::new(ax::FocusedWindow::Id(7));
+		let window = |id| focus_in(ax::FocusedWindow::Id(id), Some(id));
+		let focused = std::cell::Cell::new(window(7));
 		let siblings = Some(KeyboardConflict::Siblings(1));
-		let guard = || keys_still_reach(7, siblings, ax::FocusedWindow::Id(7), || focused.get());
+		let guard = || keys_still_reach(1, 7, siblings, window(7), || focused.get(), |_| None);
 		let mut typed = Vec::new();
 		let result = type_text(&source, "ab", |event| {
 			post_guarded(event, guard, |event| {
 				// The user picks a sibling window right after a is typed.
 				if matches!(event.get_type(), CGEventType::KeyUp) {
-					focused.set(ax::FocusedWindow::Id(9));
+					focused.set(window(9));
 				}
 				typed.push(event.get_type() as u32);
 				Ok(())
@@ -2513,14 +2541,14 @@ mod tests {
 		assert_eq!(typed, [down, up, up]);
 		// Space is never pressed once a sibling is key; the releases still go
 		// out, so nothing stays held.
-		focused.set(ax::FocusedWindow::Id(7));
+		focused.set(window(7));
 		let mut held = Vec::new();
 		let result = with_held_keys(
 			&source,
 			&[KeyName::Shift, KeyName::Space],
 			|event| {
 				post_guarded(event, guard, |event| {
-					focused.set(ax::FocusedWindow::Id(9));
+					focused.set(window(9));
 					held.push(shift_transition(event));
 					Ok(())
 				})
@@ -2536,23 +2564,99 @@ mod tests {
 	}
 
 	#[test]
-	fn background_keys_continue_while_the_focus_that_proved_them_holds() {
-		let id = ax::FocusedWindow::Id;
-		let unreported = ax::FocusedWindow::Unreported;
+	fn background_keys_stop_once_the_overlay_holding_focus_closes() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let (id, unreported) = (ax::FocusedWindow::Id, ax::FocusedWindow::Unreported);
 		let siblings = Some(KeyboardConflict::Siblings(1));
+		// Finder reports no focused window while its rename field, overlay 12
+		// on window 7, has focus. Once the rename ends after a, Finder reports
+		// window 7 focused and b would land in its file list.
+		let rename = |id| (id == 12).then_some(7);
+		let renaming = focus_in(unreported, Some(12));
+		let focused = std::cell::Cell::new(renaming);
+		let guard = || keys_still_reach(1, 7, siblings, renaming, || focused.get(), rename);
+		let mut typed = Vec::new();
+		let result = type_text(&source, "ab", |event| {
+			post_guarded(event, guard, |event| {
+				if matches!(event.get_type(), CGEventType::KeyUp) {
+					focused.set(focus_in(id(7), Some(7)));
+				}
+				typed.push(event.get_type() as u32);
+				Ok(())
+			})
+		});
+		assert_eq!(result.unwrap_err().code, ErrorCode::InputFailed);
+		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		assert_eq!(typed, [down, up, up]);
+		// The rename ending with no focused window reported stops it too.
+		let ended = focus_in(unreported, None);
+		assert!(keys_still_reach(1, 7, siblings, renaming, || ended, rename).is_err());
+		// Reminders reports window 79 focused under its details popover 90:
+		// once the popover closes, or another one on 79 takes focus, keys for
+		// the popover would reach window 79 or that other popover.
+		let popovers = |id| [90, 91].contains(&id).then_some(79);
+		let in_popover = focus_in(id(79), Some(90));
+		let closed = focus_in(id(79), Some(79));
+		assert!(keys_still_reach(1, 90, siblings, in_popover, || closed, popovers).is_err());
+		let other = focus_in(id(79), Some(91));
+		assert!(keys_still_reach(1, 90, siblings, in_popover, || other, popovers).is_err());
+	}
+
+	#[test]
+	fn background_keys_continue_while_the_focus_that_proved_them_holds() {
+		let (id, unreported) = (ax::FocusedWindow::Id, ax::FocusedWindow::Unreported);
+		let siblings = Some(KeyboardConflict::Siblings(1));
+		let still = |wid, conflict, proven, now, parent_of: fn(u32) -> Option<u32>| {
+			keys_still_reach(1, wid, conflict, proven, || now, parent_of).is_ok()
+		};
 		// Reminders reports the window under its details popover 25579 as
 		// focused while the popover takes the keys.
-		assert!(keys_still_reach(25579, siblings, id(25567), || id(25567)).is_ok());
-		assert!(keys_still_reach(25579, siblings, id(25567), || id(25579)).is_ok());
-		assert!(keys_still_reach(25579, siblings, id(25567), || id(25600)).is_err());
+		let popover = |id| (id == 25579).then_some(25567);
+		let in_popover = focus_in(id(25567), Some(25579));
+		assert!(still(25579, siblings, in_popover, in_popover, popover));
+		assert!(still(25579, siblings, in_popover, focus_in(id(25579), Some(25579)), popover));
+		assert!(!still(25579, siblings, in_popover, focus_in(id(25600), Some(25600)), popover));
 		// Finder reports no focused window while its rename field has focus.
-		assert!(keys_still_reach(7, siblings, unreported, || unreported).is_ok());
-		assert!(keys_still_reach(7, siblings, unreported, || id(9)).is_err());
-		assert!(keys_still_reach(7, siblings, id(7), || unreported).is_err());
-		assert!(keys_still_reach(7, siblings, id(7), || ax::FocusedWindow::Unmapped).is_err());
+		let rename = |id| (id == 12).then_some(7);
+		let renaming = focus_in(unreported, Some(12));
+		assert!(still(7, siblings, renaming, renaming, rename));
+		assert!(!still(7, siblings, renaming, focus_in(id(9), Some(9)), rename));
+		// Focus moving within the window, or into an overlay on it, still
+		// reaches it while the application reports it focused.
+		let window = focus_in(id(7), Some(7));
+		assert!(still(7, siblings, window, focus_in(id(7), Some(12)), rename));
+		assert!(!still(7, siblings, window, focus_in(unreported, None), rename));
+		assert!(!still(7, siblings, window, focus_in(ax::FocusedWindow::Unmapped, None), rename));
 		// A lone window: one opened during the input stops it once key.
-		assert!(keys_still_reach(7, None, id(7), || id(9)).is_err());
-		assert!(keys_still_reach(7, None, id(7), || unreported).is_ok());
+		assert!(!still(7, None, window, focus_in(id(9), Some(9)), rename));
+		assert!(still(7, None, window, focus_in(unreported, None), rename));
+	}
+
+	#[test]
+	fn a_background_left_click_reads_its_owner_once_the_window_is_key() {
+		// A system Open panel, window 554 of TextEdit (pid 7581), that is not
+		// key shows no drawing process; once the click made it key,
+		// openAndSavePanelService (pid 7592) reports focus in its window 556.
+		let key = std::cell::Cell::new(false);
+		let owner = || Ok(if key.get() { (7592, 556) } else { (7581, 554) });
+		let prepare = || {
+			key.set(true);
+			Ok(())
+		};
+		let click = PointerEvent::Click {
+			x:         10.0,
+			y:         10.0,
+			button:    MouseButton::Left,
+			count:     1,
+			modifiers: Modifiers::default(),
+		};
+		assert_eq!(pointer_owner(&click, prepare, owner).unwrap(), (7592, 556));
+		// A scroll never makes the window key, so it is not prepared.
+		key.set(false);
+		let scroll = PointerEvent::Scroll { x: 10.0, y: 10.0, dx: 0.0, dy: 3.0 };
+		let owned = pointer_owner(&scroll, || panic!("a scroll must not make its window key"), owner);
+		assert_eq!(owned.unwrap(), (7581, 554));
 	}
 
 	#[test]

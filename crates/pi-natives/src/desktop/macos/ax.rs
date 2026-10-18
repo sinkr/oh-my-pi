@@ -430,11 +430,6 @@ pub(super) fn key_focus(pid: libc::pid_t) -> KeyFocus {
 	probe_application(pid).map_or_else(KeyFocus::default, |app| read_key_focus(&app).0)
 }
 
-/// `pid`'s `AXFocusedWindow`, read alone.
-pub(super) fn focused_window(pid: libc::pid_t) -> FocusedWindow {
-	probe_application(pid).map_or(FocusedWindow::Unreported, |app| read_focused_window(&app))
-}
-
 fn read_focused_window(app: &AXUIElement) -> FocusedWindow {
 	copy_element(app, "AXFocusedWindow").map_or(FocusedWindow::Unreported, |window| {
 		window_id(&window).map_or(FocusedWindow::Unmapped, FocusedWindow::Id)
@@ -509,23 +504,41 @@ fn content_owner(
 	remote.unwrap_or(WindowContent::Own)
 }
 
-/// Who draws `pid`'s focused window when that is `wid`; [`WindowContent::Own`]
-/// when it is another window or nothing can be read.
-pub(super) fn focused_window_content(pid: libc::pid_t, wid: u32) -> WindowContent {
-	let Some(window) = probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedWindow"))
+/// Who draws `window` of process `pid`, read from its accessibility window
+/// whether or not it is the focused one, so that a system panel behind
+/// another window of its application still shows its drawing process;
+/// [`WindowContent::Own`] when that window cannot be found or read.
+pub(super) fn window_content(pid: libc::pid_t, window: &DesktopWindow) -> WindowContent {
+	let (Ok(wid), Some(app)) = (window.id.parse::<u32>(), probe_application(pid)) else {
+		return WindowContent::Own;
+	};
+	let focused = copy_element(&app, "AXFocusedWindow");
+	let Some(element) =
+		target_window(wid, focused, |focused| window_id(focused), || find_window(&app, window).ok())
 	else {
 		return WindowContent::Own;
 	};
-	if window_id(&window) != Some(wid) {
-		return WindowContent::Own;
-	}
-	let children = copy_elements_optional(&window, "AXChildren").unwrap_or_default();
+	let children = copy_elements_optional(&element, "AXChildren").unwrap_or_default();
 	content_owner(
 		pid,
 		wid,
 		children.iter().map(|child| window_id(child)),
 		skylight::window_owner_pid,
 	)
+}
+
+/// Window `wid`'s accessibility element: the application's `focused` window
+/// when that is `wid`, which spares the search through its windows and
+/// sheets, else what `find` finds.
+fn target_window<E>(
+	wid: u32,
+	focused: Option<E>,
+	id_of: impl Fn(&E) -> Option<u32>,
+	find: impl FnOnce() -> Option<E>,
+) -> Option<E> {
+	focused
+		.filter(|focused| id_of(focused) == Some(wid))
+		.or_else(find)
 }
 
 /// The window that should regain key status when `pid` is handed keyboard
@@ -2019,7 +2032,7 @@ mod tests {
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, VALUE, WindowContent,
 		ax_result, content_owner, create_system_wide, element_action_result, may_borrow_focus,
 		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
-		select_attached, stringify_value, text_readback, window_records_of,
+		select_attached, stringify_value, target_window, text_readback, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -2639,5 +2652,24 @@ mod tests {
 		assert_eq!(content_owner(7581, 561, [Some(554), Some(559)], owners), WindowContent::Own);
 		assert_eq!(content_owner(7581, 554, [Some(999)], owners), WindowContent::Own);
 		assert_eq!(content_owner(7581, 554, [None, None], owners), WindowContent::Own);
+	}
+
+	#[test]
+	fn a_panel_behind_another_window_is_read_from_its_own_window() {
+		// TextEdit's document window 543 is focused while its Open panel 554
+		// is not: the panel's content still comes from window 554.
+		let found = Cell::new(false);
+		let find = || {
+			found.set(true);
+			Some(554)
+		};
+		assert_eq!(target_window(554, Some(543), |&id| Some(id), find), Some(554));
+		assert!(found.get());
+		// The focused window answers for itself without a search.
+		found.set(false);
+		assert_eq!(target_window(554, Some(554), |&id| Some(id), find), Some(554));
+		assert!(!found.get());
+		// Neither the focused window nor a search shows the window.
+		assert_eq!(target_window(554, Some(543), |&id| Some(id), || None::<u32>), None);
 	}
 }
