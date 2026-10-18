@@ -156,11 +156,40 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 }
 
 /**
+ * Gemini pairs id-less function responses with calls by position, but tool results can be
+ * stored out of call order (parallel calls finish in any order). Sort each turn's responses
+ * whose call ordinal is known back into call order within the slots they already occupy,
+ * leaving other parts and unmatched responses in place.
+ */
+export function orderFunctionResponsesByCall(
+	contents: readonly { parts?: Part[] }[],
+	callOrdinalByPart: ReadonlyMap<Part, number>,
+): void {
+	for (const content of contents) {
+		const parts = content.parts;
+		if (!parts) continue;
+		const positions: number[] = [];
+		for (let i = 0; i < parts.length; i++) {
+			if (callOrdinalByPart.has(parts[i])) positions.push(i);
+		}
+		if (positions.length < 2) continue;
+		const inCallOrder = positions
+			.map(i => parts[i])
+			.sort((a, b) => (callOrdinalByPart.get(a) ?? 0) - (callOrdinalByPart.get(b) ?? 0));
+		positions.forEach((position, index) => {
+			parts[position] = inCallOrder[index];
+		});
+	}
+}
+
+/**
  * Convert internal messages to Gemini Content[] format.
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
+	const callOrdinals = new Map<string, number>();
+	const responseCallOrdinals = new Map<Part, number>();
 
 	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
 
@@ -246,6 +275,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					}
 				} else if (block.type === "toolCall") {
 					emittedToolCallNames.set(block.id, block.name);
+					callOrdinals.set(block.id, callOrdinals.size);
 					// Gemini 3 requires a thought signature on function calls it makes. The
 					// public API requires the bypass sentinel on every unsigned call. Cloud
 					// Code Assist requires it only when the first call itself is unsigned;
@@ -314,6 +344,8 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
+			const callOrdinal = callOrdinals.get(msg.toolCallId);
+			if (callOrdinal !== undefined) responseCallOrdinals.set(functionResponsePart, callOrdinal);
 
 			// Cloud Code Assist API requires all function responses to be in a single user turn.
 			// Check if the last content is already a user turn with function responses and merge.
@@ -334,6 +366,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 		}
 	}
 	flushPendingToolImages();
+	orderFunctionResponsesByCall(contents, responseCallOrdinals);
 
 	return contents;
 }

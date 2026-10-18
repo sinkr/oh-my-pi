@@ -144,3 +144,60 @@ describe("Google GenerateContent function response matching", () => {
 		expect(functionResponse?.name).toBe(functionCall?.name);
 	});
 });
+
+describe("Google GenerateContent parallel function response order", () => {
+	function contextWithResultsStoredOutOfOrder(): Context {
+		return {
+			messages: [
+				{ role: "user", content: "Read both files", timestamp: 1000 },
+				{
+					role: "assistant",
+					provider: "google",
+					api: "google-generative-ai",
+					model: "gemini-2.5-flash",
+					content: [
+						{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "/a" } },
+						{ type: "toolCall", id: "call_b", name: "read", arguments: { path: "/b" } },
+					],
+					usage: ZERO_USAGE,
+					stopReason: "toolUse",
+					timestamp: 2000,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_b",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "b body" }],
+					timestamp: 3000,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_a",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "a body" }],
+					timestamp: 3001,
+				},
+			],
+		};
+	}
+
+	it.each([
+		{ route: "Gemini API, Gemini 2.5", model: createGoogleModel("gemini-2.5-flash") },
+		{ route: "Vertex", model: createGoogleModel("gemini-3.5-flash", "google-vertex") },
+		{
+			route: "Antigravity",
+			model: createGoogleModel("gemini-3.5-flash", "google-generative-ai", "google-antigravity"),
+		},
+		{ route: "Gemini API, Gemini 3.5", model: createGoogleModel("gemini-3.5-flash") },
+	])("sends same-name results in call order: $route", ({ model }) => {
+		const contents = convertMessages(model, contextWithResultsStoredOutOfOrder());
+		const responseTurns = contents.filter(c => c.parts?.some(part => part.functionResponse));
+		expect(responseTurns).toHaveLength(1);
+		expect(responseTurns[0].parts?.map(part => part.functionResponse?.response)).toEqual([
+			{ output: "a body" },
+			{ output: "b body" },
+		]);
+	});
+});

@@ -404,6 +404,28 @@ describe("Factory Droid gemini wire — outbound normalization", () => {
 		expect(contents.filter(entry => entry.parts.some(part => part.functionResponse))).toHaveLength(1);
 	});
 
+	it("sends parallel results stored out of call order back in call order", async () => {
+		const { contents } = await run({
+			messages: [
+				{ role: "user", content: "read both", timestamp: 1 },
+				assistantMessage(
+					[
+						{ type: "toolCall", id: "call-a", name: "Read", arguments: { path: "/a" } },
+						{ type: "toolCall", id: "call-b", name: "Read", arguments: { path: "/b" } },
+					],
+					{ stopReason: "toolUse" },
+				),
+				toolResult("call-b", "b body"),
+				toolResult("call-a", "a body"),
+			],
+		});
+		const responses = contents.flatMap(entry => entry.parts.filter(part => part.functionResponse));
+		expect(responses.map(part => part.functionResponse)).toEqual([
+			{ name: "Read", response: { result: "a body" } },
+			{ name: "Read", response: { result: "b body" } },
+		]);
+	});
+
 	// Responses tool results carry `call_id|item_id` composites; pairing them
 	// with their call depends on the source turn's Responses provenance.
 	it.each([
