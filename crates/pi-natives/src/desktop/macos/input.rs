@@ -3719,11 +3719,12 @@ mod tests {
 		]);
 	}
 
+	/// What a test's keyboard-layout read returns.
+	type LayoutRead = CoreResult<Option<fn(char) -> Option<Keystroke>>>;
+
 	#[test]
 	fn local_text_stays_unicode_on_key_zero_and_only_a_remote_screen_gets_layout_keys() {
-		let no_layout = || -> CoreResult<Option<fn(char) -> Option<Keystroke>>> {
-			panic!("local text reads no keyboard layout")
-		};
+		let no_layout = || -> LayoutRead { panic!("local text reads no keyboard layout") };
 		let window = screen_sharing();
 		let local = keys_for(&window, "aB\n", None, no_layout).unwrap();
 		let source = source().expect("event source");
@@ -3763,7 +3764,7 @@ mod tests {
 	#[test]
 	fn a_layout_without_unicode_key_data_refuses_remote_keys_naming_the_window_and_why() {
 		let window = screen_sharing();
-		let none = || -> CoreResult<Option<fn(char) -> Option<Keystroke>>> { Ok(None) };
+		let none = || -> LayoutRead { Ok(None) };
 		for error in [
 			keys_for(&window, "a", Some(RemoteScreen::KeyEvents), none).unwrap_err(),
 			chord_keys(&window, &[KeyName::Char('a')], Some(RemoteScreen::HidReports), none)
@@ -3798,9 +3799,7 @@ mod tests {
 			KeyName::Char('Q'),
 			0
 		)]);
-		let local = || -> CoreResult<Option<fn(char) -> Option<Keystroke>>> {
-			panic!("a local chord reads no keyboard layout")
-		};
+		let local = || -> LayoutRead { panic!("a local chord reads no keyboard layout") };
 		assert_eq!(chord_keys(&window, &[KeyName::Char('q')], None, local).unwrap(), [press(
 			KeyName::Char('q'),
 			12
@@ -3837,9 +3836,7 @@ mod tests {
 		// Control characters, a ZWJ emoji, and a grapheme longer than one
 		// event's 20 UTF-16 units all ride as payloads; none has a key.
 		let text = format!("a\tb\n\u{1b}👨‍👩‍👧‍👦e{}é", "\u{301}".repeat(24));
-		let no_layout = || -> CoreResult<Option<fn(char) -> Option<Keystroke>>> {
-			panic!("local text reads no keyboard layout")
-		};
+		let no_layout = || -> LayoutRead { panic!("local text reads no keyboard layout") };
 		let keys = keys_for(&screen_sharing(), &text, None, no_layout).unwrap();
 		let source = source().expect("event source");
 		let mut events = Vec::new();
