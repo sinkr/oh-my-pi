@@ -24,7 +24,9 @@ import type * as CanvasModule from "@napi-rs/canvas";
 import {
 	IpcConnection,
 	ipcEndpoint,
+	normalizePtyDimensions,
 	type PtyArgvStartOptions,
+	type PtyDimensions,
 	PtySession,
 } from "@oh-my-pi/pi-natives";
 import type * as KittyVt from "kitty-vt-wasm";
@@ -1061,11 +1063,10 @@ async function startWindowsPty(
 
 // ─── Tool ────────────────────────────────────────────────────────────────────
 
-// Keep bounds aligned with PtySession::{start, start_argv, resize} in crates/pi-natives/src/pty.rs.
-function ptyDimension(value: number, min: number, max: number): number {
+function ptyDimensions(cols: number, rows: number): PtyDimensions {
 	return process.platform === "win32"
-		? Math.min(max, Math.max(min, Math.trunc(value)))
-		: value;
+		? normalizePtyDimensions(cols, rows)
+		: { cols, rows };
 }
 
 const factory = (omp: ToolHost) => {
@@ -1084,8 +1085,7 @@ const factory = (omp: ToolHost) => {
 			? [process.execPath, resolve(omp.cwd, file), ...(params.args ?? [])]
 			: [target, ...(params.args ?? [])];
 
-		const rows = ptyDimension(params.rows ?? 30, 5, 200);
-		const cols = ptyDimension(params.cols ?? 100, 20, 400);
+		const { cols, rows } = ptyDimensions(params.cols ?? 100, params.rows ?? 30);
 		const dir = mkdtempSync(join(tmpdir(), `omp-tui-${name}-`));
 		let screen: Screen | undefined;
 		let session: Session | undefined;
@@ -1490,8 +1490,10 @@ const factory = (omp: ToolHost) => {
 				}
 				case "resize": {
 					const session = need(params.name);
-					const rows = ptyDimension(params.rows ?? session.rows, 5, 200);
-					const cols = ptyDimension(params.cols ?? session.cols, 20, 400);
+					const { cols, rows } = ptyDimensions(
+						params.cols ?? session.cols,
+						params.rows ?? session.rows,
+					);
 					session.proc.terminal.resize(cols, rows);
 					session.screen.resize(cols, rows);
 					session.cols = cols;

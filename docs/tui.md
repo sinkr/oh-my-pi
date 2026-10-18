@@ -26,8 +26,9 @@ either a TypeScript/JavaScript `file` (run with Bun) or an executable `bin` with
 separate `args`. Windows uses native ConPTY without requiring a POSIX shell;
 macOS/Linux use Bun's PTY.
 The debug connection uses a Windows named pipe or a POSIX Unix socket.
-Windows uses integer dimensions clamped to 20–400 columns and 5–200 rows;
-the PTY, emulated screen, and reported size use the same effective dimensions.
+On Windows, `start` and `resize` use the native `normalizePtyDimensions(cols, rows)`
+helper, which returns integer dimensions clamped to 20–400 columns and 5–200 rows.
+The PTY, emulated screen, and reported size use the same effective dimensions.
 
 `screen`, `send`, `resize`, and `stop` also work for programs without an
 `OMP_TUI_DEBUG` server. Renderer queries (`info`, `tree`, `values`, and `frame`)
@@ -40,6 +41,8 @@ sequences are rejected before any input is written. Arbitrary non-UTF-8 bytes
 Use the UTF-8-compatible `\e[` CSI sequence instead. macOS/Linux preserve raw bytes.
 
 Install the tool's dependencies with `bun install --cwd .omp/tools`.
+Native PTY API changes require rebuilding the addon with
+`bun --cwd=packages/natives run build` before running the tool.
 Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`.
 The suite also runs in the native/integration CI bucket (`bun run ci:test:ts:native`)
 and the root `bun run test:ts` / `bun run test` aggregates. CI installs

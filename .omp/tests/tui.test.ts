@@ -137,6 +137,8 @@ setTerminalHeadless(false);
 				{ size: { cols: 401, rows: 201 }, columns: 400, rows: 200 },
 				{ size: { cols: 48.9, rows: 18.9 }, columns: 48, rows: 18 },
 				{ size: { rows: 3 }, columns: 48, rows: 5 },
+				{ size: { cols: -1, rows: -1 }, columns: 20, rows: 5 },
+				{ size: { cols: 2 ** 32, rows: 2 ** 32 }, columns: 400, rows: 200 },
 			]) {
 				expect(await execute({ op: "resize", name, ...size, quiet: true })).toContain(
 					`resized to ${columns}x${rows}`,
