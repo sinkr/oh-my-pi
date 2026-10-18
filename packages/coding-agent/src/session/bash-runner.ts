@@ -122,6 +122,9 @@ export class BashRunner {
 					onChunk,
 					signal: abortController.signal,
 					sessionKey: target.sessionId,
+					// A command still pending when its session was left must not keep a
+					// shell under that session after the transition released its shells.
+					isSessionCurrent: () => this.#host.sessionManager.getSessionId() === target.sessionId,
 					cwd,
 					timeout: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.#host.settings)) * 1000,
 					onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),

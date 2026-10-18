@@ -143,6 +143,8 @@ Concurrent calls never share one `Shell`: the native session runs one command at
 
 `exit`, errexit (`set -e`), and a stray top-level `return`/`break` end the command, not the native session; a timeout, cancellation, or failed run quarantines the session and the next call starts a fresh one.
 
+A call keeps the session ID it started with, even if the session changes before its shell starts. Leaving a session (new, fork, switch, branch) releases its shells, and a command still running or pending from a left session drops its shell when it settles (`isSessionCurrent`), so returning to a session starts a fresh shell.
+
 ## Bundled `jq` compatibility
 
 Unless `PI_DISABLE_UUTILS_BUILTINS` is truthy, the non-PTY native shell registers a bundled `jq` command backed by [jaq](https://github.com/01mf02/jaq) 3.1.1, not the system `jq`; `jq --version` prints `jaq 3.1.1`. Setting that flag disables the in-process uutils command set and falls back to system binaries. `env jq …` runs the system `jq` for one command.

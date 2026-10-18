@@ -30,7 +30,7 @@ afterEach(async () => {
 	await fs.rm(cwd, { recursive: true, force: true });
 });
 
-function bashTool(settings: Record<string, unknown> = {}): BashTool {
+function bashTool(settings: Record<string, unknown> = {}, overrides: Partial<ToolSession> = {}): BashTool {
 	const session: ToolSession = {
 		cwd,
 		hasUI: false,
@@ -39,6 +39,7 @@ function bashTool(settings: Record<string, unknown> = {}): BashTool {
 		getSessionSpawns: () => "*",
 		asyncJobManager: manager,
 		settings: Settings.isolated(settings),
+		...overrides,
 	};
 	return new BashTool(session);
 }
@@ -97,6 +98,39 @@ it.skipIf(process.platform === "win32")(
 
 		await manager.waitForAll();
 		expect((await run(tool, 'printf "%s" "$PI_STATE_VAR"')).text).toBe("kept");
+	},
+	10_000,
+);
+
+it.skipIf(process.platform === "win32")(
+	"runs a call in the shell of the session it started in when the session changes first",
+	async () => {
+		const [first, second] = [`${cwd}:first`, `${cwd}:second`];
+		let sessionId = first;
+		const heldAllocation = Promise.withResolvers<{ id?: string; path?: string }>();
+		let allocations = 0;
+		const tool = bashTool(
+			{ "bash.autoBackground.thresholdMs": 100 },
+			{
+				getSessionId: () => sessionId,
+				// Holds the first call before its shell starts, so the session changes underneath it.
+				allocateOutputArtifact: async () => (allocations++ === 0 ? heldAllocation.promise : {}),
+			},
+		);
+		try {
+			expect((await run(tool, "PI_STATE_VAR=from-first")).async?.state).toBe("running");
+			sessionId = second;
+			heldAllocation.resolve({});
+			await manager.waitForAll();
+
+			expect((await run(tool, 'printf "[%s]" "$PI_STATE_VAR"')).text).toBe("[]");
+			// The left session's shell was dropped when that call finished.
+			sessionId = first;
+			expect((await run(tool, 'printf "[%s]" "$PI_STATE_VAR"')).text).toBe("[]");
+		} finally {
+			releaseShellSessions(first);
+			releaseShellSessions(second);
+		}
 	},
 	10_000,
 );

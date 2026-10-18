@@ -836,6 +836,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		foreground: boolean;
 		/** Approval tier bounding the job's URL filesystem. */
 		approvalTier: ToolTier;
+		/** Session the call started in; its shell, even if the session changes before the job runs. */
+		sessionId: string | undefined;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -880,9 +882,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						// functions, and options reach the next call even after it is
 						// backgrounded. A job that starts in the background gets its own
 						// shell, so it never holds the session's.
-						sessionKey: options.foreground
-							? (this.session.getSessionId?.() ?? undefined)
-							: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+						sessionKey: options.foreground ? options.sessionId : `${options.sessionId ?? ""}:async:${jobId}`,
+						isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === options.sessionId,
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						gitGuard: cfgBashGitGuard.get(this.session.settings),
@@ -975,6 +976,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BashToolDetails>> {
 		let command = rawCommand;
+		// The session this call belongs to, captured before any await: a session
+		// change while the call waits must not move it into the new session's shell.
+		const sessionId = this.session.getSessionId?.() ?? undefined;
 
 		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
 		// cwd parameter. The scanner captures only a single path token and defers
@@ -1159,6 +1163,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				onUpdate,
 				foreground: false,
 				approvalTier,
+				sessionId,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -1199,6 +1204,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				onUpdate,
 				foreground: !startBackgrounded,
 				approvalTier,
+				sessionId,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
@@ -1563,7 +1569,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				// command here so the unset prefix is not applied twice.
 				await executeBash(command, {
 					cwd: commandCwd,
-					sessionKey: this.session.getSessionId?.() ?? undefined,
+					sessionKey: sessionId,
+					isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === sessionId,
 					timeout: timeoutMs ?? 0,
 					signal,
 					gitGuard: cfgBashGitGuard.get(this.session.settings),
