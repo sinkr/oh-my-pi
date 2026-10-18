@@ -591,6 +591,20 @@ describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
 		expect(healing.drainCompleted().map(call => JSON.parse(call.arguments))).toEqual([{ path: "a" }, { path: "b" }]);
 	});
 
+	it("keeps a section close or call open inside a JSON string as argument text", () => {
+		// A grep for the leaked tokens themselves: neither occurrence may end the call.
+		const args = { command: 'grep -c "<｜tool▁calls▁end｜>\\|<｜tool_call_begin｜>" omp.log' };
+		const leak = `<｜tool_calls_begin｜><｜tool_call_begin｜>bash<｜tool_sep｜>${JSON.stringify(args)}<｜tool_calls_end｜>`;
+		for (const step of [leak.length, 1]) {
+			const healing = new StreamMarkupHealing({ pattern: "dsml" });
+			let visible = "";
+			for (let i = 0; i < leak.length; i += step) visible += healing.feed(leak.slice(i, i + step));
+			visible += healing.flushPending();
+			expect(visible).toBe("");
+			expect(healing.drainCompleted().map(call => JSON.parse(call.arguments))).toEqual([args]);
+		}
+	});
+
 	it("leaves ASCII-pipe tokens from other templates visible", () => {
 		// Kimi's `<|tool_call_begin|>` shares a name with DeepSeek's token; without a
 		// fullwidth bar it is not DeepSeek markup and must not open a call.

@@ -1,4 +1,4 @@
-import { parseJsonWithRepair } from "@oh-my-pi/pi-utils";
+import { classifyJsonPrefix, parseJsonWithRepair } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
@@ -140,8 +140,9 @@ const OUTSIDE_TEMPLATE_TOKENS: Readonly<Record<string, true>> = Object.fromEntri
 );
 const SEPARATOR_TOKENS: Readonly<Record<string, true>> = { [DEEPSEEK_TOOL_SEPARATOR]: true };
 // A call's arguments end at its own close or, when the model skips that close,
-// at the section close or the next call's open — neither can occur inside
-// arguments. Those two are left in the buffer for the next state to consume.
+// at the section close or the next call's open. Those two fallbacks are left in
+// the buffer for the next state to consume, and only count once the arguments
+// before them are no longer an open JSON prefix (see `#consumeArgs`).
 const ARGS_TERMINATOR_TOKENS: Readonly<Record<string, true>> = {
 	[DEEPSEEK_TOOL_CALL_END]: true,
 	[DEEPSEEK_TOOL_CALLS_END]: true,
@@ -492,15 +493,38 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	}
 
 	#consumeArgs(final: boolean, events: InbandScanEvent[]): boolean {
-		const end = findDeepSeekTemplateToken(this.#buffer, ARGS_TERMINATOR_TOKENS);
+		let end: DeepSeekTokenMatch | undefined;
+		let rawArgs = "";
+		for (
+			let candidate = findDeepSeekTemplateToken(this.#buffer, ARGS_TERMINATOR_TOKENS);
+			candidate;
+			candidate = findDeepSeekTemplateToken(
+				this.#buffer,
+				ARGS_TERMINATOR_TOKENS,
+				candidate.index + candidate.raw.length,
+			)
+		) {
+			rawArgs = this.#buffer.slice(0, candidate.index);
+			if (this.#state === "legacyArgs") {
+				const fence = rawArgs.lastIndexOf(CODE_FENCE);
+				if (fence !== -1) rawArgs = rawArgs.slice(0, fence);
+			}
+			// The call's own close always ends it, even after malformed JSON (the
+			// parser repairs or flags it). A fallback inside a still-open JSON
+			// string or container is argument text — e.g. a grep for the token.
+			const trimmed = rawArgs.trim();
+			if (
+				candidate.token === DEEPSEEK_TOOL_CALL_END ||
+				trimmed.length === 0 ||
+				classifyJsonPrefix(trimmed) !== "prefix"
+			) {
+				end = candidate;
+				break;
+			}
+		}
 		if (!end) {
 			if (final) this.#resetTool();
 			return false;
-		}
-		let rawArgs = this.#buffer.slice(0, end.index);
-		if (this.#state === "legacyArgs") {
-			const fence = rawArgs.lastIndexOf(CODE_FENCE);
-			if (fence !== -1) rawArgs = rawArgs.slice(0, fence);
 		}
 		// Only the call's own close belongs to it; a section close or the next
 		// call's open stays buffered for the state that owns it.
