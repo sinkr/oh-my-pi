@@ -16,6 +16,7 @@ import {
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
+	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
@@ -280,15 +281,17 @@ export class ComputerSupervisor implements ComputerController {
 				result = await this.#raceWithGrace(promise, timeoutMs);
 			} catch (error) {
 				// The worker's own stop report already carries what the stopped operation said.
-				const reported = error instanceof Error && error.message.includes(ESCAPE_STOPPED_MESSAGE);
+				const reported =
+					error instanceof Error &&
+					(error.message.includes(ESCAPE_STOPPED_MESSAGE) || error.message.includes(ESCAPE_AFTER_CALL_MESSAGE));
 				if (reported || !this.#escapeStopped()) throw error;
 				// What the worker said went wrong (input that landed in part, a timeout) stays first; its abort adds nothing.
 				const own = error instanceof Error && !(error instanceof ToolAbortError) ? error.message : undefined;
 				throw new ToolError(own ? `${own}\n\n${ESCAPE_STOPPED_MESSAGE}` : ESCAPE_STOPPED_MESSAGE);
 			}
-			// The stop landed after the script finished: keep what it did, led by the user's stop.
+			// The stop landed after the script finished, its input out: keep what it did, led by the user's stop.
 			if (this.#escapeStopped()) {
-				return { ...result, displays: [{ type: "text", text: ESCAPE_STOPPED_MESSAGE }, ...result.displays] };
+				return { ...result, displays: [{ type: "text", text: ESCAPE_AFTER_CALL_MESSAGE }, ...result.displays] };
 			}
 			return result;
 		} finally {

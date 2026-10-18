@@ -1,6 +1,7 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { CaptureRegion, DesktopCapabilities, DesktopScreenState } from "@oh-my-pi/pi-natives";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import escapeAfterCallMessage from "../../prompts/tools/computer-escape-after-call.md" with { type: "text" };
 import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
 import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
@@ -66,6 +67,9 @@ export interface ComputerRunOk {
 
 /** Result of a computer call the user stopped with physical Escape during takeover input. */
 export const ESCAPE_STOPPED_MESSAGE = prompt.render(escapeStoppedMessage);
+
+/** Result of a computer call that finished, its input out, before the user's Escape stopped computer use. */
+export const ESCAPE_AFTER_CALL_MESSAGE = prompt.render(escapeAfterCallMessage);
 
 /** Refusal of every later computer call until the user's next message acknowledges their Escape stop. */
 export const ESCAPE_REFUSED_MESSAGE = prompt.render(escapeRefusedMessage);

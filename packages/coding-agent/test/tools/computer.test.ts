@@ -13,6 +13,7 @@ import {
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
 	type ComputerWorkerTransport,
+	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	SCREEN_LOCKED_CAPTURE_NOTE,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
@@ -2380,6 +2381,25 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
+	it("says a call that finished sent its input when the user's Escape lands as it returns", async () => {
+		class EscapeAsClickReturns extends FakeNativeSession {
+			override async click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void> {
+				await super.click(target, x, y, opts);
+				// Every event went out; the Escape lands in the call's tail, before it returns.
+				this.escapeStops = 1;
+			}
+		}
+		const transport = new MemoryTransport();
+		const native = new EscapeAsClickReturns();
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(transport, "finished-click", "await (await desktop.window(42)).click(1, 2)");
+		expect(native.clickCount).toBe(1);
+		expect(result.ok ? result.payload.returnValue : result.error).toMatchObject({
+			isAbort: false,
+			message: ESCAPE_AFTER_CALL_MESSAGE,
+		});
+	});
+
 	it("reports what the stopped operation said, such as a failed restoration, ahead of the stop", async () => {
 		const { native, prelude, context, close } = escapeHarness();
 		try {
@@ -2598,7 +2618,7 @@ describe("expanded computer APIs", () => {
 		try {
 			const result = await supervisor.run("1", 1_000, snapshot());
 			expect(result.returnValue).toBe("fresh");
-			expect(result.displays[0]).toEqual({ type: "text", text: ESCAPE_STOPPED_MESSAGE });
+			expect(result.displays[0]).toEqual({ type: "text", text: ESCAPE_AFTER_CALL_MESSAGE });
 			await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow("the user pressed Escape");
 		} finally {
 			await supervisor.close();

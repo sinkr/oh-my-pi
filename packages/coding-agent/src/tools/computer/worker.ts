@@ -45,6 +45,7 @@ import {
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
+	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
 	SCREEN_LOCKED_CAPTURE_NOTE,
@@ -1048,14 +1049,12 @@ export class ComputerWorkerCore {
 	 * aborted and this access refused, so a script that catches the cancelled
 	 * operation sends nothing more.
 	 */
-	#checkEscape(cause?: unknown): void {
+	#checkEscape(cause?: unknown, notice = ESCAPE_STOPPED_MESSAGE): void {
 		const active = this.#active;
 		if (!active || !this.#session || this.#session.escapeStops <= active.acknowledgedEscapeStops) return;
 		if (active.escapeStop) throw active.escapeStop;
 		// What the stopped operation reported (a key left held, the user's app not handed back) stays first.
-		const stopped = new ToolError(
-			cause === undefined ? ESCAPE_STOPPED_MESSAGE : `${nativeError(cause).message}\n\n${ESCAPE_STOPPED_MESSAGE}`,
-		);
+		const stopped = new ToolError(cause === undefined ? notice : `${nativeError(cause).message}\n\n${notice}`);
 		active.escapeStop = stopped;
 		active.ac.abort(stopped);
 		throw stopped;
@@ -1074,7 +1073,8 @@ export class ComputerWorkerCore {
 					if (!(result instanceof Promise)) return result;
 					return result.then(
 						settled => {
-							this.#checkEscape();
+							// The call finished and its input went out; the stop ends the run after it.
+							this.#checkEscape(undefined, ESCAPE_AFTER_CALL_MESSAGE);
 							return settled;
 						},
 						error => {
