@@ -73,6 +73,10 @@ const STRING_SEQ_PARTIAL = /^\x1b[\]P_]/;
 // progress. Generous: a slow clipboard owner or SSH link may stall a packet
 // for a while, and abandoning a live packet types nothing but loses it.
 const STRING_ABANDON_MS = 5000;
+// How long an abandoned head stays dormant waiting for a late tail. Bounded
+// so a stale packet cannot absorb unrelated multi-byte input later on; a
+// resumed head that is abandoned again is dropped for good.
+const STRING_DORMANT_MS = 10_000;
 
 // SGR mouse report bodies live between `<` and the terminating `M`/`m`.
 // Matched only when the trailing byte is a valid terminator, so the regex
@@ -501,6 +505,9 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	// An abandoned string head, kept so a late terminal-shaped tail still
 	// completes it instead of being typed (see `#resumeDormantString`).
 	#dormantString: string | undefined;
+	#dormantUntilMs = 0;
+	// The pending head was resumed from dormancy; abandoning it again drops it.
+	#stringResumed = false;
 
 	constructor(options: StdinBufferOptions = {}) {
 		super();
@@ -540,7 +547,10 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			str = this.#consumeStringDiscard(str);
 			if (str.length === 0) return;
 		}
-		if (this.#dormantString !== undefined && this.#buffer.length === 0) this.#resumeDormantString(str);
+		if (this.#dormantString !== undefined && this.#buffer.length === 0) {
+			if (Date.now() < this.#dormantUntilMs) this.#resumeDormantString(str);
+			else this.#dormantString = undefined;
+		}
 		if (this.#bufferIsStringHead()) this.#trackStringRead(str);
 
 		if (this.#flushDeferral && this.#isFreshEscapeAfterDeferredFlush(str)) {
@@ -650,6 +660,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		if (this.#bufferIsStringHead()) {
 			if (this.#stringProgressMs === 0) {
 				this.#dormantString = undefined;
+				this.#stringResumed = false;
 				this.#noteStringProgress();
 			}
 			this.#partialHoldStartMs = 0;
@@ -957,7 +968,12 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 				const at = this.#stringTypedAt[i]!;
 				dormant = dormant.slice(0, at) + dormant.slice(at + this.#stringTypedKeys[i]!.length);
 			}
-			this.#dormantString = dormant;
+			if (this.#stringResumed) {
+				this.#dormantString = undefined;
+			} else {
+				this.#dormantString = dormant;
+				this.#dormantUntilMs = Date.now() + STRING_DORMANT_MS;
+			}
 			this.#buffer = "";
 			this.#escapeSearchOffset = 0;
 			this.#emitStringTypedKeys();
@@ -1006,6 +1022,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		if (end <= STRING_ABORTED) return;
 		this.#buffer = head;
 		this.#escapeSearchOffset = head.length;
+		this.#stringResumed = true;
 	}
 
 	/** Timeout-driven flush: hold unambiguous partials (bounded), else deliver. */
@@ -1136,6 +1153,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#exitStringDiscard();
 		this.#takeStringTypedKeys();
 		this.#dormantString = undefined;
+		this.#stringResumed = false;
 		this.#buffer = "";
 		this.#rawPasteCandidate = "";
 		this.#pasteMode = false;

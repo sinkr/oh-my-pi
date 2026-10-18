@@ -823,13 +823,14 @@ describe("StdinBuffer", () => {
 			vi.useRealTimers();
 		});
 
-		it("completes an OSC 5522 packet however long its payload stalls", () => {
+		it("completes an OSC 5522 packet whose payload stalls for seconds", () => {
 			// Regression: a packet stalled past the flush window (a dictation
 			// app serving the clipboard slowly) was torn, and its base64 payload
-			// was typed into the composer as text.
+			// was typed into the composer as text. A tail within the
+			// abandonment plus dormant window (15 s) still completes it.
 			vi.useFakeTimers();
 			processInput(head);
-			vi.advanceTimersByTime(60_000);
+			vi.advanceTimersByTime(14_000);
 			expect(emittedSequences).toEqual([]);
 
 			processInput("IHdvcmxkIQ==\x1b");
@@ -933,6 +934,24 @@ describe("StdinBuffer", () => {
 			vi.advanceTimersByTime(5000);
 			expect(emittedSequences).toEqual([]);
 			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("lets an abandoned head expire so later bursts are delivered", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000 + 10_000);
+			processInput("hello");
+			expect(emittedSequences).toEqual(["h", "e", "l", "l", "o"]);
+		});
+
+		it("drops a resumed head for good when it is abandoned again", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000);
+			processInput("QUJD");
+			vi.advanceTimersByTime(5000);
+			processInput("hello");
+			expect(emittedSequences).toEqual(["h", "e", "l", "l", "o"]);
 		});
 
 		it.each([
