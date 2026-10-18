@@ -47,6 +47,8 @@ Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`.
 The suite also runs in the native/integration CI bucket (`bun run ci:test:ts:native`)
 and the root `bun run test:ts` / `bun run test` aggregates. CI installs
 `.omp/tools` dependencies before running the native/integration bucket.
+The CI path filters include `.omp/tools/**` and `.omp/tests/**` for both
+`push` and `pull_request` events.
 
 ## Core component contract (`@oh-my-pi/pi-tui`)
 
