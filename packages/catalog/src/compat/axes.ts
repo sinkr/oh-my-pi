@@ -494,6 +494,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	/**
+	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps the newest user message's
+	 * and newest tool result's images past `inline-image-byte-budget` while they alone fit this limit.
+	 */
+	"request-body-byte-limit": { key: "requestBodyByteLimit", set: "catalog", shape: "scalar" },
+	/**
 	 * Supported formats and size bounds for judgment-request images; `mime-types`
 	 * is comma-separated because object payloads have no array shape.
 	 */

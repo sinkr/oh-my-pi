@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Message, Model, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, ModelSpec, Usage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
@@ -1403,6 +1403,17 @@ describe("frame data budget", () => {
 		expect(snapcompact.frameDataBytesBudget(throughProxy(sol))).toBe(budget);
 		expect(snapcompact.frameDataBytesBudget(getBundledModel("openrouter", "anthropic/claude-opus-5.5"))).toBe(budget);
 		expect(snapcompact.frameDataBytesBudget(undefined)).toBe(budget);
+		// Factory Droid's own hosts carry a smaller budget; a custom gateway in front of Factory keeps the default.
+		const factory = (baseUrl: string) =>
+			buildModel({
+				...toModelSpec(opus),
+				api: "factory-droid-agent",
+				provider: "factory-droid",
+				id: "claude-haiku-4-5-20251001",
+				baseUrl,
+			} as ModelSpec<"factory-droid-agent">);
+		expect(snapcompact.frameDataBytesBudget(factory("https://api.factory.ai/api/llm/a"))).toBeLessThan(budget);
+		expect(snapcompact.frameDataBytesBudget(factory("https://factory-gateway.example/api/llm/a"))).toBe(budget);
 		// Opus's 1932px frames: 17 under the default, 70 under Anthropic's share.
 		const opusShape = snapcompact.resolveShape(opus);
 		expect(snapcompact.maxFramesForDataBudget(opusShape, budget)).toBe(17);

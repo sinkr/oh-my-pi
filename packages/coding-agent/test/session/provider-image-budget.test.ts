@@ -423,6 +423,54 @@ describe("provider context image budgets", () => {
 		expect(clampProviderContextImageBytes(context, gateway)).toBe(context);
 	});
 
+	it("trims five 1 MB Factory screenshots, which the count cap allows, to three", () => {
+		const screenshot = "A".repeat(1_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 5 }, (_, index) => ({
+				role: "toolResult",
+				toolCallId: `call-${index}`,
+				toolName: "screenshot",
+				content: [text(`result-${index}`), image(screenshot)],
+				isError: false,
+				timestamp: index,
+			})),
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		const counted = clampProviderContextImages(context, hosted);
+		expect(imageData(counted)).toHaveLength(5);
+		const clamped = clampProviderContextImageBytes(counted, hosted);
+		expect(imageData(clamped)).toHaveLength(3);
+		expect(clamped.messages.slice(2).every(message => message.content.length === 2)).toBe(true);
+	});
+
+	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {
+		const older = "B".repeat(500_000);
+		const fresh = "C".repeat(3_800_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("first"), image(older)], timestamp: 0 },
+				{ role: "user", content: [text("second"), image(older)], timestamp: 1 },
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 2 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		const clamped = clampProviderContextImageBytes(context, hosted);
+		expect(imageData(clamped)).toEqual([fresh]);
+		expect(clamped.messages[2]).toBe(context.messages[2]);
+		expect(textData(clamped)).toEqual(["first", "second", "look at this"]);
+		expect(JSON.stringify(clamped).length).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		// An image too large for the route on its own is still dropped.
+		const oversized: Context = {
+			...context,
+			messages: [{ role: "user", content: [text("huge"), image("D".repeat(4_600_000))], timestamp: 0 }],
+		};
+		expect(imageData(clampProviderContextImageBytes(oversized, hosted))).toEqual([]);
+	});
+
 	it("removes an oversized single tool image but keeps its tool result meaningful", () => {
 		const context: Context = {
 			systemPrompt: [],

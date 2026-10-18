@@ -26,6 +26,16 @@ export function resolveInlineImageByteBudget(model: Model, budgetedHost: boolean
 }
 
 /**
+ * Largest request body the deployment accepts (`request-body-byte-limit`), or `undefined` when no rule names it.
+ * Same gate as {@link resolveInlineImageByteBudget}.
+ */
+export function resolveRequestBodyByteLimit(model: Model, budgetedHost: boolean): number | undefined {
+	if (!budgetedHost) return undefined;
+	const value = resolveCatalogPolicy(model).requestBodyByteLimit;
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
  * Most images one request to this deployment may carry, or `undefined` when no rule names the host. A configured
  * `model.imageCountBudget` wins: the user knows the host behind a custom gateway. Otherwise the
  * `official-image-count-budget` axis replaces `image-count-budget` only when `budgetedHost` says the request

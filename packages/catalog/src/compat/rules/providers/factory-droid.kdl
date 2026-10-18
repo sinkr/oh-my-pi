@@ -14,9 +14,11 @@ provider "factory-droid" {
 	context-window-authoritative #true
 	// Factory's hosted HTTP routes refuse request bodies over 4,500,000 bytes.
 	// The native CLI keeps inline media under 3,500,000 base64 bytes, leaving
-	// ~1 MB for system, tools and text. Applied only on Factory's own hosts; a
-	// custom gateway baseUrl keeps its own limit.
+	// ~1 MB for system, tools and text, but never evicts the newest user
+	// message's or newest tool result's media. Applied only on Factory's own
+	// hosts; a custom gateway baseUrl keeps its own limit.
 	inline-image-byte-budget 3500000
+	request-body-byte-limit 4500000
 
 	// The registry roster. Factory has no model-listing endpoint, so first-party
 	// clients ship this list and narrow it per account with feature flags, org
