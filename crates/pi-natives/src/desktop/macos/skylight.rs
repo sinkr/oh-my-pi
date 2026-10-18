@@ -5,13 +5,16 @@ use std::{
 	ptr,
 	sync::{
 		LazyLock,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicU32, Ordering},
 	},
 	thread,
 	time::{Duration, Instant},
 };
 
-use core_graphics::{event::CGEvent, geometry::CGPoint};
+use core_graphics::{
+	event::{CGEvent, CGEventType},
+	geometry::CGPoint,
+};
 use foreign_types::ForeignType;
 use libc::pid_t;
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
@@ -21,7 +24,7 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	ax, capture,
+	ax, capture, permission,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -383,16 +386,130 @@ pub(super) fn after_cleanup<T>(result: CoreResult<T>, cleanup: CoreResult<()>) -
 	}
 }
 
+/// How many presses of `event_type` the HID system has counted. Hardware
+/// mouse presses ([`control::POINTER_PRESS_TYPES`]) are how a user picks a
+/// window, while typing in their own window is not. Presses posted to the HID
+/// event tap advance these counters, omp's own included; events posted to a
+/// pid do not.
+fn hid_counter(event_type: u32) -> u32 {
+	// SAFETY: HIDSystemState (1) and these public CGEventType values are
+	// defined by CGEventSource.h / CGEventTypes.h; this is a read-only query.
+	unsafe { CGEventSourceCounterForEventType(1, event_type) }
+}
+
 /// Physical activity is a conservative veto, not proof of which app the user
 /// chose. A source that updates HID counters for synthetic events can also veto
 /// restoration; yielding control is safer than fighting a deliberate switch.
 fn activation_activity() -> [u32; 5] {
-	// Left/right/other press, key press, and modifiers can change activation.
-	[1, 3, 25, 10, 12].map(|event_type| {
-		// SAFETY: HIDSystemState (1) and these public CGEventType values are
-		// defined by CGEventSource.h / CGEventTypes.h; this is a read-only query.
-		unsafe { CGEventSourceCounterForEventType(1, event_type) }
-	})
+	// Pointer presses, key press, and modifiers can change activation: the
+	// types the takeover monitor watches.
+	control::MONITORED_TYPES.map(hid_counter)
+}
+
+/// `WindowServer`'s HID counters for the types the takeover monitor watches,
+/// next to how many of each the monitor has seen. Both count omp's own HID
+/// posts too.
+#[derive(Clone, Copy, Debug)]
+struct MonitorProgress {
+	counted: [u32; 5],
+	seen:    [u32; 5],
+}
+
+impl MonitorProgress {
+	fn now() -> Self {
+		// Counted first: an event counted after this read cannot make the
+		// monitor look behind.
+		let counted = activation_activity();
+		Self { counted, seen: control::monitor_seen() }
+	}
+
+	/// Whether the monitor has seen, since `baseline`, at least as many events
+	/// of every type as `WindowServer` counted: none of them is still in the
+	/// tap's queue. A tap without Input Monitoring sees nothing, so it never
+	/// catches up once anything is counted.
+	fn caught_up_since(self, baseline: Self) -> bool {
+		(0..self.seen.len()).all(|i| {
+			self.seen[i].wrapping_sub(baseline.seen[i])
+				>= self.counted[i].wrapping_sub(baseline.counted[i])
+		})
+	}
+}
+
+/// How long takeover's hand-back waits for the monitor to catch up before it
+/// leaves the front application as it is.
+const MONITOR_CATCH_UP: Duration = Duration::from_millis(50);
+
+/// Waits up to [`MONITOR_CATCH_UP`] for the takeover monitor to have seen
+/// every event `WindowServer` counted since `baseline`.
+fn monitor_settled(baseline: MonitorProgress) -> bool {
+	let deadline = Instant::now() + MONITOR_CATCH_UP;
+	loop {
+		if MonitorProgress::now().caught_up_since(baseline) {
+			return true;
+		}
+		if Instant::now() >= deadline || control::wait(Duration::from_millis(2)).is_err() {
+			return false;
+		}
+	}
+}
+
+/// Whether the user picked something since takeover began: a click or a
+/// shortcut the monitor classified as a choice. With Input Monitoring the
+/// monitor sees every key and press, and its count is complete once it has
+/// caught up with all `WindowServer` counted (`settled`), whichever of omp's
+/// own presses are still on their way; until then the user may have chosen.
+/// Without it the tap sees nothing, which leaves the HID press counters net
+/// of omp's own presses (`counters_show_press`); keys are then known only to
+/// `WindowServer`, which refuses the hand-back for those after its timestamp.
+fn takeover_user_chose(
+	monitor_sees_input: bool,
+	settled: impl FnOnce() -> bool,
+	choices_changed: impl FnOnce() -> bool,
+	counters_show_press: impl FnOnce() -> bool,
+) -> bool {
+	if monitor_sees_input {
+		!settled() || choices_changed()
+	} else {
+		counters_show_press()
+	}
+}
+
+/// Pointer presses omp posted to the HID event tap ([`note_hid_post`]).
+static OWN_POINTER_PRESSES: AtomicU32 = AtomicU32::new(0);
+
+/// Counts `event_type` as omp's own pointer press when it is one; called just
+/// before the event is posted to the HID event tap, so a reader never sees
+/// the HID counter move ahead of this count.
+pub(super) fn note_hid_post(event_type: CGEventType) {
+	if control::is_pointer_press(event_type as u32) {
+		OWN_POINTER_PRESSES.fetch_add(1, Ordering::AcqRel);
+	}
+}
+
+/// The HID pointer-press counters next to omp's own presses posted to the HID
+/// event tap, so a baseline taken before omp's own clicks still tells the
+/// user's presses apart from them.
+#[derive(Clone, Copy, Debug)]
+struct PointerPresses {
+	hid: [u32; 3],
+	own: u32,
+}
+
+impl PointerPresses {
+	fn now() -> Self {
+		// Own first: a press of omp's posted between the two reads then looks
+		// like the user's, which only stands the hand-back down.
+		let own = OWN_POINTER_PRESSES.load(Ordering::Acquire);
+		Self { hid: control::POINTER_PRESS_TYPES.map(hid_counter), own }
+	}
+
+	/// Whether the HID counters show more presses since `baseline` than omp
+	/// posted: one of them, at least, is the user's.
+	fn user_pressed_since(self, baseline: Self) -> bool {
+		let hid =
+			(0..3).fold(0u32, |sum, i| sum.wrapping_add(self.hid[i].wrapping_sub(baseline.hid[i])));
+		hid > self.own.wrapping_sub(baseline.own)
+	}
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -587,7 +704,7 @@ pub(super) fn with_background_watch<T>(
 								// the user pressed a key or clicked after the re-check
 								// began.
 								let handed_back = request_after_check(
-									event_clock_now,
+									control::uptime_ns,
 									|| {
 										front_process(spi.get_front).is_some_and(|front| front.psn == target)
 											&& activation_activity() == lease.activity
@@ -699,17 +816,6 @@ enum FrontRequest {
 	UserActed,
 }
 
-/// Now on the clock `WindowServer` compares a front-process request's
-/// timestamp with: nanoseconds of `CLOCK_UPTIME_RAW`.
-fn event_clock_now() -> u64 {
-	let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-	// SAFETY: `time` is writable for the call; CLOCK_UPTIME_RAW is a clock
-	// every supported macOS provides, and the call retains no pointer.
-	unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &raw mut time) };
-	u64::try_from(time.tv_sec).unwrap_or(0) * 1_000_000_000
-		+ u64::try_from(time.tv_nsec).unwrap_or(0)
-}
-
 /// Runs `request` with a timestamp taken from `now` before `still_ours`
 /// confirms the hand-back is still wanted; `None` when it no longer is.
 /// `WindowServer` refuses the request if the user pressed a key or clicked
@@ -727,10 +833,54 @@ fn request_after_check(
 	request(since).map(Some)
 }
 
+/// How many timestamps takeover's hand-back tries while the user keeps typing.
+const TAKEOVER_HAND_BACK_TRIES: usize = 3;
+
+/// Takeover's hand-back through [`request_after_check`], asked again with a
+/// fresh timestamp while `WindowServer` refuses it and `typed_since` shows the
+/// takeover monitor saw the user type after the refused timestamp. Such
+/// typing reached the target only because takeover held the front.
+///
+/// The monitor's tap trails `WindowServer`, so a retry also needs `settled`:
+/// the monitor has classified every key, modifier and press `WindowServer`
+/// counted. It is asked before the monitor's typing is trusted and again
+/// after each retry's timestamp, so a choice still in the tap's queue (the
+/// arrow of a Control-Up after its Control) cannot be outrun. A refusal the
+/// monitor cannot account for (a choice, input it has not caught up with, or
+/// no monitor at all) stands, as does any try `still_ours` rejects.
+fn hand_back_through_typing(
+	mut now: impl FnMut() -> u64,
+	mut still_ours: impl FnMut() -> bool,
+	mut typed_since: impl FnMut(u64) -> bool,
+	mut settled: impl FnMut() -> bool,
+	mut request: impl FnMut(u64) -> CoreResult<FrontRequest>,
+) -> CoreResult<Option<FrontRequest>> {
+	let mut asked = 0;
+	let mut handed = request_after_check(&mut now, &mut still_ours, |since| {
+		asked = since;
+		request(since)
+	})?;
+	for _ in 1..TAKEOVER_HAND_BACK_TRIES {
+		if handed != Some(FrontRequest::UserActed) || !(settled() && typed_since(asked)) {
+			break;
+		}
+		handed = request_after_check(
+			&mut now,
+			|| settled() && still_ours(),
+			|since| {
+				asked = since;
+				request(since)
+			},
+		)?;
+	}
+	Ok(handed)
+}
+
 /// Makes `psn` the front process unless the user pressed a key or clicked
-/// after `since` ([`event_clock_now`]). `WindowServer` decides on its own
-/// event clock, so polling delays cannot hide that input; events posted to a
-/// process, as background input is, do not count. Where the conditional
+/// after `since` ([`control::uptime_ns`]). `WindowServer` decides on its own
+/// event clock, so polling delays cannot hide that input. It counts keys and
+/// clicks posted to the HID event tap, takeover input included, but not
+/// events posted to a process, as background input is. Where the conditional
 /// request is unavailable, the front process changes unconditionally.
 fn set_front_unless_user_acted(
 	spi: &ForegroundSpi,
@@ -822,7 +972,13 @@ pub(super) fn with_foreground<T>(
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
-	let activity = control::user_activity();
+	let choices = control::user_choices();
+	// Read with `choices`, before takeover posts anything: a click of the
+	// user's at any later point is then a choice the monitor counts once it has
+	// caught up with `WindowServer`, or a press beyond takeover's own.
+	let presses = PointerPresses::now();
+	let progress = MonitorProgress::now();
+	let monitor_sees_input = permission::listen_events();
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::input_failed("exact-window takeover SPI is unavailable; no input was sent")
 	})?;
@@ -851,36 +1007,53 @@ pub(super) fn with_foreground<T>(
 		})?
 		.window();
 	let restore = |preparation_failed: bool| {
-		if control::user_activity() != activity {
+		// Keys the user types while takeover holds the front land in the target
+		// without them choosing it, so only a click or a shortcut of theirs, or
+		// a switch elsewhere, leaves the front application alone.
+		let user_chose = || {
+			takeover_user_chose(
+				monitor_sees_input,
+				|| monitor_settled(progress),
+				|| control::user_choices() != choices,
+				|| PointerPresses::now().user_pressed_since(presses),
+			)
+		};
+		let still_ours = || {
+			!user_chose()
+				// A user-selected third app or sibling window must not be
+				// overwritten.
+				&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
+				&& !ax::focused_window_id(pid)
+					.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
+		};
+		if !still_ours() {
 			return Ok(());
 		}
-		let front = front_process(spi.get_front).ok_or_else(|| {
-			DesktopError::input_failed("cannot establish current focus for takeover restoration")
-		})?;
-		// A user-selected third app or sibling window must not be overwritten.
-		if front.psn != target {
+		// The action and its settle are over, so takeover's own keys and
+		// clicks, which `WindowServer` counts like the user's, came before this
+		// timestamp; user input after it refuses the hand-back, and the
+		// make-key records below are then never posted.
+		let handed_back = hand_back_through_typing(
+			control::uptime_ns,
+			still_ours,
+			|since| control::last_user_typing() >= since,
+			|| monitor_settled(progress),
+			|since| set_front_unless_user_acted(spi, previous.psn, previous_key.unwrap_or(0), since),
+		)?;
+		if handed_back != Some(FrontRequest::Done) {
 			return Ok(());
 		}
-		if ax::focused_window_id(pid)
-			.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
-		{
-			return Ok(());
-		}
-		if control::user_activity() != activity
-			|| !front_process(spi.get_front).is_some_and(|front| front.psn == target)
-		{
-			return Ok(());
-		}
-		set_front(spi, previous.psn, previous_key.unwrap_or(0))?;
 		// A previous app that showed no window gets only its front status back.
 		let Some(previous_key) = previous_key else {
 			return Ok(());
 		};
-		// Returning to an app often reinstates its original key window by
-		// itself. Re-making an already-key Chromium window can clear the user's
-		// renderer focus, just as reactivating an already-key input target can.
-		if ax::focused_window_id(previous_pid) != Some(previous_key) {
-			make_exact_window_key(spi, previous.psn, previous_key)?;
+		if !rekey_unless_user_chose(
+			|| ax::focused_window_id(previous_pid),
+			previous_key,
+			user_chose,
+			|| make_exact_window_key(spi, previous.psn, previous_key),
+		)? {
+			return Ok(());
 		}
 		await_window_focused(spi, previous_pid, previous_key, previous.psn)
 	};
@@ -892,6 +1065,28 @@ pub(super) fn with_foreground<T>(
 	}
 	let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
 	after_cleanup(result, control::cleanup(|| restore(false)))
+}
+
+/// Makes `previous_key` key again after takeover handed the front back,
+/// unless it already is or the user chose something meanwhile; `false` when
+/// the user did. Returning to an app often reinstates its original key window
+/// by itself, and re-making an already-key Chromium window can clear the
+/// user's renderer focus, just as reactivating an already-key input target
+/// can. `user_chose` is read after the key-window probe, right before the
+/// records: a window the user clicked while the probe ran stays theirs.
+fn rekey_unless_user_chose(
+	key_window: impl FnOnce() -> Option<u32>,
+	previous_key: u32,
+	user_chose: impl FnOnce() -> bool,
+	make_key: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<bool> {
+	if key_window() == Some(previous_key) {
+		return Ok(true);
+	}
+	if user_chose() {
+		return Ok(false);
+	}
+	make_key().map(|()| true)
 }
 
 pub(super) fn require_front_window(pid: pid_t, wid: u32) -> CoreResult<()> {
@@ -1177,6 +1372,44 @@ mod tests {
 	use crate::desktop::error::ErrorCode;
 
 	#[test]
+	fn a_user_click_before_the_hand_back_stands_out_from_takeovers_own_presses() {
+		// Baseline taken before takeover's action posts anything.
+		let before = PointerPresses { hid: [7, 2, u32::MAX], own: u32::MAX };
+		// Takeover's own left click, counted by the HID counters too.
+		let own_click = PointerPresses { hid: [8, 2, u32::MAX], own: 0 };
+		assert!(!own_click.user_pressed_since(before));
+		// A press noted but not yet counted by the HID counters.
+		assert!(!PointerPresses { hid: [7, 2, u32::MAX], own: 0 }.user_pressed_since(before));
+		// The user's click after the action, before the cleanup runs and before
+		// the monitor counts it.
+		let user_click = PointerPresses { hid: [8, 2, 0], own: 0 };
+		assert!(user_click.user_pressed_since(before));
+		assert!(PointerPresses { hid: [7, 3, u32::MAX], own: u32::MAX }.user_pressed_since(before));
+	}
+
+	#[test]
+	fn only_pointer_presses_posted_to_the_hid_tap_count_as_omps() {
+		let before = OWN_POINTER_PRESSES.load(Ordering::Acquire);
+		for kind in [
+			CGEventType::LeftMouseDown,
+			CGEventType::RightMouseDown,
+			CGEventType::OtherMouseDown,
+			CGEventType::LeftMouseUp,
+			CGEventType::MouseMoved,
+			CGEventType::KeyDown,
+			CGEventType::ScrollWheel,
+		] {
+			note_hid_post(kind);
+		}
+		assert_eq!(
+			OWN_POINTER_PRESSES
+				.load(Ordering::Acquire)
+				.wrapping_sub(before),
+			3
+		);
+	}
+
+	#[test]
 	fn user_focus_changes_permanently_disarm_background_restoration() {
 		let previous = ProcessSerialNumber { high: 0, low: 7 };
 		let target = ProcessSerialNumber { high: 0, low: 8 };
@@ -1388,6 +1621,196 @@ mod tests {
 		let unwanted =
 			request_after_check(|| 7, || false, |_| panic!("no request once the check fails"));
 		assert_eq!(unwanted.ok(), Some(None));
+	}
+
+	#[test]
+	fn takeover_hands_back_through_the_users_typing_but_not_their_click() {
+		use std::cell::Cell;
+		// The monitor saw the user type after each refused timestamp, and
+		// nothing else changed: a fresh timestamp is asked for until it goes
+		// through.
+		let clock = Cell::new(0);
+		let stamps = std::cell::RefCell::new(Vec::new());
+		let handed = hand_back_through_typing(
+			|| {
+				clock.set(clock.get() + 1);
+				clock.get()
+			},
+			|| true,
+			|since| since <= 1,
+			|| true,
+			|since| {
+				stamps.borrow_mut().push(since);
+				Ok(if since < 2 {
+					FrontRequest::UserActed
+				} else {
+					FrontRequest::Done
+				})
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::Done)));
+		assert_eq!(*stamps.borrow(), [1, 2]);
+
+		// A click after the refusal: the target stays the user's.
+		let clicked = Cell::new(false);
+		let requests = Cell::new(0);
+		let handed = hand_back_through_typing(
+			|| 1,
+			|| !clicked.get(),
+			|_| true,
+			|| true,
+			|_| {
+				requests.set(requests.get() + 1);
+				clicked.set(true);
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(None));
+		assert_eq!(requests.get(), 1);
+
+		// A refusal the monitor has seen no typing for (a click or shortcut it
+		// has not counted yet, or no monitor at all) stands after one request.
+		let requests = Cell::new(0);
+		let handed = hand_back_through_typing(
+			|| 5,
+			|| true,
+			|_| false,
+			|| true,
+			|_| {
+				requests.set(requests.get() + 1);
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::UserActed)));
+		assert_eq!(requests.get(), 1);
+
+		// Typing never pauses: a bounded number of requests, then it gives up.
+		let requests = Cell::new(0);
+		let handed = hand_back_through_typing(
+			|| 1,
+			|| true,
+			|_| true,
+			|| true,
+			|_| {
+				requests.set(requests.get() + 1);
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::UserActed)));
+		assert_eq!(requests.get(), TAKEOVER_HAND_BACK_TRIES);
+	}
+
+	#[test]
+	fn a_typing_retry_waits_for_the_monitor_to_classify_everything_counted() {
+		use std::cell::{Cell, RefCell};
+		// The monitor still has the arrow of a Control-Up queued: the typing it
+		// saw (the Control) does not earn a retry.
+		let requests = Cell::new(0);
+		let handed = hand_back_through_typing(
+			|| 1,
+			|| true,
+			|_| true,
+			|| false,
+			|_| {
+				requests.set(requests.get() + 1);
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::UserActed)));
+		assert_eq!(requests.get(), 1);
+
+		// The retry's own check waits for the monitor again after taking its
+		// timestamp, and only then reads the user's choices.
+		let steps = RefCell::new(Vec::new());
+		let settles = Cell::new(0);
+		let handed = hand_back_through_typing(
+			|| {
+				steps.borrow_mut().push("clock");
+				1
+			},
+			|| {
+				steps.borrow_mut().push("choices");
+				true
+			},
+			|_| true,
+			|| {
+				steps.borrow_mut().push("settled");
+				settles.set(settles.get() + 1);
+				settles.get() < 2
+			},
+			|_| {
+				steps.borrow_mut().push("request");
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(None));
+		assert_eq!(*steps.borrow(), ["clock", "choices", "request", "settled", "clock", "settled"]);
+	}
+
+	#[test]
+	fn the_monitor_catches_up_once_it_has_seen_what_window_server_counted() {
+		let baseline =
+			MonitorProgress { counted: [4, 0, 0, 90, 30], seen: [2, 0, 0, u32::MAX, 7] };
+		let caught_up = MonitorProgress { counted: [5, 0, 0, 92, 31], seen: [3, 0, 0, 1, 8] };
+		assert!(caught_up.caught_up_since(baseline));
+		// The Control-Up arrow is counted but not yet through the tap.
+		let behind = MonitorProgress { counted: [5, 0, 0, 93, 31], seen: [3, 0, 0, 1, 8] };
+		assert!(!behind.caught_up_since(baseline));
+		// Takeover's own press and the user's click: the HID counters show one
+		// more press, the user's, counted ahead of omp's still pending press,
+		// and the monitor has not classified it yet.
+		let click = MonitorProgress { counted: [5, 0, 0, 92, 31], seen: [2, 0, 0, 1, 8] };
+		assert!(!click.caught_up_since(baseline));
+		// Events only the tap sees (posted to the session) never hold it back.
+		let ahead = MonitorProgress { counted: [4, 0, 0, 90, 30], seen: [2, 0, 0, 3, 7] };
+		assert!(ahead.caught_up_since(baseline));
+	}
+
+	#[test]
+	fn a_user_click_counted_ahead_of_takeovers_own_pending_press_still_counts() {
+		// With Input Monitoring, the monitor's count decides only once it has
+		// seen all `WindowServer` counted: a queued click or Control-Up counts
+		// as the user's choice, before any hand-back timestamp is taken.
+		assert!(takeover_user_chose(true, || false, || panic!(), || panic!()));
+		assert!(takeover_user_chose(true, || true, || true, || panic!()));
+		assert!(!takeover_user_chose(true, || true, || false, || panic!()));
+		// Without it the tap sees nothing; the HID counters net of omp's own
+		// presses are all there is.
+		assert!(!takeover_user_chose(false, || panic!(), || panic!(), || false));
+		assert!(takeover_user_chose(false, || panic!(), || panic!(), || true));
+	}
+
+	#[test]
+	fn the_key_window_is_restored_only_if_the_user_chose_nothing_during_the_probe() {
+		use std::cell::Cell;
+		let (previous_key, clicked) = (7, 9);
+		// The user clicks another window of their app while the probe runs.
+		let chose = Cell::new(false);
+		let made = Cell::new(false);
+		let rekeyed = rekey_unless_user_chose(
+			|| {
+				chose.set(true);
+				Some(clicked)
+			},
+			previous_key,
+			|| chose.get(),
+			|| {
+				made.set(true);
+				Ok(())
+			},
+		);
+		assert_eq!(rekeyed.ok(), Some(false));
+		assert!(!made.get(), "no make-key records over the user's click");
+
+		let rekeyed = rekey_unless_user_chose(|| Some(clicked), previous_key, || false, || Ok(()));
+		assert_eq!(rekeyed.ok(), Some(true));
+		let rekeyed = rekey_unless_user_chose(
+			|| Some(previous_key),
+			previous_key,
+			|| panic!("an already-key window needs no check"),
+			|| panic!("nor records"),
+		);
+		assert_eq!(rekeyed.ok(), Some(true));
 	}
 
 	#[test]

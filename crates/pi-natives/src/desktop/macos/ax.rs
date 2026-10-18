@@ -24,7 +24,7 @@ use objc2_core_foundation::{
 use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
-		backend::AxBackend,
+		backend::{AxBackend, is_raise_action},
 		control,
 		error::{CoreResult, DesktopError},
 		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
@@ -1012,7 +1012,7 @@ impl AxBackend for MacAx {
 		}
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
-		if native == "AXRaise" {
+		if is_raise_action(action) {
 			return element_action_result(&native, send_action(element, &native));
 		}
 		let pid = element_pid(element)?;
