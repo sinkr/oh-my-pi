@@ -32,14 +32,15 @@ async function lookupWorkOSOrganization(
 }
 
 /**
- * Read `/api/cli/whoami` for `identity`'s bearer. A login that whoami leaves
- * without an organization comes back with the error to report.
+ * Read `/api/cli/whoami` for `identity`'s bearer. `accepted` is true only when
+ * Factory answered for this bearer with an organization. A login that whoami
+ * leaves without an organization comes back with the error to report.
  */
 async function readWhoami(
 	identity: OAuthCredentials,
 	context: ExchangeContext,
 	signal: AbortSignal,
-): Promise<{ identity: OAuthCredentials; failure?: AIError.OAuthError }> {
+): Promise<{ identity: OAuthCredentials; accepted: boolean; failure?: AIError.OAuthError }> {
 	const unresolved = () =>
 		context.phase === "login" && !identity.orgId
 			? new AIError.OAuthError("Factory login did not resolve an organization", {
@@ -61,7 +62,7 @@ async function readWhoami(
 				`Factory identity check failed (${response.status}): ${await response.text()}`,
 				{ kind: "validation", provider: context.provider, status: response.status },
 			);
-			return { identity, failure };
+			return { identity, accepted: false, failure };
 		}
 		if (response.ok) {
 			const body: unknown = await response.json();
@@ -75,7 +76,7 @@ async function readWhoami(
 						? body.inferenceRegion
 						: resolveFactoryDroidInferenceRegion({ region, inferenceRegion: carried?.inferenceRegion });
 				const resolved = { ...identity, orgId, region, inferenceRegion };
-				return { identity: resolved, failure: orgId ? undefined : unresolved() };
+				return { identity: resolved, accepted: Boolean(orgId), failure: orgId ? undefined : unresolved() };
 			}
 		}
 	} catch (error) {
@@ -84,7 +85,7 @@ async function readWhoami(
 		// Preserve identity only when this is still the same selected organization.
 	}
 	if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
-	return { identity, failure: unresolved() };
+	return { identity, accepted: false, failure: unresolved() };
 }
 
 /** Resolve canonical Factory identity; residency chooses the host, inference scope chooses eligible routes. */
@@ -115,23 +116,32 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 	const timeout = AbortSignal.timeout(15_000);
 	const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
 	const whoami = await readWhoami(identity, context, signal);
-	// Factory rejects a bearer without an org claim. When no WorkOS organization
-	// is selected yet, scope the grant to the account's one. The scoped refresh
-	// re-enters this hook with that organization selected, so it never repeats.
-	if (!whoami.identity.orgId && !selectedOrg) {
+	// Factory rejects a bearer without an org claim. When neither the new
+	// bearer's claim nor whoami names an organization (a stored org says nothing
+	// about this bearer) and no WorkOS organization is selected yet, scope the
+	// grant to the account's one. The scoped refresh re-enters this hook with
+	// that organization selected, so it never repeats.
+	if (!credentials.orgId && !whoami.accepted && !selectedOrg) {
 		const workosOrg = await lookupWorkOSOrganization(credentials, identity.region, context, signal);
 		if (workosOrg) {
+			let scoped: OAuthCredentials | undefined;
 			try {
-				const scoped = await refreshOAuthToken(
+				scoped = await refreshOAuthToken(
 					"factory-droid",
 					{ ...identity, activeOrganizationId: workosOrg },
 					context.signal,
 				);
-				// The scoped grant rotated the refresh token, so a refresh keeps it either way.
-				if (scoped.orgId || context.phase === "refresh") return scoped;
 			} catch {
 				// Fall through: the identity check reports why the bearer is unusable.
 				if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
+			}
+			if (scoped) {
+				// The scoped grant rotated the refresh token, so a refresh keeps it either way.
+				if (context.phase === "refresh") return scoped;
+				// The nested refresh checked whoami leniently; a login must see Factory accept the bearer.
+				const confirmed = await readWhoami(scoped, context, signal);
+				if (confirmed.failure) throw confirmed.failure;
+				return confirmed.identity;
 			}
 		}
 	}

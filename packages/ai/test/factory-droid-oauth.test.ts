@@ -401,7 +401,12 @@ describe("Factory Droid organization lookup", () => {
 	/** WorkOS hands out an org-scoped bearer only when the grant names a WorkOS organization. */
 	function factoryBackend(
 		workosOrgIds: string[],
-		options: { scopedAccess?: string; scopedGrantStatus?: number; unscopedWhoamiOrg?: string } = {},
+		options: {
+			scopedAccess?: string;
+			scopedGrantStatus?: number;
+			unscopedWhoamiOrg?: string;
+			rejectScoped?: boolean;
+		} = {},
 	) {
 		const calls: Array<{ url: string; body: string; authorization?: string; factoryOrg?: string }> = [];
 		const fetchImpl: FetchImpl = async (input, init) => {
@@ -418,7 +423,9 @@ describe("Factory Droid organization lookup", () => {
 			if (url.endsWith("/api/cli/org")) return jsonResponse(200, { workosOrgIds });
 			if (url.endsWith("/api/cli/whoami")) {
 				const authorization = headers.get("authorization");
-				if (authorization === `Bearer ${scoped}`) return jsonResponse(200, { orgId: "factory-org", region: "eu" });
+				if (authorization === `Bearer ${scoped}` && !options.rejectScoped) {
+					return jsonResponse(200, { orgId: "factory-org", region: "eu" });
+				}
 				if (authorization === `Bearer ${unscoped}` && options.unscopedWhoamiOrg) {
 					return jsonResponse(200, { orgId: options.unscopedWhoamiOrg });
 				}
@@ -523,6 +530,26 @@ describe("Factory Droid organization lookup", () => {
 		expect(credentials).toMatchObject({ access: unscoped, orgId: "factory-org" });
 		expect(backend.lookups()).toBe(0);
 		expect(backend.scopedGrants()).toBe(0);
+	});
+
+	it("scopes a refresh whose stored credential carries an org the new bearer lacks", async () => {
+		const backend = factoryBackend(["org_workos"]);
+		const credentials = await withGlobalFetch(backend.fetchImpl, async () => {
+			const refresh = getProviderDefinition("factory-droid")?.refreshToken;
+			if (!refresh) throw new Error("Factory Droid refresh is unavailable");
+			return refresh({ access: "previous", refresh: "refresh-old", expires: 0, orgId: "factory-old" });
+		});
+		expect(backend.lookups()).toBe(1);
+		expect(backend.scopedGrants()).toBe(1);
+		expect(credentials).toMatchObject({ access: scoped, orgId: "factory-org", activeOrganizationId: "org_workos" });
+	});
+
+	it("rejects a login whose scoped bearer Factory still refuses", async () => {
+		const backend = factoryBackend(["org_workos"], { rejectScoped: true });
+		await expect(
+			withGlobalFetch(backend.fetchImpl, () => loginViaRegistry({ fetch: backend.fetchImpl })),
+		).rejects.toThrow(/Factory identity check failed \(401\).*User not affiliated with an organization/);
+		expect(backend.scopedGrants()).toBe(1);
 	});
 
 	it("does not look up the organization when the token already carries one", async () => {
