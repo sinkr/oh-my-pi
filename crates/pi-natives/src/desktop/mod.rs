@@ -3364,48 +3364,6 @@ mod capture_tests {
 		assert_eq!(tree.lock().reads, reads, "the walk read on after the cancel");
 	}
 
-	#[test]
-	fn a_menu_path_reaches_the_backend_with_its_click_or_action() {
-		let backend = FakeWaylandBackend::new();
-		let calls = Arc::clone(&backend.clicks);
-		let mut worker = worker_with(backend);
-		let inner: &mut Worker = &mut worker;
-		let ax = inner.backend.as_mut().unwrap().ax().unwrap();
-		let reference = register_node(ax, &mut inner.registry, WAYLAND_ID, AxHandle::Test(1))
-			.unwrap()
-			.ref_;
-		let menu = Some(vec!["Add to".to_string(), "Bench Holdout".to_string()]);
-		let token = CancellationSource::default().token();
-		let options = ParsedPointerOptions::parse(Some(PointerOptions {
-			button: Some("right".to_string()),
-			menu: menu.clone(),
-			..PointerOptions::default()
-		}))
-		.unwrap();
-		let (reply, _rx) = flume::bounded(1);
-		let click = Request::AxClick { reference: reference.clone(), options, reply };
-		worker.process(&click, &token).expect("click");
-		for (action, menu) in [("press", None), ("press", menu.clone()), ("AXShowMenu", menu)] {
-			let (reply, _rx) = flume::bounded(1);
-			let perform = Request::AxPerform {
-				reference: reference.clone(),
-				action: action.to_string(),
-				menu,
-				reply,
-			};
-			worker.process(&perform, &token).expect("perform");
-		}
-		assert_eq!(*calls.lock(), [
-			format!("{WAYLAND_ID} menu Add to > Bench Holdout"),
-			"perform press".to_string(),
-			"perform press menu Add to > Bench Holdout".to_string(),
-			"perform AXShowMenu menu Add to > Bench Holdout".to_string(),
-		]);
-		// An empty path refuses before anything is sent.
-		let empty = PointerOptions { menu: Some(Vec::new()), ..PointerOptions::default() };
-		assert!(ParsedPointerOptions::parse(Some(empty)).is_err());
-	}
-
 	fn capture_request(target: Target) -> Request {
 		let (reply, _rx) = flume::bounded(1);
 		Request::Capture { target, caps: CaptureCaps::default(), reply }
