@@ -13,18 +13,19 @@ use std::{
 
 use core_graphics::{
 	event::{CGEvent, CGEventType},
+	event_source::{CGEventSource, CGEventSourceStateID},
 	geometry::CGPoint,
 };
 use foreign_types::ForeignType;
 use libc::pid_t;
-use objc2_core_foundation::{CFDictionary, CFNumber, CFString};
+use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 
 use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	ax, permission,
+	ax, capture, permission,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -33,14 +34,10 @@ const EVENT_RECORD_KIND: u8 = 0x0d;
 const WINDOW_ID_OFFSET: usize = 0x3c;
 const FOCUS_MARKER_OFFSET: usize = 0x8a;
 const FOCUS_MARKER: u8 = 0x01;
-const DEFOCUS_MARKER: u8 = 0x02;
 /// `kCPSUserGenerated`: lets `AppKit` install the requested native key window.
 const CPS_USER_GENERATED: u32 = 0x200;
 /// `kCPSNoWindows`: changes the front process without raising its windows.
 const CPS_NO_WINDOWS: u32 = 0x400;
-/// Lets `AppKit` update key-window routing after focus records, and lets the
-/// target consume queued input before its focus is handed back.
-const FOCUS_SETTLE: Duration = Duration::from_millis(50);
 /// Covers delayed AX/AppKit activation after the synchronous action returns.
 /// The lease is joined before returning; it never continues fighting the user.
 const BACKGROUND_SETTLE: Duration = Duration::from_millis(200);
@@ -110,10 +107,8 @@ struct RequiredSpi {
 	/// through both would then deliver every event twice.
 	public_post_to_pid:  Option<SLEventPostToPidFn>,
 	set_integer:         SLEventSetIntegerValueFieldFn,
-	post_record:         SLPSPostEventRecordToFn,
-	get_front:           SLPSGetFrontProcessFn,
 	set_window_location: CGEventSetWindowLocationFn,
-	psn:                 PsnLookup,
+	main_connection:     CGSMainConnectionIDFn,
 }
 
 #[derive(Clone, Copy)]
@@ -182,25 +177,14 @@ fn required() -> CoreResult<&'static RequiredSpi> {
 
 fn resolve_required() -> Option<RequiredSpi> {
 	ensure_skylight_loaded()?;
-	let psn = PsnLookup {
-		main_connection:     Some(symbol(c"CGSMainConnectionID")?),
-		get_window_owner:    symbol(c"SLSGetWindowOwner"),
-		get_connection_psn:  symbol(c"SLSGetConnectionPSN"),
-		get_process_for_pid: symbol(c"GetProcessForPID"),
-	};
-	if !psn.can_resolve() {
-		return None;
-	}
 	let post_to_pid: SLEventPostToPidFn = symbol(c"SLEventPostToPid")?;
 	Some(RequiredSpi {
 		post_to_pid,
 		public_post_to_pid: symbol::<SLEventPostToPidFn>(c"CGEventPostToPid")
 			.filter(|public| *public as usize != post_to_pid as usize),
 		set_integer: symbol(c"SLEventSetIntegerValueField")?,
-		post_record: symbol(c"SLPSPostEventRecordTo")?,
-		get_front: symbol(c"_SLPSGetFrontProcess")?,
 		set_window_location: symbol(c"CGEventSetWindowLocation")?,
-		psn,
+		main_connection: symbol(c"CGSMainConnectionID")?,
 	})
 }
 
@@ -331,14 +315,22 @@ pub(super) fn post_keyboard(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	Ok(())
 }
 
-/// The 248-byte focus (`FOCUS_MARKER`) or defocus (`DEFOCUS_MARKER`) event
-/// record addressed to window `wid`.
-fn focus_record(wid: u32, marker: u8) -> [u8; EVENT_RECORD_LENGTH] {
+/// This process's `WindowServer` connection, which `AppKit` stamps on the
+/// window events it builds as their window context.
+pub(super) fn sender_connection() -> CoreResult<i64> {
+	let spi = required()?;
+	// SAFETY: The no-argument connection query was resolved with its exact
+	// signature.
+	Ok(i64::from(unsafe { (spi.main_connection)() }))
+}
+
+/// The 248-byte focus event record addressed to window `wid`.
+fn focus_record(wid: u32) -> [u8; EVENT_RECORD_LENGTH] {
 	let mut record = [0u8; EVENT_RECORD_LENGTH];
 	record[0x04] = EVENT_RECORD_LENGTH_BYTE;
 	record[0x08] = EVENT_RECORD_KIND;
 	record[WINDOW_ID_OFFSET..WINDOW_ID_OFFSET + 4].copy_from_slice(&wid.to_le_bytes());
-	record[FOCUS_MARKER_OFFSET] = marker;
+	record[FOCUS_MARKER_OFFSET] = FOCUS_MARKER;
 	record
 }
 
@@ -411,7 +403,7 @@ fn hid_counter(event_type: u32) -> u32 {
 /// restoration; yielding control is safer than fighting a deliberate switch.
 fn activation_activity() -> [u32; 5] {
 	// Pointer presses, key press, and modifiers can change activation: the
-	// types the takeover monitor watches.
+	// types the takeover monitor watches, pointer presses first.
 	control::MONITORED_TYPES.map(hid_counter)
 }
 
@@ -531,37 +523,137 @@ enum FocusDecision {
 /// Once the user changes the front app/window, later target activations cannot
 /// resurrect this action's old focus claim.
 struct BackgroundFocusLease {
-	previous: ProcessSerialNumber,
-	target:   ProcessSerialNumber,
-	key:      u32,
-	activity: [u32; 5],
-	disarmed: bool,
+	previous:    ProcessSerialNumber,
+	target:      ProcessSerialNumber,
+	/// The user's key window; `None` when the front app showed no window.
+	key:         Option<u32>,
+	activity:    [u32; 5],
+	/// Polls left in which the target coming to the front counts as the
+	/// user's doing: a click on the target seen while their app was still in
+	/// front brings it forward a moment later.
+	click_polls: u8,
+	disarmed:    bool,
+	/// The user came to the target ([`TargetVisit`]).
+	visited:     bool,
+}
+
+/// Polls of [`ACTIVATION_POLL`] after a click on the target with the user's
+/// app in front during which the target coming forward is that click's work.
+const CLICK_SWITCH_POLLS: u8 = 25;
+
+/// Whether `now` counts a press of a mouse button that `before` did not
+/// ([`activation_activity`] lists the three buttons first).
+fn clicked(before: [u32; 5], now: [u32; 5]) -> bool {
+	before[..3] != now[..3]
+}
+
+/// One poll's reads: the input counters, then, for a new click, whether it
+/// landed on the target (`on_target`), and the front process last. A window
+/// the target raised once its activation had changed the front process is
+/// then never taken for where the user's click landed: that poll already
+/// reads the target in front.
+fn poll<F>(
+	last: [u32; 5],
+	activity: impl FnOnce() -> [u32; 5],
+	on_target: impl FnOnce() -> bool,
+	front: impl FnOnce() -> F,
+) -> ([u32; 5], bool, F) {
+	let activity = activity();
+	let on_target = clicked(last, activity) && on_target();
+	(activity, on_target, front())
 }
 
 impl BackgroundFocusLease {
+	/// `on_target` says whether a click seen since the last poll landed on a
+	/// window of the target ([`poll`]): the counters count every physical
+	/// click, the user's clicks in their own app included, but not the events
+	/// background input posts to a process.
 	fn observe(
 		&mut self,
 		front: ProcessSerialNumber,
 		key: Option<u32>,
 		activity: [u32; 5],
+		on_target: bool,
 	) -> FocusDecision {
 		if self.disarmed
 			|| (front != self.previous && front != self.target)
-			|| (front == self.previous && key.is_some_and(|key| key != self.key))
-			|| (front == self.target && activity != self.activity)
+			|| (front == self.previous && key.is_some_and(|key| Some(key) != self.key))
+			|| (front == self.target && (activity != self.activity || self.click_polls > 0))
 		{
+			// The target in front now is the user's: they acted there, or the
+			// lease no longer sends it back.
+			self.visited |= front == self.target;
 			self.disarmed = true;
 			return FocusDecision::Disarm;
 		}
 		if front == self.target {
 			FocusDecision::Restore
 		} else {
-			// Input while the user's original window is still frontmost is not
-			// a focus change. Remember it so a later app reflex can be contained.
+			// Typing or clicking in the user's original window while it is still
+			// frontmost is not a focus change. Remember it so a later app reflex
+			// can be contained. A click on the target brings it forward only on a
+			// later poll, so the target counts as the user's for a while.
+			self.click_polls = if on_target {
+				CLICK_SWITCH_POLLS
+			} else {
+				self.click_polls.saturating_sub(1)
+			};
 			self.activity = activity;
 			FocusDecision::Observe
 		}
 	}
+
+	/// The hand-back was refused because the user pressed a key or clicked
+	/// with the target in front.
+	const fn user_acted(&mut self) {
+		self.visited = true;
+		self.disarmed = true;
+	}
+}
+
+/// Whether the pointer is over a surface of `pid`, hit-tested the way a click
+/// there lands: a menu, the menu bar or a Dock tile over the target's window
+/// is not the target, while the pointer sprite and transparent overlays that
+/// let clicks through do not count.
+fn pointer_over(pid: pid_t) -> bool {
+	let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+		return false;
+	};
+	let Ok(event) = CGEvent::new(source) else {
+		return false;
+	};
+	let point = event.location();
+	ax::point_owner(point.x, point.y).is_some_and(|owner| owner.pid == pid)
+}
+
+/// Whether the user has come to the background target since its guard
+/// began: the target was in front with a key or click of theirs, the
+/// hand-back was refused because of one, or the target was in front after the
+/// guard stood down. Later steps of the input must stop then, even once the
+/// user has left the target again.
+#[derive(Clone, Copy)]
+pub(super) struct TargetVisit<'a>(&'a AtomicBool);
+
+static NO_VISIT: AtomicBool = AtomicBool::new(false);
+
+impl TargetVisit<'_> {
+	/// For input into the application already in front, which no guard
+	/// watches.
+	pub(super) fn none() -> TargetVisit<'static> {
+		TargetVisit(&NO_VISIT)
+	}
+
+	pub(super) fn happened(self) -> bool {
+		self.0.load(Ordering::Acquire)
+	}
+}
+
+/// [`with_background_watch`] for an action that has no later steps to stop.
+pub(super) fn with_background_guard<T>(
+	pid: pid_t,
+	action: impl FnOnce() -> CoreResult<T>,
+) -> CoreResult<T> {
+	with_background_watch(pid, |_| action())
 }
 
 /// Contains asynchronous self-activation during background input and its
@@ -569,10 +661,11 @@ impl BackgroundFocusLease {
 /// A third app, changed prior key window, or new hardware input permanently
 /// disarms the lease. Only the addressed target can be sent back behind the
 /// original front app; unlike cua's wildcard suppressor, unrelated activations
-/// are never undone.
-pub(super) fn with_background_guard<T>(
+/// are never undone. `action` gets the [`TargetVisit`] the guard records,
+/// which keeps being watched after the lease disarms.
+pub(super) fn with_background_watch<T>(
 	pid: pid_t,
-	action: impl FnOnce() -> CoreResult<T>,
+	action: impl FnOnce(TargetVisit<'_>) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
@@ -588,69 +681,107 @@ pub(super) fn with_background_guard<T>(
 		)
 	})?;
 	if previous.pid == Some(pid) {
-		return action();
+		return action(TargetVisit::none());
 	}
 	let target = process_psn(spi.psn, pid, 0).ok_or_else(|| {
 		DesktopError::background_unavailable(
 			"cannot resolve the background target process; retry with takeover:true or use ax actions",
 		)
 	})?;
-	let previous_key = previous.pid.and_then(ax::key_window_id).ok_or_else(|| {
-		DesktopError::background_unavailable(
-			"cannot establish the user's key window for background focus restoration; retry with \
-			 takeover:true or use ax actions",
-		)
-	})?;
+	let previous_key = previous
+		.pid
+		.and_then(restoration_key)
+		.ok_or_else(|| {
+			DesktopError::background_unavailable(
+				"cannot establish the user's key window for background focus restoration; retry with \
+				 takeover:true or use ax actions",
+			)
+		})?
+		.window();
 	let mut lease = BackgroundFocusLease {
 		previous: previous.psn,
 		target,
 		key: previous_key,
 		activity: activation_activity(),
+		click_polls: 0,
 		disarmed: false,
+		visited: false,
 	};
 	let stopped = AtomicBool::new(false);
+	let visited = AtomicBool::new(false);
 	thread::scope(|scope| {
 		let stop = &stopped;
+		let visit = &visited;
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
 			.spawn_scoped(scope, move || -> CoreResult<()> {
 				let mut restored = false;
 				loop {
-					let Some(front) = front_process(spi.get_front) else {
-						return Err(DesktopError::input_failed(
-							"lost the front process during background input",
-						));
-					};
-					let key = if front.psn == previous.psn {
-						previous.pid.and_then(ax::key_window_id)
-					} else {
-						None
-					};
-					match lease.observe(front.psn, key, activation_activity()) {
-						FocusDecision::Disarm => return Ok(()),
-						FocusDecision::Observe => {},
-						FocusDecision::Restore => {
-							// Re-check immediately before changing focus: an AX probe
-							// may have raced a newer application or hardware event.
-							if front_process(spi.get_front).is_some_and(|front| front.psn == target)
-								&& activation_activity() == lease.activity
+					// Once disarmed, nothing is sent back any more, but the lease
+					// keeps watching for the user coming to the target.
+					let (activity, on_target, front) = poll(
+						lease.activity,
+						activation_activity,
+						|| !lease.disarmed && pointer_over(pid),
+						|| front_process(spi.get_front),
+					);
+					match front {
+						None if lease.disarmed => {},
+						None => {
+							return Err(DesktopError::input_failed(
+								"lost the front process during background input",
+							));
+						},
+						Some(front) => {
+							let key = if !lease.disarmed && front.psn == previous.psn {
+								previous.pid.and_then(ax::key_window_id)
+							} else {
+								None
+							};
+							if lease.observe(front.psn, key, activity, on_target) == FocusDecision::Restore
 							{
-								set_front(spi, previous.psn, previous_key)?;
-								restored = true;
-								if !post_record(
-									spi.post_record,
-									previous.psn,
-									&focus_record(previous_key, FOCUS_MARKER),
-								) {
-									return Err(DesktopError::input_failed(
-										"background key-window restoration was rejected",
-									));
+								// Re-check immediately before changing focus: an AX
+								// probe may have raced a newer application or hardware
+								// event. `WindowServer` then refuses the hand-back if
+								// the user pressed a key or clicked after the re-check
+								// began.
+								let handed_back = request_after_check(
+									control::uptime_ns,
+									|| {
+										front_process(spi.get_front).is_some_and(|front| front.psn == target)
+											&& activation_activity() == lease.activity
+									},
+									|since| {
+										set_front_unless_user_acted(
+											spi,
+											previous.psn,
+											previous_key.unwrap_or(0),
+											since,
+										)
+									},
+								)?;
+								match handed_back {
+									None => {},
+									// The user brought the target forward themselves.
+									Some(FrontRequest::UserActed) => lease.user_acted(),
+									Some(FrontRequest::Done) => {
+										restored = true;
+										if let Some(key) = previous_key
+											&& !post_record(spi.post_record, previous.psn, &focus_record(key))
+										{
+											return Err(DesktopError::input_failed(
+												"background key-window restoration was rejected",
+											));
+										}
+									},
 								}
 							}
 						},
 					}
+					visit.store(lease.visited, Ordering::Release);
 					if stop.load(Ordering::Acquire) {
 						if restored
+							&& !lease.disarmed
 							&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
 						{
 							return Err(DesktopError::input_failed(
@@ -681,13 +812,29 @@ pub(super) fn with_background_guard<T>(
 			}
 		}
 		let stop = StopObserver { stopped: &stopped, thread: observer.thread().clone() };
-		let result = action().and_then(|value| control::wait(BACKGROUND_SETTLE).map(|()| value));
+		let result =
+			run_then_settle(|| action(TargetVisit(&visited)), || control::wait(BACKGROUND_SETTLE));
 		drop(stop);
 		let cleanup = observer.join().unwrap_or_else(|_| {
 			Err(DesktopError::input_failed("background focus guard terminated unexpectedly"))
 		});
 		after_cleanup(result, cleanup)
 	})
+}
+
+/// Runs a guarded action, then the settle during which the guard still sends
+/// back an app the action brought forward. The settle follows a failed action
+/// too: an AX action can report an error and still activate its app, as
+/// `AXOpen` on a file in Chrome's Open panel fails with -25205 within 20 ms
+/// and Chrome comes to the front some 20 ms later. The action's own error wins
+/// over the settle's.
+fn run_then_settle<T>(
+	action: impl FnOnce() -> CoreResult<T>,
+	settle: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<T> {
+	let result = action();
+	let settled = settle();
+	result.and_then(|value| settled.map(|()| value))
 }
 
 fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreResult<()> {
@@ -808,149 +955,49 @@ fn front_request(status: i32) -> CoreResult<FrontRequest> {
 	}
 }
 
-/// Makes `wid` its process's key window without raising it or changing the
-/// front process, runs `action`, then hands keyboard focus back.
-///
-/// A background process has no key window, so it drops pid-routed keystrokes,
-/// and Chromium ignores clicks on a window that is not active. The focus
-/// records that fix this also defocus the key window of the front process,
-/// which would otherwise stop receiving the user's typing until they click it
-/// again. Nothing is posted when the target already is the key window of the
-/// front process.
-pub(super) fn with_focus_without_raise<T>(
-	pid: pid_t,
-	wid: u32,
-	action: impl FnOnce() -> CoreResult<T>,
-) -> CoreResult<T> {
-	control::check()?;
-	let presses = PointerPresses::now();
-	let spi = required()?;
-	let previous = front_process(spi.get_front).ok_or_else(|| {
-		DesktopError::background_unavailable(format!(
-			"window {wid} could not resolve the front process for background input; retry with \
-			 takeover:true or use ax actions",
-		))
-	})?;
-	let target = process_psn(spi.psn, pid, wid).ok_or_else(|| {
-		DesktopError::background_unavailable(format!(
-			"window {wid} could not resolve its process serial number for background input; retry \
-			 with takeover:true or use ax actions",
-		))
-	})?;
-	let previous_key = previous.pid.and_then(ax::key_window_id).ok_or_else(|| {
-		DesktopError::background_unavailable(
-			"cannot identify the previous key window to restore; retry with takeover:true or use ax \
-			 actions",
-		)
-	})?;
-	if previous.psn == target && previous_key == wid {
-		return action();
+/// What the user's front application gets back after input elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserKey {
+	Window(u32),
+	/// It provably shows no window, as Finder after a click on the desktop or
+	/// an app that just closed its last window: only the front process is
+	/// restored.
+	Windowless,
+}
+
+impl UserKey {
+	const fn window(self) -> Option<u32> {
+		match self {
+			Self::Window(id) => Some(id),
+			Self::Windowless => None,
+		}
 	}
-	// The defocus record names the window losing key status; within one process
-	// that distinguishes it from the target.
-	control::check()?;
-	let defocus = focus_record(previous_key, DEFOCUS_MARKER);
-	let defocused = post_record(spi.post_record, previous.psn, &defocus);
-	let focused = post_record(spi.post_record, target, &focus_record(wid, FOCUS_MARKER));
-	if !defocused || !focused {
-		return after_cleanup(
-			Err(DesktopError::background_unavailable(format!(
-				"window {wid} rejected the 248-byte SkyLight focus-without-raise record; retry with \
-				 takeover:true or use ax actions",
-			))),
-			control::cleanup(|| {
-				restore_focus_after_without_raise(spi, previous, previous_key, target, wid, presses)
-			}),
-		);
-	}
-	let result = control::wait(FOCUS_SETTLE)
-		.and_then(|()| action())
-		.and_then(|value| control::wait(FOCUS_SETTLE).map(|()| value));
-	after_cleanup(
-		result,
-		control::cleanup(|| {
-			restore_focus_after_without_raise(spi, previous, previous_key, target, wid, presses)
-		}),
+}
+
+/// The front application `pid`'s [`UserKey`]; `None` when neither its key
+/// window nor its windowlessness can be established.
+fn restoration_key(pid: pid_t) -> Option<UserKey> {
+	restorable_key(
+		ax::key_window_id(pid),
+		|| ax::window_records(pid).map(|records| records.iter().any(|record| record.id.is_some())),
+		|| capture::has_onscreen_window(pid),
 	)
 }
 
-/// Reverses [`with_focus_without_raise`]: defocuses the target and hands key
-/// status back to `previous_key` in the previous front process. A target that
-/// activated itself in response to the input (a link opening in a browser) is
-/// first sent back behind the previous front process, without raising either;
-/// a third application that took focus meanwhile is left alone, and so is a
-/// key window the user picked in the previous front process (see
-/// [`hands_back`]).
-fn restore_focus_after_without_raise(
-	spi: &RequiredSpi,
-	previous: FrontProcess,
-	previous_key: u32,
-	target: ProcessSerialNumber,
-	wid: u32,
-	presses: PointerPresses,
-) -> CoreResult<()> {
-	let front = front_process(spi.get_front).ok_or_else(|| {
-		DesktopError::input_failed("cannot establish current focus for background restoration")
-	})?;
-	// The asynchronous guard handles cross-process self-activation. Do not
-	// second-guess its hardware-activity veto or take focus from another app.
-	if front.psn != previous.psn {
-		return Ok(());
-	}
-	if !hand_back_confirmed(
-		previous.psn == target,
-		previous_key,
-		wid,
-		|| previous.pid.and_then(ax::key_window_id),
-		|| PointerPresses::now().user_pressed_since(presses),
-		|| front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn),
-	) {
-		return Ok(());
-	}
-	let defocused = post_record(spi.post_record, target, &focus_record(wid, DEFOCUS_MARKER));
-	let focused =
-		post_record(spi.post_record, previous.psn, &focus_record(previous_key, FOCUS_MARKER));
-	if !defocused || !focused {
-		return Err(DesktopError::input_failed("background focus restoration records were rejected"));
-	}
-	Ok(())
-}
-
-/// Checks [`hands_back`] twice, the second time with the final front-process
-/// check, re-reading the key window and the press counter each time: a window
-/// the user picks or a click on the target between the two still vetoes the
-/// hand-back.
-fn hand_back_confirmed(
-	same_process: bool,
-	previous_key: u32,
-	wid: u32,
-	mut key_window: impl FnMut() -> Option<u32>,
-	mut clicked: impl FnMut() -> bool,
-	still_front: impl FnOnce() -> bool,
-) -> bool {
-	let mut hands_back_now = || hands_back(same_process, key_window(), previous_key, wid, clicked());
-	hands_back_now() && still_front() && hands_back_now()
-}
-
-/// Whether focus goes back to `previous_key`, given the previous front
-/// process's key window now. Another window there was the user's choice. The
-/// target itself is still key after the focus record within one process, so
-/// there only a hardware click marks it as the user's choice; so does a click
-/// while the key window cannot be read. Typing in their own window never stops
-/// the hand-back: background input watches no keys.
-const fn hands_back(
-	same_process: bool,
+/// [`restoration_key`]'s decision: an app with no key window counts as
+/// windowless only when both its accessibility windows (Finder's unmappable
+/// desktop entry aside) and `WindowServer`'s on-screen list show none of its
+/// windows. An unreadable answer from either refuses.
+fn restorable_key(
 	key: Option<u32>,
-	previous_key: u32,
-	wid: u32,
-	clicked: bool,
-) -> bool {
-	match key {
-		Some(key) if key == previous_key => true,
-		Some(key) if same_process && key == wid => !clicked,
-		Some(_) => false,
-		None => !clicked,
+	ax_lists_window: impl FnOnce() -> Option<bool>,
+	shows_window: impl FnOnce() -> Option<bool>,
+) -> Option<UserKey> {
+	if let Some(key) = key {
+		return Some(UserKey::Window(key));
 	}
+	(ax_lists_window() == Some(false) && shows_window() == Some(false))
+		.then_some(UserKey::Windowless)
 }
 
 /// Makes `wid` the frontmost key window, runs `action`, then restores the
@@ -994,11 +1041,13 @@ pub(super) fn with_foreground<T>(
 			"cannot identify the previous application for takeover restoration; no input was sent",
 		)
 	})?;
-	let previous_key = ax::key_window_id(previous_pid).ok_or_else(|| {
-		DesktopError::input_failed(
-			"cannot identify the previous key window for takeover restoration; no input was sent",
-		)
-	})?;
+	let previous_key = restoration_key(previous_pid)
+		.ok_or_else(|| {
+			DesktopError::input_failed(
+				"cannot identify the previous key window for takeover restoration; no input was sent",
+			)
+		})?
+		.window();
 	let restore = |preparation_failed: bool| {
 		// Keys the user types while takeover holds the front land in the target
 		// without them choosing it, so only a click or a shortcut of theirs, or
@@ -1031,15 +1080,21 @@ pub(super) fn with_foreground<T>(
 			still_ours,
 			|since| control::last_user_typing() >= since,
 			|| monitor_settled(progress),
-			|since| set_front_unless_user_acted(spi, previous.psn, previous_key, since),
+			|since| set_front_unless_user_acted(spi, previous.psn, previous_key.unwrap_or(0), since),
 		)?;
-		if handed_back != Some(FrontRequest::Done)
-			|| !rekey_unless_user_chose(
-				|| ax::focused_window_id(previous_pid),
-				previous_key,
-				user_chose,
-				|| make_exact_window_key(spi, previous.psn, previous_key),
-			)? {
+		if handed_back != Some(FrontRequest::Done) {
+			return Ok(());
+		}
+		// A previous app that showed no window gets only its front status back.
+		let Some(previous_key) = previous_key else {
+			return Ok(());
+		};
+		if !rekey_unless_user_chose(
+			|| ax::focused_window_id(previous_pid),
+			previous_key,
+			user_chose,
+			|| make_exact_window_key(spi, previous.psn, previous_key),
+		)? {
 			return Ok(());
 		}
 		await_window_focused(spi, previous_pid, previous_key, previous.psn)
@@ -1105,6 +1160,98 @@ pub(super) fn front_window_context() -> Option<(pid_t, u32)> {
 /// The front process's pid as `WindowServer` reports it.
 pub(super) fn front_pid() -> Option<pid_t> {
 	front_process(FOREGROUND.as_ref()?.get_front)?.pid
+}
+
+type SLSWindowQueryWindowsFn = unsafe extern "C" fn(i32, &CFArray, u32) -> *mut CFType;
+type SLSWindowQueryResultCopyWindowsFn = unsafe extern "C" fn(&CFType) -> *mut CFType;
+type SLSWindowIteratorAdvanceFn = unsafe extern "C" fn(&CFType) -> bool;
+type SLSWindowIteratorGetIdFn = unsafe extern "C" fn(&CFType) -> u32;
+
+#[derive(Clone, Copy)]
+struct WindowQuerySpi {
+	connection: CGSMainConnectionIDFn,
+	query:      SLSWindowQueryWindowsFn,
+	windows:    SLSWindowQueryResultCopyWindowsFn,
+	advance:    SLSWindowIteratorAdvanceFn,
+	window_id:  SLSWindowIteratorGetIdFn,
+	parent_id:  SLSWindowIteratorGetIdFn,
+}
+
+static WINDOW_QUERY: LazyLock<Option<WindowQuerySpi>> = LazyLock::new(|| {
+	ensure_skylight_loaded()?;
+	Some(WindowQuerySpi {
+		connection: symbol(c"CGSMainConnectionID")?,
+		query:      symbol(c"SLSWindowQueryWindows")?,
+		windows:    symbol(c"SLSWindowQueryResultCopyWindows")?,
+		advance:    symbol(c"SLSWindowIteratorAdvance")?,
+		window_id:  symbol(c"SLSWindowIteratorGetWindowID")?,
+		parent_id:  symbol(c"SLSWindowIteratorGetParentID")?,
+	})
+});
+
+/// The window `wid` is a child of in `WindowServer`, such as the window a
+/// sheet or an inline editor's overlay is attached to; `None` for a top-level
+/// window or when the query is unavailable.
+pub(super) fn window_parent(wid: u32) -> Option<u32> {
+	let spi = WINDOW_QUERY.as_ref()?;
+	let number = CFNumber::new_i64(i64::from(wid));
+	let windows = CFArray::from_objects(&[&*number]);
+	// SAFETY: The no-argument connection query has its exact signature.
+	let connection = unsafe { (spi.connection)() } as i32;
+	// SAFETY: `windows` holds one CFNumber window id and outlives the call; the
+	// result is a create-rule object or null.
+	let query = retained(unsafe { (spi.query)(connection, windows.as_opaque(), 0) })?;
+	// SAFETY: `query` is a live window query; the result is create-rule or null.
+	let iterator = retained(unsafe { (spi.windows)(&query) })?;
+	// SAFETY: `iterator` stays retained across every iterator call.
+	while unsafe { (spi.advance)(&iterator) } {
+		// SAFETY: As above; the iterator was advanced onto a window.
+		if unsafe { (spi.window_id)(&iterator) } == wid {
+			// SAFETY: As above.
+			return Some(unsafe { (spi.parent_id)(&iterator) }).filter(|&parent| parent != 0);
+		}
+	}
+	None
+}
+
+type SLSConnectionGetPIDFn = unsafe extern "C" fn(u32, *mut pid_t) -> i32;
+
+#[derive(Clone, Copy)]
+struct WindowOwnerSpi {
+	connection: CGSMainConnectionIDFn,
+	owner:      SLSGetWindowOwnerFn,
+	pid:        SLSConnectionGetPIDFn,
+}
+
+static WINDOW_OWNER: LazyLock<Option<WindowOwnerSpi>> = LazyLock::new(|| {
+	ensure_skylight_loaded()?;
+	Some(WindowOwnerSpi {
+		connection: symbol(c"CGSMainConnectionID")?,
+		owner:      symbol(c"SLSGetWindowOwner")?,
+		pid:        symbol(c"SLSConnectionGetPID")?,
+	})
+});
+
+/// The process that owns window `wid` in `WindowServer`, including the
+/// windows a remote-view service keeps off the window list, such as the one
+/// `openAndSavePanelService` draws an application's Open panel in.
+pub(super) fn window_owner_pid(wid: u32) -> Option<pid_t> {
+	let spi = WINDOW_OWNER.as_ref()?;
+	let mut owner = 0u32;
+	// SAFETY: The connection query takes no arguments, and `owner` is writable
+	// for the exact window-owner signature.
+	if unsafe { (spi.owner)((spi.connection)(), wid, &mut owner) } != 0 || owner == 0 {
+		return None;
+	}
+	let mut pid: pid_t = 0;
+	// SAFETY: `pid` is writable for the exact connection-pid signature.
+	(unsafe { (spi.pid)(owner, &mut pid) } == 0 && pid > 0).then_some(pid)
+}
+
+/// Takes ownership of a create-rule `CFType` pointer, which may be null.
+fn retained(pointer: *mut CFType) -> Option<CFRetained<CFType>> {
+	// SAFETY: Every caller passes the +1 result of a copy or create call.
+	ptr::NonNull::new(pointer).map(|pointer| unsafe { CFRetained::from_raw(pointer) })
 }
 
 /// Whether the target already is the key window of the front process.
@@ -1264,6 +1411,277 @@ fn attach_keyboard_authentication(pid: pid_t, event: &CGEvent) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::desktop::error::ErrorCode;
+
+	#[test]
+	fn user_focus_changes_permanently_disarm_background_restoration() {
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let third = ProcessSerialNumber { high: 0, low: 9 };
+		let lease = || BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			click_polls: 0,
+			disarmed: false,
+			visited: false,
+		};
+		let mut guard = lease();
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Restore);
+		assert_eq!(guard.observe(third, None, [0; 5], false), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Disarm);
+
+		let mut guard = lease();
+		assert_eq!(guard.observe(previous, Some(43), [0; 5], false), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Disarm);
+
+		let mut guard = lease();
+		assert_eq!(guard.observe(target, None, [1; 5], false), FocusDecision::Disarm);
+	}
+
+	#[test]
+	fn typing_in_the_original_window_does_not_claim_a_user_focus_switch() {
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let mut guard = BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			click_polls: 0,
+			disarmed: false,
+			visited: false,
+		};
+		// Key and modifier presses only.
+		let typed = [0, 0, 0, 1, 1];
+		assert_eq!(guard.observe(previous, Some(42), typed, false), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, typed, false), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_click_seen_just_before_the_target_comes_forward_is_the_users() {
+		// The user clicks the target window: the poll sees the click while
+		// their app (7) is still in front, and the target (8) in front on a
+		// later poll with no further input. Sending it back would undo the
+		// user's own switch.
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let lease = || BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			click_polls: 0,
+			disarmed: false,
+			visited: false,
+		};
+		let clicked = [1, 0, 0, 0, 0];
+		let mut guard = lease();
+		assert_eq!(guard.observe(previous, Some(42), clicked, true), FocusDecision::Observe);
+		assert_eq!(guard.observe(previous, Some(42), clicked, false), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, clicked, false), FocusDecision::Disarm);
+		assert!(guard.visited);
+		// Long after that click, the target's own activation is sent back.
+		let mut guard = lease();
+		guard.observe(previous, Some(42), clicked, true);
+		for _ in 0..CLICK_SWITCH_POLLS {
+			guard.observe(previous, Some(42), clicked, false);
+		}
+		assert_eq!(guard.observe(target, None, clicked, false), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_poll_places_a_click_before_it_reads_the_front_process() {
+		use std::cell::Cell;
+		let front_read = Cell::new(false);
+		let hit_tested = Cell::new(false);
+		let (activity, on_target, front) = poll(
+			[0; 5],
+			|| [1, 0, 0, 0, 0],
+			|| {
+				assert!(!front_read.get(), "the click was placed after the front process was read");
+				hit_tested.set(true);
+				true
+			},
+			|| front_read.set(true),
+		);
+		assert_eq!((activity, on_target, front), ([1, 0, 0, 0, 0], true, ()));
+		assert!(hit_tested.get() && front_read.get());
+		// Without a new click nothing is hit-tested: typing only.
+		let (_, on_target, ()) =
+			poll([0; 5], || [0, 0, 0, 1, 0], || panic!("no click to place"), || ());
+		assert!(!on_target);
+	}
+
+	#[test]
+	fn a_click_in_the_users_own_app_does_not_let_the_target_keep_the_front() {
+		// The user clicks in their own app (7) while a background action runs,
+		// and right after the target (8) activates itself: it is sent back.
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let mut guard = BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			click_polls: 0,
+			disarmed: false,
+			visited: false,
+		};
+		let clicked = [1, 0, 0, 0, 0];
+		assert_eq!(guard.observe(previous, Some(42), clicked, false), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, clicked, false), FocusDecision::Restore);
+		assert!(!guard.visited);
+	}
+
+	#[test]
+	fn a_window_appearing_in_a_windowless_front_app_is_a_user_focus_change() {
+		// Finder in front after a click on the desktop: no key window to restore.
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let lease = || BackgroundFocusLease {
+			previous,
+			target,
+			key: None,
+			activity: [0; 5],
+			click_polls: 0,
+			disarmed: false,
+			visited: false,
+		};
+		let mut guard = lease();
+		assert_eq!(guard.observe(previous, None, [0; 5], false), FocusDecision::Observe);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Restore);
+
+		// The user opened a Finder window meanwhile: hands off.
+		let mut guard = lease();
+		assert_eq!(guard.observe(previous, Some(43), [0; 5], false), FocusDecision::Disarm);
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Disarm);
+	}
+
+	#[test]
+	fn a_visit_to_the_target_is_kept_after_the_user_leaves_it() {
+		let previous = ProcessSerialNumber { high: 0, low: 7 };
+		let target = ProcessSerialNumber { high: 0, low: 8 };
+		let third = ProcessSerialNumber { high: 0, low: 9 };
+		let lease = || BackgroundFocusLease {
+			previous,
+			target,
+			key: Some(42),
+			activity: [0; 5],
+			click_polls: 0,
+			disarmed: false,
+			visited: false,
+		};
+		// The user clicks the target, then goes back to their app.
+		let mut guard = lease();
+		guard.observe(target, None, [1; 5], false);
+		guard.observe(previous, Some(42), [1; 5], false);
+		assert!(guard.visited);
+		// After a switch to a third app the lease stands down, yet still sees
+		// the user come to the target.
+		let mut guard = lease();
+		guard.observe(third, None, [0; 5], false);
+		assert!(!guard.visited);
+		guard.observe(target, None, [0; 5], false);
+		assert!(guard.visited);
+		// The target's own activation, sent back, is not a visit; a refused
+		// hand-back is.
+		let mut guard = lease();
+		assert_eq!(guard.observe(target, None, [0; 5], false), FocusDecision::Restore);
+		assert!(!guard.visited);
+		guard.user_acted();
+		assert!(guard.visited);
+	}
+
+	#[test]
+	fn only_a_provably_windowless_front_app_is_restored_without_a_key_window() {
+		let unread = || -> Option<bool> { panic!("a known key window needs no window scan") };
+		assert_eq!(restorable_key(Some(42), unread, unread), Some(UserKey::Window(42)));
+		// TextEdit after closing its last document; Finder after a desktop click
+		// lists only its unmappable desktop, which counts as no window.
+		assert_eq!(restorable_key(None, || Some(false), || Some(false)), Some(UserKey::Windowless));
+		// Windows that AX or WindowServer reports, or an unreadable answer,
+		// refuse.
+		assert_eq!(restorable_key(None, || Some(true), || Some(false)), None);
+		assert_eq!(restorable_key(None, || Some(false), || Some(true)), None);
+		assert_eq!(restorable_key(None, || None, || Some(false)), None);
+		assert_eq!(restorable_key(None, || Some(false), || None), None);
+	}
+
+	#[test]
+	fn a_failed_action_still_settles_under_the_guard() {
+		// AXOpen in Chrome's Open panel fails with -25205, then Chrome comes
+		// forward: the guard must still be watching.
+		let mut settled = false;
+		let result: CoreResult<()> = run_then_settle(
+			|| Err(DesktopError::ax_failed("AX action 'AXOpen' failed (AXError(-25205))")),
+			|| {
+				settled = true;
+				Err(DesktopError::cancelled("stopped"))
+			},
+		);
+		assert!(settled);
+		let error = result.expect_err("the action failed");
+		assert_eq!(
+			(error.code, error.message.as_str()),
+			(ErrorCode::AxFailed, "AX action 'AXOpen' failed (AXError(-25205))")
+		);
+
+		let result = run_then_settle(|| Ok(7), || Err(DesktopError::cancelled("stopped")));
+		assert_eq!(result.expect_err("the settle was cancelled").code, ErrorCode::Cancelled);
+		assert_eq!(run_then_settle(|| Ok(7), || Ok(())).ok(), Some(7));
+	}
+
+	#[test]
+	fn only_the_exact_key_window_of_the_front_process_skips_activation() {
+		let target = ProcessSerialNumber { high: 0, low: 7 };
+		let other = ProcessSerialNumber { high: 0, low: 8 };
+		assert!(preserves_exact_existing_focus(Some(target), target, Some(42), 42));
+		assert!(!preserves_exact_existing_focus(Some(other), target, Some(42), 42));
+		assert!(!preserves_exact_existing_focus(Some(target), target, Some(41), 42));
+		assert!(!preserves_exact_existing_focus(Some(target), target, None, 42));
+		assert!(!preserves_exact_existing_focus(None, target, Some(42), 42));
+	}
+
+	#[test]
+	fn the_hand_back_timestamp_precedes_the_last_check() {
+		use std::cell::RefCell;
+		let steps = RefCell::new(Vec::new());
+		let handed = request_after_check(
+			|| {
+				steps.borrow_mut().push("clock");
+				7
+			},
+			|| {
+				steps.borrow_mut().push("check");
+				true
+			},
+			|since| {
+				steps.borrow_mut().push("request");
+				assert_eq!(since, 7, "the request carries the timestamp taken before the check");
+				Ok(FrontRequest::UserActed)
+			},
+		);
+		assert_eq!(handed.ok(), Some(Some(FrontRequest::UserActed)));
+		assert_eq!(*steps.borrow(), ["clock", "check", "request"]);
+
+		let unwanted =
+			request_after_check(|| 7, || false, |_| panic!("no request once the check fails"));
+		assert_eq!(unwanted.ok(), Some(None));
+	}
+
+	#[test]
+	fn a_front_request_the_user_overtook_is_their_choice_not_an_error() {
+		assert_eq!(front_request(0).ok(), Some(FrontRequest::Done));
+		assert_eq!(front_request(EXPIRED_FRONT_REQUEST).ok(), Some(FrontRequest::UserActed));
+		assert_eq!(
+			front_request(-1)
+				.expect_err("other failures stay errors")
+				.code,
+			ErrorCode::InputFailed
+		);
+	}
 
 	#[test]
 	fn a_user_click_before_the_hand_back_stands_out_from_takeovers_own_presses() {
@@ -1301,116 +1719,6 @@ mod tests {
 				.wrapping_sub(before),
 			3
 		);
-	}
-
-	#[test]
-	fn user_focus_changes_permanently_disarm_background_restoration() {
-		let previous = ProcessSerialNumber { high: 0, low: 7 };
-		let target = ProcessSerialNumber { high: 0, low: 8 };
-		let third = ProcessSerialNumber { high: 0, low: 9 };
-		let lease =
-			|| BackgroundFocusLease { previous, target, key: 42, activity: [0; 5], disarmed: false };
-		let mut guard = lease();
-		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Restore);
-		assert_eq!(guard.observe(third, None, [0; 5]), FocusDecision::Disarm);
-		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Disarm);
-
-		let mut guard = lease();
-		assert_eq!(guard.observe(previous, Some(43), [0; 5]), FocusDecision::Disarm);
-		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Disarm);
-
-		let mut guard = lease();
-		assert_eq!(guard.observe(target, None, [1; 5]), FocusDecision::Disarm);
-	}
-
-	#[test]
-	fn typing_in_the_original_window_does_not_claim_a_user_focus_switch() {
-		let previous = ProcessSerialNumber { high: 0, low: 7 };
-		let target = ProcessSerialNumber { high: 0, low: 8 };
-		let mut guard =
-			BackgroundFocusLease { previous, target, key: 42, activity: [0; 5], disarmed: false };
-		assert_eq!(guard.observe(previous, Some(42), [1; 5]), FocusDecision::Observe);
-		assert_eq!(guard.observe(target, None, [1; 5]), FocusDecision::Restore);
-	}
-
-	#[test]
-	fn only_the_exact_key_window_of_the_front_process_skips_activation() {
-		let target = ProcessSerialNumber { high: 0, low: 7 };
-		let other = ProcessSerialNumber { high: 0, low: 8 };
-		assert!(preserves_exact_existing_focus(Some(target), target, Some(42), 42));
-		assert!(!preserves_exact_existing_focus(Some(other), target, Some(42), 42));
-		assert!(!preserves_exact_existing_focus(Some(target), target, Some(41), 42));
-		assert!(!preserves_exact_existing_focus(Some(target), target, None, 42));
-		assert!(!preserves_exact_existing_focus(None, target, Some(42), 42));
-	}
-
-	#[test]
-	fn focus_hand_back_yields_only_to_a_window_the_user_picked() {
-		let (user, target) = (7, 42);
-		// Typing in their own app moves no window: focus goes back to it.
-		assert!(hands_back(false, Some(user), user, target, false));
-		assert!(hands_back(true, Some(user), user, target, true), "a click in their own window");
-		assert!(hands_back(true, None, user, target, false));
-		// An unreadable key window after a click may hide the user's pick.
-		assert!(
-			!hands_back(true, None, user, target, true),
-			"a click while the key window is unknown"
-		);
-		assert!(!hands_back(false, None, user, target, true));
-		// A sibling target still key after the focus record is ours to hand back,
-		// unless the user clicked it.
-		assert!(hands_back(true, Some(target), user, target, false));
-		assert!(!hands_back(true, Some(target), user, target, true));
-		assert!(!hands_back(true, Some(9), user, target, false), "another window the user picked");
-		assert!(!hands_back(false, Some(9), user, target, false));
-	}
-
-	#[test]
-	fn final_hand_back_check_rereads_the_key_window() {
-		let (user, target) = (7, 42);
-		let mut keys = [Some(user), Some(9)].into_iter();
-		assert!(
-			!hand_back_confirmed(false, user, target, || keys.next().unwrap(), || false, || true),
-			"a window the user picked between the two checks"
-		);
-		let mut presses = [false, true].into_iter();
-		assert!(!hand_back_confirmed(
-			true,
-			user,
-			target,
-			|| Some(target),
-			|| presses.next().unwrap(),
-			|| true
-		));
-		assert!(!hand_back_confirmed(false, user, target, || Some(user), || false, || false));
-		assert!(hand_back_confirmed(false, user, target, || Some(user), || false, || true));
-	}
-
-	#[test]
-	fn the_hand_back_timestamp_precedes_the_last_check() {
-		use std::cell::RefCell;
-		let steps = RefCell::new(Vec::new());
-		let handed = request_after_check(
-			|| {
-				steps.borrow_mut().push("clock");
-				7
-			},
-			|| {
-				steps.borrow_mut().push("check");
-				true
-			},
-			|since| {
-				steps.borrow_mut().push("request");
-				assert_eq!(since, 7, "the request carries the timestamp taken before the check");
-				Ok(FrontRequest::UserActed)
-			},
-		);
-		assert_eq!(handed.ok(), Some(Some(FrontRequest::UserActed)));
-		assert_eq!(*steps.borrow(), ["clock", "check", "request"]);
-
-		let unwanted =
-			request_after_check(|| 7, || false, |_| panic!("no request once the check fails"));
-		assert_eq!(unwanted.ok(), Some(None));
 	}
 
 	#[test]
@@ -1601,18 +1909,5 @@ mod tests {
 			|| panic!("nor records"),
 		);
 		assert_eq!(rekeyed.ok(), Some(true));
-	}
-
-	#[test]
-	fn a_front_request_the_user_overtook_is_their_choice_not_an_error() {
-		use crate::desktop::error::ErrorCode;
-		assert_eq!(front_request(0).ok(), Some(FrontRequest::Done));
-		assert_eq!(front_request(EXPIRED_FRONT_REQUEST).ok(), Some(FrontRequest::UserActed));
-		assert_eq!(
-			front_request(-1)
-				.expect_err("other failures stay errors")
-				.code,
-			ErrorCode::InputFailed
-		);
 	}
 }
