@@ -250,9 +250,10 @@ export function ollamaChatDropsOwnThinking(
 	model: { api?: string; compat?: Model["compat"] } | null | undefined,
 ): boolean {
 	if (model?.api !== "ollama-chat") return false;
-	// Cached model rows without compat predate this guard; strip for safe replay.
 	const compat = model.compat;
-	return compat && "stripThinkingHistory" in compat ? (compat.stripThinkingHistory ?? true) : true;
+	// Cached model rows without compat predate this guard; strip for safe replay.
+	if (!compat || !("stripThinkingHistory" in compat)) return true;
+	return compat.stripThinkingHistory ?? true;
 }
 
 function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaMessage[] {

@@ -2,7 +2,10 @@ import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
 import { isColdReplayableResponsesTurn } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import {
+	isSameModelTurn,
+	shouldDropTruncatedThinkingOnlyAssistant,
+} from "@oh-my-pi/pi-ai/providers/transform-messages";
 import {
 	getOpenAIResponsesHistoryItems,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
@@ -420,11 +423,7 @@ export class Tokenizer {
 				// backend reported no reasoning tokens keeps the signature as its price.
 				const replayedReasoning = this.#replayedReasoningTokens(message);
 				const ollamaReader = this.#reasoningReader?.api === "ollama-chat" ? this.#reasoningReader : undefined;
-				const ownOllamaTurn =
-					ollamaReader !== undefined &&
-					message.api === ollamaReader.api &&
-					message.provider === ollamaReader.provider &&
-					message.model === ollamaReader.id;
+				const ownOllamaTurn = ollamaReader !== undefined && isSameModelTurn(message, ollamaReader);
 				if (typeof replayedReasoning === "number") extra += replayedReasoning;
 				const signaturesPriced = this.thinkingReplayTokens === "signature";
 				// The replay's signature rule (`transformMessages`): an aborted or
@@ -451,10 +450,10 @@ export class Tokenizer {
 					if (block.type === "text") {
 						fragments.push(block.text);
 					} else if (block.type === "thinking") {
-						// Foreign turns are demoted to visible text by transformMessages;
-						// only the reader's own thinking stays native and is stripped.
+						// `transformMessages` drops another model's empty thinking and demotes the
+						// rest to visible text; only the reader's own thinking stays native.
 						if (ollamaReader && !ownOllamaTurn) {
-							fragments.push(renderDemotedThinking(ollamaReader.id, block.thinking));
+							if (block.thinking.trim()) fragments.push(renderDemotedThinking(ollamaReader.id, block.thinking));
 							continue;
 						}
 						if (this.#dropsOllamaThinking && ownOllamaTurn) continue;
