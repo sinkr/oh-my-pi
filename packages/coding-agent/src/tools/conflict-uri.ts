@@ -50,10 +50,21 @@ function parseTarget(raw: string): ParsedConflictUri {
 }
 
 function requireEntry(session: ToolSession, id: number): ConflictEntry {
-	const entry = getConflictHistory(session).get(id);
+	const history = getConflictHistory(session);
+	const entry = history.get(id);
 	if (!entry) {
+		const byPath = new Map<string, number[]>();
+		for (const registered of history.entries()) {
+			const ids = byPath.get(registered.displayPath) ?? [];
+			ids.push(registered.id);
+			byPath.set(registered.displayPath, ids);
+		}
+		const known =
+			byPath.size > 0
+				? `Registered: ${[...byPath].map(([displayPath, ids]) => `${ids.map(n => `#${n}`).join(", ")} in ${displayPath}`).join("; ")}.`
+				: "No conflicts are registered.";
 		throw new ToolError(
-			`Conflict #${id} not found. Conflict ids are registered when \`read\` surfaces a marker block; re-read the file to get a current id.`,
+			`Conflict #${id} not found: it was resolved, or no \`read\` has shown its block yet (a ranged read registers only the blocks it shows, so unseen blocks' ids can't be guessed). Read \`<path>:conflicts\` on the file to list and register every block. ${known}`,
 		);
 	}
 	return entry;

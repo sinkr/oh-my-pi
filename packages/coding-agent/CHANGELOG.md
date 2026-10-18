@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a ranged `read` of a file with more merge conflicts than it shows leading agents to guess the hidden blocks' `conflict://<N>` ids: the warning now says the read registered only the blocks shown, and a missing id's error says the id was resolved or never shown, lists the registered ids per file, and points to `<path>:conflicts`
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
