@@ -299,6 +299,15 @@ const fn classify(kind: u32, key: i64, flags: u64) -> Option<UserInput> {
 	}
 }
 
+// A type added to `MONITORED_TYPES` fails the build until it has a rule.
+const _: () = {
+	let mut i = 0;
+	while i < MONITORED_TYPES.len() {
+		assert!(classify(MONITORED_TYPES[i], 0, 0).is_some(), "a monitored type has no rule");
+		i += 1;
+	}
+};
+
 const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
 	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
 		return None;
@@ -398,6 +407,18 @@ const fn untargeted(kind: u32) -> Option<Untargeted> {
 	}
 }
 
+// A type added to `USER_INPUT_MASK` fails the build until it has a rule.
+const _: () = {
+	let mut kind = 0;
+	while kind < 64 {
+		assert!(
+			USER_INPUT_MASK & (1 << kind) == 0 || untargeted(kind).is_some(),
+			"a user-input type has no rule"
+		);
+		kind += 1;
+	}
+};
+
 /// The process a foreign key press or click lands in: the target the
 /// annotated tap names, else what [`untargeted`] says for its type, and the
 /// front process for a type without a rule.
@@ -414,9 +435,9 @@ fn input_target(
 	match untargeted(kind) {
 		Some(Untargeted::Front) => front(),
 		Some(Untargeted::Dropped) => None,
-		// A type the tap takes on later without a rule: counted against the
-		// front process, it at worst has the agent read that app again, where
-		// dropping it would let the agent act on what the user changed.
+		// Not a type the tap listens to, since each of those has a rule: counted
+		// against the front process, it at worst has the agent read that app
+		// again, where dropping it would let the agent act on what the user changed.
 		None => front(),
 	}
 }
@@ -720,18 +741,9 @@ mod tests {
 		assert_eq!(input_target(LEFT_MOUSE_DOWN, 0, unread), None);
 		assert_eq!(input_target(RIGHT_MOUSE_DOWN, -1, unread), None);
 		assert_eq!(input_target(OTHER_MOUSE_DOWN, 0, unread), None);
-		// A type the tap takes on without a rule here counts against the front
-		// process rather than being dropped.
+		// A type without a rule counts against the front process rather than
+		// being dropped.
 		assert_eq!(input_target(11, 0, || Some(12)), Some(12));
-	}
-
-	#[test]
-	fn every_type_the_user_input_tap_listens_to_has_a_target_rule() {
-		for kind in 0..64 {
-			if USER_INPUT_MASK & (1 << kind) != 0 {
-				assert!(untargeted(kind).is_some(), "{kind}");
-			}
-		}
 	}
 
 	#[test]
@@ -820,13 +832,6 @@ mod tests {
 			assert_eq!(seen_index(kind, 4242, 0), None);
 		}
 		assert_eq!(seen_index(11, 0, 0), None, "key releases are not watched");
-	}
-
-	#[test]
-	fn every_type_the_monitor_listens_to_has_a_rule() {
-		for kind in MONITORED_TYPES {
-			assert!(classify(kind, 0, 0).is_some(), "{kind}");
-		}
 	}
 
 	/// `CGEventType` values from `CGEventTypes.h`, spelled out here rather
