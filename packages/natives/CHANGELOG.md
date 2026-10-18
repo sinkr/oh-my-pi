@@ -48,7 +48,7 @@
 - Fixed a key you typed on macOS reaching your app twice or more when a process holding a computer-use event tap exited; `closeDesktopEventTaps()` closes them first ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS typing into Screen Sharing and iPhone Mirroring arriving as the wrong characters: it now presses your keyboard layout's keys, types unmodified text in the background and stops while you hold a modifier or Caps Lock is on, and iPhone Mirroring taps and scrolls land where aimed ([#15193](https://github.com/can1357/oh-my-pi/pull/15193) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed your keystrokes landing in the app a macOS background action targets, or vanishing into a menu it opened, when it takes the keyboard mid-action; they now reach your app ([#16140](https://github.com/can1357/oh-my-pi/pull/16140) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed computer use input that had already gone out, such as a shortcut, a click or takeover keys, reporting `Cancelled` when you stopped it moments later; the stop now ends the next call instead
+- Fixed computer use input that had already gone out, such as typed text, a shortcut or a click, reporting `Cancelled` when you stopped it moments later; the stop now ends the next call instead
 
 ## [18.12.1] - 2026-10-17
 
