@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `IrcMessage.broadcast`, set on each copy of an `agent://all` broadcast so recipients can tell it from a direct message
+
 ## [18.12.2] - 2026-10-18
 
 ### Added

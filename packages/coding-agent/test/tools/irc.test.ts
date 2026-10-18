@@ -1,14 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { executeSend } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
+import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { attachIrcWakeTurnMonitor } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { createSessionDefaults } from "../helpers/session-defaults";
+
+type IrcWakeObserver = (records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
+
+const wakeAgent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 
 interface FakeSession {
 	session: AgentSession;
@@ -488,6 +496,105 @@ describe("IRC", () => {
 			expect(receipt).toEqual({ to: "0-Parked", outcome: "failed", error: "revive exploded" });
 			// Failed revival never enqueues: the message is lost, not buffered.
 			expect(bus.take("0-Parked")).toBeUndefined();
+		});
+	});
+
+	describe("wake-turn replies to broadcasts", () => {
+		/**
+		 * An idle subagent wired like a real one: deliveries go through the real
+		 * IrcBridge, a wake runs the executor's wake-turn monitor, and every turn
+		 * ends with the stop text "Not for me."
+		 */
+		function registerIdleSubagent(id: string, parentId?: string) {
+			let observer: IrcWakeObserver | undefined;
+			const turns: Promise<void>[] = [];
+			const relays: Promise<void>[] = [];
+			const jobs: string[] = [];
+			const bridge = new IrcBridge({
+				isDisposed: () => false,
+				isStreaming: () => false,
+				planModeEnabled: () => false,
+				emitSessionEvent: async () => {},
+				wakeForIrc: (records: AgentMessage[]) => {
+					const finish = observer?.(records);
+					turns.push(Promise.resolve(finish?.()));
+				},
+			} as unknown as IrcBridgeHost);
+			const session = {
+				...createSessionDefaults(),
+				subscribe: () => () => {},
+				setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
+					observer = next;
+				},
+				trackIrcReply: (pending: Promise<void>) => {
+					relays.push(pending);
+				},
+				getLastAssistantMessage: () => ({
+					role: "assistant",
+					content: [{ type: "text", text: "Not for me." }],
+					stopReason: "stop",
+				}),
+				deliverIrcMessage: (msg: IrcMessage) => bridge.deliver(msg),
+				asyncJobManager: {
+					register: (_kind: string, jobId: string) => {
+						jobs.push(jobId);
+						return jobId;
+					},
+				},
+			} as unknown as AgentSession;
+			registry.register({ id, displayName: "task", kind: "sub", status: "idle", session, parentId });
+			attachIrcWakeTurnMonitor(session, { id, agent: wakeAgent });
+			return {
+				jobs,
+				settled: async () => {
+					await Promise.all(turns);
+					await Promise.all(relays);
+				},
+			};
+		}
+
+		it("does not relay woken peers' turns back to a subagent broadcaster", async () => {
+			const broadcaster = makeFakeSession();
+			registry.register({
+				id: "0-C",
+				displayName: "task",
+				kind: "sub",
+				status: "idle",
+				session: broadcaster.session,
+			});
+			const a = registerIdleSubagent("0-A");
+			const b = registerIdleSubagent("0-B");
+
+			const sent = await executeSend({ registry, senderId: "0-C" }, { to: "all", message: "fixers: rebase now" });
+			expect(sent.details?.receipts?.map(receipt => receipt.outcome)).toEqual(["woken", "woken"]);
+			await a.settled();
+			await b.settled();
+			expect(broadcaster.delivered).toEqual([]);
+
+			// A direct message still gets the woken peer's turn back.
+			await executeSend({ registry, senderId: "0-C" }, { to: "0-A", message: "status?" });
+			await a.settled();
+			expect(broadcaster.delivered).toMatchObject([
+				{ from: "0-A", to: "0-C", body: "Not for me.", wakeRelay: true },
+			]);
+		});
+
+		it("does not deliver woken children's turns to a main-agent broadcaster", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "Main", displayName: "main", kind: "main", status: "idle", session: main.session });
+			const a = registerIdleSubagent("0-A", "Main");
+			const b = registerIdleSubagent("0-B", "Main");
+
+			await executeSend({ registry, senderId: "Main" }, { to: "all", message: "everyone: status" });
+			await a.settled();
+			await b.settled();
+			expect(main.delivered).toEqual([]);
+			expect([...a.jobs, ...b.jobs]).toEqual([]);
+
+			// The parent's direct message still makes the woken turn a job the parent receives.
+			await executeSend({ registry, senderId: "Main" }, { to: "0-A", message: "status?" });
+			await a.settled();
+			expect(a.jobs).toEqual(["0-A"]);
 		});
 	});
 
