@@ -436,7 +436,30 @@ impl Request {
 			Self::RaiseWindow { .. } => return true,
 			Self::OpenApplication { options, .. } => return options.activate.unwrap_or(false),
 			Self::AxPerform { action, .. } => return is_raise_action(action),
-			_ => return false,
+			// Background-only mutations and reads: listed by name so a new
+			// request variant must decide whether it arms the stop.
+			Self::MenuItems { .. }
+			| Self::MenuSelect { .. }
+			| Self::BringToCurrentSpace { .. }
+			| Self::AxSetValue { .. }
+			| Self::AxSelectText { .. }
+			| Self::AxFocus { .. }
+			| Self::Capabilities { .. }
+			| Self::ListDisplays { .. }
+			| Self::ListWindows { .. }
+			| Self::Capture { .. }
+			| Self::CaptureRegion { .. }
+			| Self::Observe { .. }
+			| Self::ListApplications { .. }
+			| Self::AxSnapshot { .. }
+			| Self::AxQuery { .. }
+			| Self::AxElementAt { .. }
+			| Self::AxFocused { .. }
+			| Self::AxNode { .. }
+			| Self::AxAttributes { .. }
+			| Self::AxChildren { .. }
+			| Self::AxParent { .. }
+			| Self::Close { .. } => return false,
 		};
 		target.is_some_and(|target| !matches!(target, Target::Window(_)))
 			|| DeliveryMode::from_takeover(takeover) == DeliveryMode::Foreground
