@@ -20,6 +20,7 @@ import {
 import {
 	beginComputerTurnForOwner,
 	type ComputerController,
+	type ComputerEscapeStops,
 	ComputerSupervisor,
 	type ComputerWorkerHandle,
 	endComputerTurnForOwner,
@@ -115,6 +116,9 @@ const axNode: AxNode = {
 	width: 9,
 	height: 10,
 };
+
+/** Escape-stop counts for supervisor tests that exercise no Escape stop, so they never read the native addon. */
+const NO_ESCAPE_STOPS: ComputerEscapeStops = { read: () => 0, forget: () => {} };
 
 class FakeNativeSession implements NativeDesktopSession {
 	/** Lock and sleep state reported by captures, capabilities and screenState, as the native session reads it live. */
@@ -2244,7 +2248,13 @@ describe("expanded computer APIs", () => {
 		async approved => {
 			const native = new FakeNativeSession();
 			const session = toolSession();
-			const supervisor = new ComputerSupervisor(session, () => liveWorker(native));
+			const supervisor = new ComputerSupervisor(
+				session,
+				() => liveWorker(native),
+				undefined,
+				undefined,
+				NO_ESCAPE_STOPS,
+			);
 			const prelude = createComputerPrelude(session, () => supervisor);
 			const answer = Promise.withResolvers<boolean>();
 			const shown = Promise.withResolvers<void>();
@@ -2288,7 +2298,13 @@ describe("expanded computer APIs", () => {
 
 	it("denies headless control and ignores a late yes after cancellation", async () => {
 		const native = new FakeNativeSession();
-		const supervisor = new ComputerSupervisor(toolSession(), () => liveWorker(native));
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => liveWorker(native),
+			undefined,
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
 		try {
 			expect(
 				(await supervisor.run('return await desktop.control.acquire({ reason: "Headless" })', 2000, snapshot()))
@@ -2321,7 +2337,13 @@ describe("expanded computer APIs", () => {
 
 	it("revokes an acquired grant on worker error and disposal", async () => {
 		const native = new FakeNativeSession();
-		const supervisor = new ComputerSupervisor(toolSession(), () => liveWorker(native));
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => liveWorker(native),
+			undefined,
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
 		const context = confirmationContext(async () => true);
 		await supervisor.run(
 			'await desktop.control.acquire({ reason: "Test task" })',
@@ -3219,10 +3241,16 @@ class SupervisorWorker implements ComputerWorkerHandle {
 describe("computer supervisor recovery", () => {
 	it("surfaces a timeout ToolError and creates a fresh worker for the next run", async () => {
 		let workers = 0;
-		const supervisor = new ComputerSupervisor(toolSession(), () => new SupervisorWorker(++workers > 1), {
-			startMs: 200,
-			closeMs: 200,
-		});
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => new SupervisorWorker(++workers > 1),
+			{
+				startMs: 200,
+				closeMs: 200,
+			},
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
 		await expect(supervisor.run("await new Promise(() => {})", 5, snapshot())).rejects.toEqual(
 			expect.objectContaining({
 				name: "ToolError",
@@ -3236,10 +3264,16 @@ describe("computer supervisor recovery", () => {
 	});
 
 	it("resolves direct capabilities before any run instead of a stale cache", async () => {
-		const supervisor = new ComputerSupervisor(toolSession(), () => new SupervisorWorker(true), {
-			startMs: 200,
-			closeMs: 200,
-		});
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => new SupervisorWorker(true),
+			{
+				startMs: 200,
+				closeMs: 200,
+			},
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
 		// Regression (#11169): capabilities() used to return the run-populated
 		// cache, so a fresh session yielded undefined until a run happened.
 		const direct = await supervisor.capabilities(snapshot(true));
@@ -3408,6 +3442,8 @@ describe("display hold follows the agent turn", () => {
 				return worker;
 			},
 			{ startMs: 200, closeMs: 200 },
+			undefined,
+			NO_ESCAPE_STOPS,
 		);
 		supervisor.releaseDisplay(1);
 		expect(workers).toBe(0);
@@ -3443,6 +3479,8 @@ describe("display hold follows the agent turn", () => {
 				};
 			},
 			{ startMs: 1_000, closeMs: 200 },
+			undefined,
+			NO_ESCAPE_STOPS,
 		);
 		const run = supervisor.run("return 1;", 2_000, snapshot(false, 1));
 		// A dialog opens and is answered before the cold worker's handshake, so before the run reaches it.
