@@ -156,16 +156,10 @@ pub(super) fn bring_to_current_space(id: &str) -> CoreResult<()> {
 }
 
 /// Whether `pid` has a normal window on a Space other than the current one,
-/// which on-screen window lists leave out.
-pub(in crate::desktop) fn window_on_another_space(pid: libc::pid_t) -> bool {
-	super::capture::normal_window_ids(pid).and_then(|windows| on_another_space(&windows))
-		== Some(true)
-}
-
-/// Whether one of `windows` belongs to a Space other than the current one, as
-/// `WindowServer`'s memberships show; a window it keeps ordered out belongs to
-/// none. `None` when `WindowServer` cannot say.
-fn on_another_space(windows: &[u32]) -> Option<bool> {
+/// which on-screen window lists leave out. `None` when the window list or a
+/// window's Space membership cannot be read.
+pub(in crate::desktop) fn window_on_another_space(pid: libc::pid_t) -> Option<bool> {
+	let windows = super::capture::normal_window_ids(pid)?;
 	let spi = SPI.as_ref()?;
 	// SAFETY: The runtime symbol has the exact no-argument connection ABI.
 	let connection = unsafe { (spi.connection)() };
@@ -173,12 +167,50 @@ fn on_another_space(windows: &[u32]) -> Option<bool> {
 		return None;
 	}
 	let current = active_space(spi, connection).ok()?;
-	Some(windows.iter().any(|&wid| {
-		let number = CFNumber::new_i64(i64::from(wid));
-		let window = CFArray::from_objects(&[&*number]);
-		memberships(spi, connection, window.as_opaque())
-			.is_ok_and(|spaces| spaces.iter().any(|&space| space != current))
-	}))
+	on_another_space(
+		current,
+		windows
+			.iter()
+			.map(|&wid| window_spaces(spi, connection, wid)),
+	)
+}
+
+/// Whether one of the windows whose Space memberships are `memberships` is on
+/// a Space other than `current`; a window `WindowServer` keeps ordered out
+/// belongs to none. `None` once a membership is unknown and none seen so far
+/// is elsewhere.
+fn on_another_space(
+	current: u64,
+	memberships: impl IntoIterator<Item = Option<Vec<u64>>>,
+) -> Option<bool> {
+	for spaces in memberships {
+		if spaces?.iter().any(|&space| space != current) {
+			return Some(true);
+		}
+	}
+	Some(false)
+}
+
+/// Window `wid`'s Space memberships, empty for none; `None` when
+/// `WindowServer` does not say.
+fn window_spaces(spi: &SpaceSpi, connection: i32, wid: u32) -> Option<Vec<u64>> {
+	let number = CFNumber::new_i64(i64::from(wid));
+	let window = CFArray::from_objects(&[&*number]);
+	// SAFETY: The window array remains alive; selector 7 includes all Spaces.
+	let spaces = retain_array(
+		unsafe { (spi.copy_spaces)(connection, 7, window.as_opaque()) },
+		"window Space memberships",
+	)
+	.ok()?;
+	spaces
+		.iter()
+		.map(|space| {
+			space
+				.downcast_ref::<CFNumber>()
+				.and_then(CFNumber::as_i64)
+				.and_then(|id| u64::try_from(id).ok())
+		})
+		.collect()
 }
 
 fn verified_move(current: u64, observed: &[u64]) -> bool {
@@ -295,7 +327,7 @@ fn display_spaces(spi: &SpaceSpi, connection: i32) -> CoreResult<Vec<(String, u6
 
 #[cfg(test)]
 mod tests {
-	use super::verified_move;
+	use super::{on_another_space, verified_move};
 
 	#[test]
 	fn ignored_or_partial_native_move_is_not_success() {
@@ -304,5 +336,16 @@ mod tests {
 		assert!(!verified_move(9, &[]));
 		assert!(!verified_move(0, &[0]));
 		assert!(verified_move(9, &[9]));
+	}
+
+	#[test]
+	fn an_unknown_space_membership_is_not_proof_of_no_window_elsewhere() {
+		// Space 9 is current. A window on Space 4 is elsewhere; one kept
+		// ordered out belongs to no Space.
+		assert_eq!(on_another_space(9, [Some(vec![9]), Some(vec![4])]), Some(true));
+		assert_eq!(on_another_space(9, [Some(vec![9]), Some(vec![])]), Some(false));
+		assert_eq!(on_another_space(9, []), Some(false));
+		// A window whose membership WindowServer did not give may be elsewhere.
+		assert_eq!(on_another_space(9, [Some(vec![9]), None]), None);
 	}
 }
