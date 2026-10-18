@@ -2391,6 +2391,38 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
+	it("stops a run at the next non-native facade call after an Escape between native calls", async () => {
+		/** The user's Escape lands right after `listWindows` settled and passed its check, while no native call runs. */
+		class LateEscapeSession extends FakeNativeSession {
+			#readsSinceList: number | undefined;
+			constructor() {
+				super();
+				// The base class declares `escapeStops` as a field, which an accessor override would not shadow.
+				Object.defineProperty(this, "escapeStops", {
+					get: () => {
+						if (this.#readsSinceList === undefined) return 0;
+						this.#readsSinceList += 1;
+						return this.#readsSinceList > 1 ? 1 : 0;
+					},
+				});
+			}
+			override async listWindows(): Promise<DesktopWindow[]> {
+				this.#readsSinceList = 0;
+				return await super.listWindows();
+			}
+		}
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new LateEscapeSession());
+		// `clipboard.read` stands in for `clipboard.write`, so a regression cannot overwrite the real clipboard.
+		const result = await runWorker(
+			transport,
+			"clipboard-after-escape",
+			'await desktop.windows(); await desktop.clipboard.read(); return "continued";',
+		);
+		// The worker aborts the run; the host, reading the stop count, words it as ESCAPE_STOPPED_MESSAGE.
+		expect(result.ok ? result.payload.returnValue : result.error).toMatchObject({ isAbort: true });
+	});
+
 	it("refuses capabilities and runs after an Escape between calls that no run reported", async () => {
 		const { native, prelude, sent, ownerId, context, close } = escapeHarness();
 		try {

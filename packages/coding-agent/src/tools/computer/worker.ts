@@ -1161,9 +1161,11 @@ export class ComputerWorkerCore {
 		else pending.reject(replyError(reply.error));
 	}
 
+	/** Every desktop facade operation starts here, so the user's Escape stops clipboard and other non-native work too. */
 	#currentRunContext = (): ComputerRunContext => {
 		const context = this.#runContexts.getStore();
 		if (!context) throw new ToolError("no active computer run");
+		this.#checkEscape();
 		return context;
 	};
 
@@ -1352,6 +1354,8 @@ export class ComputerWorkerCore {
 					// Clipboard access is part of the native desktop surface and remains
 					// outside the worker's readiness-only import graph.
 					const { copyToClipboard } = await import("../../utils/clipboard");
+					// The import yields; an Escape during it must still stop the write.
+					guardRun(getContext(), "clipboard.write");
 					await copyToClipboard(text);
 					throwIfAborted(context.signal);
 				},
