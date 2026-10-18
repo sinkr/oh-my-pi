@@ -622,12 +622,17 @@ describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
 	});
 
 	it("drops template tokens after a stray section open, including one cut off by stream end, but keeps prose", () => {
-		const healing = new StreamMarkupHealing({ pattern: "dsml" });
-		const visible =
-			healing.feed("Hi.<｜tool▁calls▁begin｜>Done.<｜tool▁sep｜><｜end▁of▁sentence｜><｜tool_call_begin｜") +
-			healing.flushPending();
-		expect(visible).toBe("Hi.Done.");
-		expect(healing.drainCompleted()).toEqual([]);
+		const input =
+			"Hi.<｜tool▁calls▁begin｜>Hello world\nNext line.\n<｜tool▁sep｜>\n<｜end▁of▁sentence｜> Bye.<｜tool_call_begin｜";
+		for (const step of [input.length, 1]) {
+			const healing = new StreamMarkupHealing({ pattern: "dsml" });
+			let visible = "";
+			for (let i = 0; i < input.length; i += step) visible += healing.feed(input.slice(i, i + step));
+			visible += healing.flushPending();
+			// Whitespace before a token is layout and goes with it; before prose it stays.
+			expect(visible).toBe("Hi.Hello world\nNext line. Bye.");
+			expect(healing.drainCompleted()).toEqual([]);
+		}
 	});
 
 	it("leaves ASCII-pipe tokens from other templates visible", () => {

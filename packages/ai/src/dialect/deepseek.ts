@@ -432,16 +432,20 @@ export class DeepSeekInbandScanner implements InbandScanner {
 
 	#consumeSection(final: boolean, events: InbandScanEvent[]): boolean {
 		while (this.#buffer.length > 0) {
-			this.#skipWhitespace();
-			const lead = templateTokenAtStart(this.#buffer);
+			// Whitespace before a token is template layout and is dropped with it;
+			// whitespace before prose belongs to the prose. Peek, don't skip, so a
+			// chunk boundary cannot decide which.
+			const indent = this.#buffer.length - this.#buffer.trimStart().length;
+			const rest = this.#buffer.slice(indent);
+			const lead = templateTokenAtStart(rest);
 			if (lead?.token === DEEPSEEK_TOOL_CALLS_END) {
-				this.#buffer = this.#buffer.slice(lead.raw.length);
+				this.#buffer = rest.slice(lead.raw.length);
 				this.#inToolSection = false;
 				this.#state = "outside";
 				return true;
 			}
 			if (lead?.token === DEEPSEEK_TOOL_CALL_BEGIN) {
-				this.#buffer = this.#buffer.slice(lead.raw.length);
+				this.#buffer = rest.slice(lead.raw.length);
 				this.#rawBlock = lead.raw;
 				this.#state = "header";
 				return true;
@@ -449,21 +453,22 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			if (lead) {
 				// Any other template token here (`<｜end▁of▁sentence｜>`, a stray
 				// `<｜tool▁sep｜>`) is template structure, never prose: drop it.
-				this.#buffer = this.#buffer.slice(lead.raw.length);
+				this.#buffer = rest.slice(lead.raw.length);
 				continue;
 			}
-			if (this.#buffer.length === 0) return false;
-			if (templateTokenPartialLength(this.#buffer) === this.#buffer.length) {
+			if (rest.length === 0 || templateTokenPartialLength(rest) === rest.length) {
 				if (!final) return false;
-				// The stream ended mid-token (`<｜tool_call_begin｜`): an unfinished
-				// call opener is markup, not prose.
+				// The stream ended on layout whitespace or mid-token
+				// (`<｜tool_call_begin｜`): markup, not prose.
 				this.#buffer = "";
 				return true;
 			}
 			// The template puts nothing but calls in a section, so anything else is
 			// the model writing prose after a stray section open: keep it visible.
-			const next = this.#buffer.indexOf("<", 1);
-			const prose = next === -1 ? this.#buffer : this.#buffer.slice(0, next);
+			// Trailing whitespace stays buffered until what follows it decides.
+			const next = rest.indexOf("<", 1);
+			const run = this.#buffer.slice(0, next === -1 ? this.#buffer.length : indent + next);
+			const prose = run.trimEnd();
 			this.#emitText(prose, events);
 			this.#buffer = this.#buffer.slice(prose.length);
 		}
