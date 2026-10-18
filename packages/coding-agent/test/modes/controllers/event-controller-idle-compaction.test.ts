@@ -48,6 +48,7 @@ function createContext(
 		isCompacting?: boolean;
 		isStreaming?: boolean;
 		runIdleCompaction?: AgentSession["runIdleCompaction"];
+		promptCacheEntry?: AgentSession["promptCacheEntry"];
 		runEphemeralTurn?: AgentSession["runEphemeralTurn"];
 		present?: InteractiveModeContext["present"];
 		sessionName?: string;
@@ -80,6 +81,7 @@ function createContext(
 			isCompacting: options.isCompacting ?? false,
 			isStreaming: options.isStreaming ?? false,
 			runIdleCompaction,
+			promptCacheEntry: options.promptCacheEntry,
 			runEphemeralTurn,
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 			messages: [createAssistantMessage()],
@@ -140,6 +142,37 @@ describe("EventController idle compaction teardown", () => {
 		controller.refreshIdleCompactionTimer();
 		vi.advanceTimersByTime(60_000);
 
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("waits for the prompt cache lifetime instead of the fallback delay when it is known", async () => {
+		const runIdleCompaction = vi.fn(async () => {});
+		const context = createContext({
+			runIdleCompaction,
+			promptCacheEntry: { touchedAt: Date.now(), ttlMs: 3_600_000 },
+		});
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		// The 60s fallback would have fired long ago; the 1h entry is refreshed at 54 min.
+		vi.advanceTimersByTime(54 * 60_000 - 5_001);
+		expect(runIdleCompaction).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("falls back to the configured delay once the cache entry has lapsed", async () => {
+		const runIdleCompaction = vi.fn(async () => {});
+		const context = createContext({
+			runIdleCompaction,
+			promptCacheEntry: { touchedAt: Date.now() - 600_000, ttlMs: 300_000 },
+		});
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		vi.advanceTimersByTime(60_000);
 		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
 		controller.dispose();
 	});

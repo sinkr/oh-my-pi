@@ -140,7 +140,7 @@ The automatic paths are intentionally different:
    - On success, if `compaction.autoContinue !== false`, post-turn maintenance schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`; mid-turn maintenance never schedules a separate continuation because the core loop already owns the next provider request.
 
 - **Idle maintenance**
-   - Trigger: `runIdleCompaction()` when not streaming or already compacting.
+   - Trigger: `runIdleCompaction()` when not streaming or already compacting. The interactive idle timer arms after a turn ends with empty input and context at or above `compaction.idleThresholdTokens`. When the model declares a prompt-cache lifetime for the tier the last request wrote (or the provider reported writing), it fires 5s before the cache warmer's refresh point — `min(90% of TTL, TTL − 10s)` after the last request or warm hit, about 54 min on a 1h entry — so the summary request still reads the cached prefix. Otherwise, or once that point has passed, it waits `compaction.idleTimeoutSeconds`.
    - Uses `reason: "idle"` and does not auto-continue afterward.
 
 ### Payload-rejection guard
@@ -525,7 +525,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `task.agentCompactionThresholdOverrides` = `{}`; exact-name task/eval agent → token count (`90000`) or percentage (`"80%"`) replacing both thresholds for that agent only. See [Settings](./settings.md#context-compaction-and-memory).
 - `compaction.idleEnabled` = `false`
 - `compaction.idleThresholdTokens` = `200000`
-- `compaction.idleTimeoutSeconds` = `300`
+- `compaction.idleTimeoutSeconds` = `300` (fallback when the prompt-cache lifetime is unknown)
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)

@@ -429,7 +429,7 @@ import {
 } from "./session-advisors";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
-import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-warmer";
+import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus, PromptCacheEntry } from "./cache-warmer";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { anonymizeSessionTranscripts } from "./session-anonymizer";
 import {
@@ -5477,6 +5477,15 @@ export class AgentSession implements SettingsScope {
 	 */
 	get cacheWarmingStatus(): CacheWarmingStatus | undefined {
 		return this.#cacheWarmer?.status;
+	}
+
+	/**
+	 * Prompt cache entry the latest main-loop request wrote, while the
+	 * conversation still matches it. Undefined when the session has no warmer
+	 * or the model declares no cache lifetime.
+	 */
+	get promptCacheEntry(): PromptCacheEntry | undefined {
+		return this.#cacheWarmer?.cacheEntry;
 	}
 
 	/**

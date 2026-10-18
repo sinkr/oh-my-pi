@@ -469,6 +469,39 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "conversation context changed" });
 	});
 
+	test("tracks the cache entry lifetime even when warming is off", () => {
+		const h = harness();
+		h.mode = "off";
+		const sentAt = Date.now();
+		start(h, { apiKey: () => "resolved-at-request-time" });
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache warming disabled" });
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: sentAt, ttlMs: 300_000 });
+		// The provider's reported write tier wins over the credential guess.
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })));
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: sentAt, ttlMs: 3_600_000 });
+		h.current = false;
+		expect(h.warmer.cacheEntry).toBeUndefined();
+		h.current = true;
+		start(h, { cacheRetention: "none" });
+		expect(h.warmer.cacheEntry).toBeUndefined();
+	});
+
+	test("a refresh that hits the cache extends the tracked entry; a miss does not", async () => {
+		const h = harness();
+		start(h);
+		const firstTouch = Date.now();
+		await advance(SHORT_DELAY_MS);
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: firstTouch + SHORT_DELAY_MS, ttlMs: 300_000 });
+
+		const missed = harness();
+		missed.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };
+		start(missed);
+		const missedTouch = Date.now();
+		await advance(SHORT_DELAY_MS);
+		expect(missed.warmer.status.reason).toBe("refresh missed the cache");
+		expect(missed.warmer.cacheEntry?.touchedAt).toBe(missedTouch);
+	});
+
 	test("extensions can stop a refresh and force one past the threshold", async () => {
 		const stopped = harness({ decide: () => Promise.resolve("stop") });
 		start(stopped);

@@ -259,6 +259,21 @@ interface ActiveRun extends CacheWarmRequest {
 	warmingStopReason?: string;
 }
 
+/** Lifetime of the prompt cache entry the latest request wrote, independent of whether it is warmed. */
+export interface PromptCacheEntry {
+	/** When a request last wrote or read the entry (send time of the latest real or warm request). */
+	touchedAt: number;
+	/** How long the provider keeps the entry after it was last touched. */
+	ttlMs: number;
+}
+
+interface TrackedCacheEntry {
+	model: Model<Api>;
+	tier: PromptCacheTier;
+	touchedAt: number;
+	isCurrent: () => boolean;
+}
+
 /** Everything the warmer needs from its host; injected so the core stays session-agnostic. */
 export interface CacheWarmerDeps {
 	/**
@@ -285,6 +300,7 @@ export interface CacheWarmerDeps {
  */
 export class CacheWarmer {
 	#run?: ActiveRun;
+	#entry?: TrackedCacheEntry;
 	#inactive: CacheWarmingStatus;
 	readonly #deps: CacheWarmerDeps;
 	/** Called with every paid warm response, including one that missed the cache or was aborted after acceptance. */
@@ -317,9 +333,30 @@ export class CacheWarmer {
 		};
 	}
 
+	/**
+	 * Cache entry the latest request wrote, while the conversation still matches
+	 * it. Tracked even when warming is off or the request cannot be replayed;
+	 * undefined when the model declares no lifetime for the tier or caching is off.
+	 */
+	get cacheEntry(): PromptCacheEntry | undefined {
+		const entry = this.#entry;
+		if (!entry?.isCurrent()) return undefined;
+		const seconds = entry.model.promptCache?.[entry.tier];
+		return seconds === undefined ? undefined : { touchedAt: entry.touchedAt, ttlMs: seconds * 1000 };
+	}
+
 	/** Keep the prompt cache entry written by `request` warm while `isCurrent` holds. */
 	start(request: CacheWarmRequest, isCurrent: () => boolean): void {
 		this.#clearRun();
+		// A string key is classified up front. Resolver keys (rotating
+		// credentials) cannot be inspected without consuming them; they start on
+		// the short tier and `onResponse` switches to the tier the provider
+		// reports having written.
+		const apiKey = request.options.apiKey;
+		const isOAuthToken =
+			request.model.api === "anthropic-messages" && typeof apiKey === "string" && isAnthropicOAuthToken(apiKey);
+		const tier = resolvePromptCacheTier(request.model, request.options, isOAuthToken);
+		this.#entry = tier === undefined ? undefined : { model: request.model, tier, touchedAt: Date.now(), isCurrent };
 		const mode = this.#deps.getMode();
 		if (mode === "off") {
 			this.#stop("cache warming disabled");
@@ -329,14 +366,6 @@ export class CacheWarmer {
 			this.#stop("request cannot be replayed safely");
 			return;
 		}
-		// A string key is classified up front. Resolver keys (rotating
-		// credentials) cannot be inspected without consuming them; they start on
-		// the short tier and `onResponse` switches to the tier the provider
-		// reports having written.
-		const apiKey = request.options.apiKey;
-		const isOAuthToken =
-			request.model.api === "anthropic-messages" && typeof apiKey === "string" && isAnthropicOAuthToken(apiKey);
-		const tier = resolvePromptCacheTier(request.model, request.options, isOAuthToken);
 		if (tier === undefined) {
 			this.#stop("request disabled prompt caching");
 			return;
@@ -366,16 +395,25 @@ export class CacheWarmer {
 	 * the credential.
 	 */
 	onResponse(message: AssistantMessage): void {
+		const observed = observedPromptCacheTier(message.usage);
+		const entry = this.#entry;
+		if (
+			observed !== undefined &&
+			entry &&
+			message.provider === entry.model.provider &&
+			message.model === entry.model.id
+		) {
+			entry.tier = observed;
+		}
 		const run = this.#run;
 		if (!run || run.timer === undefined) return;
 		if (message.provider !== run.model.provider || message.model !== run.model.id) return;
-		const tier = observedPromptCacheTier(message.usage);
-		if (tier === undefined || tier === run.tier) return;
-		const delayMs = this.#delayFor(run.model, tier);
+		if (observed === undefined || observed === run.tier) return;
+		const delayMs = this.#delayFor(run.model, observed);
 		if (delayMs === undefined) return;
 		clearTimeout(run.timer);
 		run.timer = undefined;
-		run.tier = tier;
+		run.tier = observed;
 		run.delayMs = delayMs;
 		this.#schedule(run);
 	}
@@ -401,6 +439,7 @@ export class CacheWarmer {
 	}
 
 	cancel(): void {
+		this.#entry = undefined;
 		this.#stop("inactive");
 	}
 
@@ -502,6 +541,7 @@ export class CacheWarmer {
 		this.onRefreshStart?.(refresh);
 		let outcome: CacheWarmingRefreshEnd["outcome"] = "error";
 		let usage: Usage | undefined;
+		const sentAt = Date.now();
 		try {
 			const message = await this.#replay(run);
 			// Record before the abort check: a refresh cancelled or replaced after the
@@ -527,6 +567,9 @@ export class CacheWarmer {
 				return;
 			}
 			outcome = "hit";
+			// The run and the tracked entry are replaced together by `start`, so
+			// a hit on the current run extends the current entry.
+			if (this.#entry) this.#entry.touchedAt = sentAt;
 			if (!this.#validateRun(run)) return;
 			this.#schedule(run);
 		} finally {
