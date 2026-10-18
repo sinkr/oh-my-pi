@@ -125,6 +125,14 @@ const fn navigation_key(key: i64) -> bool {
 	matches!(key, 114..=117 | 119 | 121 | 123..=126)
 }
 
+/// Shift, Option and Caps Lock: modifiers that only change the characters
+/// typed. Command and Control start shortcuts, and a Globe (fn) press or a
+/// double Command or Control press can itself open the emoji picker or start
+/// Dictation.
+const fn typing_modifier(key: i64) -> bool {
+	matches!(key, 56 | 60 | 58 | 61 | 57)
+}
+
 /// Whether a key press is plain typing: no Command or Control, not a function
 /// key, and fn only on the keys that always carry it. Shift and Option type
 /// characters. Anything else may be a shortcut that picks an app, window,
@@ -166,20 +174,13 @@ pub(crate) fn monitor_seen() -> [u32; 5] {
 	SEEN.each_ref().map(|seen| seen.load(Ordering::Acquire))
 }
 
-/// Whether the monitor has ever seen a pointer press, omp's own included: a tap
-/// that has not may be blind to them, so its silence proves nothing.
-pub(crate) fn monitor_sees_presses() -> bool {
-	SEEN[..POINTER_PRESS_TYPES.len()]
-		.iter()
-		.any(|seen| seen.load(Ordering::Acquire) != 0)
-}
-
 /// What a physical event means for takeover's hand-back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserInput {
-	/// A mouse press or any key press that is not plain typing (Command-Tab,
-	/// Control-Up, Control-F2, F3, a Globe shortcut): it may pick an app,
-	/// window, Space or menu, so the hand-back stands down.
+	/// A mouse press, any key press that is not plain typing (Command-Tab,
+	/// Control-Up, Control-F2, F3, a Globe shortcut), or a Command, Control or
+	/// Globe modifier on its own: it may pick an app, window, Space or menu,
+	/// or open system UI, so the hand-back stands down.
 	Choice,
 	/// Plain typing, which reaches the takeover target only because takeover
 	/// holds the front.
@@ -194,7 +195,8 @@ const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Opti
 		kind if is_pointer_press(kind) => Some(UserInput::Choice),
 		KEY_DOWN if plain_typing(key, flags) => Some(UserInput::Typing),
 		KEY_DOWN => Some(UserInput::Choice),
-		FLAGS_CHANGED => Some(UserInput::Typing),
+		FLAGS_CHANGED if typing_modifier(key) => Some(UserInput::Typing),
+		FLAGS_CHANGED => Some(UserInput::Choice),
 		_ => None,
 	}
 }
@@ -445,6 +447,20 @@ mod tests {
 			assert_eq!(user_input(KEY_DOWN, key, flags, 0, 0), Some(UserInput::Typing), "{key}");
 		}
 		assert_eq!(user_input(KEY_DOWN, 126, CONTROL_FLAG, 0, SYNTHETIC_EVENT_TAG), None);
+	}
+
+	#[test]
+	fn only_shift_option_and_caps_lock_are_typing_modifiers() {
+		// Shift, Option and Caps Lock change the characters typed.
+		for key in [56, 60, 58, 61, 57] {
+			assert_eq!(user_input(FLAGS_CHANGED, key, 0, 0, 0), Some(UserInput::Typing), "{key}");
+		}
+		// Globe on its own opens the emoji picker or starts Dictation, a double
+		// Command or Control press can start Dictation, and both start shortcuts.
+		for key in [63, 55, 54, 59, 62] {
+			assert_eq!(user_input(FLAGS_CHANGED, key, 0, 0, 0), Some(UserInput::Choice), "{key}");
+		}
+		assert_eq!(user_input(FLAGS_CHANGED, 63, SECONDARY_FN_FLAG, 0, SYNTHETIC_EVENT_TAG), None);
 	}
 
 	#[test]

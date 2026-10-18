@@ -1,7 +1,6 @@
 use std::{
 	ffi::{CStr, c_void},
 	mem,
-	ops::Range,
 	os::raw::{c_char, c_int, c_uint},
 	ptr,
 	sync::{
@@ -25,7 +24,7 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	ax,
+	ax, permission,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -426,11 +425,6 @@ struct MonitorProgress {
 }
 
 impl MonitorProgress {
-	/// Every type the monitor watches.
-	const ALL: Range<usize> = 0..control::MONITORED_TYPES.len();
-	/// The pointer presses among [`control::MONITORED_TYPES`].
-	const PRESSES: Range<usize> = 0..control::POINTER_PRESS_TYPES.len();
-
 	fn now() -> Self {
 		// Counted first: an event counted after this read cannot make the
 		// monitor look behind.
@@ -439,11 +433,11 @@ impl MonitorProgress {
 	}
 
 	/// Whether the monitor has seen, since `baseline`, at least as many events
-	/// of each of `types` as `WindowServer` counted: none of them is still in
-	/// the tap's queue. A tap that never sees keys (no Input Monitoring) never
-	/// catches up on them once the user types.
-	fn caught_up_since(self, baseline: Self, mut types: Range<usize>) -> bool {
-		types.all(|i| {
+	/// of every type as `WindowServer` counted: none of them is still in the
+	/// tap's queue. A tap without Input Monitoring sees nothing, so it never
+	/// catches up once anything is counted.
+	fn caught_up_since(self, baseline: Self) -> bool {
+		(0..self.seen.len()).all(|i| {
 			self.seen[i].wrapping_sub(baseline.seen[i])
 				>= self.counted[i].wrapping_sub(baseline.counted[i])
 		})
@@ -455,11 +449,11 @@ impl MonitorProgress {
 const MONITOR_CATCH_UP: Duration = Duration::from_millis(50);
 
 /// Waits up to [`MONITOR_CATCH_UP`] for the takeover monitor to have seen
-/// every event of `types` `WindowServer` counted since `baseline`.
-fn monitor_settled(baseline: MonitorProgress, types: Range<usize>) -> bool {
+/// every event `WindowServer` counted since `baseline`.
+fn monitor_settled(baseline: MonitorProgress) -> bool {
 	let deadline = Instant::now() + MONITOR_CATCH_UP;
 	loop {
-		if MonitorProgress::now().caught_up_since(baseline, types.clone()) {
+		if MonitorProgress::now().caught_up_since(baseline) {
 			return true;
 		}
 		if Instant::now() >= deadline || control::wait(Duration::from_millis(2)).is_err() {
@@ -469,23 +463,24 @@ fn monitor_settled(baseline: MonitorProgress, types: Range<usize>) -> bool {
 }
 
 /// Whether the user picked something since takeover began: a click or a
-/// shortcut the monitor classified as a choice. The monitor's count is
-/// complete once it has seen every press `WindowServer` counted
-/// (`presses_settled`), whichever of omp's own presses are still on their way.
-/// Until then, a monitor that has seen presses before may still hold the
-/// user's click, which counts as one; a tap that has never seen one may be
-/// blind to them, which leaves the HID counters net of omp's own presses
-/// (`counters_show_press`).
+/// shortcut the monitor classified as a choice. With Input Monitoring the
+/// monitor sees every key and press, and its count is complete once it has
+/// caught up with all `WindowServer` counted (`settled`), whichever of omp's
+/// own presses are still on their way; until then the user may have chosen.
+/// Without it the tap sees nothing, which leaves the HID press counters net
+/// of omp's own presses (`counters_show_press`); keys are then known only to
+/// `WindowServer`, which refuses the hand-back for those after its timestamp.
 fn takeover_user_chose(
-	presses_settled: impl FnOnce() -> bool,
-	choices_changed: impl Fn() -> bool,
-	monitor_sees_presses: impl FnOnce() -> bool,
+	monitor_sees_input: bool,
+	settled: impl FnOnce() -> bool,
+	choices_changed: impl FnOnce() -> bool,
 	counters_show_press: impl FnOnce() -> bool,
 ) -> bool {
-	if presses_settled() {
-		return choices_changed();
+	if monitor_sees_input {
+		!settled() || choices_changed()
+	} else {
+		counters_show_press()
 	}
-	monitor_sees_presses() || choices_changed() || counters_show_press()
 }
 
 /// Pointer presses omp posted to the HID event tap ([`note_hid_post`]).
@@ -978,6 +973,7 @@ pub(super) fn with_foreground<T>(
 	// caught up with `WindowServer`, or a press beyond takeover's own.
 	let presses = PointerPresses::now();
 	let progress = MonitorProgress::now();
+	let monitor_sees_input = permission::listen_events();
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::input_failed("exact-window takeover SPI is unavailable; no input was sent")
 	})?;
@@ -1009,9 +1005,9 @@ pub(super) fn with_foreground<T>(
 		// a switch elsewhere, leaves the front application alone.
 		let user_chose = || {
 			takeover_user_chose(
-				|| monitor_settled(progress, MonitorProgress::PRESSES),
+				monitor_sees_input,
+				|| monitor_settled(progress),
 				|| control::user_choices() != choices,
-				control::monitor_sees_presses,
 				|| PointerPresses::now().user_pressed_since(presses),
 			)
 		};
@@ -1034,7 +1030,7 @@ pub(super) fn with_foreground<T>(
 			control::uptime_ns,
 			still_ours,
 			|since| control::last_user_typing() >= since,
-			|| monitor_settled(progress, MonitorProgress::ALL),
+			|| monitor_settled(progress),
 			|since| set_front_unless_user_acted(spi, previous.psn, previous_key, since),
 		)?;
 		if handed_back != Some(FrontRequest::Done)
@@ -1546,34 +1542,32 @@ mod tests {
 		let baseline =
 			MonitorProgress { counted: [4, 0, 0, 90, 30], seen: [2, 0, 0, u32::MAX, 7] };
 		let caught_up = MonitorProgress { counted: [5, 0, 0, 92, 31], seen: [3, 0, 0, 1, 8] };
-		assert!(caught_up.caught_up_since(baseline, MonitorProgress::ALL));
+		assert!(caught_up.caught_up_since(baseline));
 		// The Control-Up arrow is counted but not yet through the tap.
 		let behind = MonitorProgress { counted: [5, 0, 0, 93, 31], seen: [3, 0, 0, 1, 8] };
-		assert!(!behind.caught_up_since(baseline, MonitorProgress::ALL));
-		assert!(behind.caught_up_since(baseline, MonitorProgress::PRESSES), "no press is pending");
+		assert!(!behind.caught_up_since(baseline));
+		// Takeover's own press and the user's click: the HID counters show one
+		// more press, the user's, counted ahead of omp's still pending press,
+		// and the monitor has not classified it yet.
+		let click = MonitorProgress { counted: [5, 0, 0, 92, 31], seen: [2, 0, 0, 1, 8] };
+		assert!(!click.caught_up_since(baseline));
 		// Events only the tap sees (posted to the session) never hold it back.
 		let ahead = MonitorProgress { counted: [4, 0, 0, 90, 30], seen: [2, 0, 0, 3, 7] };
-		assert!(ahead.caught_up_since(baseline, MonitorProgress::ALL));
+		assert!(ahead.caught_up_since(baseline));
 	}
 
 	#[test]
 	fn a_user_click_counted_ahead_of_takeovers_own_pending_press_still_counts() {
-		// Takeover's own press and the user's click: the HID counters show one
-		// press (the user's, counted first) against one of omp's, and the
-		// monitor has not classified the click yet.
-		let baseline = MonitorProgress { counted: [7, 0, 0, 0, 0], seen: [7, 0, 0, 0, 0] };
-		let pending = MonitorProgress { counted: [8, 0, 0, 0, 0], seen: [7, 0, 0, 0, 0] };
-		assert!(!pending.caught_up_since(baseline, MonitorProgress::PRESSES));
-		assert!(
-			takeover_user_chose(|| false, || false, || true, || false),
-			"a monitor that is behind may still hold the user's click"
-		);
-		// Once it has seen the click, its choice count decides.
-		assert!(takeover_user_chose(|| true, || true, || panic!(), || panic!()));
-		assert!(!takeover_user_chose(|| true, || false, || panic!(), || panic!()));
-		// A tap blind to presses leaves the HID counters net of omp's own.
-		assert!(!takeover_user_chose(|| false, || false, || false, || false));
-		assert!(takeover_user_chose(|| false, || false, || false, || true));
+		// With Input Monitoring, the monitor's count decides only once it has
+		// seen all `WindowServer` counted: a queued click or Control-Up counts
+		// as the user's choice, before any hand-back timestamp is taken.
+		assert!(takeover_user_chose(true, || false, || panic!(), || panic!()));
+		assert!(takeover_user_chose(true, || true, || true, || panic!()));
+		assert!(!takeover_user_chose(true, || true, || false, || panic!()));
+		// Without it the tap sees nothing; the HID counters net of omp's own
+		// presses are all there is.
+		assert!(!takeover_user_chose(false, || panic!(), || panic!(), || false));
+		assert!(takeover_user_chose(false, || panic!(), || panic!(), || true));
 	}
 
 	#[test]

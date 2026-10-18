@@ -28,7 +28,7 @@ mod windows;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
 	MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, is_pointer_press, monitor_seen,
-	monitor_sees_presses, uptime_ns,
+	uptime_ns,
 };
 
 #[derive(Default)]
