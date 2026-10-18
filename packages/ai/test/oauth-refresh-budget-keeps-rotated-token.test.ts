@@ -130,4 +130,66 @@ describe("OAuth refresh budget", () => {
 		// The lease is released once the exchange has persisted.
 		expect(store.tryAcquireCredentialRefreshLease(credentialId, "peer", Date.now() + 15_000)).toBe(true);
 	});
+
+	test("a peer waiting on a held lease gives up at its budget", async () => {
+		if (!store) throw new Error("test setup failed");
+		const authStorage = new AuthStorage(store, {});
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "oauth", access: "access-r0", refresh: "r0", expires: Date.now() - 60_000 },
+		]);
+		const credentialId = store.listAuthCredentials(PROVIDER)[0]!.id;
+		const hung = Promise.withResolvers<never>();
+		const first = authStorage.oauth.refreshStored(PROVIDER, {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			refreshTimeoutMs: 50,
+			refresh: () => hung.promise,
+		});
+		await expect(first).rejects.toMatchObject({ message: `OAuth token refresh timed out for provider: ${PROVIDER}` });
+
+		let peerExchanged = false;
+		const started = Date.now();
+		await expect(
+			authStorage.oauth.refreshStored(PROVIDER, {
+				credentialId,
+				credentialFromRow: row => row,
+				forceRefresh: true,
+				refreshTimeoutMs: 50,
+				refresh: async () => {
+					peerExchanged = true;
+					throw new Error("peer must not exchange while the lease is held");
+				},
+			}),
+		).rejects.toMatchObject({ message: `OAuth token refresh timed out for provider: ${PROVIDER}` });
+		expect(Date.now() - started).toBeLessThan(1_000);
+		expect(peerExchanged).toBe(false);
+		hung.reject(new Error("done"));
+	});
+
+	test("a credential removed while the exchange ran is not restored to the pool", async () => {
+		if (!store) throw new Error("test setup failed");
+		const authStorage = new AuthStorage(store, {});
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "oauth", access: "access-a", refresh: "a0", expires: Date.now() - 60_000 },
+			{ type: "oauth", access: "access-b", refresh: "b0", expires: Date.now() + 3_600_000 },
+		]);
+		const [target, sibling] = store.listAuthCredentials(PROVIDER);
+		const gate = Promise.withResolvers<void>();
+		const refresh = authStorage.oauth.refreshStored(PROVIDER, {
+			credentialId: target!.id,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			refresh: async () => {
+				await gate.promise;
+				return { access: "access-a1", refresh: "a1", expires: Date.now() + 3_600_000 };
+			},
+		});
+		await Bun.sleep(0);
+		await store.deleteAuthCredential(sibling!.id, "deleted by user");
+		gate.resolve();
+		await expect(refresh).resolves.toMatchObject({ refreshed: true });
+		const pooled = authStorage.credentials.list(PROVIDER).map(entry => entry.id);
+		expect(pooled).toEqual([target!.id]);
+	});
 });
