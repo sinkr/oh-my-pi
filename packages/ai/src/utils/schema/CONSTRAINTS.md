@@ -93,8 +93,8 @@ The droid CLI's gemini wire (`factory-droid/google-generate`) uses an
 ALLOWLIST copier instead of the shared denylist normalizer — it preserves
 `type`/`title`/`description`/`required`/`format`/`minimum`/`maximum`/
 `minLength`/`maxLength`/`pattern`/`minItems`/`maxItems`/`default`/`example`,
-converts `const` to a stringified single-entry `enum`, merges `allOf`
-(branch `required` lists union), and handles `anyOf`/`oneOf` by branch types:
+converts `const` to a stringified single-entry `enum`, merges `allOf` first
+(branch `required` lists union), then handles `anyOf`/`oneOf` by branch types:
 typed non-null branches of different types stay an `anyOf` (a `null` branch
 becomes `nullable: true`; branch `required` names missing from the branch's
 own `properties` are dropped) when the node has only `title`/`description`/
@@ -102,8 +102,9 @@ own `properties` are dropped) when the node has only `title`/`description`/
 `anyOf` and on a `string` carrying `items`. Otherwise the union collapses into
 the parent (parent `properties`/`required` kept, branch properties merged in, a
 branch field required only when every non-null branch requires it, a `null`
-branch becomes `nullable: true`), keeping only the branches of the node's own
-type when the node declares one that a branch matches. It silently drops
+branch becomes `nullable: true`); for different-type branches only those of
+the node's own type merge (none when no branch has it), or those of the first
+branch's type when the node declares none. It silently drops
 everything else. It never adds `propertyOrdering`, never edits descriptions,
 and does not spill stripped keywords. Use `normalizeSchemaForFactoryDroid`
 only in `packages/ai/src/providers/factory-droid/gemini.ts`; the shared

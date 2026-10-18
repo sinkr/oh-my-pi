@@ -95,7 +95,9 @@ const ANY_OF_SIBLING_KEYS: Record<string, true> = {
 function withoutUndefinedRequired(branch: JsonObject): JsonObject {
 	if (!Array.isArray(branch.required)) return branch;
 	const properties = isJsonObject(branch.properties) ? branch.properties : {};
-	const required = (branch.required as unknown[]).filter(name => typeof name === "string" && name in properties);
+	const required = (branch.required as unknown[]).filter(
+		name => typeof name === "string" && Object.hasOwn(properties, name),
+	);
 	const { required: _dropped, ...rest } = branch;
 	return required.length > 0 ? { ...rest, required } : rest;
 }
@@ -123,6 +125,15 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 		if (copied !== undefined) out.items = copied;
 	}
 
+	// allOf: merge every branch into this node's own copy first, so the union
+	// handling below sees every field that will sit beside it.
+	if (Array.isArray(node.allOf)) {
+		for (const branch of node.allOf) {
+			const copied = copyFactoryDroidSchema(branch);
+			if (copied) Object.assign(out, mergeFactoryDroidSchemas(out, copied, "union"));
+		}
+	}
+
 	// anyOf/oneOf unions: merge the non-null branches (a field stays required
 	// only when every branch requires it), marking the result nullable when a
 	// `type: "null"` branch is present, then fold that into this node so its
@@ -144,11 +155,15 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 			if (nullable) out.nullable = true;
 		} else {
 			if (mixedTypes) {
-				// `anyOf` must be the only structural field: keep the branches
-				// matching the node's own type, or merge them all as before.
-				const ownType = out.type ?? (isJsonObject(out.properties) ? "object" : undefined);
-				const matching = nonNull.filter(branch => branch.type === ownType);
-				if (matching.length > 0) nonNull = matching;
+				// `anyOf` must be the only structural field, and branches of
+				// different types never merge into one Schema: keep only the
+				// branches of the node's own type (none if no branch has it),
+				// else of the first branch's type.
+				const ownType = Array.isArray(out.type)
+					? (out.type as unknown[]).find(t => typeof t === "string" && t !== "null")
+					: (out.type ?? (isJsonObject(out.properties) ? "object" : undefined));
+				const kept = ownType ?? nonNull[0].type;
+				nonNull = nonNull.filter(branch => branch.type === kept);
 			}
 			let collapsed: JsonObject | undefined;
 			for (const branch of nonNull) {
@@ -158,14 +173,6 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 				collapsed.nullable = nullable;
 				Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
 			}
-		}
-	}
-
-	// allOf: merge every branch into this node's own copy.
-	if (Array.isArray(node.allOf)) {
-		for (const branch of node.allOf) {
-			const copied = copyFactoryDroidSchema(branch);
-			if (copied) Object.assign(out, mergeFactoryDroidSchemas(out, copied, "union"));
 		}
 	}
 

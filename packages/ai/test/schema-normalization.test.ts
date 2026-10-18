@@ -1518,7 +1518,7 @@ describe("normalizeSchemaForFactoryDroid", () => {
 			properties: { a: { type: "string" } },
 			anyOf: [{ type: "string" }, { type: "integer" }],
 		});
-		expect(withProperties).toEqual({ type: "object", properties: { a: { type: "string" } }, nullable: false });
+		expect(withProperties).toEqual({ type: "object", properties: { a: { type: "string" } } });
 
 		const withType = normalizeSchemaForFactoryDroid({
 			type: "string",
@@ -1527,11 +1527,41 @@ describe("normalizeSchemaForFactoryDroid", () => {
 		expect(withType).toEqual({ type: "string", nullable: false });
 	});
 
+	it("never merges branches of different types into one schema", () => {
+		const stringOrList = [{ type: "string" }, { type: "array", items: { type: "string" } }];
+		expect(normalizeSchemaForFactoryDroid({ format: "x", anyOf: stringOrList })).toEqual({
+			format: "x",
+			type: "string",
+			nullable: false,
+		});
+		expect(
+			normalizeSchemaForFactoryDroid({ type: "object", properties: { a: { type: "string" } }, anyOf: stringOrList }),
+		).toEqual({ type: "object", properties: { a: { type: "string" } } });
+	});
+
+	it("counts allOf fields when deciding whether anyOf can stay", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			anyOf: [{ type: "string" }, { type: "number" }],
+			allOf: [{ type: "string" }],
+		});
+		expect(normalized).toEqual({ type: "string", nullable: false });
+	});
+
 	it("drops required names a mixed-union branch does not define", () => {
 		const normalized = normalizeSchemaForFactoryDroid({
 			anyOf: [{ type: "object", required: ["a"] }, { type: "string" }],
 		});
 		expect(normalized).toEqual({ anyOf: [{ type: "object" }, { type: "string" }] });
+
+		const inherited = normalizeSchemaForFactoryDroid({
+			anyOf: [
+				{ type: "object", properties: { a: { type: "string" } }, required: ["constructor"] },
+				{ type: "string" },
+			],
+		});
+		expect(inherited).toEqual({
+			anyOf: [{ type: "object", properties: { a: { type: "string" } } }, { type: "string" }],
+		});
 	});
 
 	it("merges an untyped branch into its typed sibling", () => {
