@@ -8,12 +8,14 @@ import { resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolv
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions,
-	rebuildScopedModelsAfterLogin,
+	rebuildScopedModels,
 	rebuildScopedModelsAfterDiscovery,
 	resolveScopedModels,
 	type ScopedModelSink,
 	toSessionScopedModels,
 } from "@oh-my-pi/pi-coding-agent/main";
+import { createSetupHost } from "@oh-my-pi/pi-coding-agent/modes/setup";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -149,14 +151,14 @@ describe("rebuildScopedModelsAfterDiscovery", () => {
 	});
 });
 
-describe("rebuildScopedModelsAfterLogin", () => {
+describe("rebuildScopedModels after login", () => {
 	it("adds a newly available allowed model to the existing scope", async () => {
 		const settings = Settings.isolated();
 		const registry = new FakeRegistry([model("a")]);
 		const session = new FakeSession(await startupScope(["prov/a", "prov/b"], registry, settings));
 
 		registry.available = [model("a"), model("b")];
-		await rebuildScopedModelsAfterLogin(session, parseArgs(["--models", "prov/a,prov/b"]), registry, settings);
+		await rebuildScopedModels(session, parseArgs(["--models", "prov/a,prov/b"]), registry, settings);
 
 		expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a", "b"]);
 	});
@@ -167,7 +169,7 @@ describe("rebuildScopedModelsAfterLogin", () => {
 		const session = new FakeSession(await startupScope(["prov/a"], registry, settings));
 
 		registry.available = [model("a"), model("b")];
-		await rebuildScopedModelsAfterLogin(session, parseArgs(["--models", "prov/a"]), registry, settings);
+		await rebuildScopedModels(session, parseArgs(["--models", "prov/a"]), registry, settings);
 
 		expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a"]);
 	});
@@ -178,9 +180,32 @@ describe("rebuildScopedModelsAfterLogin", () => {
 		const session = new FakeSession(await startupScope(["prov/a"], registry, settings));
 
 		registry.available = [model("a"), model("b")];
-		await rebuildScopedModelsAfterLogin(session, parseArgs([]), registry, settings);
+		await rebuildScopedModels(session, parseArgs([]), registry, settings);
 
 		expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a", "b"]);
+	});
+
+	it("makes setup-discovered models selectable without changing the active model", async () => {
+		const settings = Settings.isolated({ enabledModels: ["prov/*"] });
+		const active = model("a");
+		const registry = Object.assign(new FakeRegistry([active]), {
+			async refreshProvider(this: FakeRegistry) {
+				this.available = [active, model("b")];
+			},
+		});
+		const session = new FakeSession([{ model: active }]);
+		const ctx = {
+			settings,
+			session: { model: active, modelRegistry: registry },
+			refreshScopedModelsAfterLogin: async () => {
+				await rebuildScopedModels(session, parseArgs([]), registry, settings);
+			},
+		};
+
+		await createSetupHost(ctx as unknown as InteractiveModeContext).refreshProvider("prov");
+
+		expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a", "b"]);
+		expect(ctx.session.model).toBe(active);
 	});
 });
 

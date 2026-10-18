@@ -64,7 +64,10 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			if (projectScope) ctx.settings.setProjectModelRole("default", selector);
 			await ctx.settings.flush();
 		},
-		refreshProvider: provider => ctx.session.modelRegistry.refreshProvider(provider, "online"),
+		refreshProvider: async provider => {
+			await ctx.session.modelRegistry.refreshProvider(provider, "online");
+			await ctx.refreshScopedModelsAfterLogin?.();
+		},
 		saveComposerShape: async shape => {
 			cfgComposerShape.set(ctx.settings, shape);
 			await ctx.settings.flush();
