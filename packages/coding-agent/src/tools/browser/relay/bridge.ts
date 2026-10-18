@@ -548,6 +548,7 @@ export class RelayBridge {
 					this.#lateRpc.delete(key);
 					clearTimeout(late.timer);
 					if (msg.ok) late.onResult(msg.result);
+					if (this.#conns.size === 0) void this.#updateIdleExtensions();
 					return;
 				}
 				this.#pendingRpc.delete(key);
@@ -719,7 +720,8 @@ export class RelayBridge {
 				return "tabs attached";
 			}
 		}
-		for (const key of this.#pendingRpc.keys()) {
+		// A call past its timeout whose late result still closes what it made (a tab created after omp gave up) counts.
+		for (const key of [...this.#pendingRpc.keys(), ...this.#lateRpc.keys()]) {
 			if (key.startsWith(`${inst.instanceId}:`)) return "extension calls pending";
 		}
 		for (const key of this.#closeOnHello.keys()) {
@@ -1958,7 +1960,10 @@ export class RelayBridge {
 			const key = `${inst.instanceId}:${id}`;
 			this.#pendingRpc.delete(key);
 			if (onLateResult) {
-				const expiry = setTimeout(() => this.#lateRpc.delete(key), LATE_RPC_KEEP_MS);
+				const expiry = setTimeout(() => {
+					this.#lateRpc.delete(key);
+					if (this.#conns.size === 0) void this.#updateIdleExtensions();
+				}, LATE_RPC_KEEP_MS);
 				expiry.unref?.();
 				this.#lateRpc.set(key, { onResult: onLateResult, timer: expiry });
 			}

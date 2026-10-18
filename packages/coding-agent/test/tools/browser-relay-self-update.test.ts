@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -217,6 +217,44 @@ describe("relay extension self-update decisions", () => {
 		await finish(false);
 		expect(socket.reloads).toBe(0);
 		expect(bridge.ready).toBe(true);
+	});
+
+	it("waits for a tab create that outlived its timeout, whose late result closes the tab", async () => {
+		vi.useFakeTimers();
+		try {
+			const { bridge, calls, finish } = bridgeWithUpdater();
+			const conn = bridge.cdpConnected(FAKE_CDP);
+			const socket = new FakeExtSocket();
+			hello(bridge, socket);
+			bridge.cdpMessage(
+				conn,
+				JSON.stringify({ id: 1, method: "Target.createTarget", params: { background: true } }),
+			);
+			await flushMicrotasks();
+			const create = socket.messages.find(msg => msg.t === "rpc" && msg.op === "createTab") as { id: number };
+			vi.advanceTimersByTime(20_000);
+			await flushMicrotasks();
+			bridge.cdpClosed(conn);
+			await finish(true);
+			// Chrome can still create the tab; a reload now would lose the late result that closes it.
+			expect(calls).toEqual([]);
+			bridge.extMessage(
+				socket,
+				JSON.stringify({ t: "rpcResult", id: create.id, ok: true, result: { tab: tab(2) } }),
+			);
+			await flushMicrotasks();
+			const close = socket.messages.find(msg => msg.t === "rpc" && msg.op === "removeTab") as {
+				id: number;
+				tabId: number;
+			};
+			expect(close.tabId).toBe(2);
+			expect(calls).toEqual([]);
+			bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id: close.id, ok: true, result: {} }));
+			await flushMicrotasks();
+			expect(calls).toEqual([EXTENSION_ID]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("releases an attach the last client left mid-way, then updates", async () => {
