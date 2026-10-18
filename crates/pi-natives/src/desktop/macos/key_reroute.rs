@@ -773,7 +773,9 @@ impl KeyReroute {
 								continue;
 							}
 							let at = *ended_at.get_or_insert(now);
-							context.theft.linger(front, now.saturating_duration_since(at));
+							context
+								.theft
+								.linger(front, now.saturating_duration_since(at));
 							context.theft.publish(&mut registry);
 							forget_lifted(&mut registry.held, target, key_down, now);
 							if context.theft.settled(&registry.held) {
@@ -1064,7 +1066,8 @@ mod tests {
 		rig.steal();
 		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
 		let mut posted = |code, stroke| {
-			rig.theft.route(&mut rig.registry, posted_key(code, stroke), false, BUTTONS)
+			rig.theft
+				.route(&mut rig.registry, posted_key(code, stroke), false, BUTTONS)
 		};
 		assert_eq!(posted(LEFT_SHIFT, Stroke::Press), KEPT);
 		assert_eq!(posted(Q, Stroke::Press), KEPT);
@@ -1088,7 +1091,8 @@ mod tests {
 		let mut rig = Rig::new();
 		rig.steal();
 		let mut own = |stroke| {
-			rig.theft.route(&mut rig.registry, posted_key(Q, stroke), false, BUTTONS)
+			rig.theft
+				.route(&mut rig.registry, posted_key(Q, stroke), false, BUTTONS)
 		};
 		assert_eq!(own(Stroke::Press), KEPT);
 		assert_eq!(own(Stroke::Release), KEPT);
@@ -1096,7 +1100,8 @@ mod tests {
 		rig.steal();
 		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
 		assert_eq!(
-			rig.theft.route(&mut rig.registry, posted_key(Q, Stroke::Release), false, BUTTONS),
+			rig.theft
+				.route(&mut rig.registry, posted_key(Q, Stroke::Release), false, BUTTONS),
 			KEPT
 		);
 		rig.give_back();
