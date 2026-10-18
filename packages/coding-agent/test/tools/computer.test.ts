@@ -3189,6 +3189,18 @@ describe("computer background fallback", () => {
 			}
 		});
 
+		it("names the window or element a refusal kept input from", async () => {
+			for (const [code, target] of [
+				['await (await desktop.window("42")).raise()', "window 42"],
+				['await (await desktop.ref("e1")).perform("AXRaise")', "element e1"],
+			] as const) {
+				const result = await run(new ForegroundSession(), code, "refuse");
+				expect(result.ok, code).toBe(false);
+				if (result.ok) continue;
+				expect(result.error.message, code).toContain(`nothing was sent to ${target}.`);
+			}
+		});
+
 		it("sends each as before under takeover", async () => {
 			for (const { code, call } of foreground) {
 				const native = new ForegroundSession();
