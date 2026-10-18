@@ -269,13 +269,13 @@ impl UserHolds {
 
 	/// Takes the HID state (`down`, the user's holds and this request's
 	/// presses alike) after the tap missed events: holds the user released
-	/// meanwhile end, and keys and buttons that went down meanwhile count as
-	/// the user's, unsure, since a press of this request's may hold them.
+	/// meanwhile end, and every key and button down counts as the user's,
+	/// unsure until its next transition, since a press of this request's may
+	/// hold it: one the user held before the gap may have been let go of and
+	/// pressed by the request in it.
 	pub(crate) const fn resync(&mut self, down: Self) {
-		let down = down.held;
-		self.unsure.keys = (self.unsure.keys | !self.held.keys) & down.keys;
-		self.unsure.buttons = (self.unsure.buttons | !self.held.buttons) & down.buttons;
-		self.held = down;
+		self.held = down.held;
+		self.unsure = down.held;
 	}
 
 	/// The holds a release plan for `open` trusts: an unsure hold of an input
@@ -793,5 +793,18 @@ mod tests {
 		observation.holds().resync(holding(&[Input::Key(OPTION)]));
 		observation.holds().posted_release(Input::Key(OPTION));
 		assert!(!observation.settle(&[]).has(Input::Key(OPTION)));
+		// The user held A when the tap stopped, let go of it unseen, and this
+		// request pressed A: still down, it is the request's press to release.
+		let open = [press(3, Route::Hid, Input::Key(A))];
+		let observation = Observation::default();
+		observation.holds().set(Input::Key(A), true);
+		observation.holds().resync(holding(&[Input::Key(A)]));
+		assert_eq!(plan(&open, observation.settle(&open)), [Step::Post { id: 3, flags: Some(0) }]);
+		// A hold that is still down with no press of this request on it stays
+		// the user's.
+		let observation = Observation::default();
+		observation.holds().set(Input::Key(A), true);
+		observation.holds().resync(holding(&[Input::Key(A)]));
+		assert!(observation.settle(&[]).has(Input::Key(A)));
 	}
 }
