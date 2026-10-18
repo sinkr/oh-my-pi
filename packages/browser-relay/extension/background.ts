@@ -41,6 +41,46 @@ async function ensureInstanceId(): Promise<string> {
 	return instanceId;
 }
 
+/**
+ * A random id for this browser session, kept in `chrome.storage.session`, which Chrome clears when the browser
+ * exits. Chrome reuses tab ids after a restart, so a close the relay saved for later applies only while this
+ * id is unchanged.
+ */
+async function ensureBrowserSession(): Promise<string> {
+	const key = "relayBrowserSession";
+	const stored = await chrome.storage.session.get({ [key]: "" });
+	const existing = stored[key];
+	if (typeof existing === "string" && existing.length > 0) return existing;
+	const created = crypto.randomUUID();
+	await chrome.storage.session.set({ [key]: created });
+	return created;
+}
+
+const ORPHAN_TABS_KEY = "relayOrphanTabs";
+/** Serializes orphan-tab bookkeeping, so a retry pass and a new orphan do not overwrite each other's list. */
+let orphanTabs: Promise<void> = Promise.resolve();
+
+/**
+ * Close tabs created for RPCs whose relay connection was gone. One Chrome will not close yet is kept in
+ * `chrome.storage.session`, which outlives a service-worker restart, and tried again on the next connect and
+ * keepalive; `added` joins the list first.
+ */
+function closeOrphanTabs(added?: number): Promise<void> {
+	orphanTabs = orphanTabs
+		.then(async () => {
+			const stored = await chrome.storage.session.get({ [ORPHAN_TABS_KEY]: [] });
+			const listed = stored[ORPHAN_TABS_KEY];
+			const ids = Array.isArray(listed) ? listed.filter(id => typeof id === "number") : [];
+			if (added !== undefined) ids.push(added);
+			if (ids.length === 0) return;
+			const left: number[] = [];
+			for (const id of ids) await removeTab(id).catch(() => left.push(id));
+			await chrome.storage.session.set({ [ORPHAN_TABS_KEY]: left });
+		})
+		.catch(() => {});
+	return orphanTabs;
+}
+
 interface RelaySettings {
 	port: number;
 	token: string;
@@ -163,7 +203,7 @@ function post(msg: ExtToRelayMessage): void {
 		rpcOrigins.delete(msg.id);
 		if (origin && (origin.socket !== ws || origin.socket.readyState !== WebSocket.OPEN)) {
 			if (origin.op === "createTab" && msg.ok && isCreatedTab(msg.result)) {
-				void removeTab(msg.result.tab.tabId).catch(() => {});
+				void closeOrphanTabs(msg.result.tab.tabId);
 			}
 			return;
 		}
@@ -212,6 +252,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 	return {
 		t: "hello",
 		instanceId: await ensureInstanceId(),
+		browserSession: await ensureBrowserSession(),
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
@@ -294,6 +335,7 @@ async function connect(): Promise<void> {
 	socket.onopen = () => {
 		reconnectDelay = RECONNECT_MIN_MS;
 		void setBadge(true);
+		void closeOrphanTabs();
 		void buildHello().then(hello => post(hello));
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
@@ -357,7 +399,9 @@ chrome.tabs.onRemoved.addListener(tabId => {
 
 chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(alarm => {
-	if (alarm.name === "omp-relay-keepalive") void connect();
+	if (alarm.name !== "omp-relay-keepalive") return;
+	void connect();
+	void closeOrphanTabs();
 });
 
 chrome.storage.onChanged.addListener((_changes, areaName) => {

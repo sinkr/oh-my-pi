@@ -119,6 +119,8 @@ interface ExtInstance {
 	code: string;
 	/** When its socket closed; unset while connected. */
 	offlineSince?: number;
+	/** The browser session its last hello named (see the hello's `browserSession`). */
+	browserSession?: string;
 	socket: RelaySocket | null;
 	info: { userAgent: string; browserVersion: string; discardedTabsProtocol?: number } | null;
 }
@@ -246,6 +248,18 @@ const CHROME_DETACH_REPORT_MS = 1_000;
  */
 const OFFLINE_BROWSER_HOLD_MS = 60_000;
 
+/** A tab close waiting for its browser's extension, for the browser session it was meant for. */
+export interface RelayPendingClose {
+	key: string;
+	browserSession: string;
+}
+
+/** Where {@link RelayBridge.keepPendingClosesIn} keeps pending closes between relay processes. */
+export interface RelayPendingCloseStore {
+	load(): RelayPendingClose[];
+	save(closes: RelayPendingClose[]): void;
+}
+
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
  * relay extension. One instance per relay server; all state lives here so an
@@ -270,8 +284,13 @@ export class RelayBridge {
 	#extensionSeen = false;
 	/** Instance ids by hello, the most recent last. */
 	#helloOrder = new Set<string>();
-	/** Keys of tabs omp opened whose close failed (see {@link #closeTab}): closed at their browser's next hello. */
-	#closeOnHello = new Set<string>();
+	/**
+	 * Tabs omp opened whose close failed (see {@link #closeTab}), by tab key, with the browser session the close was
+	 * meant for: closed at their browser's next hello in that session.
+	 */
+	#closeOnHello = new Map<string, string | undefined>();
+	/** Where pending closes outlive this relay process; see {@link keepPendingClosesIn}. */
+	#pendingCloseStore: RelayPendingCloseStore | null = null;
 	/** `Date.now()` when the last ready extension socket closed; null while one is ready or none ever was. */
 	#extensionGoneSince: number | null = null;
 	#pendingRpc = new Map<
@@ -545,6 +564,7 @@ export class RelayBridge {
 		}
 		inst.socket = socket;
 		inst.offlineSince = undefined;
+		inst.browserSession = msg.browserSession;
 		this.#socketInstance.set(socket, instanceId);
 		inst.info = {
 			userAgent: msg.userAgent,
@@ -568,13 +588,16 @@ export class RelayBridge {
 		}
 		this.#helloOrder.delete(instanceId);
 		this.#helloOrder.add(instanceId);
-		// Close the tabs whose close failed while this browser was offline; one the user closed meanwhile is gone already.
-		for (const key of this.#closeOnHello) {
+		// Close the tabs whose close failed while this browser was offline, unless Chrome restarted since (it reuses
+		// tab ids) or the user closed them meanwhile.
+		for (const [key, session] of this.#closeOnHello) {
 			if (!key.startsWith(`${inst.code}:`)) continue;
 			this.#closeOnHello.delete(key);
+			if (session !== undefined && session !== msg.browserSession) continue;
 			const closed = this.#tabs.get(key);
 			if (closed) void this.#closeTab(key, closed.tabId, inst).catch(() => undefined);
 		}
+		this.#savePendingCloses();
 		for (const tab of this.#tabs.values()) {
 			if (tab.instanceId !== instanceId) continue;
 			const wasAttached = tab.attached;
@@ -1794,8 +1817,32 @@ export class RelayBridge {
 		} catch (err) {
 			// The tab stays open, so a later detach is Chrome's own again.
 			if (tab) tab.closing = false;
-			this.#closeOnHello.add(key);
+			this.#closeOnHello.set(key, inst.browserSession);
+			this.#savePendingCloses();
 			throw err;
 		}
+	}
+
+	/**
+	 * Keep pending closes in `store`, so a close waiting for an offline browser survives this relay process: the
+	 * broker stops an idle relay seconds after its last client exits, sooner than an extension may reconnect.
+	 * Loads what an earlier relay saved. Only closes tied to a browser session are kept, since a tab id alone could
+	 * name another tab after Chrome restarts.
+	 */
+	keepPendingClosesIn(store: RelayPendingCloseStore): void {
+		this.#pendingCloseStore = store;
+		for (const { key, browserSession } of store.load()) {
+			if (!this.#closeOnHello.has(key)) this.#closeOnHello.set(key, browserSession);
+		}
+	}
+
+	#savePendingCloses(): void {
+		const store = this.#pendingCloseStore;
+		if (!store) return;
+		const kept: RelayPendingClose[] = [];
+		for (const [key, browserSession] of this.#closeOnHello) {
+			if (browserSession !== undefined) kept.push({ key, browserSession });
+		}
+		store.save(kept);
 	}
 }

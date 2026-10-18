@@ -35,6 +35,34 @@ async function ensureInstanceId() {
   await chrome.storage.local.set({ [key]: instanceId });
   return instanceId;
 }
+async function ensureBrowserSession() {
+  const key = "relayBrowserSession";
+  const stored = await chrome.storage.session.get({ [key]: "" });
+  const existing = stored[key];
+  if (typeof existing === "string" && existing.length > 0)
+    return existing;
+  const created = crypto.randomUUID();
+  await chrome.storage.session.set({ [key]: created });
+  return created;
+}
+var ORPHAN_TABS_KEY = "relayOrphanTabs";
+var orphanTabs = Promise.resolve();
+function closeOrphanTabs(added) {
+  orphanTabs = orphanTabs.then(async () => {
+    const stored = await chrome.storage.session.get({ [ORPHAN_TABS_KEY]: [] });
+    const listed = stored[ORPHAN_TABS_KEY];
+    const ids = Array.isArray(listed) ? listed.filter((id) => typeof id === "number") : [];
+    if (added !== undefined)
+      ids.push(added);
+    if (ids.length === 0)
+      return;
+    const left = [];
+    for (const id of ids)
+      await removeTab(id).catch(() => left.push(id));
+    await chrome.storage.session.set({ [ORPHAN_TABS_KEY]: left });
+  }).catch(() => {});
+  return orphanTabs;
+}
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
   const port = Number(stored.port);
@@ -130,7 +158,7 @@ function post(msg) {
     rpcOrigins.delete(msg.id);
     if (origin && (origin.socket !== ws || origin.socket.readyState !== WebSocket.OPEN)) {
       if (origin.op === "createTab" && msg.ok && isCreatedTab(msg.result)) {
-        removeTab(msg.result.tab.tabId).catch(() => {});
+        closeOrphanTabs(msg.result.tab.tabId);
       }
       return;
     }
@@ -173,6 +201,7 @@ async function buildHello() {
   return {
     t: "hello",
     instanceId: await ensureInstanceId(),
+    browserSession: await ensureBrowserSession(),
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     discardedTabsProtocol: 1,
@@ -247,6 +276,7 @@ async function connect() {
   socket.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
+    closeOrphanTabs();
     buildHello().then((hello) => post(hello));
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
@@ -304,8 +334,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "omp-relay-keepalive")
-    connect();
+  if (alarm.name !== "omp-relay-keepalive")
+    return;
+  connect();
+  closeOrphanTabs();
 });
 chrome.storage.onChanged.addListener((_changes, areaName) => {
   if (areaName !== "local")

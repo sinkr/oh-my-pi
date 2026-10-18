@@ -1,7 +1,11 @@
 import { describe, expect, it, jest, setSystemTime } from "bun:test";
 import { createHash } from "node:crypto";
 import { closeRelayTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
-import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
+import {
+	RelayBridge,
+	type RelayPendingClose,
+	type RelaySocket,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
 import type {
 	RelayRpcRequest,
 	RelayToExtMessage,
@@ -1645,6 +1649,69 @@ describe("closeRelayTarget", () => {
 		const bridge = new RelayBridge({});
 		connectInstance(bridge, new FakeExtSocket(), "chrome", [tab({ tabId: 7 })]);
 		expect(await closeRelayTarget(channel(bridge), `PAGE${instanceCode("chrome")}.8`)).toBeTrue();
+	});
+});
+
+describe("RelayBridge pending closes across relay processes", () => {
+	/** An extension hello in browser session `browserSession`. */
+	function helloIn(bridge: RelayBridge, socket: FakeExtSocket, browserSession: string, tabs: TabSnapshot[]): void {
+		bridge.extConnected(socket);
+		bridge.extMessage(
+			socket,
+			JSON.stringify({
+				t: "hello",
+				instanceId: "chrome",
+				browserSession,
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				discardedTabsProtocol: 1,
+				tabs,
+				attachedTabIds: [],
+			}),
+		);
+	}
+
+	/** A relay that closes tab 7 while its browser is offline, then stops; returns what it kept. */
+	async function closeWhileOffline(): Promise<RelayPendingClose[]> {
+		let kept: RelayPendingClose[] = [];
+		const bridge = new RelayBridge({});
+		bridge.keepPendingClosesIn({ load: () => [], save: closes => (kept = closes) });
+		const chrome = new FakeExtSocket();
+		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
+		bridge.extClosed(chrome);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.closeTarget",
+				params: { targetId: `PAGE${instanceCode("chrome")}.7` },
+			}),
+		);
+		await flush();
+		return kept;
+	}
+
+	it("closes a tab an earlier relay could not, once the browser reconnects in the same session", async () => {
+		const kept = await closeWhileOffline();
+		expect(kept).toEqual([{ key: `${instanceCode("chrome")}:7`, browserSession: "session-1" }]);
+		// A new relay process loads what the stopped one kept.
+		const bridge = new RelayBridge({});
+		bridge.keepPendingClosesIn({ load: () => kept, save: () => {} });
+		const chrome = new FakeExtSocket();
+		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
+		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
+	});
+
+	it("drops a kept close once Chrome restarted, since tab 7 may now be another tab", async () => {
+		const kept = await closeWhileOffline();
+		let left: RelayPendingClose[] = kept;
+		const bridge = new RelayBridge({});
+		bridge.keepPendingClosesIn({ load: () => kept, save: closes => (left = closes) });
+		const chrome = new FakeExtSocket();
+		helloIn(bridge, chrome, "session-2", [tab({ tabId: 7 })]);
+		expect(chrome.rpcs("removeTab")).toHaveLength(0);
+		expect(left).toEqual([]);
 	});
 });
 
