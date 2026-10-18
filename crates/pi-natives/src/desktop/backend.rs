@@ -133,6 +133,10 @@ pub struct KeyboardFocus {
 pub enum ElementDelivery {
 	Delivered,
 	/// The element never reported keyboard focus; nothing was sent.
+	#[cfg_attr(
+		not(target_os = "macos"),
+		allow(dead_code, reason = "only macOS reads which element holds keyboard focus")
+	)]
 	Unfocused(KeyboardFocus),
 }
 
