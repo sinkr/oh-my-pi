@@ -42,29 +42,43 @@ async function ensureInstanceId(): Promise<string> {
 }
 
 const BROWSER_SESSION_KEY = "relayBrowserSession";
-/** Set in `chrome.storage.session` once this worker's browser session is settled; cleared with the browser. */
+/** Set in `chrome.storage.session` once this browser session's id is settled; cleared with the browser. */
 const SESSION_SETTLED_KEY = "relayBrowserSessionSettled";
 /**
- * How long a worker without that mark (the browser just started, or this extension was loaded, reloaded, updated
- * or re-enabled) waits for `runtime.onStartup` before keeping the stored id: without a browser start, tab ids hold.
+ * How long a worker without that mark waits for a lifecycle event telling why: `runtime.onStartup` (the browser
+ * started) or `runtime.onInstalled` (this extension was installed, reloaded or updated with the browser running).
  */
 const SESSION_EVENT_WAIT_MS = 2_000;
 const sessionEvent = Promise.withResolvers<void>();
-/** True once the wait above is over, by `runtime.onStartup` or the timeout. */
+/** True once this worker's session id is settled. */
 let sessionDecided = false;
-/** True when this worker created the session id itself (first run): it is new, so a browser start need not replace it. */
+let sawInstalled = false;
+/** True when this worker created the session id (first run): new already, so a late browser start keeps it. */
 let sessionCreatedHere = false;
-function decideSession(): void {
+
+/** Settle the session id, replacing it first when tab ids may have been reused since it was made. */
+async function settleSession(replace: boolean): Promise<void> {
+	if (sessionDecided) return;
+	if (replace) await chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() });
 	sessionDecided = true;
 	sessionEvent.resolve();
 }
-setTimeout(decideSession, SESSION_EVENT_WAIT_MS);
+
+setTimeout(() => {
+	void chrome.storage.session.get({ [SESSION_SETTLED_KEY]: false }).then(
+		settled =>
+			// No mark and no event: re-enabled, possibly after a browser restart it did not see, so tab ids may
+			// name other tabs. A reload or update with the browser running reports `onInstalled`, and keeps the id.
+			settleSession(settled[SESSION_SETTLED_KEY] !== true && !sawInstalled),
+		() => settleSession(true),
+	);
+}, SESSION_EVENT_WAIT_MS);
 
 /**
  * A random id for this browser session. Chrome reuses tab ids after a restart, so the relay scopes target ids and
- * saved closes to it. It lives in `chrome.storage.local`, so reloading or updating the extension keeps it, and is
- * replaced when the browser starts (`runtime.onStartup`); until a fresh worker knows which happened, no hello or
- * orphan close uses it.
+ * saved closes to it. It lives in `chrome.storage.local`, so reloading or updating the extension keeps it; a
+ * browser start replaces it, and so does a re-enable, which cannot tell whether the browser restarted meanwhile.
+ * Until a fresh worker has settled it, no hello or orphan close uses it.
  */
 async function ensureBrowserSession(): Promise<string> {
 	const settled = await chrome.storage.session.get({ [SESSION_SETTLED_KEY]: false });
@@ -501,22 +515,23 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
-// Not a session decision: an install event also comes with a browser start (Chrome or this extension updated).
-chrome.runtime.onInstalled.addListener(() => void connect());
+// Noted, not settling on its own: an install event also comes with a browser start (Chrome or this extension
+// updated), which `onStartup` then reports too.
+chrome.runtime.onInstalled.addListener(() => {
+	sawInstalled = true;
+	void connect();
+});
 chrome.runtime.onStartup.addListener(() => {
 	// The browser just started, so tab ids from before may be reused: take a new session id before any hello uses
-	// one. If the wait for this event already ran out, say hello again with the new id.
-	if (sessionCreatedHere) {
-		decideSession();
+	// one. If the wait for this event already ran out, replace the id and say hello again with it.
+	if (!sessionDecided) {
+		void settleSession(true);
 		return;
 	}
-	const late = sessionDecided;
+	if (sessionCreatedHere) return;
 	void chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() }).then(() => {
-		decideSession();
-		if (late) {
-			ws?.close();
-			void connect();
-		}
+		ws?.close();
+		void connect();
 	});
 });
 

@@ -40,12 +40,19 @@ var SESSION_SETTLED_KEY = "relayBrowserSessionSettled";
 var SESSION_EVENT_WAIT_MS = 2000;
 var sessionEvent = Promise.withResolvers();
 var sessionDecided = false;
+var sawInstalled = false;
 var sessionCreatedHere = false;
-function decideSession() {
+async function settleSession(replace) {
+  if (sessionDecided)
+    return;
+  if (replace)
+    await chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() });
   sessionDecided = true;
   sessionEvent.resolve();
 }
-setTimeout(decideSession, SESSION_EVENT_WAIT_MS);
+setTimeout(() => {
+  chrome.storage.session.get({ [SESSION_SETTLED_KEY]: false }).then((settled) => settleSession(settled[SESSION_SETTLED_KEY] !== true && !sawInstalled), () => settleSession(true));
+}, SESSION_EVENT_WAIT_MS);
 async function ensureBrowserSession() {
   const settled = await chrome.storage.session.get({ [SESSION_SETTLED_KEY]: false });
   if (settled[SESSION_SETTLED_KEY] !== true) {
@@ -390,19 +397,20 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   connect();
 });
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
-chrome.runtime.onInstalled.addListener(() => void connect());
+chrome.runtime.onInstalled.addListener(() => {
+  sawInstalled = true;
+  connect();
+});
 chrome.runtime.onStartup.addListener(() => {
-  if (sessionCreatedHere) {
-    decideSession();
+  if (!sessionDecided) {
+    settleSession(true);
     return;
   }
-  const late = sessionDecided;
+  if (sessionCreatedHere)
+    return;
   chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() }).then(() => {
-    decideSession();
-    if (late) {
-      ws?.close();
-      connect();
-    }
+    ws?.close();
+    connect();
   });
 });
 connect();
