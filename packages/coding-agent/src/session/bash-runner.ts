@@ -2,7 +2,12 @@ import * as path from "node:path";
 import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { type BashPtyOptions, type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
+import {
+	type BashPtyOptions,
+	type BashResult,
+	executeBash as executeBashCommand,
+	releaseShellSessions,
+} from "../exec/bash-executor";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { outputMeta } from "../tools/output-meta";
 import { clampTimeout } from "../tools/tool-timeouts";
@@ -259,6 +264,11 @@ export class BashRunner {
 		transition.newTarget.destination = currentDestination;
 		if (!success) transition.newTarget.sessionId = manager.getSessionId();
 		transition.resolveNew(currentDestination);
+		// The left session's persistent shells are unreachable under the new id; drop
+		// them as dispose does, rather than holding each one until process exit.
+		if (success && transition.oldSessionId !== manager.getSessionId()) {
+			releaseShellSessions(transition.oldSessionId);
+		}
 		if (transition.detachedManager && (oldDestination.kind !== "detached" || transition.oldTarget.refs === 0)) {
 			void transition.detachedManager.close().catch(error => {
 				logger.warn("Failed to close detached bash session writer", { error: String(error) });

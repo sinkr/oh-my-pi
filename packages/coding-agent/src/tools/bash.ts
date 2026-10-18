@@ -429,6 +429,8 @@ interface ManagedBashJobHandle {
 	jobId: string;
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
+	/** Notices for this call's results, including one added once the run starts (temporary shell). */
+	notices: readonly string[];
 	/** Hand the call's card to the job: later frames carry `details.async` and the last one settles it. */
 	background: () => void;
 }
@@ -848,6 +850,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		let latestProgressDetails: BashProgressDetails | undefined;
 		let backgrounded = !options.foreground;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
+		const notices = [...(options.notices ?? [])];
 
 		const jobId = manager.register(
 			"bash",
@@ -869,7 +872,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				};
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const wallTimeStart = performance.now();
-				const notices = [...(options.notices ?? [])];
 				try {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
@@ -950,6 +952,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			jobId,
 			completion: completion.promise,
 			getLatestText: () => latestText,
+			notices,
 			background: () => {
 				backgrounded = true;
 			},
@@ -1229,10 +1232,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			autoBgManager.backgroundJob(job.jobId);
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
+			// `job.notices` also carries the temporary-shell notice once the run started.
 			const notices =
 				waitResult.kind === "steer"
-					? [...pendingNotices, "Backgrounded early to handle an incoming message; the command keeps running."]
-					: pendingNotices;
+					? [...job.notices, "Backgrounded early to handle an incoming message; the command keeps running."]
+					: job.notices;
 			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
 				requestedTimeoutSec,
 				notices,
