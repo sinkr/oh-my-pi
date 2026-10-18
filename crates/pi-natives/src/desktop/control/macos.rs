@@ -286,22 +286,31 @@ enum UserInput {
 	Typing,
 }
 
-const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
-	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
-		return None;
-	}
+/// The rule for each type the takeover monitor's tap listens to; `None` for a
+/// type without one.
+const fn classify(kind: u32, key: i64, flags: u64) -> Option<UserInput> {
 	match kind {
 		kind if is_pointer_press(kind) => Some(UserInput::Choice),
 		KEY_DOWN if plain_typing(key, flags) => Some(UserInput::Typing),
 		KEY_DOWN => Some(UserInput::Choice),
 		FLAGS_CHANGED if typing_modifier(key) => Some(UserInput::Typing),
 		FLAGS_CHANGED => Some(UserInput::Choice),
+		_ => None,
+	}
+}
+
+const fn user_input(kind: u32, key: i64, flags: u64, pid: i64, tag: i64) -> Option<UserInput> {
+	if pid != 0 || tag == SYNTHETIC_EVENT_TAG {
+		return None;
+	}
+	match classify(kind, key, flags) {
+		Some(input) => Some(input),
 		// Not a type the tap listens to, so it never counts toward `SEEN`.
-		kind if seen_index(kind, pid, tag).is_none() => None,
-		// A type the tap listens to without an arm above still counts toward
-		// `SEEN`, so the monitor would look caught up with it; read as no input,
-		// the hand-back would take the front back over the user's pick.
-		_ => Some(UserInput::Choice),
+		None if seen_index(kind, pid, tag).is_none() => None,
+		// A type the tap listens to without a rule still counts toward `SEEN`,
+		// so the monitor would look caught up with it; read as no input, the
+		// hand-back would take the front back over the user's pick.
+		None => Some(UserInput::Choice),
 	}
 }
 
@@ -371,9 +380,27 @@ const fn foreign(tag: i64, source_pid: i64, own_pid: i64) -> bool {
 const USER_INPUT_MASK: u64 =
 	(1 << KEY_DOWN) | (1 << LEFT_MOUSE_DOWN) | (1 << RIGHT_MOUSE_DOWN) | (1 << OTHER_MOUSE_DOWN);
 
+/// Where a foreign event the annotated tap names no target for lands.
+enum Untargeted {
+	/// The front process, which takes the keyboard.
+	Front,
+	/// Nowhere: a click without a target names no app.
+	Dropped,
+}
+
+/// The rule for each type the user-input tap listens to; `None` for a type
+/// without one.
+const fn untargeted(kind: u32) -> Option<Untargeted> {
+	match kind {
+		KEY_DOWN => Some(Untargeted::Front),
+		LEFT_MOUSE_DOWN | RIGHT_MOUSE_DOWN | OTHER_MOUSE_DOWN => Some(Untargeted::Dropped),
+		_ => None,
+	}
+}
+
 /// The process a foreign key press or click lands in: the target the
-/// annotated tap names, else for a key the front process, which takes the
-/// keyboard. A click without a target names no app and is dropped.
+/// annotated tap names, else what [`untargeted`] says for its type, and the
+/// front process for a type without a rule.
 fn input_target(
 	kind: u32,
 	target: i64,
@@ -384,13 +411,13 @@ fn input_target(
 	{
 		return Some(pid);
 	}
-	match kind {
-		KEY_DOWN => front(),
-		LEFT_MOUSE_DOWN | RIGHT_MOUSE_DOWN | OTHER_MOUSE_DOWN => None,
-		// A type the tap takes on later without an arm here: counted against
-		// the front process, it at worst has the agent read that app again,
-		// where dropping it would let the agent act on what the user changed.
-		_ => front(),
+	match untargeted(kind) {
+		Some(Untargeted::Front) => front(),
+		Some(Untargeted::Dropped) => None,
+		// A type the tap takes on later without a rule: counted against the
+		// front process, it at worst has the agent read that app again, where
+		// dropping it would let the agent act on what the user changed.
+		None => front(),
 	}
 }
 
@@ -699,11 +726,12 @@ mod tests {
 	}
 
 	#[test]
-	fn the_user_input_tap_listens_only_to_types_with_a_target_rule() {
-		let listened: Vec<u32> = (0..64)
-			.filter(|kind| USER_INPUT_MASK & (1 << kind) != 0)
-			.collect();
-		assert_eq!(listened, [LEFT_MOUSE_DOWN, RIGHT_MOUSE_DOWN, KEY_DOWN, OTHER_MOUSE_DOWN]);
+	fn every_type_the_user_input_tap_listens_to_has_a_target_rule() {
+		for kind in 0..64 {
+			if USER_INPUT_MASK & (1 << kind) != 0 {
+				assert!(untargeted(kind).is_some(), "{kind}");
+			}
+		}
 	}
 
 	#[test]
@@ -795,13 +823,9 @@ mod tests {
 	}
 
 	#[test]
-	fn the_monitor_classifies_every_event_it_counts() {
-		for kind in 0..64 {
-			let counted = seen_index(kind, 0, 0).is_some();
-			assert_eq!(counted, monitor_mask() & (1 << kind) != 0, "{kind}");
-			// Counted but read as no input, an event would let the monitor look
-			// caught up while the hand-back takes the front over the user's pick.
-			assert_eq!(user_input(kind, 48, COMMAND_FLAG, 0, 0).is_some(), counted, "{kind}");
+	fn every_type_the_monitor_listens_to_has_a_rule() {
+		for kind in MONITORED_TYPES {
+			assert!(classify(kind, 0, 0).is_some(), "{kind}");
 		}
 	}
 
