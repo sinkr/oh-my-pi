@@ -2548,6 +2548,34 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
+	it("reports a stop that lands while a capabilities request is in flight", async () => {
+		let stops = 0;
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => {
+				const worker = new SupervisorWorker(true);
+				return {
+					send: message => {
+						worker.send(message);
+						// Held control keeps the monitor armed between runs; the worker's capabilities reply cannot see it.
+						if (message.type === "capabilities") stops += 1;
+					},
+					onMessage: handler => worker.onMessage(handler),
+					onError: handler => worker.onError(handler),
+					terminate: () => worker.terminate(),
+				};
+			},
+			{ startMs: 200, closeMs: 200 },
+			undefined,
+			{ read: () => stops, forget: () => {} },
+		);
+		try {
+			await expect(supervisor.capabilities(snapshot(true))).rejects.toThrow("the user pressed Escape");
+		} finally {
+			await supervisor.close();
+		}
+	});
+
 	it("keeps the worker's own error ahead of the stop it reports", async () => {
 		let stops = 0;
 		const partial = "type: 3 of 10 characters were sent before the input was cancelled";

@@ -228,7 +228,14 @@ export class ComputerSupervisor implements ComputerController {
 		else signal?.addEventListener("abort", abort, { once: true });
 		try {
 			this.#safeSend({ type: "capabilities", id, session: snapshot, escape: this.#escapeScope() });
-			return await withTimeout(promise, CAPABILITIES_TIMEOUT_MS, "Timed out fetching computer capabilities");
+			const capabilities = await withTimeout(
+				promise,
+				CAPABILITIES_TIMEOUT_MS,
+				"Timed out fetching computer capabilities",
+			);
+			// The worker checks for the user's Escape only during runs, so a stop while this was in flight is read here.
+			if (this.#escapeStopped()) throw new ToolError(ESCAPE_REFUSED_MESSAGE);
+			return capabilities;
 		} finally {
 			signal?.removeEventListener("abort", abort);
 			this.#pendingCapabilities.delete(id);
