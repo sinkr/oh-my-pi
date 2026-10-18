@@ -197,6 +197,10 @@
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 
+### Fixed
+
+- Fixed `omp auth-broker serve` token refreshes that hang continuing past the refresh deadline and keeping other refreshes of that credential waiting: the deadline now cancels the token request
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
@@ -226,7 +230,6 @@
 
 ### Fixed
 
-- Fixed `omp auth-broker serve` token refreshes that hang continuing past the refresh deadline and keeping other refreshes of that credential waiting: the deadline now cancels the token request
 - Fixed repeated status commands such as `/goal show` showing nothing after the first few times in a native terminal when the text had not changed
 - Fixed browser relay tabs that a browser already had open when its extension connected staying invisible to omp until they changed; opening such a tab by `app.target` could fail with "Selected tab did not become available before omp could attach"
 - Fixed Ollama Cloud sessions compacting too early on stripped thinking or too late after switching from another model ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
