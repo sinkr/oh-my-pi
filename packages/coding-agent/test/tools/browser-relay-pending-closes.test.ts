@@ -4,8 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileCloseStore } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/pending-closes";
 
-const first = { key: "AAAA:7", browserSession: "session-1" };
-const second = { key: "AAAA:8", browserSession: "session-1" };
+const first = { key: "AAAA:7", instanceId: "chrome" };
+const second = { key: "AAAA:8", instanceId: "chrome" };
 
 describe("relay pending-close file", () => {
 	let dir = "";

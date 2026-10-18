@@ -119,15 +119,19 @@ interface ExtInstance {
 	code: string;
 	/** When its socket closed; unset while connected. */
 	offlineSince?: number;
-	/** The browser session its last hello named (see the hello's `browserSession`). */
+	/** The browser session its last hello named (see the hello's `browserSession`); unset for older extensions. */
 	browserSession?: string;
 	socket: RelaySocket | null;
 	info: { userAgent: string; browserVersion: string; discardedTabsProtocol?: number } | null;
 }
 
-/** Deterministic per-instance code for target ids: stable across relay restarts. */
-function instanceCode(instanceId: string): string {
-	return createHash("sha256").update(instanceId).digest("base64url").slice(0, 8);
+/**
+ * Deterministic per-instance code for target ids: stable across relay restarts and, with an extension that names
+ * its browser session, scoped to that session, so a tab id Chrome reuses after a restart gets a new target id.
+ */
+function instanceCode(instanceId: string, browserSession?: string): string {
+	const scope = browserSession === undefined ? instanceId : `${instanceId}\n${browserSession}`;
+	return createHash("sha256").update(scope).digest("base64url").slice(0, 8);
 }
 
 function tabKeyOf(extCode: string, tabId: number): string {
@@ -248,10 +252,13 @@ const CHROME_DETACH_REPORT_MS = 1_000;
  */
 const OFFLINE_BROWSER_HOLD_MS = 60_000;
 
-/** A tab close waiting for its browser's extension, for the browser session it was meant for. */
+/**
+ * A tab close waiting for its browser's extension. The key's instance code names the browser session, so a close
+ * meant for a browser that restarted since is never applied to a tab that reused its id.
+ */
 export interface RelayPendingClose {
 	key: string;
-	browserSession: string;
+	instanceId: string;
 }
 
 /** Where {@link RelayBridge.keepPendingClosesIn} keeps pending closes between relay processes. */
@@ -285,10 +292,10 @@ export class RelayBridge {
 	/** Instance ids by hello, the most recent last. */
 	#helloOrder = new Set<string>();
 	/**
-	 * Tabs omp opened whose close failed (see {@link #closeTab}), by tab key, with the browser session the close was
-	 * meant for: closed at their browser's next hello in that session.
+	 * Tabs omp opened whose close failed (see {@link #closeTab}), by tab key: closed at their browser's next hello
+	 * unless that browser restarted since. `durable` closes (from an extension naming its session) are saved.
 	 */
-	#closeOnHello = new Map<string, string | undefined>();
+	#closeOnHello = new Map<string, { instanceId: string; durable: boolean }>();
 	/** Where pending closes outlive this relay process; see {@link keepPendingClosesIn}. */
 	#pendingCloseStore: RelayPendingCloseStore | null = null;
 	/** `Date.now()` when the last ready extension socket closed; null while one is ready or none ever was. */
@@ -546,10 +553,22 @@ export class RelayBridge {
 		// Hellos without an instance id (legacy extension builds) share one anon
 		// instance and keep the historical latest-wins replacement semantics.
 		const instanceId = typeof msg.instanceId === "string" && msg.instanceId.length > 0 ? msg.instanceId : "anon";
+		const code = instanceCode(instanceId, msg.browserSession);
 		let inst = this.#instances.get(instanceId);
 		if (!inst) {
 			inst = { instanceId, code: instanceCode(instanceId), socket: null, info: null };
 			this.#instances.set(instanceId, inst);
+		} else if (inst.code !== code) {
+			// A new browser session (Chrome restarted, so tab ids may name other tabs now): retire every target of
+			// the old one, so no client keeps driving or closing a tab by a reused id.
+			for (const [key, tab] of this.#tabs) {
+				if (tab.instanceId === instanceId) this.#onTabRemoved(key);
+			}
+			this.#rejectPendingExtensionRpcs(instanceId, new ExtensionReplacedError());
+			if (inst.socket && inst.socket !== socket) {
+				this.#socketInstance.delete(inst.socket);
+				inst.socket.close();
+			}
 		} else if (inst.socket && inst.socket !== socket) {
 			// Same browser reconnected (service-worker restart): retire the old
 			// socket. Debugger-derived state dies with the old attachment, so
@@ -562,6 +581,7 @@ export class RelayBridge {
 			this.#socketInstance.delete(inst.socket);
 			inst.socket.close();
 		}
+		inst.code = code;
 		inst.socket = socket;
 		inst.offlineSince = undefined;
 		inst.browserSession = msg.browserSession;
@@ -588,13 +608,14 @@ export class RelayBridge {
 		}
 		this.#helloOrder.delete(instanceId);
 		this.#helloOrder.add(instanceId);
-		// Close the tabs whose close failed while this browser was offline, unless Chrome restarted since (it reuses
-		// tab ids) or the user closed them meanwhile. One being retried stays queued until the extension confirms it.
+		// Close the tabs whose close failed while this browser was offline, unless it restarted since (a key of an
+		// older session) or the user closed them meanwhile. One being retried stays queued until the extension
+		// confirms it.
 		let dropped = false;
-		for (const [key, session] of this.#closeOnHello) {
-			if (!key.startsWith(`${inst.code}:`)) continue;
+		for (const [key, pending] of this.#closeOnHello) {
+			if (pending.instanceId !== instanceId) continue;
 			const closed = this.#tabs.get(key);
-			if (!closed || (session !== undefined && session !== msg.browserSession)) {
+			if (!closed || !key.startsWith(`${inst.code}:`)) {
 				this.#closeOnHello.delete(key);
 				dropped = true;
 				continue;
@@ -1821,7 +1842,7 @@ export class RelayBridge {
 		} catch (err) {
 			// The tab stays open, so a later detach is Chrome's own again.
 			if (tab) tab.closing = false;
-			this.#closeOnHello.set(key, inst.browserSession);
+			this.#closeOnHello.set(key, { instanceId: inst.instanceId, durable: inst.browserSession !== undefined });
 			this.#savePendingCloses();
 			throw err;
 		}
@@ -1831,13 +1852,13 @@ export class RelayBridge {
 	/**
 	 * Keep pending closes in `store`, so a close waiting for an offline browser survives this relay process: the
 	 * broker stops an idle relay seconds after its last client exits, sooner than an extension may reconnect.
-	 * Loads what an earlier relay saved. Only closes tied to a browser session are kept, since a tab id alone could
+	 * Loads what an earlier relay saved. Only closes keyed to a browser session are kept, since a tab id alone could
 	 * name another tab after Chrome restarts.
 	 */
 	keepPendingClosesIn(store: RelayPendingCloseStore): void {
 		this.#pendingCloseStore = store;
-		for (const { key, browserSession } of store.load()) {
-			if (!this.#closeOnHello.has(key)) this.#closeOnHello.set(key, browserSession);
+		for (const { key, instanceId } of store.load()) {
+			if (!this.#closeOnHello.has(key)) this.#closeOnHello.set(key, { instanceId, durable: true });
 		}
 	}
 
@@ -1845,8 +1866,8 @@ export class RelayBridge {
 		const store = this.#pendingCloseStore;
 		if (!store) return;
 		const kept: RelayPendingClose[] = [];
-		for (const [key, browserSession] of this.#closeOnHello) {
-			if (browserSession !== undefined) kept.push({ key, browserSession });
+		for (const [key, { instanceId, durable }] of this.#closeOnHello) {
+			if (durable) kept.push({ key, instanceId });
 		}
 		store.save(kept);
 	}

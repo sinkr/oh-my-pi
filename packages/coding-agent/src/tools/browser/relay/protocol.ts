@@ -46,8 +46,9 @@ export type ExtToRelayMessage =
 	| {
 			t: "hello";
 			/**
-			 * Random per browser session (Chrome clears it on exit). Chrome reuses tab ids after a restart, so the relay
-			 * applies a tab close it saved for later only while this is unchanged. Absent in older extensions.
+			 * Random per browser session: kept across extension reloads, replaced when the browser starts. Chrome
+			 * reuses tab ids after a restart, so the relay scopes target ids and saved tab closes to it. Absent in
+			 * older extensions.
 			 */
 			browserSession?: string;
 			userAgent: string;

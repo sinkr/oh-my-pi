@@ -35,14 +35,14 @@ async function ensureInstanceId() {
   await chrome.storage.local.set({ [key]: instanceId });
   return instanceId;
 }
+var BROWSER_SESSION_KEY = "relayBrowserSession";
 async function ensureBrowserSession() {
-  const key = "relayBrowserSession";
-  const stored = await chrome.storage.session.get({ [key]: "" });
-  const existing = stored[key];
+  const stored = await chrome.storage.local.get({ [BROWSER_SESSION_KEY]: "" });
+  const existing = stored[BROWSER_SESSION_KEY];
   if (typeof existing === "string" && existing.length > 0)
     return existing;
   const created = crypto.randomUUID();
-  await chrome.storage.session.set({ [key]: created });
+  await chrome.storage.local.set({ [BROWSER_SESSION_KEY]: created });
   return created;
 }
 var ORPHAN_TABS_KEY = "relayOrphanTabs";
@@ -346,13 +346,20 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   connect();
   closeOrphanTabs();
 });
-chrome.storage.onChanged.addListener((_changes, areaName) => {
+chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local")
+    return;
+  if (Object.keys(changes).every((key) => key === BROWSER_SESSION_KEY))
     return;
   ws?.close();
   connect();
 });
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
 chrome.runtime.onInstalled.addListener(() => void connect());
-chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onStartup.addListener(() => {
+  chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() }).then(() => {
+    ws?.close();
+    connect();
+  });
+});
 connect();

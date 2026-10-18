@@ -41,18 +41,19 @@ async function ensureInstanceId(): Promise<string> {
 	return instanceId;
 }
 
+const BROWSER_SESSION_KEY = "relayBrowserSession";
+
 /**
- * A random id for this browser session, kept in `chrome.storage.session`, which Chrome clears when the browser
- * exits. Chrome reuses tab ids after a restart, so a close the relay saved for later applies only while this
- * id is unchanged.
+ * A random id for this browser session. Chrome reuses tab ids after a restart, so the relay scopes target ids and
+ * saved closes to it. It lives in `chrome.storage.local`, so reloading or updating the extension keeps it, and is
+ * replaced when the browser starts (`runtime.onStartup`).
  */
 async function ensureBrowserSession(): Promise<string> {
-	const key = "relayBrowserSession";
-	const stored = await chrome.storage.session.get({ [key]: "" });
-	const existing = stored[key];
+	const stored = await chrome.storage.local.get({ [BROWSER_SESSION_KEY]: "" });
+	const existing = stored[BROWSER_SESSION_KEY];
 	if (typeof existing === "string" && existing.length > 0) return existing;
 	const created = crypto.randomUUID();
-	await chrome.storage.session.set({ [key]: created });
+	await chrome.storage.local.set({ [BROWSER_SESSION_KEY]: created });
 	return created;
 }
 
@@ -420,8 +421,9 @@ chrome.alarms.onAlarm.addListener(alarm => {
 	void closeOrphanTabs();
 });
 
-chrome.storage.onChanged.addListener((_changes, areaName) => {
+chrome.storage.onChanged.addListener((changes, areaName) => {
 	if (areaName !== "local") return;
+	if (Object.keys(changes).every(key => key === BROWSER_SESSION_KEY)) return;
 	// Settings changed: drop the current connection and re-dial with new ones.
 	ws?.close();
 	void connect();
@@ -429,6 +431,13 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
 
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
 chrome.runtime.onInstalled.addListener(() => void connect());
-chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onStartup.addListener(() => {
+	// The browser just started, so tab ids from before may be reused: take a new session id and say hello again
+	// with it, replacing a hello already sent with the old one.
+	void chrome.storage.local.set({ [BROWSER_SESSION_KEY]: crypto.randomUUID() }).then(() => {
+		ws?.close();
+		void connect();
+	});
+});
 
 void connect();

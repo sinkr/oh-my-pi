@@ -14,8 +14,9 @@ import type {
 import type { CDPSession } from "puppeteer-core";
 
 /** Same derivation as the bridge: target ids embed this per-instance code. */
-function instanceCode(instanceId: string): string {
-	return createHash("sha256").update(instanceId).digest("base64url").slice(0, 8);
+function instanceCode(instanceId: string, browserSession?: string): string {
+	const scope = browserSession === undefined ? instanceId : `${instanceId}\n${browserSession}`;
+	return createHash("sha256").update(scope).digest("base64url").slice(0, 8);
 }
 
 const ANON = instanceCode("anon");
@@ -1685,7 +1686,7 @@ describe("RelayBridge pending closes across relay processes", () => {
 			JSON.stringify({
 				id: ++msgSeq,
 				method: "Target.closeTarget",
-				params: { targetId: `PAGE${instanceCode("chrome")}.7` },
+				params: { targetId: `PAGE${instanceCode("chrome", "session-1")}.7` },
 			}),
 		);
 		await flush();
@@ -1694,7 +1695,7 @@ describe("RelayBridge pending closes across relay processes", () => {
 
 	it("closes a tab an earlier relay could not once the browser reconnects in the same session, keeping it until confirmed", async () => {
 		const kept = await closeWhileOffline();
-		expect(kept).toEqual([{ key: `${instanceCode("chrome")}:7`, browserSession: "session-1" }]);
+		expect(kept).toEqual([{ key: `${instanceCode("chrome", "session-1")}:7`, instanceId: "chrome" }]);
 		// A new relay process loads what the stopped one kept.
 		let left: RelayPendingClose[] = kept;
 		const bridge = new RelayBridge({});
@@ -1718,6 +1719,46 @@ describe("RelayBridge pending closes across relay processes", () => {
 		helloIn(bridge, chrome, "session-2", [tab({ tabId: 7 })]);
 		expect(chrome.rpcs("removeTab")).toHaveLength(0);
 		expect(left).toEqual([]);
+	});
+
+	it("retires a browser's targets once it restarted, so a reused tab id is not closed by the old target id", async () => {
+		const bridge = new RelayBridge({});
+		const before = new FakeExtSocket();
+		helloIn(bridge, before, "session-1", [tab({ tabId: 7 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.extClosed(before);
+		// Chrome restarted: tab 7 is now a tab the user opened.
+		const after = new FakeExtSocket();
+		helloIn(bridge, after, "session-2", [tab({ tabId: 7 })]);
+		const closeId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: closeId,
+				method: "Target.closeTarget",
+				params: { targetId: `PAGE${instanceCode("chrome", "session-1")}.7` },
+			}),
+		);
+		await flush();
+		expect(after.rpcs("removeTab")).toHaveLength(0);
+		expect(cdp.messages.find(message => message.id === closeId)).toHaveProperty("error");
+		const listId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: listId, method: "Target.getTargets" }));
+		const listed = cdp.messages.find(message => message.id === listId)?.result as {
+			targetInfos: Array<{ targetId: string }>;
+		};
+		expect(listed.targetInfos.map(info => info.targetId)).toEqual([`PAGE${instanceCode("chrome", "session-2")}.7`]);
+	});
+
+	it("keeps a browser's targets and kept closes when only its extension reloaded", async () => {
+		const kept = await closeWhileOffline();
+		const bridge = new RelayBridge({});
+		bridge.keepPendingClosesIn({ load: () => kept, save: () => {} });
+		const chrome = new FakeExtSocket();
+		// The reloaded extension names the same browser session.
+		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7 })]);
+		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
 	});
 });
 
