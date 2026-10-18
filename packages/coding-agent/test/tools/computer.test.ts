@@ -277,6 +277,10 @@ class FakeNativeSession implements NativeDesktopSession {
 class EscapeNativeSession extends FakeNativeSession {
 	escapeOnClick = false;
 	capabilityReads = 0;
+	/** What the stopped click rejects with, as native reports a cancelled operation. */
+	escapeError = "Cancelled: desktop operation cancelled; input may be partial; inspect before retrying";
+	/** Runs as the Escape lands, before the click rejects. */
+	onEscape?: () => void;
 
 	override get capabilities(): DesktopCapabilities {
 		this.capabilityReads += 1;
@@ -290,7 +294,8 @@ class EscapeNativeSession extends FakeNativeSession {
 		if (!this.escapeOnClick) return await super.click(target, x, y, opts);
 		this.escapeOnClick = false;
 		this.escapeStops += 1;
-		throw new Error("Cancelled: desktop operation cancelled; input may be partial; inspect before retrying");
+		this.onEscape?.();
+		throw new Error(this.escapeError);
 	}
 }
 
@@ -2375,6 +2380,55 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
+	it("reports what the stopped operation said, such as a failed restoration, ahead of the stop", async () => {
+		const { native, prelude, context, close } = escapeHarness();
+		try {
+			native.escapeOnClick = true;
+			native.escapeError =
+				"Cancelled: desktop operation cancelled; input may be partial; restoration also failed: key up for shift was not posted; inspect the desktop before retrying";
+			const stopped = prelude.invoke(
+				{ action: "run", code: "await (await desktop.window(42)).click(1, 2)" },
+				context,
+			);
+			await expect(stopped).rejects.toThrow(`restoration also failed: key up for shift was not posted`);
+			await expect(stopped).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+		} finally {
+			await close();
+		}
+	});
+
+	it("still words a run as the user's stop when their next message lifted it while the run ended", async () => {
+		const { native, prelude, ownerId, context, close } = escapeHarness();
+		try {
+			native.escapeOnClick = true;
+			// The user's message lands while the stopped run is still ending, so the host sees no stop pending.
+			native.onEscape = () => resumeComputerUseForOwner(ownerId);
+			await expect(
+				prelude.invoke({ action: "run", code: "await (await desktop.window(42)).click(1, 2)" }, context),
+			).rejects.toThrow(ESCAPE_STOPPED_MESSAGE);
+			await prelude.invoke(CLICK, context);
+			expect(native.clickCount).toBe(1);
+		} finally {
+			await close();
+		}
+	});
+
+	it("answers a capabilities request while a stopped run is still ending, leaving the refusal to the host", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+		const run = runWorker(transport, "stopped-run", "await tool.barrier({})");
+		const call = await transport.waitFor(message => message.type === "tool-call" && message.runId === "stopped-run");
+		// The user's Escape lands while the run waits on its tool; the run is not told until its next check.
+		native.escapeStops = 1;
+		transport.inbound({ type: "capabilities", id: "during-stop", session: snapshot(true), escape: escapeScope() });
+		const reply = await transport.waitFor(message => message.type === "capabilities" && message.id === "during-stop");
+		expect(reply).toMatchObject({ type: "capabilities", ok: true });
+		if (call.type === "tool-call")
+			transport.inbound({ type: "tool-reply", id: call.id, reply: { ok: true, value: null } });
+		await run;
+	});
+
 	it("sends nothing more from a run whose script catches the cancelled operation", async () => {
 		const { native, prelude, context, close } = escapeHarness();
 		try {
@@ -2431,8 +2485,11 @@ describe("expanded computer APIs", () => {
 		});
 		new ComputerWorkerCore(transport, () => new LateEscapeSession());
 		const result = await runWorker(transport, "effect-after-escape", `await desktop.windows(); ${effect} return 1;`);
-		// The worker aborts the run; the host, reading the stop count, words it as ESCAPE_STOPPED_MESSAGE.
-		expect(result.ok ? result.payload.returnValue : result.error).toMatchObject({ isAbort: true });
+		// The worker ends the run with the user's stop, not a bare abort.
+		expect(result.ok ? result.payload.returnValue : result.error).toMatchObject({
+			isAbort: false,
+			message: ESCAPE_STOPPED_MESSAGE,
+		});
 		expect(written).toEqual([]);
 		expect(transport.outbound.filter(message => message.type === "tool-call")).toEqual([]);
 	});

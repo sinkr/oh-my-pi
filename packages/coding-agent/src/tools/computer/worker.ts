@@ -144,6 +144,8 @@ interface ActiveRun {
 	pendingTools: Map<string, PendingTool>;
 	/** The agent turn the run belongs to, if any; a resume while it starts carries it into the turn that went on. */
 	displayTurn?: number;
+	/** The stop the user's Escape set on this run, reported as its result. */
+	escapeStop?: ToolError;
 }
 
 interface ComputerRunContext {
@@ -846,9 +848,9 @@ export class ComputerWorkerCore {
 		}
 	}
 
-	/** Returns the session guarded against the user's Escape; cancel, retire and close use the raw one. */
+	/** Returns the raw session; the desktop scope gets `#guarded`, which checks for the user's Escape on every access. */
 	async #ensureSession(snapshot: ComputerSessionSnapshot, escape: ComputerEscapeScope): Promise<NativeDesktopSession> {
-		if (this.#guarded) return this.#guarded;
+		if (this.#session) return this.#session;
 		// Single-flight: share one creation promise so a run and a capabilities
 		// request racing on a cold worker cannot each build (and leak) a session.
 		this.#sessionInit ??= (async () => {
@@ -861,7 +863,7 @@ export class ComputerWorkerCore {
 				const guarded = this.#guard(session);
 				this.#session = session;
 				this.#guarded = guarded;
-				return guarded;
+				return session;
 			} catch (error) {
 				throw nativeError(error);
 			}
@@ -938,7 +940,8 @@ export class ComputerWorkerCore {
 		let completed = false;
 		try {
 			throwIfAborted(signal);
-			const session = await this.#ensureSession(message.session, message.escape);
+			await this.#ensureSession(message.session, message.escape);
+			const session = this.#guarded!;
 			throwIfAborted(signal);
 			// An Escape after the host's check still ends the run before the script starts.
 			this.#checkEscape();
@@ -965,8 +968,10 @@ export class ComputerWorkerCore {
 			});
 			const { promise: cancelRejection, reject: rejectCancel } = Promise.withResolvers<never>();
 			const onCancel = (): void => {
+				// The user's Escape ends the run with its own message, not as a bare abort, so the host reports it
+				// even when the user's next message already lifted the stop.
 				const abortError =
-					signal.reason instanceof ToolAbortError
+					signal.reason === active.escapeStop || signal.reason instanceof ToolAbortError
 						? signal.reason
 						: new ToolAbortError(undefined, { cause: signal.reason });
 				rejectCancel(
@@ -1043,10 +1048,15 @@ export class ComputerWorkerCore {
 	 * aborted and this access refused, so a script that catches the cancelled
 	 * operation sends nothing more.
 	 */
-	#checkEscape(): void {
+	#checkEscape(cause?: unknown): void {
 		const active = this.#active;
 		if (!active || !this.#session || this.#session.escapeStops <= active.acknowledgedEscapeStops) return;
-		const stopped = new ToolError(ESCAPE_STOPPED_MESSAGE);
+		if (active.escapeStop) throw active.escapeStop;
+		// What the stopped operation reported (a key left held, the user's app not handed back) stays first.
+		const stopped = new ToolError(
+			cause === undefined ? ESCAPE_STOPPED_MESSAGE : `${nativeError(cause).message}\n\n${ESCAPE_STOPPED_MESSAGE}`,
+		);
+		active.escapeStop = stopped;
 		active.ac.abort(stopped);
 		throw stopped;
 	}
@@ -1068,7 +1078,7 @@ export class ComputerWorkerCore {
 							return settled;
 						},
 						error => {
-							this.#checkEscape();
+							this.#checkEscape(error);
 							throw error;
 						},
 					);
