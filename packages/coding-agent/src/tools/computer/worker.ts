@@ -719,6 +719,8 @@ class Win {
 		return {
 			items: async (...path: string[] | [path?: string | string[]]): Promise<MenuItem[]> => {
 				const context = this.#getContext();
+				// On macOS the read makes the window key first, so it is not inspection-only.
+				guardRun(context, "menu.items");
 				// An omitted path, or one passed on as `undefined`, lists the top-level menus.
 				const segments =
 					path.length <= 1 && path[0] === undefined

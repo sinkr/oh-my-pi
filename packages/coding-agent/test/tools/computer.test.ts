@@ -2482,6 +2482,16 @@ describe("expanded computer APIs", () => {
 		expect(readOnly.ok ? undefined : readOnly.error.message).toBe(
 			"read-only run: 'setValue' requires read_only: false",
 		);
+		// A menu read makes its macOS window key, so a read-only run refuses it too.
+		const menuRead = await runWorker(
+			transport,
+			"menu-read-only",
+			"await (await desktop.window(42)).menu.items()",
+			true,
+		);
+		expect(menuRead.ok ? undefined : menuRead.error.message).toBe(
+			"read-only run: 'menu.items' requires read_only: false",
+		);
 		// The JavaScript facade's direct ref call checks the argument before the ref lookup too.
 		const session = toolSession();
 		const prelude = workerPrelude(session, native);
@@ -2624,14 +2634,14 @@ describe("expanded computer APIs", () => {
 			expect(isReadOnlyComputerCall([{ method, args: [] }])).toBe(true);
 		for (const method of ["apps.open", "control.acquire", "control.release", "holdKeys", "holdMouse"])
 			expect(isReadOnlyComputerCall([{ method, args: [] }])).toBe(false);
-		for (const method of ["observe", "menu.items"])
+		for (const method of ["observe"])
 			expect(
 				isReadOnlyComputerCall([
 					{ method: "window", args: [42] },
 					{ method, args: [] },
 				]),
 			).toBe(true);
-		for (const method of ["menu.select", "bringToCurrentSpace", "holdKeys", "holdMouse"])
+		for (const method of ["menu.items", "menu.select", "bringToCurrentSpace", "holdKeys", "holdMouse"])
 			expect(
 				isReadOnlyComputerCall([
 					{ method: "window", args: [42] },
