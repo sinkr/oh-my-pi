@@ -138,37 +138,43 @@ impl MacInput {
 	) -> CoreResult<()> {
 		match target {
 			Target::Desktop | Target::Display(_) => {
-				let keymap = Keymap::current();
-				let keys = typed_keys(text, |character| keymap.as_ref()?.stroke(character), None)?;
-				type_keys(&self.source, &keys, KEY_GAP, post_global)
+				let keys = typed_keys(text, local_strokes(), None)?;
+				type_keys(&self.source, &keys, KEY_GAP, || Ok(()), post_global)
 			},
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
 				let remote = process::remote_screen(pid);
+				let entry_front = EntryFront::now();
+				if mode == DeliveryMode::Background
+					&& inserts_first(text, || {
+						Ok(remote.is_none()
+							&& !process::is_terminal(pid)
+							&& ax::insert_native_text(pid, wid, text, || {
+								entry_front.require_behind(skylight::front_pid(), pid, wid)
+							})?)
+					})? {
+					return Ok(());
+				}
 				// The whole text is mapped before anything is posted, so a
 				// character a remote screen cannot receive refuses cleanly.
-				let keymap = Keymap::current();
-				let keys = typed_keys(text, |character| keymap.as_ref()?.stroke(character), remote)?;
+				let keys = if remote.is_some() {
+					let keymap = Keymap::current()?;
+					typed_keys(text, |character| keymap.as_ref()?.stroke(character), remote)?
+				} else {
+					typed_keys(text, local_strokes(), None)?
+				};
 				let gap = key_gap(remote);
 				match mode {
 					DeliveryMode::Background => {
-						let entry_front = EntryFront::now();
-						let behind_user = || entry_front.require_behind(skylight::front_pid(), pid, wid);
-						let modified = modified_text(&keys);
-						if remote == Some(RemoteScreen::KeyEvents) && !modified.is_empty() {
-							return Err(keyboard_modifiers_refusal(
-								&window,
-								&format!("type {}", modified.join(" ")),
-							));
-						}
-						let inserted = inserts_first(text, || {
-							Ok(remote.is_none()
-								&& !process::is_terminal(pid)
-								&& ax::insert_native_text(pid, wid, text, behind_user)?)
-						})?;
-						if inserted {
-							return Ok(());
+						if remote == Some(RemoteScreen::KeyEvents) {
+							let modified = modified_text(&keys);
+							if !modified.is_empty() {
+								return Err(keyboard_modifiers_refusal(
+									&window,
+									&format!("type {}", modified.join(" ")),
+								));
+							}
 						}
 						with_background_keyboard(
 							&self.source,
@@ -177,8 +183,8 @@ impl MacInput {
 							&window,
 							entry_front,
 							|to, guard| {
-								type_keys(&self.source, &keys, gap, |event| {
-									post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
+								type_keys(&self.source, &keys, gap, guard, |event| {
+									skylight::post_keyboard(to, event)
 								})
 							},
 						)
@@ -187,12 +193,22 @@ impl MacInput {
 						control::wait(first_key_settle(activated))?;
 						if remote.is_some() {
 							// A remote screen may read modifiers from the keyboard
-							// state, which only bare key
-							// transitions at the HID tap move.
-							skylight::require_front_window(pid, wid)?;
-							post_bare_keys(&bare_transitions(&keys), gap)
+							// state, which only bare key transitions at the HID tap
+							// move. They post globally, so every press first
+							// checks that the target still has focus.
+							post_bare_keys(&bare_transitions(&keys), gap, || {
+								skylight::require_front_window(pid, wid)
+							})
 						} else {
-							type_keys(&self.source, &keys, gap, |event| post_takeover_key(pid, wid, event))
+							// Stop rather than typing into a newly user-selected
+							// app or window.
+							type_keys(
+								&self.source,
+								&keys,
+								gap,
+								|| skylight::require_front_window(pid, wid),
+								post_global,
+							)
 						}
 					}),
 				}
@@ -315,6 +331,13 @@ impl MacInput {
 			},
 		}
 	}
+}
+
+/// Strokes for typing into a local application. Without a keyboard layout
+/// the text goes out as event text, which local applications read.
+fn local_strokes() -> impl Fn(char) -> Option<Keystroke> {
+	let keymap = Keymap::current().ok().flatten();
+	move |character| keymap.as_ref()?.stroke(character)
 }
 
 fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
@@ -1758,12 +1781,9 @@ fn click_group_id() -> i64 {
 }
 
 fn post_takeover_key(pid: libc::pid_t, wid: u32, event: &CGEvent) -> CoreResult<()> {
-	if matches!(event.get_type(), CGEventType::KeyDown) {
-		// Stop rather than typing into a newly user-selected app/window. Key
-		// releases must still pass through so held modifiers do not leak.
-		skylight::require_front_window(pid, wid)?;
-	}
-	post_global(event)
+	// Stop rather than typing into a newly user-selected app/window. Key
+	// releases must still pass through so held keys do not leak.
+	post_guarded(event, || skylight::require_front_window(pid, wid), post_global)
 }
 
 /// One key typed into the target, carrying the text it types as its Unicode
@@ -1857,12 +1877,15 @@ const fn key_gap(remote: Option<RemoteScreen>) -> Duration {
 
 /// Types `keys` with `gap` after every transition, pressing Shift and Option
 /// as modifier keys only while a key needs them: a client that forwards input
-/// to another machine sends modifier keys, not event flags. Modifiers still
-/// held when posting fails or the operation is cancelled are released.
+/// to another machine sends modifier keys, not event flags. `guard` runs
+/// before every press, modifier presses included; when it fails nothing more
+/// is pressed. Modifiers still held when posting fails or the operation is
+/// cancelled are released.
 fn type_keys(
 	source: &CGEventSource,
 	keys: &[TypedKey<'_>],
 	gap: Duration,
+	mut guard: impl FnMut() -> CoreResult<()>,
 	mut post: impl FnMut(&CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	const MODIFIERS: [KeyName; 2] = [KeyName::Shift, KeyName::Alt];
@@ -1882,9 +1905,16 @@ fn type_keys(
 				let down = modifier_held(wanted, modifier);
 				if modifier_held(held, modifier) != down {
 					// An attempted press counts as held: it may have reached the
-					// target.
-					update_modifier(&mut held, modifier, down);
-					post_key(source, modifier, down, modifier_flags(held), &mut post)?;
+					// target. A release counts only once posted, so the final
+					// cleanup retries a release that failed.
+					let mut next = held;
+					update_modifier(&mut next, modifier, down);
+					if down {
+						guard()?;
+						held = next;
+					}
+					post_key(source, modifier, down, modifier_flags(next), &mut post)?;
+					held = next;
 					control::wait(gap)?;
 				}
 			}
@@ -1901,6 +1931,7 @@ fn type_keys(
 				event.set_string_from_utf16_unchecked(&units[..length]);
 				event.set_flags(modifier_flags(held));
 			}
+			guard()?;
 			let result = post(&press).and_then(|()| control::wait(gap));
 			let cleanup = control::cleanup(|| post(&release));
 			skylight::after_cleanup(result, cleanup)?;
@@ -1971,8 +2002,12 @@ fn bare_transitions(keys: &[TypedKey<'_>]) -> Vec<(u16, bool)> {
 /// Posts bare key transitions at the HID tap: a null source and no flag or
 /// Unicode overrides, so `CoreGraphics` derives modifier state from the
 /// transitions exactly as for a hardware keyboard.
-fn post_bare_keys(transitions: &[(u16, bool)], gap: Duration) -> CoreResult<()> {
-	let post = |code, down| {
+fn post_bare_keys(
+	transitions: &[(u16, bool)],
+	gap: Duration,
+	guard: impl FnMut() -> CoreResult<()>,
+) -> CoreResult<()> {
+	post_transitions(transitions, gap, guard, |code, down| {
 		control::check()?;
 		// SAFETY: A null source is documented as valid for keyboard events.
 		let raw = unsafe { create_keyboard_event(ptr::null_mut(), code, down) };
@@ -1983,17 +2018,34 @@ fn post_bare_keys(transitions: &[(u16, bool)], gap: Duration) -> CoreResult<()> 
 		// here.
 		let event = unsafe { CGEvent::from_ptr(raw) };
 		post_global(&event)
-	};
+	})
+}
+
+/// Posts `transitions` with `gap` after each, running `guard` before every
+/// press. A key counts as held from its attempted press until its release
+/// posts; keys still held when posting fails or is cancelled are released.
+fn post_transitions(
+	transitions: &[(u16, bool)],
+	gap: Duration,
+	mut guard: impl FnMut() -> CoreResult<()>,
+	mut post: impl FnMut(u16, bool) -> CoreResult<()>,
+) -> CoreResult<()> {
 	let mut held = [false; 128];
-	let result = (|| {
-		for &(code, down) in transitions {
-			control::check()?;
+	let mut result = Ok(());
+	for &(code, down) in transitions {
+		result = control::check().and_then(|()| {
+			if down {
+				guard()?;
+				held[usize::from(code)] = true;
+			}
 			post(code, down)?;
 			held[usize::from(code)] = down;
-			control::wait(gap)?;
+			control::wait(gap)
+		});
+		if result.is_err() {
+			break;
 		}
-		Ok(())
-	})();
+	}
 	let cleanup = control::cleanup(|| {
 		let mut result = Ok(());
 		for (code, down) in held.into_iter().enumerate().rev() {
@@ -2815,13 +2867,19 @@ mod tests {
 		let mut events = Vec::new();
 		let result = control::with_token_for_test(&token, || {
 			let keys = typed_keys("e\u{301}later", us_stroke, None).unwrap();
-			type_keys(&source, &keys, KEY_GAP, |event| {
-				events.push(event.get_type());
-				if matches!(event.get_type(), CGEventType::KeyDown) {
-					cancellation.cancel();
-				}
-				Ok(())
-			})
+			type_keys(
+				&source,
+				&keys,
+				KEY_GAP,
+				|| Ok(()),
+				|event| {
+					events.push(event.get_type());
+					if matches!(event.get_type(), CGEventType::KeyDown) {
+						cancellation.cancel();
+					}
+					Ok(())
+				},
+			)
 		});
 		assert!(result.is_err());
 		assert!(matches!(events.as_slice(), [CGEventType::KeyDown, CGEventType::KeyUp]));
@@ -2874,10 +2932,16 @@ mod tests {
 		let source = source().expect("event source");
 		let keys = typed_keys("aBC b\r\n😀", us_stroke, None).unwrap();
 		let mut events = Vec::new();
-		type_keys(&source, &keys, Duration::ZERO, |event| {
-			events.push(typed_event(event));
-			Ok(())
-		})
+		type_keys(
+			&source,
+			&keys,
+			Duration::ZERO,
+			|| Ok(()),
+			|event| {
+				events.push(typed_event(event));
+				Ok(())
+			},
+		)
 		.unwrap();
 		let (down, up, flags) =
 			(CGEventType::KeyDown as u32, CGEventType::KeyUp as u32, CGEventType::FlagsChanged as u32);
@@ -2908,16 +2972,22 @@ mod tests {
 		let source = source().expect("event source");
 		let keys = typed_keys("Ba", us_stroke, None).unwrap();
 		let mut events = Vec::new();
-		let result = type_keys(&source, &keys, Duration::ZERO, |event| {
-			let typed = typed_event(event);
-			let failed = typed.0 == CGEventType::KeyDown as u32 && typed.1 == 11;
-			events.push(typed);
-			if failed {
-				Err(DesktopError::input_failed("focus changed"))
-			} else {
-				Ok(())
-			}
-		});
+		let result = type_keys(
+			&source,
+			&keys,
+			Duration::ZERO,
+			|| Ok(()),
+			|event| {
+				let typed = typed_event(event);
+				let failed = typed.0 == CGEventType::KeyDown as u32 && typed.1 == 11;
+				events.push(typed);
+				if failed {
+					Err(DesktopError::input_failed("focus changed"))
+				} else {
+					Ok(())
+				}
+			},
+		);
 		assert!(result.is_err());
 		let kinds: Vec<_> = events
 			.iter()
@@ -2928,6 +2998,175 @@ mod tests {
 			(CGEventType::KeyDown as u32, 11, true),
 			(CGEventType::KeyUp as u32, 11, true),
 			(CGEventType::FlagsChanged as u32, 56, false),
+		]);
+	}
+
+	#[test]
+	fn failed_modifier_release_is_retried_by_cleanup() {
+		let source = source().expect("event source");
+		let keys = typed_keys("Ba", us_stroke, None).unwrap();
+		let mut events = Vec::new();
+		let mut releases = 0;
+		let result = type_keys(
+			&source,
+			&keys,
+			Duration::ZERO,
+			|| Ok(()),
+			|event| {
+				let typed = typed_event(event);
+				let shift_up = typed.0 == CGEventType::FlagsChanged as u32 && typed.1 == 56 && !typed.2;
+				events.push((typed.0, typed.1, typed.2));
+				if shift_up {
+					releases += 1;
+					if releases == 1 {
+						return Err(DesktopError::input_failed("cancelled"));
+					}
+				}
+				Ok(())
+			},
+		);
+		assert!(result.is_err());
+		// The failed Shift release is attempted again, and a is never pressed.
+		assert_eq!(events, [
+			(CGEventType::FlagsChanged as u32, 56, true),
+			(CGEventType::KeyDown as u32, 11, true),
+			(CGEventType::KeyUp as u32, 11, true),
+			(CGEventType::FlagsChanged as u32, 56, false),
+			(CGEventType::FlagsChanged as u32, 56, false),
+		]);
+	}
+
+	/// (event type, key code, Shift flag) of the events takeover typing posts
+	/// when focus moves right after the event `lose_after` matches.
+	fn takeover_typing(
+		text: &str,
+		lose_after: (CGEventType, i64),
+	) -> (CoreResult<()>, Vec<(u32, i64, bool)>) {
+		let source = source().expect("event source");
+		let keys = typed_keys(text, us_stroke, None).unwrap();
+		let lost = std::cell::Cell::new(false);
+		let mut posted = Vec::new();
+		let result = type_keys(
+			&source,
+			&keys,
+			Duration::ZERO,
+			|| {
+				if lost.get() {
+					Err(DesktopError::input_failed("focus moved"))
+				} else {
+					Ok(())
+				}
+			},
+			|event| {
+				let typed = typed_event(event);
+				lost.set(lost.get() || (typed.0, typed.1) == (lose_after.0 as u32, lose_after.1));
+				posted.push((typed.0, typed.1, typed.2));
+				Ok(())
+			},
+		);
+		(result, posted)
+	}
+
+	#[test]
+	fn takeover_typing_checks_focus_before_pressing_a_modifier() {
+		let (down, up, flags) =
+			(CGEventType::KeyDown as u32, CGEventType::KeyUp as u32, CGEventType::FlagsChanged as u32);
+		// Focus moves after a: neither Shift nor B is pressed.
+		let (result, posted) = takeover_typing("aB", (CGEventType::KeyUp, 0));
+		assert!(result.is_err());
+		assert_eq!(posted, [(down, 0, false), (up, 0, false)]);
+		// Focus moves after Shift goes down: B is refused, Shift still released.
+		let (result, posted) = takeover_typing("Ba", (CGEventType::FlagsChanged, 56));
+		assert!(result.is_err());
+		assert_eq!(posted, [(flags, 56, true), (flags, 56, false)]);
+	}
+
+	#[test]
+	fn key_and_modifier_presses_are_guarded_but_releases_are_not() {
+		let source = source().expect("event source");
+		let presses: Vec<bool> =
+			[(KeyName::Shift, true), (KeyName::Shift, false), (KeyName::Meta, true)]
+				.into_iter()
+				.map(|(key, down)| {
+					let mut modifiers = Modifiers::default();
+					update_modifier(&mut modifiers, key, down);
+					let mut press = false;
+					post_key(&source, key, down, modifier_flags(modifiers), &mut |event| {
+						press = is_key_press(event);
+						Ok(())
+					})
+					.unwrap();
+					press
+				})
+				.collect();
+		assert_eq!(presses, [true, false, true]);
+		let key = |down| CGEvent::new_keyboard_event(source.clone(), 0, down).unwrap();
+		assert!(is_key_press(&key(true)));
+		assert!(!is_key_press(&key(false)));
+		let refused = post_guarded(
+			&key(true),
+			|| Err(DesktopError::input_failed("focus moved")),
+			|_| panic!("a refused press must not post"),
+		);
+		assert!(refused.is_err());
+		assert!(post_guarded(&key(false), || panic!("a release is not guarded"), |_| Ok(())).is_ok());
+	}
+
+	/// The transitions `post_transitions` posts for "aB" on a remote screen,
+	/// with focus lost after `lose_after` and the first post of `fail` failing.
+	fn remote_takeover(
+		lose_after: Option<(u16, bool)>,
+		fail: Option<(u16, bool)>,
+	) -> (CoreResult<()>, Vec<(u16, bool)>) {
+		let keys = typed_keys("aB", us_stroke, Some(RemoteScreen::HidReports)).unwrap();
+		let lost = std::cell::Cell::new(false);
+		let mut failed = false;
+		let mut posted = Vec::new();
+		let result = post_transitions(
+			&bare_transitions(&keys),
+			Duration::ZERO,
+			|| {
+				if lost.get() {
+					Err(DesktopError::input_failed("focus moved"))
+				} else {
+					Ok(())
+				}
+			},
+			|code, down| {
+				posted.push((code, down));
+				if !failed && fail == Some((code, down)) {
+					failed = true;
+					return Err(DesktopError::input_failed("post failed"));
+				}
+				lost.set(lost.get() || lose_after == Some((code, down)));
+				Ok(())
+			},
+		);
+		(result, posted)
+	}
+
+	#[test]
+	fn remote_takeover_stops_pressing_when_focus_moves_and_releases_held_keys() {
+		let (result, posted) = remote_takeover(None, None);
+		assert!(result.is_ok());
+		assert_eq!(posted, [(0, true), (0, false), (56, true), (11, true), (11, false), (56, false)]);
+		let (result, posted) = remote_takeover(Some((0, false)), None);
+		assert!(result.is_err());
+		assert_eq!(posted, [(0, true), (0, false)]);
+		let (result, posted) = remote_takeover(Some((56, true)), None);
+		assert!(result.is_err());
+		assert_eq!(posted, [(0, true), (0, false), (56, true), (56, false)]);
+		// A release that fails is attempted again, with Shift's.
+		let (result, posted) = remote_takeover(None, Some((11, false)));
+		assert!(result.is_err());
+		assert_eq!(posted, [
+			(0, true),
+			(0, false),
+			(56, true),
+			(11, true),
+			(11, false),
+			(56, false),
+			(11, false)
 		]);
 	}
 
@@ -3036,23 +3275,20 @@ mod tests {
 		let guard = || keys_still_reach(1, 7, || siblings, window(7), || focused.get(), |_| None);
 		let mut typed = Vec::new();
 		let keys = typed_keys("ab", |_| None, None).unwrap();
-		let result = type_keys(&source, &keys, Duration::ZERO, |event| {
-			post_guarded(event, guard, |event| {
-				// The user picks a sibling window right after a is typed.
-				if matches!(event.get_type(), CGEventType::KeyUp) {
-					focused.set(window(9));
-				}
-				typed.push(event.get_type() as u32);
-				Ok(())
-			})
+		let result = type_keys(&source, &keys, Duration::ZERO, guard, |event| {
+			// The user picks a sibling window right after a is typed.
+			if matches!(event.get_type(), CGEventType::KeyUp) {
+				focused.set(window(9));
+			}
+			typed.push(event.get_type() as u32);
+			Ok(())
 		});
 		let error = result.unwrap_err();
 		assert_eq!(error.code, ErrorCode::InputFailed);
 		assert!(error.message.contains("may already have landed"), "{}", error.message);
-		// b is never pressed; its release still goes out, as after any failed
-		// press.
+		// b is never pressed.
 		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
-		assert_eq!(typed, [down, up, up]);
+		assert_eq!(typed, [down, up]);
 		// Space is never pressed once a sibling is key; the releases still go
 		// out, so nothing stays held.
 		focused.set(window(7));
@@ -3093,18 +3329,16 @@ mod tests {
 		let guard = || keys_still_reach(1, 7, || siblings, renaming, || focused.get(), rename);
 		let mut typed = Vec::new();
 		let keys = typed_keys("ab", |_| None, None).unwrap();
-		let result = type_keys(&source, &keys, Duration::ZERO, |event| {
-			post_guarded(event, guard, |event| {
-				if matches!(event.get_type(), CGEventType::KeyUp) {
-					focused.set(focus_in(id(7), Some(7)));
-				}
-				typed.push(event.get_type() as u32);
-				Ok(())
-			})
+		let result = type_keys(&source, &keys, Duration::ZERO, guard, |event| {
+			if matches!(event.get_type(), CGEventType::KeyUp) {
+				focused.set(focus_in(id(7), Some(7)));
+			}
+			typed.push(event.get_type() as u32);
+			Ok(())
 		});
 		assert_eq!(result.unwrap_err().code, ErrorCode::InputFailed);
 		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
-		assert_eq!(typed, [down, up, up]);
+		assert_eq!(typed, [down, up]);
 		// The rename ending with no focused window reported stops it too.
 		let ended = focus_in(unreported, None);
 		assert!(keys_still_reach(1, 7, || siblings, renaming, || ended, rename).is_err());
@@ -3129,18 +3363,16 @@ mod tests {
 		let guard = || recheck_background(true, 7, 41, || front.get(), || false, || Ok(()));
 		let mut typed = Vec::new();
 		let keys = typed_keys("ab", |_| None, None).unwrap();
-		let result = type_keys(&source, &keys, Duration::ZERO, |event| {
-			post_guarded(event, guard, |event| {
-				if matches!(event.get_type(), CGEventType::KeyUp) {
-					front.set(Some(7));
-				}
-				typed.push(event.get_type() as u32);
-				Ok(())
-			})
+		let result = type_keys(&source, &keys, Duration::ZERO, guard, |event| {
+			if matches!(event.get_type(), CGEventType::KeyUp) {
+				front.set(Some(7));
+			}
+			typed.push(event.get_type() as u32);
+			Ok(())
 		});
 		assert_eq!(result.unwrap_err().code, ErrorCode::BackgroundUnavailable);
 		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
-		assert_eq!(typed, [down, up, up]);
+		assert_eq!(typed, [down, up]);
 		// Input into the app the user already had in front is not stopped.
 		assert!(recheck_background(false, 7, 41, || Some(7), || false, || Ok(())).is_ok());
 	}
@@ -3541,18 +3773,16 @@ mod tests {
 		let guard = || owner_still_focused(7581, 554, (7592, 556), |_| focused.get());
 		let mut typed = Vec::new();
 		let keys = typed_keys("ab", |_| None, None).unwrap();
-		let result = type_keys(&source, &keys, Duration::ZERO, |event| {
-			post_guarded(event, guard, |event| {
-				if matches!(event.get_type(), CGEventType::KeyUp) {
-					focused.set(Some(570));
-				}
-				typed.push(event.get_type() as u32);
-				Ok(())
-			})
+		let result = type_keys(&source, &keys, Duration::ZERO, guard, |event| {
+			if matches!(event.get_type(), CGEventType::KeyUp) {
+				focused.set(Some(570));
+			}
+			typed.push(event.get_type() as u32);
+			Ok(())
 		});
 		assert_eq!(result.unwrap_err().code, ErrorCode::InputFailed);
 		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
-		assert_eq!(typed, [down, up, up]);
+		assert_eq!(typed, [down, up]);
 		// Keys the window's own process takes need no such check.
 		let unasked = |_| -> Option<u32> { panic!("no other process is involved") };
 		assert!(owner_still_focused(7581, 543, (7581, 543), unasked).is_ok());
