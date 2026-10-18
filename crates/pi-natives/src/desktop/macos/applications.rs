@@ -18,7 +18,7 @@ use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError},
-		macos::application_windows,
+		macos::{application_windows, has_onscreen_window},
 		types::DesktopWindow,
 	},
 	Application, OpenedApplication,
@@ -254,6 +254,12 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 			true,
 			FIRST_WINDOW_WAIT,
 			|| application_windows(pid).ok(),
+			|| {
+				libc::pid_t::try_from(pid)
+					.ok()
+					.and_then(has_onscreen_window)
+					== Some(true)
+			},
 			|| show_in_background(pid, &app.path),
 			wait,
 		)?;
@@ -261,9 +267,14 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 	}
 	let application = launch(&app.path, activate)?;
 	let window = match application.pid {
-		Some(pid) => {
-			first_window(false, FIRST_WINDOW_WAIT, || application_windows(pid).ok(), || false, wait)?
-		},
+		Some(pid) => first_window(
+			false,
+			FIRST_WINDOW_WAIT,
+			|| application_windows(pid).ok(),
+			|| false,
+			|| false,
+			wait,
+		)?,
 		None => None,
 	};
 	Ok(OpenedApplication { application, window })
@@ -272,11 +283,15 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplica
 /// The application's frontmost window, given until `timeout` to show its
 /// first one. With `show`, a running application without a window is asked to
 /// show one first; when it cannot be asked, none is awaited. Without a window
-/// list (no Screen Recording permission) no window is returned.
+/// list (no Screen Recording permission) no window is returned. An application
+/// whose on-screen windows the list leaves out (`unlisted_window`), such as
+/// one that does not allow capture, is not asked: it already shows one, and
+/// the reopen event can make it activate itself.
 fn first_window(
 	show: bool,
 	timeout: Duration,
 	mut windows: impl FnMut() -> Option<Vec<DesktopWindow>>,
+	unlisted_window: impl FnOnce() -> bool,
 	request_window: impl FnOnce() -> bool,
 	mut wait: impl FnMut() -> CoreResult<()>,
 ) -> CoreResult<Option<DesktopWindow>> {
@@ -284,7 +299,7 @@ fn first_window(
 	let Some(mut shown) = windows() else {
 		return Ok(None);
 	};
-	if shown.is_empty() && show && !request_window() {
+	if shown.is_empty() && show && (unlisted_window() || !request_window()) {
 		return Ok(None);
 	}
 	while shown.is_empty() && Instant::now() < deadline {
@@ -443,6 +458,7 @@ mod tests {
 					vec![]
 				})
 			},
+			|| false,
 			|| {
 				assert!(!reopened.replace(true), "the application is asked once");
 				true
@@ -468,6 +484,7 @@ mod tests {
 					vec![]
 				})
 			},
+			|| false,
 			|| panic!("a launch shows its first window itself"),
 			|| Ok(()),
 		)
@@ -479,23 +496,44 @@ mod tests {
 	fn a_shown_window_returns_at_once_and_a_missing_one_only_waits_out_the_bound() {
 		let no_reopen = || -> bool { panic!("an application with a window is not asked again") };
 		let no_wait = || -> CoreResult<()> { panic!("no poll interval is slept") };
+		let unlisted = || false;
 		// The frontmost of the application's windows, without waiting.
 		let found = first_window(
 			true,
 			Duration::from_secs(60),
 			|| Some(vec![window("12"), window("11")]),
+			unlisted,
 			no_reopen,
 			no_wait,
 		);
 		assert_eq!(id(found.expect("window")).as_deref(), Some("12"));
 		// An application that never shows a window is not awaited past the bound.
-		let found = first_window(false, Duration::ZERO, || Some(vec![]), no_reopen, no_wait);
+		let found =
+			first_window(false, Duration::ZERO, || Some(vec![]), unlisted, no_reopen, no_wait);
 		assert!(found.expect("no window").is_none());
 		// An application that could not be asked brings no window to wait for.
-		let found = first_window(true, Duration::from_secs(60), || Some(vec![]), || false, no_wait);
+		let found =
+			first_window(true, Duration::from_secs(60), || Some(vec![]), unlisted, || false, no_wait);
 		assert!(found.expect("no window").is_none());
 		// Without a window list there is nothing to decide or return.
-		let found = first_window(true, Duration::from_secs(60), || None, no_reopen, no_wait);
+		let found =
+			first_window(true, Duration::from_secs(60), || None, unlisted, no_reopen, no_wait);
+		assert!(found.expect("no window").is_none());
+	}
+
+	#[test]
+	fn an_application_showing_only_a_window_capture_leaves_out_is_not_asked_for_one() {
+		// With Screen Recording granted, a window that does not allow capture
+		// is left out of the list, yet it is on screen: asking the application
+		// to show a window would send the reopen event for nothing.
+		let found = first_window(
+			true,
+			Duration::from_secs(60),
+			|| Some(vec![]),
+			|| true,
+			|| panic!("an application showing a window is not asked for one"),
+			|| panic!("no window is awaited"),
+		);
 		assert!(found.expect("no window").is_none());
 	}
 }

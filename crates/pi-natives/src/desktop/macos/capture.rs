@@ -354,7 +354,7 @@ fn window_snapshot(target: Option<u32>, owner: Option<u32>) -> CoreResult<Vec<De
 /// Whether `pid` owns an on-screen window in the normal window layer, from
 /// Quartz's window list; owner and layer need no Screen Recording permission.
 /// `None` when the list cannot be read.
-pub(super) fn has_onscreen_window(pid: libc::pid_t) -> Option<bool> {
+pub(in crate::desktop) fn has_onscreen_window(pid: libc::pid_t) -> Option<bool> {
 	let snapshot = CGWindowListCopyWindowInfo(
 		CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
 		0,

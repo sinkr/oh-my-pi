@@ -78,7 +78,7 @@ impl MacInput {
 							None => (window, wid),
 						};
 						let in_overlay =
-							takes_overlay_focus(wid, ax::focused_window_id(pid), skylight::window_parent);
+							takes_overlay_focus(wid, ax::key_focus(pid), skylight::window_parent);
 						background_guard(&window, pid, &event)?;
 						let owner = || {
 							input_owner(pid, wid, ax::window_content(pid, &window), ax::focused_window_id)
@@ -343,11 +343,17 @@ fn with_background_keyboard<T>(
 		let (to, focus) = await_key_destination(pid, wid, conflict)?;
 		let to =
 			key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
-		if prepared {
-			still_behind_user(pid, wid)?;
-		}
 		deliver(to, &|| {
-			keys_still_reach(pid, wid, conflict, focus, || ax::key_focus(pid), skylight::window_parent)
+			recheck_background(prepared, pid, wid, skylight::front_pid, || {
+				keys_still_reach(
+					pid,
+					wid,
+					conflict,
+					focus,
+					|| ax::key_focus(pid),
+					skylight::window_parent,
+				)
+			})
 		})
 	})
 }
@@ -585,15 +591,23 @@ fn pressed_point(event: &PointerEvent) -> Option<(f64, f64)> {
 	}
 }
 
-/// Whether `wid` is a sheet or popover on `focused`, the application's
-/// reported focused window, or is that window itself while attached to
-/// another. Making such a window key with a press outside its frame would
-/// close a popover, or land in the window a sheet is attached to.
+/// Whether `wid` is a sheet or popover on the application's focused window,
+/// or is that window itself while attached to another, as `focus` shows.
+/// Making such a window key with a press outside its frame would close a
+/// popover, or land in the window a sheet is attached to. While the
+/// application reports no focused window, as Finder does while its rename
+/// field, an overlay window of its own, has focus, the focused element's
+/// window stands for it.
 fn takes_overlay_focus(
 	wid: u32,
-	focused: Option<u32>,
+	focus: ax::KeyFocus,
 	parent_of: impl Fn(u32) -> Option<u32>,
 ) -> bool {
+	let focused = match focus.window {
+		ax::FocusedWindow::Id(id) => Some(id),
+		ax::FocusedWindow::Unreported => focus.element_window,
+		ax::FocusedWindow::Unmapped => None,
+	};
 	parent_of(wid).is_some()
 		&& (focused == Some(wid) || attached_under(wid, parent_of, |parent| Some(parent) == focused))
 }
@@ -960,12 +974,31 @@ pub(super) fn make_key_in_background(
 
 /// Refuses once the target's application is frontmost (or the front process
 /// is unknown) after [`make_key_in_background`] judged it a background app.
-pub(super) fn still_behind_user(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
-	if left_background(skylight::front_pid(), pid) {
+fn still_behind_user(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
+	recheck_background(true, pid, wid, skylight::front_pid, || Ok(()))
+}
+
+/// The check before each later press or command of background input for
+/// window `wid` of `pid`: `target_holds` must pass, and then, when
+/// [`make_key_in_background`] found the application behind the user's
+/// (`prepared`), it must still be, as `front` reads the front process now.
+/// `BackgroundFocusLease` only stands down when the user brings the target
+/// forward, so this is what keeps the input from following them into the
+/// window they just picked. The front process is read last, as close to the
+/// input as it can be.
+pub(super) fn recheck_background(
+	prepared: bool,
+	pid: libc::pid_t,
+	wid: u32,
+	front: impl FnOnce() -> Option<libc::pid_t>,
+	target_holds: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<()> {
+	target_holds()?;
+	if prepared && left_background(front(), pid) {
 		return Err(DesktopError::background_unavailable(format!(
 			"window {wid}'s application came to the front, or the front application could not be \
-			 identified, while background input was prepared; no further input was sent; inspect the \
-			 window, then retry with takeover:true or use ax actions",
+			 identified, during background input; no further input was sent; inspect the window, \
+			 then retry with takeover:true or use ax actions",
 		)));
 	}
 	Ok(())
@@ -2600,6 +2633,31 @@ mod tests {
 	}
 
 	#[test]
+	fn background_keys_stop_once_the_user_brings_the_target_forward() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		// The user's app 9 is in front when typing into app 7 begins; after a,
+		// the user clicks the target window, bringing app 7 forward.
+		let front = std::cell::Cell::new(Some(9));
+		let guard = || recheck_background(true, 7, 41, || front.get(), || Ok(()));
+		let mut typed = Vec::new();
+		let result = type_text(&source, "ab", |event| {
+			post_guarded(event, guard, |event| {
+				if matches!(event.get_type(), CGEventType::KeyUp) {
+					front.set(Some(7));
+				}
+				typed.push(event.get_type() as u32);
+				Ok(())
+			})
+		});
+		assert_eq!(result.unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		assert_eq!(typed, [down, up, up]);
+		// Input into the app the user already had in front is not stopped.
+		assert!(recheck_background(false, 7, 41, || Some(7), || Ok(())).is_ok());
+	}
+
+	#[test]
 	fn background_keys_continue_while_the_focus_that_proved_them_holds() {
 		let (id, unreported) = (ax::FocusedWindow::Id, ax::FocusedWindow::Unreported);
 		let siblings = Some(KeyboardConflict::Siblings(1));
@@ -2779,13 +2837,27 @@ mod tests {
 			25670 => Some(25656),
 			_ => None,
 		};
-		assert!(takes_overlay_focus(25579, Some(25567), parents));
-		assert!(takes_overlay_focus(25670, Some(25670), parents));
+		let window = |id| focus_in(ax::FocusedWindow::Id(id), Some(id));
+		assert!(takes_overlay_focus(25579, window(25567), parents));
+		assert!(takes_overlay_focus(25670, window(25670), parents));
 		// A top-level window, and an overlay on a window that is not focused,
 		// are made key with the press as before.
-		assert!(!takes_overlay_focus(25567, Some(25567), parents));
-		assert!(!takes_overlay_focus(25579, Some(25656), parents));
-		assert!(!takes_overlay_focus(25579, None, parents));
+		assert!(!takes_overlay_focus(25567, window(25567), parents));
+		assert!(!takes_overlay_focus(25579, window(25656), parents));
+		let nothing = focus_in(ax::FocusedWindow::Unreported, None);
+		assert!(!takes_overlay_focus(25579, nothing, parents));
+	}
+
+	#[test]
+	fn a_click_into_finders_rename_field_skips_the_activating_press() {
+		// Finder reports no focused window while its rename field, overlay 12
+		// on window 7, has focus: the press would commit the rename before the
+		// click reaches the field.
+		let rename = |id| (id == 12).then_some(7);
+		let renaming = focus_in(ax::FocusedWindow::Unreported, Some(12));
+		assert!(takes_overlay_focus(12, renaming, rename));
+		// A click into the window under it still makes that window key.
+		assert!(!takes_overlay_focus(7, renaming, rename));
 	}
 
 	#[test]

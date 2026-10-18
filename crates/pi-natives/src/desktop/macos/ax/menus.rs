@@ -4,7 +4,7 @@ use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
 use super::{
-	super::input::{await_key_window, make_key_in_background, source, still_behind_user},
+	super::input::{await_key_window, make_key_in_background, recheck_background, source},
 	MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element, copy_required_string,
 	copy_string, copy_strings_from_action_names, create_application, element_pid, key_focus,
 	mac_handle, perform_action, reports_active, set_timeout, skylight, window_id,
@@ -48,7 +48,7 @@ pub(crate) fn items(window: &DesktopWindow, path: &[String]) -> CoreResult<Vec<D
 
 pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> {
 	validate_path(path, false)?;
-	with_window_menu(window, MenuAccess::Dispatch, |app, pid, wid, _| {
+	with_window_menu(window, MenuAccess::Dispatch, |app, pid, context_holds, _| {
 		let (menu, actual_path) = resolve_menu(app, &path[..path.len() - 1], pid)?;
 		let (elements, items) = children(&menu, &actual_path, pid)?;
 		let index = match_index(&items, &path[path.len() - 1])?;
@@ -82,7 +82,7 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 		// validate itself in response to a key-window change.
 		let item = reread()?;
 		require_command(&item)?;
-		require_key_context(pid, wid)?;
+		context_holds()?;
 		control::check()?;
 		perform_action(element, "AXPress").map_err(|error| {
 			DesktopError::ax_failed(format!(
@@ -151,28 +151,33 @@ enum MenuAccess {
 }
 
 /// Runs `prepare`, which makes the window key within its application; a read
-/// still goes ahead when it is refused as unavailable in the background.
-fn enter_menu_context(
+/// still goes ahead, with `prepare`'s default answer, when it is refused as
+/// unavailable in the background.
+fn enter_menu_context<T: Default>(
 	access: MenuAccess,
-	prepare: impl FnOnce() -> CoreResult<()>,
-) -> CoreResult<()> {
+	prepare: impl FnOnce() -> CoreResult<T>,
+) -> CoreResult<T> {
 	match prepare() {
 		Err(error)
 			if access == MenuAccess::Read && error.code == ErrorCode::BackgroundUnavailable =>
 		{
-			Ok(())
+			Ok(T::default())
 		},
 		result => result,
 	}
 }
 
-/// Runs `action` in the window's menu context. Its last argument says whether
-/// the application reported itself inactive before this call activated it,
-/// so its menus may still show the inactive state.
+/// Runs `action` in the window's menu context. Its third argument checks that
+/// the context still holds: the window is still key and, when it was made key
+/// behind the user's app, the application is still behind it, since a command
+/// can wait seconds for its menu to revalidate while the user brings the app
+/// forward. Its last argument says whether the application reported itself
+/// inactive before this call activated it, so its menus may still show the
+/// inactive state.
 fn with_window_menu<T>(
 	window: &DesktopWindow,
 	access: MenuAccess,
-	action: impl FnOnce(&AXUIElement, libc::pid_t, u32, bool) -> CoreResult<T>,
+	action: impl FnOnce(&AXUIElement, libc::pid_t, &dyn Fn() -> CoreResult<()>, bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	let (app, pid, wid) = window_menu_context(window)?;
 	// Application menus validate and dispatch through the key window, not their
@@ -180,22 +185,26 @@ fn with_window_menu<T>(
 	let entry_front = skylight::front_pid();
 	let activated = reports_active(pid) == Some(false);
 	skylight::with_background_guard(pid, || {
-		enter_menu_context(access, || {
+		let prepared = enter_menu_context(access, || {
 			// A read must not end an overlay's editing, such as a popover's: the
 			// press that makes `wid` key would close it.
 			let in_overlay = access == MenuAccess::Read
 				&& key_focus(pid).in_overlay_of(wid, skylight::window_parent);
 			let prepared =
 				make_key_in_background(&source()?, pid, wid, window, entry_front, in_overlay)?;
-			require_key_context(pid, wid)?;
 			// The user may have brought the app forward while its key window
 			// settled.
-			if prepared {
-				still_behind_user(pid, wid)?;
-			}
-			Ok(())
+			recheck_background(prepared, pid, wid, skylight::front_pid, || {
+				require_key_context(pid, wid)
+			})?;
+			Ok(prepared)
 		})?;
-		action(&app, pid, wid, activated)
+		let context_holds = || {
+			recheck_background(prepared, pid, wid, skylight::front_pid, || {
+				require_key_context(pid, wid)
+			})
+		};
+		action(&app, pid, &context_holds, activated)
 	})
 }
 
@@ -393,7 +402,9 @@ mod tests {
 		});
 		assert!(ready.is_ok());
 		assert!(prepared.get());
-		let refused = || Err(DesktopError::background_unavailable("the target came forward"));
+		let refused = || -> CoreResult<()> {
+			Err(DesktopError::background_unavailable("the target came forward"))
+		};
 		assert!(enter_menu_context(MenuAccess::Read, refused).is_ok());
 		assert_eq!(
 			enter_menu_context(MenuAccess::Dispatch, refused)
@@ -401,7 +412,7 @@ mod tests {
 				.code,
 			ErrorCode::BackgroundUnavailable
 		);
-		let cancelled = || Err(DesktopError::cancelled("cancelled"));
+		let cancelled = || -> CoreResult<()> { Err(DesktopError::cancelled("cancelled")) };
 		assert_eq!(
 			enter_menu_context(MenuAccess::Read, cancelled)
 				.unwrap_err()

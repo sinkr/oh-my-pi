@@ -9,7 +9,7 @@ mod skylight;
 mod spaces;
 
 pub(super) use ax::menus;
-pub(super) use capture::application_windows;
+pub(super) use capture::{application_windows, has_onscreen_window};
 use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use session::screen_state;
