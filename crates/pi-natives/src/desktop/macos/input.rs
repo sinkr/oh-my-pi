@@ -630,7 +630,7 @@ const MAX_ATTACHED_DEPTH: usize = 4;
 /// Whether `window` is attached, directly or through other attached windows,
 /// to a window `is_ancestor` accepts, as `parent_of` reports `WindowServer`'s
 /// parents.
-fn attached_under(
+pub(super) fn attached_under(
 	window: u32,
 	parent_of: impl Fn(u32) -> Option<u32>,
 	is_ancestor: impl Fn(u32) -> bool,
