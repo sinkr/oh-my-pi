@@ -81,7 +81,8 @@ interface RelayFixture extends RelayBrowser {
 /**
  * Headless Chromium running the real relay extension against a relay on a free port, plus a loopback
  * site. The extension's `chrome.debugger.onDetach` listener is exposed as `testDebuggerDetach`, since a
- * programmatic detach does not fire it.
+ * programmatic detach does not fire it; setting `testDropBeforeCreate` closes its relay socket as its next
+ * `chrome.tabs.create` starts.
  */
 async function launchRelayFixture(
 	log?: (message: string, data?: Record<string, unknown>) => void,
@@ -139,6 +140,29 @@ async function launchRelayFixture(
 chrome.debugger.onDetach.addListener = listener => {
 	globalThis.testDebuggerDetach = listener;
 	registerDetach(listener);
+};
+const RelayWebSocket = WebSocket;
+globalThis.WebSocket = class extends RelayWebSocket {
+	constructor(...args) {
+		super(...args);
+		globalThis.testRelaySocket = this;
+	}
+};
+const createTab = chrome.tabs.create.bind(chrome.tabs);
+chrome.tabs.create = properties => {
+	const created = createTab(properties);
+	if (globalThis.testDropBeforeCreate) {
+		globalThis.testDropBeforeCreate = false;
+		globalThis.testRelaySocket.close();
+		const removed = Promise.withResolvers();
+		globalThis.testDroppedTabClosed = removed.promise;
+		created.then(tab => {
+			chrome.tabs.onRemoved.addListener(tabId => {
+				if (tabId === tab.id) removed.resolve(tabId);
+			});
+		});
+	}
+	return created;
 };
 chrome.storage.local.set({ port: ${port} }).then(() => {
 ${background}
@@ -274,6 +298,26 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			expect(browserOf(owned.tab.targetId)).toBe(browserOf(inSecond.tab.targetId));
 		} finally {
 			for (const name of names) await releaseTab(name).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+		}
+	}, 60_000);
+
+	it("closes a tab Chrome created while the extension's relay socket was down", async () => {
+		const fixture = await launchRelayFixture();
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const name = `relay-create-drop-${process.pid}`;
+		try {
+			await fixture.extension.evaluate("globalThis.testDropBeforeCreate = true");
+			// The open fails or, once the extension is back, retries into a tab of its own; either way it is released.
+			await acquireTab(name, relay, { timeoutMs: 15_000 }).then(
+				() => releaseTab(name),
+				() => undefined,
+			);
+			// The extension answers the dropped create after it reconnects, and the relay closes that tab.
+			expect(await fixture.extension.evaluate("globalThis.testDroppedTabClosed")).toBeNumber();
+		} finally {
+			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
 			await fixture.close();
 		}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a tab the extension opened while its relay connection was down staying open after omp had given up on it; the extension now reports it once it reconnects, and the relay closes it ([#16119](https://github.com/can1357/oh-my-pi/pull/16119) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.8.8] - 2026-10-10
 
 ### Fixed

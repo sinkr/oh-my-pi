@@ -113,9 +113,12 @@ async function restoreGroups() {
       await chrome.tabs.ungroup(ids).catch(() => {});
   }
 }
+var unsentResults = [];
 function post(msg) {
   if (ws?.readyState === WebSocket.OPEN)
     ws.send(JSON.stringify(msg));
+  else if (msg.t === "rpcResult")
+    unsentResults.push(msg);
 }
 async function setBadge(connected) {
   try {
@@ -210,7 +213,11 @@ async function connect() {
   socket.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
-    buildHello().then((hello) => post(hello));
+    buildHello().then((hello) => {
+      post(hello);
+      for (const result of unsentResults.splice(0))
+        post(result);
+    });
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
   };

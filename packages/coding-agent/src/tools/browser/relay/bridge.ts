@@ -266,7 +266,7 @@ export class RelayBridge {
 	#extensionSeen = false;
 	/** Instance ids by hello, the most recent last. */
 	#helloOrder = new Set<string>();
-	/** Keys of tabs a client closed while their browser was offline: closed at that browser's next hello. */
+	/** Keys of tabs omp opened whose close failed (see {@link #closeTab}): closed at their browser's next hello. */
 	#closeOnHello = new Set<string>();
 	/** `Date.now()` when the last ready extension socket closed; null while one is ready or none ever was. */
 	#extensionGoneSince: number | null = null;
@@ -564,17 +564,12 @@ export class RelayBridge {
 		}
 		this.#helloOrder.delete(instanceId);
 		this.#helloOrder.add(instanceId);
-		// Close the tabs clients closed while this browser was offline; one the user closed meanwhile is gone already.
+		// Close the tabs whose close failed while this browser was offline; one the user closed meanwhile is gone already.
 		for (const key of this.#closeOnHello) {
 			if (!key.startsWith(`${inst.code}:`)) continue;
 			this.#closeOnHello.delete(key);
 			const closed = this.#tabs.get(key);
-			if (!closed) continue;
-			closed.closing = true;
-			void this.#rpc({ op: "removeTab", tabId: closed.tabId }, inst).catch(() => {
-				closed.closing = false;
-				this.#closeOnHello.add(key);
-			});
+			if (closed) void this.#closeTab(key, closed.tabId, inst).catch(() => undefined);
 		}
 		for (const tab of this.#tabs.values()) {
 			if (tab.instanceId !== instanceId) continue;
@@ -1072,8 +1067,8 @@ export class RelayBridge {
 				// Chrome can still create the tab after the RPC timed out: close it then, since nobody learns its id.
 				const result = (await this.#rpc({ op: "createTab", url, active }, inst, RPC_TIMEOUT_MS, late => {
 					const tabId = (late as { tab: TabSnapshot }).tab.tabId;
-					this.#rpc({ op: "removeTab", tabId }, inst).catch(err => {
-						this.#log("late relay tab left open", {
+					this.#closeTab(tabKeyOf(inst.code, tabId), tabId, inst).catch(err => {
+						this.#log("late relay tab close waits for the next hello", {
 							tabId,
 							error: err instanceof Error ? err.message : String(err),
 						});
@@ -1083,7 +1078,7 @@ export class RelayBridge {
 				// The client left while Chrome created the tab (omp gave up on a slow open), so nobody
 				// can learn its id to close it later: close it now instead of leaving it in the user's browser.
 				if (this.#conns.get(conn.id) !== conn) {
-					await this.#rpc({ op: "removeTab", tabId: result.tab.tabId }, inst);
+					await this.#closeTab(tabKeyOf(inst.code, result.tab.tabId), result.tab.tabId, inst);
 					return;
 				}
 				// Creating a tab is an explicit act of driving it.
@@ -1103,19 +1098,7 @@ export class RelayBridge {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
 					return;
 				}
-				if (!this.#instanceFor(removedTab).socket) {
-					this.#closeOnHello.add(parsed.key);
-					this.#replyError(conn, msg, "relay extension is offline; the tab closes when its browser reconnects");
-					return;
-				}
-				removedTab.closing = true;
-				try {
-					await this.#rpc({ op: "removeTab", tabId: removedTab.tabId }, this.#instanceFor(removedTab));
-				} catch (err) {
-					// The tab stays open, so a later detach is Chrome's own again.
-					removedTab.closing = false;
-					throw err;
-				}
+				await this.#closeTab(parsed.key, removedTab.tabId, this.#instanceFor(removedTab));
 				this.#reply(conn, msg, { success: true });
 				return;
 			}
@@ -1792,5 +1775,22 @@ export class RelayBridge {
 		const expiry = setTimeout(() => this.#lateRpc.delete(key), LATE_RPC_KEEP_MS);
 		expiry.unref?.();
 		this.#lateRpc.set(key, { onResult, timer: expiry });
+	}
+
+	/**
+	 * Close a tab omp opened. One whose close fails (its browser offline, or the socket dropping mid-call) is
+	 * closed at that browser's next hello, unless the user closed it meanwhile.
+	 */
+	async #closeTab(key: string, tabId: number, inst: ExtInstance): Promise<void> {
+		const tab = this.#tabs.get(key);
+		if (tab) tab.closing = true;
+		try {
+			await this.#rpc({ op: "removeTab", tabId }, inst);
+		} catch (err) {
+			// The tab stays open, so a later detach is Chrome's own again.
+			if (tab) tab.closing = false;
+			this.#closeOnHello.add(key);
+			throw err;
+		}
 	}
 }

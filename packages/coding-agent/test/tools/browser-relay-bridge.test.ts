@@ -1556,6 +1556,12 @@ describe("RelayBridge multiple extension instances", () => {
 		);
 		await flush();
 		expect(back.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([9]);
+		// That close drops with the socket too: the next reconnect sends it again.
+		bridge.extClosed(back);
+		await flush();
+		const again = new FakeExtSocket();
+		connectInstance(bridge, again, "chrome", [tab({ tabId: 9 })]);
+		expect(again.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([9]);
 	});
 
 	it("forgets a timed-out createTab once its late window passes, so a wedged extension cannot grow the relay", async () => {
@@ -1611,6 +1617,28 @@ describe("closeRelayTarget", () => {
 		const again = new FakeExtSocket();
 		connectInstance(bridge, again, "chrome", [tab({ tabId: 7 }), tab({ tabId: 8 })]);
 		expect(again.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
+	});
+
+	it("closes a tab whose close its browser dropped mid-call once that browser reconnects", async () => {
+		const bridge = new RelayBridge({});
+		const chrome = new FakeExtSocket();
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 7 })]);
+		const connId = bridge.cdpConnected(new FakeCdpSocket());
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.closeTarget",
+				params: { targetId: `PAGE${instanceCode("chrome")}.7` },
+			}),
+		);
+		await flush();
+		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
+		bridge.extClosed(chrome);
+		await flush();
+		const back = new FakeExtSocket();
+		connectInstance(bridge, back, "chrome", [tab({ tabId: 7 })]);
+		expect(back.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
 	});
 
 	it("reports a tab the relay no longer knows as closed", async () => {

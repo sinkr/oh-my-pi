@@ -137,8 +137,15 @@ async function restoreGroups(): Promise<void> {
 	}
 }
 
+/**
+ * RPC results that finished while the socket was down, sent after the next hello: the relay keeps the undo of a
+ * call it gave up on (a tab created for an open that already failed), and a result it does not know it drops.
+ */
+const unsentResults: ExtToRelayMessage[] = [];
+
 function post(msg: ExtToRelayMessage): void {
 	if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+	else if (msg.t === "rpcResult") unsentResults.push(msg);
 }
 
 async function setBadge(connected: boolean): Promise<void> {
@@ -246,7 +253,10 @@ async function connect(): Promise<void> {
 	socket.onopen = () => {
 		reconnectDelay = RECONNECT_MIN_MS;
 		void setBadge(true);
-		void buildHello().then(hello => post(hello));
+		void buildHello().then(hello => {
+			post(hello);
+			for (const result of unsentResults.splice(0)) post(result);
+		});
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
