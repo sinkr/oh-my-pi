@@ -1376,9 +1376,18 @@ fn background_pointer(
 	let prepare =
 		|| make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit);
 	let (prepared, (to, to_wid)) = pointer_owner(&event, prepare, owner)?;
-	// Every pointer kind goes through the same check right before it posts.
-	let before_post =
-		|| pointer_recheck(prepared, entry_front, pid, wid, skylight::front_pid, || visit.happened());
+	// Every pointer kind goes through the same check right before it posts. A
+	// left click has posted its hover primer by then; the others nothing.
+	let sent = matches!(event, PointerEvent::Click { button: MouseButton::Left, .. });
+	let before_post = || {
+		pointer_recheck(
+			(prepared, sent),
+			entry_front,
+			(pid, wid, &window.app),
+			skylight::front_pid,
+			|| visit.happened(),
+		)
+	};
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => background_left_click(
 			source,
@@ -1411,26 +1420,38 @@ fn background_pointer(
 }
 
 /// The check right before background pointer input for window `wid` of `pid`
-/// posts. The probes that chose where it goes can block, and the user may
-/// bring the target forward meanwhile, or come to it and leave again
-/// (`visited`): the input then refuses, whether or not it first made the
-/// window key (`prepared`, [`recheck_background`]), as it does when the
-/// front process cannot be read. A target that was already the user's own
-/// front app as the input began (`entry_front`) still takes it.
+/// (application `app`) posts. The probes that chose where it goes can block,
+/// and the user may bring the target forward meanwhile, or come to it and
+/// leave again (`visited`): the input then refuses, whether or not it first
+/// made the window key (`prepared`), as it does when the front process cannot
+/// be read. A target that was already the user's own front app as the input
+/// began (`entry_front`) still takes it. `sent` says whether this input
+/// already posted events, which the refusal then reports.
 fn pointer_recheck(
-	prepared: bool,
+	(prepared, sent): (bool, bool),
 	entry_front: EntryFront,
-	pid: libc::pid_t,
-	wid: u32,
+	(pid, wid, app): (libc::pid_t, u32, &str),
 	front: impl FnOnce() -> Option<libc::pid_t>,
-	visited: impl Fn() -> bool,
+	visited: impl FnOnce() -> bool,
 ) -> CoreResult<()> {
 	let now = front();
-	entry_front.require_behind(now, pid, wid)?;
-	if visited() {
-		return Err(came_forward_refusal(wid));
-	}
-	recheck_background(prepared || now.is_none(), pid, wid, || now, &visited, || Ok(()))
+	let why = if now.is_none() {
+		"the front application could not be identified"
+	} else if entry_front.came_forward(now, pid) || visited() || (prepared && now == Some(pid)) {
+		"it came to the front"
+	} else {
+		return Ok(());
+	};
+	let sent = if sent {
+		"input sent before this may already have landed, and no further input was sent"
+	} else {
+		"nothing was sent"
+	};
+	Err(DesktopError::background_unavailable(format!(
+		"window {wid} of {app}: {why} during background input, so the input could reach a window \
+		 the user just picked; {sent}; inspect the window, then retry with takeover:true or use ax \
+		 actions",
+	)))
 }
 
 /// Where background pointer `event` goes: `owner`'s answer, with whether
@@ -3477,18 +3498,27 @@ mod tests {
 	fn a_pointer_event_that_never_made_its_window_key_refuses_once_the_user_came_to_it() {
 		use crate::desktop::error::ErrorCode;
 		let user = EntryFront(Some(9));
+		let target = (7, 42, "TextEdit");
 		// A right click, move or scroll (never prepared) while the user (9)
 		// brought the target (7) forward during its owner lookup.
-		let error = pointer_recheck(false, user, 7, 42, || Some(7), || false).unwrap_err();
+		let error = pointer_recheck((false, false), user, target, || Some(7), || false).unwrap_err();
 		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert!(
+			error
+				.message
+				.contains("window 42 of TextEdit: it came to the front")
+		);
+		assert!(error.message.contains("; nothing was sent;"), "{}", error.message);
 		// The user came to the target and left again.
-		assert!(pointer_recheck(false, user, 7, 42, || Some(9), || true).is_err());
+		assert!(pointer_recheck((false, false), user, target, || Some(9), || true).is_err());
 		// Still behind the user, or the user's own front app from the start.
-		pointer_recheck(false, user, 7, 42, || Some(9), || false).unwrap();
-		pointer_recheck(false, EntryFront(Some(7)), 7, 42, || Some(7), || false).unwrap();
+		pointer_recheck((false, false), user, target, || Some(9), || false).unwrap();
+		pointer_recheck((false, false), EntryFront(Some(7)), target, || Some(7), || false).unwrap();
 		// A left click that made the window key refuses once the front process
-		// cannot be read.
-		assert!(pointer_recheck(true, user, 7, 42, || None, || false).is_err());
+		// cannot be read; its primer and key-making press were already posted.
+		let error = pointer_recheck((true, true), user, target, || None, || false).unwrap_err();
+		assert!(error.message.contains("could not be identified"));
+		assert!(error.message.contains("no further input was sent"), "{}", error.message);
 	}
 
 	#[test]
@@ -3496,7 +3526,13 @@ mod tests {
 		// A right click, move or scroll was never prepared, but an unknown front
 		// process may be the target the user just picked, as on the left-click
 		// path.
-		let error = pointer_recheck(false, EntryFront(Some(9)), 7, 42, || None, || false);
+		let error = pointer_recheck(
+			(false, false),
+			EntryFront(Some(9)),
+			(7, 42, "TextEdit"),
+			|| None,
+			|| false,
+		);
 		assert_eq!(error.unwrap_err().code, crate::desktop::error::ErrorCode::BackgroundUnavailable);
 	}
 
