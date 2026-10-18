@@ -332,7 +332,7 @@ unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> R
 			SEEN[index].fetch_add(1, Ordering::AcqRel);
 		}
 		if physical_escape(kind, key, pid, tag) {
-			context.inner.cancel();
+			context.inner.escape();
 		}
 	}
 	event

@@ -1,5 +1,5 @@
 import { adaptDesktopSession } from "./desktop-adapter.js";
-import { loadNative } from "./loader-state.js";
+import { loadNative, missingNativeExport } from "./loader-state.js";
 
 let DesktopSession;
 
@@ -12,7 +12,21 @@ export function createDesktopSession(options) {
 	return new DesktopSession(options);
 }
 
-/** Invalidate this process's listen-only event taps before it exits (see the native doc). */
+// A stale workspace addon lacks the Escape exports; fall back to the stub
+// `native/index.js` exports in their place, which names the rebuild.
+
+/** Physical-Escape stops counted under `key`, loading the native addon on first use. */
+export function desktopEscapeStops(key) {
+	return (loadNative().desktopEscapeStops ?? missingNativeExport("desktopEscapeStops"))(key);
+}
+
+/** Drop the stop count kept under `key`. */
+export function forgetDesktopEscapeStops(key) {
+	(loadNative().forgetDesktopEscapeStops ?? missingNativeExport("forgetDesktopEscapeStops"))(key);
+}
+
+/** Invalidate this process's listen-only event taps before it exits (see the native doc). A stale
+ * workspace addon without the export holds no such taps. */
 export function closeDesktopEventTaps() {
-	loadNative().closeDesktopEventTaps();
+	loadNative().closeDesktopEventTaps?.();
 }

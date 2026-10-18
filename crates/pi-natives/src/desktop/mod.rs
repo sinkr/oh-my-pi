@@ -22,7 +22,7 @@ use std::{
 	panic::AssertUnwindSafe,
 	sync::{
 		Arc,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicU32, AtomicUsize, Ordering},
 	},
 	thread::{self, JoinHandle},
 	time::{Duration, Instant},
@@ -31,7 +31,8 @@ use std::{
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
 use ax::{AxRegistry, register_node};
 use backend::{
-	Backend, DeliveryMode, DisplayAwakeHold, MouseButton, PointerEvent, is_raise_action,
+	Backend, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput, KeyboardFocus,
+	MouseButton, PointerEvent, is_raise_action,
 };
 use control::{CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError, ErrorCode};
@@ -343,6 +344,12 @@ enum Request {
 		options:   ParsedPointerOptions,
 		reply:     Reply,
 	},
+	AxInput {
+		reference: String,
+		input:     ElementInput,
+		takeover:  Option<bool>,
+		reply:     Reply,
+	},
 	Close {
 		reply: Reply,
 	},
@@ -384,6 +391,7 @@ impl Request {
 			| Self::AxSelectText { reply, .. }
 			| Self::AxFocus { reply, .. }
 			| Self::AxClick { reply, .. }
+			| Self::AxInput { reply, .. }
 			| Self::Close { reply } => reply,
 		};
 		reply.send(result).is_ok()
@@ -406,6 +414,7 @@ impl Request {
 				| Self::AxSelectText { .. }
 				| Self::AxFocus { .. }
 				| Self::AxClick { .. }
+				| Self::AxInput { .. }
 				| Self::OpenApplication { .. }
 				| Self::MenuItems { .. }
 				| Self::MenuSelect { .. }
@@ -433,10 +442,34 @@ impl Request {
 				(Some(target), options.takeover)
 			},
 			Self::AxClick { options, .. } => (None, options.takeover),
+			Self::AxInput { takeover, .. } => (None, *takeover),
 			Self::RaiseWindow { .. } => return true,
 			Self::OpenApplication { options, .. } => return options.activate.unwrap_or(false),
 			Self::AxPerform { action, .. } => return is_raise_action(action),
-			_ => return false,
+			// Background-only mutations and reads: listed by name so a new
+			// request variant must decide whether it arms the stop.
+			Self::MenuItems { .. }
+			| Self::MenuSelect { .. }
+			| Self::BringToCurrentSpace { .. }
+			| Self::AxSetValue { .. }
+			| Self::AxSelectText { .. }
+			| Self::AxFocus { .. }
+			| Self::Capabilities { .. }
+			| Self::ListDisplays { .. }
+			| Self::ListWindows { .. }
+			| Self::Capture { .. }
+			| Self::CaptureRegion { .. }
+			| Self::Observe { .. }
+			| Self::ListApplications { .. }
+			| Self::AxSnapshot { .. }
+			| Self::AxQuery { .. }
+			| Self::AxElementAt { .. }
+			| Self::AxFocused { .. }
+			| Self::AxNode { .. }
+			| Self::AxAttributes { .. }
+			| Self::AxChildren { .. }
+			| Self::AxParent { .. }
+			| Self::Close { .. } => return false,
 		};
 		target.is_some_and(|target| !matches!(target, Target::Window(_)))
 			|| DeliveryMode::from_takeover(takeover) == DeliveryMode::Foreground
@@ -483,6 +516,7 @@ impl Request {
 			| Self::AxPerform { reference, .. }
 			| Self::AxSetValue { reference, .. }
 			| Self::AxSelectText { reference, .. }
+			| Self::AxInput { reference, .. }
 			| Self::AxFocus { reference, .. }
 			| Self::AxClick { reference, .. } => Some(reference),
 			_ => None,
@@ -516,10 +550,11 @@ impl Request {
 			| Self::Observe { target, .. }
 			| Self::AxSnapshot { target, .. }
 			| Self::AxQuery { target, .. } => window(target).map(AppAccess::Read),
-			Self::MenuItems { target, .. } | Self::AxElementAt { target, .. } => {
-				window(target).map(AppAccess::Look)
-			},
-			Self::MenuSelect { target, .. }
+			Self::AxElementAt { target, .. } => window(target).map(AppAccess::Look),
+			// A menu read makes the window key in its app first, so it acts on
+			// the app like input.
+			Self::MenuItems { target, .. }
+			| Self::MenuSelect { target, .. }
 			| Self::HoldKeys { target, .. }
 			| Self::HoldMouse { target, .. }
 			| Self::Click { target, .. }
@@ -535,8 +570,21 @@ impl Request {
 			| Self::AxSetValue { reference, .. }
 			| Self::AxSelectText { reference, .. }
 			| Self::AxFocus { reference, .. }
-			| Self::AxClick { reference, .. } => Some(AppAccess::Element(reference)),
-			_ => None,
+			| Self::AxClick { reference, .. }
+			| Self::AxInput { reference, .. } => Some(AppAccess::Element(reference)),
+			// Listed by name so a new request must decide whether the watch
+			// covers it.
+			Self::Capabilities { .. }
+			| Self::ListDisplays { .. }
+			| Self::ListWindows { .. }
+			| Self::ListApplications { .. }
+			| Self::OpenApplication { .. }
+			| Self::AxFocused { .. }
+			| Self::AxNode { .. }
+			| Self::AxAttributes { .. }
+			| Self::AxChildren { .. }
+			| Self::AxParent { .. }
+			| Self::Close { .. } => None,
 		}
 	}
 }
@@ -1493,7 +1541,77 @@ impl Worker {
 				)?;
 				Ok(Response::Unit)
 			},
+			Request::AxInput { reference, input, takeover, .. } => {
+				let h = self.registry.resolve(reference)?;
+				let windows = self.backend()?.windows()?;
+				let target = Target::Window(self.ax()?.window_id(&h, &windows)?);
+				let mode = DeliveryMode::from_takeover(*takeover);
+				match self
+					.backend()?
+					.element_input(&target, &h, input, mode, token)?
+				{
+					ElementDelivery::Delivered => Ok(Response::Unit),
+					ElementDelivery::Unfocused(focus) => {
+						Err(self.element_focus_refusal(reference, focus, mode))
+					},
+				}
+			},
 			Request::Close { .. } => Ok(Response::Unit),
+		}
+	}
+}
+
+impl Worker {
+	/// The error for keys addressed to `reference` that were never sent
+	/// because the element did not take keyboard focus: where focus is now,
+	/// with the focused element's `ax()` line and a ref for it.
+	fn element_focus_refusal(
+		&mut self,
+		reference: &str,
+		focus: KeyboardFocus,
+		mode: DeliveryMode,
+	) -> DesktopError {
+		let window = match focus.window.as_deref() {
+			None => "an unidentified window".to_owned(),
+			Some(id) => {
+				let title = self
+					.backend()
+					.and_then(|backend| backend.windows())
+					.ok()
+					.and_then(|windows| windows.into_iter().find(|window| window.id == id))
+					.map(|window| window.title);
+				match title {
+					Some(title) => format!("window {id} ({title:?})"),
+					None => format!("window {id}"),
+				}
+			},
+		};
+		let target = focus
+			.window
+			.or_else(|| self.registry.target(reference).ok())
+			.unwrap_or_else(|| "desktop".to_owned());
+		let element = match focus.element {
+			None => "no element".to_owned(),
+			Some(handle) => {
+				let (backend, registry) = (&mut self.backend, &mut self.registry);
+				backend
+					.as_mut()
+					.ok()
+					.and_then(|backend| backend.ax())
+					.and_then(|ax| ax::element_line(ax, registry, &target, handle).ok())
+					.unwrap_or_else(|| "an element that could not be read".to_owned())
+			},
+		};
+		let message = format!(
+			"{reference} did not take keyboard focus, so nothing was sent; its application's \
+			 keyboard focus is in {window}, on {element}. Re-read with win.ax() or win.observe() \
+			 before retrying"
+		);
+		match mode {
+			DeliveryMode::Background => {
+				DesktopError::background_unavailable(format!("{message}, or retry with takeover:true"))
+			},
+			DeliveryMode::Foreground => DesktopError::input_failed(message),
 		}
 	}
 }
@@ -1542,11 +1660,15 @@ struct SessionCore {
 	operation_timeout: Duration,
 }
 impl SessionCore {
-	fn new(selector: DisplaySelector) -> Arc<Self> {
-		Self::with_operation_timeout(selector, OPERATION_TIMEOUT)
+	fn new(selector: DisplaySelector, escape_stops: Arc<AtomicU32>) -> Arc<Self> {
+		Self::with_operation_timeout(selector, escape_stops, OPERATION_TIMEOUT)
 	}
 
-	fn with_operation_timeout(selector: DisplaySelector, operation_timeout: Duration) -> Arc<Self> {
+	fn with_operation_timeout(
+		selector: DisplaySelector,
+		escape_stops: Arc<AtomicU32>,
+		operation_timeout: Duration,
+	) -> Arc<Self> {
 		Arc::new(Self {
 			selector,
 			lifecycle: Mutex::new(Lifecycle {
@@ -1558,7 +1680,7 @@ impl SessionCore {
 			capabilities: Arc::default(),
 			display_awake: Arc::default(),
 			in_flight: AtomicUsize::new(0),
-			cancellation: CancellationSource::default(),
+			cancellation: CancellationSource::counting_escapes(escape_stops),
 			operation_timeout,
 		})
 	}
@@ -1673,6 +1795,19 @@ fn response_unit(response: Response) -> CoreResult<()> {
 	}
 }
 
+/// Physical-Escape stops counted under `key` by every desktop session created
+/// with it, including closed ones, until the key is forgotten.
+#[napi]
+pub fn desktop_escape_stops(key: String) -> u32 {
+	control::escape_stops(&key)
+}
+
+/// Drops the stop count kept under `key` once no session will use it again.
+#[napi]
+pub fn forget_desktop_escape_stops(key: String) {
+	control::forget_escape_stops(&key);
+}
+
 /// Invalidates this process's listen-only event taps before it exits.
 ///
 /// No desktop session here sees the user's input again afterwards. A macOS tap
@@ -1701,7 +1836,9 @@ impl Drop for DesktopSession {
 impl DesktopSession {
 	#[napi(constructor)]
 	pub fn new(options: Option<DesktopSessionOptions>) -> Result<Self> {
-		Ok(Self { core: SessionCore::new(DisplaySelector::parse(options.and_then(|o| o.display))) })
+		let options = options.unwrap_or_default();
+		let escape_stops = control::escape_stop_counter(options.escape_stop_key.as_deref());
+		Ok(Self { core: SessionCore::new(DisplaySelector::parse(options.display), escape_stops) })
 	}
 
 	/// Asks the worker when it is idle, so permissions are read live. While
@@ -1751,6 +1888,14 @@ impl DesktopSession {
 	#[napi]
 	pub fn release_display_awake(&self) {
 		self.core.display_awake.release_turn();
+	}
+
+	/// How many times the user's physical Escape has stopped takeover input in
+	/// this session, or under its `escapeStopKey`. Host cancels, retirement and
+	/// release never count, so a rise tells the host the user stopped the work.
+	#[napi(getter)]
+	pub fn escape_stops(&self) -> u32 {
+		self.core.cancellation.escape_stops()
 	}
 
 	#[napi]
@@ -2299,6 +2444,46 @@ impl DesktopSession {
 		}))
 	}
 
+	/// Types `text` into the element: native text fields take it by AX
+	/// insertion, other elements as keystrokes once they hold keyboard focus.
+	#[napi]
+	pub fn ax_type(
+		&self,
+		reference: String,
+		text: String,
+		opts: Option<PointerOptions>,
+	) -> Result<task::Promise<()>> {
+		let takeover = ParsedPointerOptions::parse(opts)
+			.map_err(napi::Error::from)?
+			.takeover;
+		Ok(self.unit("desktop.axType", move |reply| Request::AxInput {
+			reference,
+			input: ElementInput::Text(text),
+			takeover,
+			reply,
+		}))
+	}
+
+	/// Presses a key chord in the element once it holds keyboard focus.
+	#[napi]
+	pub fn ax_key_chord(
+		&self,
+		reference: String,
+		keys: Vec<String>,
+		opts: Option<PointerOptions>,
+	) -> Result<task::Promise<()>> {
+		let keys = parse_keys(&keys).map_err(napi::Error::from)?;
+		let takeover = ParsedPointerOptions::parse(opts)
+			.map_err(napi::Error::from)?
+			.takeover;
+		Ok(self.unit("desktop.axKeyChord", move |reply| Request::AxInput {
+			reference,
+			input: ElementInput::Chord(keys),
+			takeover,
+			reply,
+		}))
+	}
+
 	/// Immediately cancel operations submitted before this call. Later
 	/// operations may proceed.
 	#[napi]
@@ -2829,6 +3014,25 @@ mod capture_tests {
 			unreachable!("hold_keys not exercised")
 		}
 
+		/// The element never takes focus, which stays on element 7 of the
+		/// window.
+		fn element_input(
+			&mut self,
+			_: &Target,
+			h: &AxHandle,
+			_: &ElementInput,
+			_: DeliveryMode,
+			_: &OperationToken,
+		) -> CoreResult<ElementDelivery> {
+			if let Some(tree) = &self.tree {
+				tree.lock().element(h)?;
+			}
+			Ok(ElementDelivery::Unfocused(KeyboardFocus {
+				window:  Some(self.window.id.clone()),
+				element: Some(AxHandle::Test(7)),
+			}))
+		}
+
 		fn menu_items(
 			&mut self,
 			_: &DesktopWindow,
@@ -3113,7 +3317,11 @@ mod capture_tests {
 	/// A session serving `backend` with an hour's grace, so while a request
 	/// hangs only the session giving up can release the display.
 	fn session_serving(backend: FakeWaylandBackend) -> Arc<SessionCore> {
-		let core = SessionCore::with_operation_timeout(DisplaySelector::Active, HUNG_CALL_TIMEOUT);
+		let core = SessionCore::with_operation_timeout(
+			DisplaySelector::Active,
+			Arc::default(),
+			HUNG_CALL_TIMEOUT,
+		);
 		let display_awake = Arc::clone(&core.display_awake);
 		let (tx, rx) = flume::unbounded();
 		let (done_tx, done) = flume::bounded(1);
@@ -3479,7 +3687,7 @@ mod capture_tests {
 		}
 		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
 		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
-		let requests: [fn(Reply) -> Request; 9] = [
+		let requests: [fn(Reply) -> Request; 10] = [
 			|reply| Request::AxNode { reference: e2(), reply },
 			|reply| Request::AxAttributes { reference: e2(), reply },
 			|reply| Request::AxChildren { reference: e2(), reply },
@@ -3489,6 +3697,12 @@ mod capture_tests {
 			|reply| Request::AxSelectText {
 				reference: e2(),
 				request: text_range::TextSelectRequest { text: "Go".to_string(), ..Default::default() },
+				reply,
+			},
+			|reply| Request::AxInput {
+				reference: e2(),
+				input: ElementInput::Text("Stop".to_owned()),
+				takeover: None,
 				reply,
 			},
 			|reply| Request::AxFocus { reference: e2(), reply },
@@ -3626,6 +3840,45 @@ mod capture_tests {
 		assert_eq!(tree.lock().reads, reads, "the walk read on after the cancel");
 	}
 
+	#[test]
+	fn element_keys_refused_for_focus_name_where_focus_is_with_a_usable_ref() {
+		for (takeover, code) in
+			[(None, ErrorCode::BackgroundUnavailable), (Some(true), ErrorCode::InputFailed)]
+		{
+			let mut worker = worker_with(FakeWaylandBackend::new());
+			let inner: &mut Worker = &mut worker;
+			let (backend, registry) = (&mut inner.backend, &mut inner.registry);
+			let ax = backend
+				.as_mut()
+				.ok()
+				.and_then(|backend| backend.ax())
+				.unwrap();
+			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
+				.unwrap()
+				.ref_;
+			let (reply, _rx) = flume::bounded(1);
+			let request = Request::AxInput {
+				reference: reference.clone(),
+				input: ElementInput::Text("4".to_owned()),
+				takeover,
+				reply,
+			};
+			let Err(error) = worker.process(&request, &CancellationSource::default().token()) else {
+				panic!("keys for an element without focus must be refused");
+			};
+			assert_eq!(error.code, code);
+			let message = &error.message;
+			assert!(
+				message.starts_with(&format!("{reference} did not take keyboard focus")),
+				"{message}"
+			);
+			assert!(message.contains(&format!("window {WAYLAND_ID} (\"Obsidian\")")), "{message}");
+			assert!(message.contains("on - button [ref=e2]."), "{message}");
+			assert!(message.contains("win.ax()"), "{message}");
+			assert!(worker.registry.resolve("e2").unwrap() == AxHandle::Test(7));
+		}
+	}
+
 	fn capture_request(target: Target) -> Request {
 		let (reply, _rx) = flume::bounded(1);
 		Request::Capture { target, caps: CaptureCaps::default(), reply }
@@ -3638,7 +3891,7 @@ mod capture_tests {
 
 	#[test]
 	fn capture_refreshes_the_nonblocking_capabilities_snapshot() {
-		let core = SessionCore::new(DisplaySelector::Active);
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
 		let mut worker = worker_with(FakeWaylandBackend::new());
 		worker.capabilities = Arc::clone(&core.capabilities);
 		worker
@@ -3657,7 +3910,7 @@ mod capture_tests {
 
 	#[test]
 	fn screen_state_never_queues_behind_a_stuck_request() {
-		let core = SessionCore::new(DisplaySelector::Active);
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
 		// A worker that never serves its queue, with a request outstanding and
 		// no capabilities snapshot: a queued read would wait out its timeout.
 		let (tx, stuck) = flume::unbounded();
@@ -3670,7 +3923,7 @@ mod capture_tests {
 
 	#[test]
 	fn cancelled_calls_never_start_the_worker_or_count_as_in_flight() {
-		let core = SessionCore::new(DisplaySelector::Active);
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
 		let token = core.cancellation.token();
 		core.cancellation.cancel();
 		assert_eq!(
@@ -3687,7 +3940,7 @@ mod capture_tests {
 
 	#[test]
 	fn failed_queue_delivery_releases_the_in_flight_count() {
-		let core = SessionCore::new(DisplaySelector::Active);
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
 		let (tx, rx) = flume::unbounded();
 		core.lifecycle.lock().tx = Some(tx);
 		drop(rx);
