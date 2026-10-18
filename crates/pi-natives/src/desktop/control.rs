@@ -407,10 +407,17 @@ impl Drop for KernelOwner {
 #[cfg(target_os = "macos")]
 static SHARED_OWNERSHIP: Mutex<Option<SharedLock>> = Mutex::new(None);
 
+/// Tells apart the leases `SHARED_OWNERSHIP` publishes, so a helper reaped
+/// after its lease ended counts against none.
+#[cfg(target_os = "macos")]
+static SHARED_LEASES: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(target_os = "macos")]
 struct SharedLock {
-	file:   std::fs::File,
-	handed: bool,
+	file:     std::fs::File,
+	lease:    u64,
+	/// Helpers handed a duplicate that have not been reaped.
+	unreaped: usize,
 }
 
 /// The kernel lease while its lock is published to release helpers.
@@ -422,11 +429,11 @@ struct SharedOwnership {
 #[cfg(target_os = "macos")]
 impl SharedOwnership {
 	fn publish(lease: KernelLease) -> Self {
-		*SHARED_OWNERSHIP.lock() = lease
-			.file
-			.try_clone()
-			.ok()
-			.map(|file| SharedLock { file, handed: false });
+		*SHARED_OWNERSHIP.lock() = lease.file.try_clone().ok().map(|file| SharedLock {
+			file,
+			lease: SHARED_LEASES.fetch_add(1, Ordering::Relaxed),
+			unreaped: 0,
+		});
 		Self { lease }
 	}
 }
@@ -435,19 +442,39 @@ impl SharedOwnership {
 impl Drop for SharedOwnership {
 	fn drop(&mut self) {
 		let published = SHARED_OWNERSHIP.lock().take();
-		self.lease.shared = published.is_some_and(|published| published.handed);
+		self.lease.shared = published.is_some_and(|published| published.unreaped > 0);
+	}
+}
+
+/// A release helper's share of the kernel ownership lock, dropped once the
+/// helper is reaped: the lease unlocks on drop again once every helper it
+/// handed the lock to has exited.
+#[cfg(target_os = "macos")]
+pub(crate) struct HandedOwnership {
+	lease: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for HandedOwnership {
+	fn drop(&mut self) {
+		if let Some(published) = SHARED_OWNERSHIP.lock().as_mut()
+			&& published.lease == self.lease
+		{
+			published.unreaped -= 1;
+		}
 	}
 }
 
 /// A new close-on-exec descriptor for the kernel ownership lock, while this
-/// process holds it.
+/// process holds it, for a helper that holds the returned share until it is
+/// reaped.
 #[cfg(target_os = "macos")]
-pub(crate) fn shared_ownership() -> Option<std::os::fd::OwnedFd> {
+pub(crate) fn shared_ownership() -> Option<(std::os::fd::OwnedFd, HandedOwnership)> {
 	let mut published = SHARED_OWNERSHIP.lock();
 	let published = published.as_mut()?;
 	let duplicate = published.file.try_clone().ok()?;
-	published.handed = true;
-	Some(duplicate.into())
+	published.unreaped += 1;
+	Some((duplicate.into(), HandedOwnership { lease: published.lease }))
 }
 
 pub(crate) struct InputLease {
@@ -488,9 +515,9 @@ impl Drop for InputLease {
 #[cfg(unix)]
 struct KernelLease {
 	file:   std::fs::File,
-	/// A macOS release helper was handed a duplicate (`SharedOwnership`), so
-	/// the lease releases by closing its descriptor and the lock lasts until
-	/// the helper's closes too.
+	/// A macOS release helper that was handed a duplicate
+	/// (`SharedOwnership`) may still run, so the lease releases by closing its
+	/// descriptor and the lock lasts until the helper's closes too.
 	shared: bool,
 }
 
@@ -642,6 +669,36 @@ pub(crate) fn grant_for_test(source: &CancellationSource) {
 		running: AtomicBool::new(false),
 	};
 	*source.0.state.lock() = Some(Arc::new(owner));
+}
+
+/// Real kernel ownership alone, as each mutation without explicit control
+/// takes and drops it.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn own_for_test() -> CoreResult<impl Sized> {
+	KernelOwner::acquire()
+}
+
+/// Whether this is the child test process that runs `test` alone. Otherwise
+/// runs it so and asserts that it passed: under cargo test, the worker tests
+/// in this process take its one input ownership to send input.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn alone(test: &str) -> bool {
+	const ALONE: &str = "PI_DESKTOP_TEST_ALONE";
+	if std::env::var_os(ALONE).is_some() {
+		return true;
+	}
+	let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", test])
+		.env(ALONE, "1")
+		.output()
+		.expect("child test");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success() && stdout.contains(" 1 passed;"),
+		"{stdout}{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+	false
 }
 
 #[cfg(test)]
@@ -892,29 +949,19 @@ mod tests {
 	#[cfg(target_os = "macos")]
 	#[test]
 	fn a_helper_holding_the_shared_lock_keeps_other_hosts_out_until_it_exits() {
-		// The worker tests in this process take its one input ownership to send
-		// input, so the test runs alone in a child test process.
-		const ALONE: &str = "PI_DESKTOP_TEST_ALONE";
-		if std::env::var_os(ALONE).is_none() {
-			let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
-				.args([
-					"--exact",
-					"desktop::control::tests::a_helper_holding_the_shared_lock_keeps_other_hosts_out_until_it_exits",
-				])
-				.env(ALONE, "1")
-				.output()
-				.expect("child test");
-			let stdout = String::from_utf8_lossy(&output.stdout);
-			assert!(output.status.success() && stdout.contains(" 1 passed;"), "{stdout}");
+		if !alone(
+			"desktop::control::tests::a_helper_holding_the_shared_lock_keeps_other_hosts_out_until_it_exits",
+		) {
 			return;
 		}
 		assert!(shared_ownership().is_none());
 		let owner = KernelOwner::acquire().expect("test kernel owner");
+		let (ownership, _handed) = shared_ownership().expect("held lock is shared");
 		// Started as the release helper is: the shared lock is its standard
 		// output, and it exits when its standard input ends.
 		let mut helper = std::process::Command::new("/bin/cat")
 			.stdin(std::process::Stdio::piped())
-			.stdout(shared_ownership().expect("held lock is shared"))
+			.stdout(ownership)
 			.spawn()
 			.expect("helper stand-in");
 		drop(owner);
@@ -923,6 +970,45 @@ mod tests {
 		drop(helper.stdin.take());
 		assert!(helper.wait().expect("helper exits").success());
 		child_probe(&KernelLease::path(), true);
+		remove_test_lock();
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn a_lease_whose_helpers_were_reaped_releases_while_a_spawning_process_holds_its_descriptor() {
+		if !alone(
+			"desktop::control::tests::a_lease_whose_helpers_were_reaped_releases_while_a_spawning_process_holds_its_descriptor",
+		) {
+			return;
+		}
+		let owner = KernelOwner::acquire().expect("test kernel owner");
+		let (ownership, handed) = shared_ownership().expect("held lock is shared");
+		let mut helper = std::process::Command::new("/bin/cat")
+			.stdin(std::process::Stdio::piped())
+			.stdout(ownership)
+			.spawn()
+			.expect("helper stand-in");
+		drop(helper.stdin.take());
+		assert!(helper.wait().expect("helper exits").success());
+		drop(handed);
+		// A process spawned while the lease is held carries a copy of its
+		// descriptor until it execs; this one keeps it.
+		let copy = SHARED_OWNERSHIP
+			.lock()
+			.as_ref()
+			.expect("published lock")
+			.file
+			.try_clone()
+			.expect("descriptor copy");
+		let mut copy = std::process::Command::new("/bin/cat")
+			.stdin(std::process::Stdio::piped())
+			.stdout(copy)
+			.spawn()
+			.expect("process holding a copy");
+		drop(owner);
+		child_probe(&KernelLease::path(), true);
+		drop(copy.stdin.take());
+		assert!(copy.wait().expect("copy exits").success());
 		remove_test_lock();
 	}
 }

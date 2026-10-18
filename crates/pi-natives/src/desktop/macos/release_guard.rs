@@ -6,9 +6,10 @@
 //! a helper process (`release_helper.rs`) receives every press with its
 //! prepared release, every drag move and every release. When the stream ends
 //! with presses still open, the helper posts their releases
-//! (`release::plan`). A request starts the helper at its first press, or at
-//! once on the shared HID route, and it exits when the request ends: nothing
-//! runs between requests.
+//! (`release::plan`). A request that presses starts the helper before it
+//! runs, so no start or wait sits between a check and the press it guards,
+//! and waits for the helper to exit when it ends: nothing runs between
+//! requests, and the next request finds input ownership free.
 
 use std::{
 	cell::RefCell,
@@ -34,15 +35,18 @@ use super::release::{self, Input, Record, Route, Transition};
 use crate::desktop::{control, error::CoreResult, native_helper::HelperDirectory};
 
 const HELPER: &[u8] = include_bytes!(env!("OMP_INPUT_RELEASE_HELPER"));
-/// How long the first press on the shared HID route waits for the helper to
-/// start observing the user's keys and buttons.
+/// How long a request on the shared HID route waits, as it starts, for the
+/// helper to start observing the user's keys and buttons.
 const READY_TIMEOUT: Duration = Duration::from_millis(250);
 /// How long a stalled helper may hold up input before the request goes on
 /// without it.
 const WRITE_TIMEOUT: Duration = Duration::from_millis(100);
-/// How long a request that ends with presses open (a panic unwound it) waits
-/// for the helper to release them, keeping input ownership meanwhile.
-const RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long a request waits for its helper to release what is still open (a
+/// panic unwound it) and exit, keeping input ownership meanwhile.
+const EXIT_TIMEOUT: Duration = Duration::from_millis(500);
+/// How often a request checks whether its helper exited; one with nothing to
+/// release exits within about a millisecond.
+const EXIT_POLL: Duration = Duration::from_micros(200);
 /// How long an abandoned helper may take to close its event tap and exit
 /// once asked, before it is killed.
 const STOP_TIMEOUT: Duration = Duration::from_millis(100);
@@ -69,15 +73,31 @@ thread_local! {
 	static EXECUTABLE: RefCell<Option<(HelperDirectory, PathBuf)>> = const { RefCell::new(None) };
 }
 
-/// Runs one input request, streaming its presses to a release helper. A
-/// request that presses on the shared HID route (`hid`) starts the helper at
-/// once, so it is observing the user by the first press; others start it at
-/// their first press.
-pub(super) fn scope<T>(hid: bool, action: impl FnOnce() -> T) -> T {
-	scope_with(spawn, hid, action)
+/// What an input request presses, which decides when its release helper
+/// starts.
+#[derive(Clone, Copy)]
+pub(super) enum Presses {
+	/// Nothing: the helper starts only if a press comes anyway.
+	Nothing,
+	/// Keys or buttons delivered to a process.
+	Process,
+	/// Keys or buttons on the shared HID route, which the user's own keyboard
+	/// and mouse share: the helper must read which the user already holds.
+	Hid,
 }
 
-fn scope_with<T>(connect: fn() -> io::Result<Helper>, hid: bool, action: impl FnOnce() -> T) -> T {
+/// Runs one input request, streaming its presses to a release helper, which
+/// starts (and on the HID route, reads the user's holds) before the request
+/// runs.
+pub(super) fn scope<T>(presses: Presses, action: impl FnOnce() -> T) -> T {
+	scope_with(spawn, presses, action)
+}
+
+fn scope_with<T>(
+	connect: fn() -> io::Result<Helper>,
+	presses: Presses,
+	action: impl FnOnce() -> T,
+) -> T {
 	struct End;
 	impl Drop for End {
 		fn drop(&mut self) {
@@ -90,8 +110,10 @@ fn scope_with<T>(connect: fn() -> io::Result<Helper>, hid: bool, action: impl Fn
 		}
 		let mut ledger =
 			Ledger { open: Vec::new(), next_id: 0, helper: None, unguarded: false, connect };
-		if hid {
-			ledger.observe();
+		match presses {
+			Presses::Nothing => {},
+			Presses::Process => ledger.start(),
+			Presses::Hid => ledger.prepare(Route::Hid),
 		}
 		*request = Some(ledger);
 		true
@@ -101,32 +123,34 @@ fn scope_with<T>(connect: fn() -> io::Result<Helper>, hid: bool, action: impl Fn
 }
 
 /// Ends the request's stream, also while a panic unwinds it: the helper
-/// releases whatever is still open, then exits. With presses open the request
-/// waits for that, so its input ownership outlasts the releases.
+/// releases whatever is still open, then exits. The request waits for that,
+/// so its input ownership outlasts the releases and the helper's share of
+/// it.
 fn end() {
-	let Some(Ledger { open, helper: Some(helper), .. }) = REQUEST.with_borrow_mut(Option::take)
-	else {
+	let Some(Ledger { helper: Some(helper), .. }) = REQUEST.with_borrow_mut(Option::take) else {
 		return;
 	};
-	let Helper { child, socket, .. } = helper;
+	let Helper { child, socket, ownership, .. } = helper;
 	drop(socket);
 	let Some(mut child) = child else {
 		return;
 	};
-	if !open.is_empty() {
-		let deadline = Instant::now() + RELEASE_TIMEOUT;
-		while Instant::now() < deadline {
-			match child.try_wait() {
-				Ok(None) => thread::sleep(Duration::from_millis(2)),
-				_ => return,
-			}
+	let deadline = Instant::now() + EXIT_TIMEOUT;
+	while Instant::now() < deadline {
+		match child.try_wait() {
+			Ok(None) => thread::sleep(EXIT_POLL),
+			_ => return,
 		}
 	}
-	// Reaped off the input thread; a failed spawn leaves a zombie rather than
-	// a panic during unwinding.
+	// Reaped off the input thread, keeping its share of input ownership until
+	// then; a failed spawn leaves a zombie rather than a panic during
+	// unwinding.
 	let _ = thread::Builder::new()
 		.name("desktop-release-reaper".into())
-		.spawn(move || child.wait());
+		.spawn(move || {
+			let _ = child.wait();
+			drop(ownership);
+		});
 }
 
 /// Posts `event` on `route` through `deliver`, telling the request's release
@@ -147,12 +171,14 @@ pub(super) fn post(
 
 struct Helper {
 	/// `None` for a test peer.
-	child:    Option<Child>,
-	socket:   UnixStream,
+	child:     Option<Child>,
+	socket:    UnixStream,
+	/// Its share of input ownership, held until it is reaped.
+	ownership: Option<control::HandedOwnership>,
 	/// Told to follow what the user physically holds.
-	observes: bool,
+	observes:  bool,
 	/// Answered that it does.
-	ready:    bool,
+	ready:     bool,
 }
 
 struct Ledger {
@@ -183,9 +209,9 @@ impl Ledger {
 			self.find(route, input).is_some()
 		}) {
 			Some(Transition::Press(input)) => {
+				// Only a request whose `Presses` left the helper unstarted
+				// waits here; input cancelled meanwhile presses nothing new.
 				self.prepare(route);
-				// Preparing may wait for the helper; input cancelled meanwhile
-				// presses nothing new.
 				control::check()?;
 				self.press(route, input, kind, event);
 				deliver()
@@ -220,6 +246,8 @@ impl Ledger {
 
 	/// Starts the helper for a press on `route`. On the shared HID route it
 	/// must first have read which keys and buttons the user already holds.
+	/// Requests do this as they start (`Presses`); a press does it only if its
+	/// request did not.
 	fn prepare(&mut self, route: Route) {
 		self.start();
 		if route == Route::Hid {
@@ -259,11 +287,11 @@ impl Ledger {
 		}
 	}
 
-	/// Holds the first press on the shared HID route until the helper answers
+	/// Holds the request on the shared HID route until the helper answers
 	/// that it has read which keys and buttons the user already holds, so it
 	/// can tell the user's holds from this request's. A helper that does not
 	/// answer in time, exits (it cannot observe) or answers anything else is
-	/// stopped before the press, which it could no longer tell apart.
+	/// stopped before the first press, which it could no longer tell apart.
 	fn await_ready(&mut self) {
 		let Some(helper) = &mut self.helper else {
 			return;
@@ -296,7 +324,10 @@ impl Ledger {
 	/// asked with `SIGTERM` first and closes its event tap before it exits:
 	/// killed with the tap live, it can make the user's key arrive twice.
 	fn abandon(&mut self) {
-		if let Some(Helper { child: Some(mut child), socket: _stream, .. }) = self.helper.take() {
+		if let Some(Helper {
+			child: Some(mut child), socket: _stream, ownership: _ownership, ..
+		}) = self.helper.take()
+		{
 			let asked = libc::pid_t::try_from(child.id())
 				// SAFETY: the helper is this request's unreaped child.
 				.is_ok_and(|pid| unsafe { libc::kill(pid, libc::SIGTERM) } == 0);
@@ -361,7 +392,9 @@ fn spawn() -> io::Result<Helper> {
 		*executable = Some((directory, path.clone()));
 		Ok::<_, io::Error>(path)
 	})?;
-	spawn_at(&executable, control::shared_ownership())
+	let (descriptor, ownership) = control::shared_ownership().unzip();
+	let helper = spawn_at(&executable, descriptor)?;
+	Ok(Helper { ownership, ..helper })
 }
 
 /// Starts `executable` as a release helper with one end of a socket pair as
@@ -395,7 +428,7 @@ fn spawn_at(executable: &Path, ownership: Option<OwnedFd>) -> io::Result<Helper>
 		.stderr(Stdio::null())
 		.process_group(0)
 		.spawn()?;
-	Ok(Helper { child: Some(child), socket, observes: false, ready: false })
+	Ok(Helper { child: Some(child), socket, ownership: None, observes: false, ready: false })
 }
 
 #[cfg(test)]
@@ -423,6 +456,19 @@ mod tests {
 		static STAND_IN: RefCell<Option<(HelperDirectory, PathBuf)>> = const { RefCell::new(None) };
 		/// The process id of the last stand-in helper started.
 		static STARTED: Cell<libc::pid_t> = const { Cell::new(0) };
+		/// What the next `answering_peer` does once told to observe.
+		static ANSWER: Cell<Answer> = const { Cell::new(Answer::Silent) };
+		/// The input the next `cancelling_peer` cancels before it answers.
+		static CANCEL: RefCell<Option<CancellationSource>> = const { RefCell::new(None) };
+	}
+
+	#[derive(Clone, Copy, Debug, PartialEq)]
+	enum Answer {
+		Byte(u8),
+		/// Never answers.
+		Silent,
+		/// Exits, as a helper that cannot observe the user does.
+		HangUp,
 	}
 
 	/// A helper that is only the far end of the socket, kept for the test to
@@ -430,23 +476,44 @@ mod tests {
 	fn peer() -> io::Result<Helper> {
 		let (socket, theirs) = UnixStream::pair()?;
 		PEER.set(Some(theirs));
-		Ok(Helper { child: None, socket, observes: false, ready: true })
+		Ok(Helper { child: None, socket, ownership: None, observes: false, ready: true })
 	}
 
-	/// A peer that has not answered `READY` yet.
-	fn unready_peer() -> io::Result<Helper> {
+	/// A peer that has not answered `READY` yet and does as `ANSWER` says.
+	fn answering_peer() -> io::Result<Helper> {
 		let mut helper = peer()?;
 		helper.ready = false;
+		match ANSWER.get() {
+			Answer::Byte(answer) => {
+				PEER.with_borrow_mut(|peer| peer.as_mut().expect("peer").write_all(&[answer]))?;
+			},
+			Answer::Silent => {},
+			Answer::HangUp => drop(PEER.take()),
+		}
+		Ok(helper)
+	}
+
+	/// A peer that answers `READY` only once the input in `CANCEL` is
+	/// cancelled.
+	fn cancelling_peer() -> io::Result<Helper> {
+		let mut helper = peer()?;
+		helper.ready = false;
+		let answer = PEER.with_borrow(|peer| peer.as_ref().expect("peer").try_clone())?;
+		let cancel = CANCEL.take().expect("input to cancel");
+		thread::spawn(move || {
+			cancel.cancel();
+			(&answer).write_all(&[release::READY])
+		});
 		Ok(helper)
 	}
 
 	/// A stand-in helper executable that reads its stream to the end, then
-	/// takes 300 ms to exit, as one posting releases would.
+	/// takes 150 ms to exit, as one posting releases would.
 	fn stand_in() -> PathBuf {
 		STAND_IN.with_borrow_mut(|stand_in| {
 			let (_, path) = stand_in.get_or_insert_with(|| {
 				let directory = HelperDirectory::create("omp-release-test").expect("directory");
-				// Well inside RELEASE_TIMEOUT (500 ms) so a loaded runner still
+				// Well inside EXIT_TIMEOUT (500 ms) so a loaded runner still
 				// sees the request wait for it; long enough that a request that
 				// does not wait finds it running.
 				let script = b"#!/bin/sh\ncat >/dev/null\nsleep 0.15\n";
@@ -622,7 +689,7 @@ mod tests {
 	fn a_panicking_request_leaves_its_open_presses_to_the_helper() {
 		let route = Route::Keyboard(4242);
 		let result = catch_unwind(|| {
-			scope_with(peer, false, || {
+			scope_with(peer, Presses::Process, || {
 				post(route, &shift(true), || Ok(())).expect("Shift down");
 				let a = |down| key(0, down, CGEventFlags::CGEventFlagShift);
 				post(Route::Hid, &a(true), || Ok(())).expect("A down");
@@ -646,7 +713,7 @@ mod tests {
 
 		// Negative control: a request that releases what it pressed leaves
 		// nothing open.
-		scope_with(peer, false, || {
+		scope_with(peer, Presses::Process, || {
 			post(route, &shift(true), || Ok(())).expect("Shift down");
 			post(route, &shift(false), || Ok(())).expect("Shift up");
 		});
@@ -657,7 +724,7 @@ mod tests {
 	fn a_press_is_told_before_it_posts_and_a_release_after() {
 		let route = Route::Keyboard(7);
 		let mut seen = Vec::new();
-		scope_with(peer, false, || {
+		scope_with(peer, Presses::Process, || {
 			for down in [true, false] {
 				post(route, &key(12, down, CGEventFlags::CGEventFlagNull), || {
 					seen.push(told().len());
@@ -675,7 +742,7 @@ mod tests {
 	#[test]
 	fn a_drag_releases_where_it_last_moved_even_mid_move() {
 		let mut release_at = Vec::new();
-		scope_with(peer, false, || {
+		scope_with(peer, Presses::Process, || {
 			let route = Route::Dual(7);
 			post(route, &mouse(CGEventType::LeftMouseDown, 1.0), || Ok(())).expect("down");
 			for x in [5.0, 9.0] {
@@ -701,15 +768,15 @@ mod tests {
 
 	#[test]
 	fn only_a_helper_that_answers_ready_is_told_the_first_hid_press() {
-		for answer in [Some(release::READY), Some(0xff), None] {
-			let ready = answer == Some(release::READY);
+		for answer in
+			[Answer::Byte(release::READY), Answer::Byte(0xff), Answer::Silent, Answer::HangUp]
+		{
+			let ready = answer == Answer::Byte(release::READY);
+			ANSWER.set(answer);
 			let mut closed_when_posted = None;
-			scope_with(unready_peer, true, || {
-				assert_eq!(drain(), [Record::Observe]);
-				if let Some(answer) = answer {
-					PEER
-						.with_borrow_mut(|peer| peer.as_mut().expect("helper").write_all(&[answer]))
-						.expect("answer");
+			scope_with(answering_peer, Presses::Hid, || {
+				if answer != Answer::HangUp {
+					assert_eq!(drain(), [Record::Observe]);
 				}
 				post(Route::Hid, &shift(true), || {
 					closed_when_posted = Some(closed());
@@ -721,37 +788,50 @@ mod tests {
 			// A ready helper was told the press before it posted; any other
 			// was stopped first and told nothing.
 			assert_eq!(closed_when_posted, Some(!ready), "answer {answer:?}");
-			assert_eq!(left_open().len(), usize::from(ready), "answer {answer:?}");
+			if answer != Answer::HangUp {
+				assert_eq!(left_open().len(), usize::from(ready), "answer {answer:?}");
+			}
 		}
-		// A helper that exits (it cannot observe the user) is stopped too.
-		scope_with(unready_peer, true, || {
-			drop(PEER.take());
-			post(Route::Hid, &shift(true), || Ok(())).expect("posted");
-			assert!(unguarded());
+	}
+
+	#[test]
+	fn a_pressing_request_starts_its_helper_and_has_it_ready_before_it_runs() {
+		for presses in [Presses::Process, Presses::Hid] {
+			let hid = matches!(presses, Presses::Hid);
+			ANSWER.set(Answer::Byte(release::READY));
+			scope_with(answering_peer, presses, || {
+				// Nothing is left to wait for between the request's last check and
+				// its first press.
+				let helper = REQUEST.with_borrow(|request| {
+					let helper = request.as_ref().and_then(|ledger| ledger.helper.as_ref());
+					helper.map(|helper| (helper.observes, helper.ready))
+				});
+				assert_eq!(helper, Some((hid, hid)), "hid {hid}");
+			});
+		}
+		// A request that presses nothing starts none.
+		scope_with(answering_peer, Presses::Nothing, || {
+			assert!(REQUEST.with_borrow(|request| {
+				request
+					.as_ref()
+					.is_some_and(|ledger| ledger.helper.is_none())
+			}));
 		});
 	}
 
 	#[test]
 	fn input_cancelled_while_the_helper_gets_ready_presses_nothing() {
 		let source = CancellationSource::default();
+		CANCEL.set(Some(source.clone()));
 		let mut delivered = false;
 		let (pressed, released) = control::with_token_for_test(&source.token(), || {
-			scope_with(unready_peer, true, || {
+			scope_with(cancelling_peer, Presses::Hid, || {
+				assert!(!unguarded(), "the helper answered READY");
 				assert_eq!(drain(), [Record::Observe]);
-				let helper = PEER
-					.with_borrow(|peer| peer.as_ref().expect("helper").try_clone())
-					.expect("helper end");
-				let cancel = source.clone();
-				// The helper answers only once the input is cancelled.
-				let answer = thread::spawn(move || {
-					cancel.cancel();
-					(&helper).write_all(&[release::READY])
-				});
 				let pressed = post(Route::Hid, &shift(true), || {
 					delivered = true;
 					Ok(())
 				});
-				answer.join().expect("helper thread").expect("READY");
 				// Cleanup still releases after cancellation.
 				let released = control::cleanup(|| post(Route::Hid, &shift(false), || Ok(())));
 				(pressed, released)
@@ -766,9 +846,9 @@ mod tests {
 	#[test]
 	fn a_nested_scope_keeps_the_outer_request() {
 		let route = Route::Keyboard(7);
-		scope_with(peer, false, || {
+		scope_with(peer, Presses::Process, || {
 			post(route, &shift(true), || Ok(())).expect("Shift down");
-			scope_with(peer, false, || {
+			scope_with(peer, Presses::Process, || {
 				let a = key(0, true, CGEventFlags::CGEventFlagShift);
 				post(route, &a, || Ok(())).expect("A down");
 			});
@@ -778,22 +858,41 @@ mod tests {
 	}
 
 	#[test]
-	fn a_request_unwound_with_presses_open_waits_for_their_release() {
+	fn a_request_waits_for_its_helper_to_exit_with_or_without_presses_open() {
 		let unwound = catch_unwind(|| {
-			scope_with(slow_helper, false, || {
+			scope_with(slow_helper, Presses::Process, || {
 				post(Route::Keyboard(7), &shift(true), || Ok(())).expect("Shift down");
 				panic!("native code panicked while Shift was held");
 			})
 		});
 		assert!(unwound.is_err());
 		assert!(!running(STARTED.get()), "the helper released and exited first");
-		// Negative control: a request that released what it pressed does not
-		// wait.
-		scope_with(slow_helper, false, || {
+		// One that released what it pressed waits too: the helper shares the
+		// request's input ownership until it exits.
+		scope_with(slow_helper, Presses::Process, || {
 			post(Route::Keyboard(7), &shift(true), || Ok(())).expect("Shift down");
 			post(Route::Keyboard(7), &shift(false), || Ok(())).expect("Shift up");
 		});
-		assert!(running(STARTED.get()));
+		assert!(!running(STARTED.get()), "the helper exited first");
+	}
+
+	#[test]
+	fn back_to_back_pressing_requests_each_take_input_ownership() {
+		if !control::alone(
+			"desktop::macos::release_guard::tests::back_to_back_pressing_requests_each_take_input_ownership",
+		) {
+			return;
+		}
+		for request in 0..20 {
+			// As a mutation without explicit control takes it.
+			let ownership = control::own_for_test()
+				.unwrap_or_else(|error| panic!("request {request}: {}", error.message));
+			scope(Presses::Process, || {
+				post(Route::Keyboard(7), &shift(true), || Ok(())).expect("Shift down");
+				post(Route::Keyboard(7), &shift(false), || Ok(())).expect("Shift up");
+			});
+			drop(ownership);
+		}
 	}
 
 	#[test]
