@@ -301,7 +301,8 @@ impl Mpx {
 			this.drain();
 			this.check_target(target, x, y)?;
 			this.wheel(horizontal, value)?;
-			this.wait_raw(this.pointer_slave, Raw::Wheel, 1)
+			// The last detent is out: its confirmation is not cancelled.
+			control::cleanup(|| this.wait_raw(this.pointer_slave, Raw::Wheel, 1))
 		})
 	}
 
@@ -316,9 +317,12 @@ impl Mpx {
 			this.warp(x - step, y)?;
 			this.drain();
 			this.motion(i32::from(step), 0)?;
-			let confirmed = this.wait_raw(this.pointer_slave, Raw::Motion, 1)?;
-			this.warp(x, y)?;
-			Ok(confirmed)
+			// The motion is out: its confirmation and the final warp follow.
+			control::cleanup(|| {
+				let confirmed = this.wait_raw(this.pointer_slave, Raw::Motion, 1)?;
+				this.warp(x, y)?;
+				Ok(confirmed)
+			})
 		})
 	}
 

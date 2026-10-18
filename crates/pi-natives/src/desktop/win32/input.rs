@@ -159,17 +159,11 @@ fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 			with_global_modifiers(input, modifiers, |input| {
 				foreground::move_pointer(x, y)?;
 				for _ in 0..count {
-					control::bounded_hold(Duration::ZERO, |down| {
-						global_button(
-							input,
-							button,
-							if down {
-								Direction::Press
-							} else {
-								Direction::Release
-							},
-						)
-					})?;
+					// A press is always released: a cancel stops the next press.
+					control::check()?;
+					let pressed = global_button(input, button, Direction::Press);
+					let released = control::cleanup(|| global_button(input, button, Direction::Release));
+					completed(pressed, released)?;
 				}
 				Ok(())
 			})
