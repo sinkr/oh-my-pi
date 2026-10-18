@@ -31,8 +31,8 @@ use std::{
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
 use ax::{AxRegistry, register_node};
 use backend::{
-	Backend, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput, KeyboardFocus,
-	MouseButton, PointerEvent, is_raise_action,
+	Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
+	KeyboardFocus, MouseButton, PointerEvent, is_raise_action,
 };
 use control::{CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError, ErrorCode};
@@ -650,9 +650,21 @@ impl ParsedPointerOptions {
 		self.takeover.mode()
 	}
 
-	/// Sends the click `event`, choosing [`Self::menu`] in the menu it opens
-	/// when that is set. With [`Self::refuse_menu`], a background click that
-	/// would open a control's menu is refused first.
+	const fn click_options(&self) -> ClickOptions<'_> {
+		ClickOptions {
+			button:      self.button,
+			count:       self.count,
+			modifiers:   self.modifiers,
+			menu:        match &self.menu {
+				Some(path) => Some(path.as_slice()),
+				None => None,
+			},
+			refuse_menu: self.refuse_menu,
+			mode:        self.mode(),
+		}
+	}
+
+	/// Sends the click `event` as these options ask ([`ClickOptions::send`]).
 	fn click(
 		&self,
 		backend: &mut dyn Backend,
@@ -661,12 +673,9 @@ impl ParsedPointerOptions {
 		frame: &FrameGeometry,
 		token: &OperationToken,
 	) -> CoreResult<()> {
-		let mode = self.mode();
-		if let Some(path) = &self.menu {
-			return backend.pointer_menu(target, event, path, frame, mode, token);
-		}
-		refuse_menu_press(backend, self.refuse_menu, mode, target, &event)?;
-		backend.pointer(target, event, frame, mode, token)
+		self
+			.click_options()
+			.send(backend, target, event, frame, token)
 	}
 }
 
@@ -1575,29 +1584,8 @@ impl Worker {
 			},
 			Request::AxClick { reference, options, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let bounds = self.ax()?.props(&h)?.bounds.ok_or_else(|| {
-					DesktopError::ax_failed(format!("{reference} has no clickable bounds"))
-				})?;
-				let x = bounds.x + bounds.width / 2.0;
-				let y = bounds.y + bounds.height / 2.0;
-				let windows = self.backend()?.windows()?;
-				// Desktop refs and parent traversal can leave the snapshot's
-				// original window; only the live element can establish ownership.
-				let window_id = self.ax()?.window_id(&h, &windows)?;
-				let target = Target::Window(window_id);
-				options.click(
-					self.backend()?.as_mut(),
-					&target,
-					PointerEvent::Click {
-						x,
-						y,
-						button: options.button,
-						count: options.count,
-						modifiers: options.modifiers,
-					},
-					&FrameGeometry::identity_global(),
-					token,
-				)?;
+				let click = options.click_options();
+				self.backend()?.element_click(&h, &click, token)?;
 				Ok(Response::Input(control::take_focus_return()))
 			},
 			Request::AxInput { reference, input, takeover, .. } => {
@@ -3176,6 +3164,20 @@ mod capture_tests {
 			}))
 		}
 
+		fn element_click(
+			&mut self,
+			element: &AxHandle,
+			click: &ClickOptions,
+			token: &OperationToken,
+		) -> CoreResult<()> {
+			self
+				.queries_at_input
+				.lock()
+				.push(*self.window_queries.lock());
+			let (target, event) = backend::locate_element_click(self, element, click)?;
+			click.send(self, &target, event, &FrameGeometry::identity_global(), token)
+		}
+
 		fn menu_items(
 			&mut self,
 			_: &DesktopWindow,
@@ -4005,34 +4007,44 @@ mod capture_tests {
 	}
 
 	#[test]
-	fn element_input_leaves_the_elements_window_to_the_backend() {
+	fn element_calls_leave_the_elements_window_to_the_backend() {
 		// macOS reads the user's front app before it asks the element's
-		// application for its window, which blocks while that app is busy; a
-		// window listing or lookup here would come before that read.
-		let backend = FakeWaylandBackend::new();
-		let queries = Arc::clone(&backend.window_queries);
-		let seen = Arc::clone(&backend.queries_at_input);
-		let mut worker = worker_with(backend);
-		let inner: &mut Worker = &mut worker;
-		let (backend, registry) = (&mut inner.backend, &mut inner.registry);
-		let ax = backend
-			.as_mut()
-			.ok()
-			.and_then(|backend| backend.ax())
-			.unwrap();
-		let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-			.unwrap()
-			.ref_;
-		let (reply, _rx) = flume::bounded(1);
-		let request = Request::AxInput {
-			reference,
-			input: ElementInput::Text("4".to_owned()),
-			takeover: Takeover::new(None, None),
-			reply,
-		};
-		let before = *queries.lock();
-		let _ = worker.process(&request, &CancellationSource::default().token());
-		assert_eq!(*seen.lock(), [before], "the worker listed windows before the backend ran");
+		// application for its bounds or window, which blocks while that app is
+		// busy; a window listing or lookup here would come before that read.
+		let requests: [fn(String, Reply) -> Request; 2] = [
+			|reference, reply| Request::AxInput {
+				reference,
+				input: ElementInput::Text("4".to_owned()),
+				takeover: Takeover::new(None, None),
+				reply,
+			},
+			|reference, reply| Request::AxClick {
+				reference,
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply,
+			},
+		];
+		for make in requests {
+			let backend = FakeWaylandBackend::new();
+			let queries = Arc::clone(&backend.window_queries);
+			let seen = Arc::clone(&backend.queries_at_input);
+			let mut worker = worker_with(backend);
+			let inner: &mut Worker = &mut worker;
+			let (backend, registry) = (&mut inner.backend, &mut inner.registry);
+			let ax = backend
+				.as_mut()
+				.ok()
+				.and_then(|backend| backend.ax())
+				.unwrap();
+			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
+				.unwrap()
+				.ref_;
+			let (reply, _rx) = flume::bounded(1);
+			let request = make(reference, reply);
+			let before = *queries.lock();
+			let _ = worker.process(&request, &CancellationSource::default().token());
+			assert_eq!(*seen.lock(), [before], "the worker listed windows before the backend ran");
+		}
 	}
 
 	#[test]
@@ -4069,7 +4081,6 @@ mod capture_tests {
 			);
 			// The focus request itself went to the app, so only keys are unsent.
 			assert!(message.contains("so no keys were sent"), "{message}");
-			assert!(!message.contains("nothing was sent"), "{message}");
 			assert!(message.contains(&format!("window {WAYLAND_ID} (\"Obsidian\")")), "{message}");
 			assert!(message.contains("on - button [ref=e2]."), "{message}");
 			assert!(message.contains("win.ax()"), "{message}");

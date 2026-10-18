@@ -34,8 +34,8 @@ use self::{
 use super::{
 	ax::AxHandle,
 	backend::{
-		AxBackend, Backend, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
-		PointerEvent,
+		AxBackend, Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery,
+		ElementInput, PointerEvent, locate_element_click,
 	},
 	control::OperationToken,
 	error::{CoreResult, DesktopError},
@@ -170,7 +170,9 @@ impl Backend for MacosBackend {
 		token.check()?;
 		Self::require_input_permission()?;
 		release_guard::scope(pointer_presses(&event, target, mode), || {
-			self.input.pointer(target, event, None, mode, &self.capture)
+			self
+				.input
+				.pointer(target, event, None, mode, EntryFront::now(), &self.capture)
 		})
 	}
 
@@ -188,7 +190,7 @@ impl Backend for MacosBackend {
 		release_guard::scope(pointer_presses(&event, target, mode), || {
 			self
 				.input
-				.pointer(target, event, Some(path), mode, &self.capture)
+				.pointer(target, event, Some(path), mode, EntryFront::now(), &self.capture)
 		})
 	}
 
@@ -249,6 +251,28 @@ impl Backend for MacosBackend {
 				entry_front,
 				&self.capture,
 			)
+		})
+	}
+
+	fn element_click(
+		&mut self,
+		element: &AxHandle,
+		click: &ClickOptions,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		token.check()?;
+		Self::require_input_permission()?;
+		// The element's bounds and window are read from its application, which
+		// blocks while it is busy; the user's front app is read before them.
+		let (entry_front, (target, event)) =
+			EntryFront::before(skylight::front_pid, || locate_element_click(self, element, click))?;
+		if click.checks_menu_press() {
+			self.refuse_menu_press(&target, &event)?;
+		}
+		release_guard::scope(pointer_presses(&event, &target, click.mode), || {
+			self
+				.input
+				.pointer(&target, event, click.menu, click.mode, entry_front, &self.capture)
 		})
 	}
 

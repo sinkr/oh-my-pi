@@ -55,7 +55,8 @@ impl MacInput {
 	}
 
 	/// Delivers `event`; with `menu`, a click that opens a menu chooses that
-	/// item path in it.
+	/// item path in it. `entry_front` was read before anything asked the
+	/// target's application ([`EntryFront`]).
 	#[allow(
 		clippy::needless_pass_by_ref_mut,
 		reason = "`&mut self` exclusivity backs the `Send` safety argument for the CF event source"
@@ -66,6 +67,7 @@ impl MacInput {
 		event: PointerEvent,
 		menu: Option<&[String]>,
 		mode: DeliveryMode,
+		entry_front: EntryFront,
 		capture: &MacCapture,
 	) -> CoreResult<()> {
 		if menu.is_some() && !matches!(event, PointerEvent::Click { .. }) {
@@ -85,14 +87,10 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
-						let (entry_front, (window, wid, in_overlay)) =
-							EntryFront::before(skylight::front_pid, || {
-								let (window, wid) = attached_window(capture, window, pid, wid, &event)?;
-								let in_overlay =
-									takes_overlay_focus(wid, ax::key_focus(pid), skylight::window_parent);
-								background_guard(&window, pid, &event)?;
-								Ok((window, wid, in_overlay))
-							})?;
+						let (window, wid) = attached_window(capture, window, pid, wid, &event)?;
+						let in_overlay =
+							takes_overlay_focus(wid, ax::key_focus(pid), skylight::window_parent);
+						background_guard(&window, pid, &event)?;
 						let owner = || -> CoreResult<(libc::pid_t, u32)> {
 							let owner = input_owner(
 								pid,
