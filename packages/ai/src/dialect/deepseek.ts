@@ -452,8 +452,14 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				this.#buffer = this.#buffer.slice(lead.raw.length);
 				continue;
 			}
-			if (!final && templateTokenPartialLength(this.#buffer) === this.#buffer.length) return false;
 			if (this.#buffer.length === 0) return false;
+			if (templateTokenPartialLength(this.#buffer) === this.#buffer.length) {
+				if (!final) return false;
+				// The stream ended mid-token (`<｜tool_call_begin｜`): an unfinished
+				// call opener is markup, not prose.
+				this.#buffer = "";
+				return true;
+			}
 			// The template puts nothing but calls in a section, so anything else is
 			// the model writing prose after a stray section open: keep it visible.
 			const next = this.#buffer.indexOf("<", 1);

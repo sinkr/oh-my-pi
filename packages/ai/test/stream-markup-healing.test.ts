@@ -621,10 +621,11 @@ describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
 		}
 	});
 
-	it("drops template tokens after a stray section open but keeps prose", () => {
+	it("drops template tokens after a stray section open, including one cut off by stream end, but keeps prose", () => {
 		const healing = new StreamMarkupHealing({ pattern: "dsml" });
 		const visible =
-			healing.feed("Hi.<｜tool▁calls▁begin｜>Done.<｜tool▁sep｜><｜end▁of▁sentence｜>") + healing.flushPending();
+			healing.feed("Hi.<｜tool▁calls▁begin｜>Done.<｜tool▁sep｜><｜end▁of▁sentence｜><｜tool_call_begin｜") +
+			healing.flushPending();
 		expect(visible).toBe("Hi.Done.");
 		expect(healing.drainCompleted()).toEqual([]);
 	});
