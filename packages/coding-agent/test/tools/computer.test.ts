@@ -2162,6 +2162,20 @@ describe("computer worker round trips", () => {
 		if (second.ok) expect(second.payload.returnValue).toEqual({ x: 7, y: 8, width: 9, height: 10 });
 	});
 
+	it("refuses an empty menu path before anything is sent", async () => {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new FakeNativeSession());
+		const result = await runWorker(
+			transport,
+			"empty-menu-path",
+			'const el = await (await desktop.window("42")).ref("e1"); return await el.press({ menu: [] }).then(() => "sent", error => error.message)',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).not.toBe("sent");
+		expect(result.payload.returnValue).toContain("menu path");
+	});
+
 	it("answers a direct capabilities request without a prior run", async () => {
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => new FakeNativeSession());
