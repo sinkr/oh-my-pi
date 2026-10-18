@@ -13,6 +13,13 @@ import {
 	WORKOS_TOKEN,
 } from "./helpers/factory-droid";
 
+/** The `ttl` of every cache breakpoint in a request body, `5m` where none is set. */
+function breakpointTtls(body: Record<string, unknown>): string[] {
+	return [...JSON.stringify(body).matchAll(/"cache_control":\{"type":"ephemeral"(?:,"ttl":"(\w+)")?\}/g)].map(
+		match => match[1] ?? "5m",
+	);
+}
+
 describe("Factory Droid anthropic wire (Claude)", () => {
 	it("does not invent effort when the registry default leaves thinking off", async () => {
 		const captured: CapturedRequest[] = [];
@@ -65,7 +72,7 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		["vertex_anthropic", "1h"],
 		["bedrock_anthropic", "1h"],
 		["azure_anthropic", "1h"],
-		["snowflake", undefined],
+		["snowflake", "5m"],
 	] as const)(
 		"writes long retention on the %s upstream as ttl %p without the extended-cache beta",
 		async (upstream, ttl) => {
@@ -78,11 +85,9 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 
 			const request = captured[0]!;
 			expect(request.headers["x-api-provider"]).toBe(upstream);
-			const breakpoints = [...JSON.stringify(request.body).matchAll(/"cache_control":(\{[^}]*\})/g)].map(
-				match => JSON.parse(match[1]!) as { ttl?: string },
-			);
-			expect(breakpoints.length).toBeGreaterThan(0);
-			expect(breakpoints.map(breakpoint => breakpoint.ttl)).toEqual(breakpoints.map(() => ttl));
+			const ttls = breakpointTtls(request.body);
+			expect(ttls.length).toBeGreaterThan(0);
+			expect(ttls.filter(written => written !== ttl)).toEqual([]);
 			expect(request.headers["anthropic-beta"] ?? "").not.toContain("extended-cache-ttl-2025-04-11");
 		},
 	);
