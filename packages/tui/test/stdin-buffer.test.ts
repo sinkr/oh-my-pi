@@ -870,11 +870,12 @@ describe("StdinBuffer", () => {
 			expect(buffer.getBuffer()).toBe("");
 		});
 
-		it("abandons a head without terminal progress and replays the keys typed into it", () => {
+		it("abandons a head with no reads for the bound and replays the keys typed into it", () => {
 			vi.useFakeTimers();
 			processInput(head);
 			vi.advanceTimersByTime(200);
 			processInput("h");
+			vi.advanceTimersByTime(200);
 			processInput("i");
 			vi.advanceTimersByTime(4000);
 			expect(emittedSequences).toEqual([]);
@@ -887,6 +888,7 @@ describe("StdinBuffer", () => {
 			processInput("IHdvcmxkIQ==\x1b\\");
 			expect(emittedSequences).toEqual(["h", "i", `${head}IHdvcmxkIQ==\x1b\\`]);
 		});
+
 		it.each([
 			["Alt+]", "\x1b]a"],
 			["Alt+P", "\x1bPa"],
@@ -909,27 +911,28 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual([" "]);
 		});
 
-		it.each([
-			["before a separate Enter", ["hello", "\r"]],
-			["together with Enter", ["hello\r"]],
-		])("replays keys an event-loop stall batched into one read %s", (_name, reads) => {
+		it("keeps a slow transfer alive while its chunks keep arriving", () => {
+			// Regression: chunks spaced past the flush window over a slow link
+			// stopped refreshing the abandonment bound, and the abandoned
+			// payload was replayed as typed base64.
 			vi.useFakeTimers();
 			processInput(head);
-			vi.advanceTimersByTime(200);
-			for (const read of reads) processInput(read);
-			expect(emittedSequences).toEqual(["h", "e", "l", "l", "o", "\r"]);
-			expect(buffer.getBuffer()).toBe("");
+			for (let i = 0; i < 20; i++) {
+				vi.advanceTimersByTime(1000);
+				processInput("QUJD");
+			}
+			processInput("\x1b\\");
+			expect(emittedSequences).toEqual([`${head}${"QUJD".repeat(20)}\x1b\\`]);
 		});
 
-		it("does not let post-stall reads postpone abandonment", () => {
+		it("never types multi-byte payload when a stalled transfer dies", () => {
 			vi.useFakeTimers();
 			processInput(head);
 			vi.advanceTimersByTime(200);
-			processInput("ab");
-			vi.advanceTimersByTime(2000);
-			processInput("cd");
-			vi.advanceTimersByTime(2800);
-			expect(emittedSequences).toEqual(["a", "b", "c", "d"]);
+			processInput("QUJDREVG");
+			vi.advanceTimersByTime(5000);
+			expect(emittedSequences).toEqual([]);
+			expect(buffer.getBuffer()).toBe("");
 		});
 
 		it.each([
