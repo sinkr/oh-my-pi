@@ -503,26 +503,44 @@ describe("IRC", () => {
 		/**
 		 * An idle subagent wired like a real one: deliveries go through the real
 		 * IrcBridge, a wake runs the executor's wake-turn monitor, and every turn
-		 * ends with the stop text "Not for me."
+		 * ends with the stop text "Not for me." (after a `yield` when `yields`).
 		 */
-		function registerIdleSubagent(id: string, parentId?: string) {
+		function registerIdleSubagent(id: string, opts: { parentId?: string; yields?: boolean } = {}) {
 			let observer: IrcWakeObserver | undefined;
+			const listeners: ((event: AgentSessionEvent) => void)[] = [];
 			const turns: Promise<void>[] = [];
 			const relays: Promise<void>[] = [];
 			const jobs: string[] = [];
+			const wake = (records: AgentMessage[]): void => {
+				const finish = observer?.(records);
+				if (opts.yields) {
+					const event = {
+						type: "tool_execution_end",
+						toolCallId: `yield-${turns.length}`,
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Result submitted." }],
+							details: { status: "success", data: "Not for me." },
+						},
+						isError: false,
+					} as AgentSessionEvent;
+					for (const listener of listeners) listener(event);
+				}
+				turns.push(Promise.resolve(finish?.()));
+			};
 			const bridge = new IrcBridge({
 				isDisposed: () => false,
 				isStreaming: () => false,
 				planModeEnabled: () => false,
 				emitSessionEvent: async () => {},
-				wakeForIrc: (records: AgentMessage[]) => {
-					const finish = observer?.(records);
-					turns.push(Promise.resolve(finish?.()));
-				},
+				wakeForIrc: wake,
 			} as unknown as IrcBridgeHost);
 			const session = {
 				...createSessionDefaults(),
-				subscribe: () => () => {},
+				subscribe: (listener: (event: AgentSessionEvent) => void) => {
+					listeners.push(listener);
+					return () => listeners.splice(listeners.indexOf(listener), 1);
+				},
 				setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 					observer = next;
 				},
@@ -542,16 +560,27 @@ describe("IRC", () => {
 					},
 				},
 			} as unknown as AgentSession;
-			registry.register({ id, displayName: "task", kind: "sub", status: "idle", session, parentId });
+			registry.register({ id, displayName: "task", kind: "sub", status: "idle", session, parentId: opts.parentId });
 			attachIrcWakeTurnMonitor(session, { id, agent: wakeAgent });
 			return {
 				jobs,
+				wake,
 				settled: async () => {
 					await Promise.all(turns);
 					await Promise.all(relays);
 				},
 			};
 		}
+
+		const incoming = (id: string, from: string, extra: Record<string, unknown> = {}): CustomMessage => ({
+			role: "custom",
+			customType: "irc:incoming",
+			content: "status?",
+			display: true,
+			details: { id, from, message: "status?", ...extra },
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
 
 		it("does not relay woken peers' turns back to a subagent broadcaster", async () => {
 			const broadcaster = makeFakeSession();
@@ -582,8 +611,8 @@ describe("IRC", () => {
 		it("does not deliver woken children's turns to a main-agent broadcaster", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "Main", displayName: "main", kind: "main", status: "idle", session: main.session });
-			const a = registerIdleSubagent("0-A", "Main");
-			const b = registerIdleSubagent("0-B", "Main");
+			const a = registerIdleSubagent("0-A", { parentId: "Main" });
+			const b = registerIdleSubagent("0-B", { parentId: "Main" });
 
 			await executeSend({ registry, senderId: "Main" }, { to: "all", message: "everyone: status" });
 			await a.settled();
@@ -595,6 +624,34 @@ describe("IRC", () => {
 			await executeSend({ registry, senderId: "Main" }, { to: "0-A", message: "status?" });
 			await a.settled();
 			expect(a.jobs).toEqual(["0-A"]);
+		});
+
+		it("still delivers a child's own yield from a broadcast-woken turn to its parent", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "Main", displayName: "main", kind: "main", status: "idle", session: main.session });
+			const child = registerIdleSubagent("0-A", { parentId: "Main", yields: true });
+
+			await executeSend({ registry, senderId: "Main" }, { to: "all", message: "everyone: status" });
+			await child.settled();
+			expect(child.jobs).toEqual(["0-A"]);
+			expect(main.delivered).toEqual([]);
+		});
+
+		it("relays once to a sender whose direct message shares the wake with its broadcast", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", status: "idle", session: sender.session });
+			// One peer per order: a second relay from the same peer within the same
+			// millisecond would be deduped by `sentSince`, not by the broadcast skip.
+			const first = registerIdleSubagent("0-A");
+			const second = registerIdleSubagent("0-B");
+			first.wake([incoming("b-1", "0-C", { broadcast: true }), incoming("d-1", "0-C")]);
+			second.wake([incoming("d-2", "0-C"), incoming("b-2", "0-C", { broadcast: true })]);
+			await first.settled();
+			await second.settled();
+			expect(sender.delivered.map(msg => [msg.from, msg.replyTo])).toEqual([
+				["0-A", "d-1"],
+				["0-B", "d-2"],
+			]);
 		});
 	});
 

@@ -45,4 +45,13 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.details).not.toHaveProperty("wakeRelay");
 		expect(record.content).toContain("is delivered to");
 	});
+
+	it("marks broadcast legs and promises no stop relay for them", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({ id: "irc-3", from: "B", to: "A", body: "FYI all", ts: Date.now(), broadcast: true });
+
+		const record = woken[0][0] as CustomMessage;
+		expect(record.details).toMatchObject({ from: "B", broadcast: true });
+		expect(record.content).toContain("No one replies on your behalf");
+	});
 });
