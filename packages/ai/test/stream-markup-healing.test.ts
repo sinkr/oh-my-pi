@@ -591,18 +591,42 @@ describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
 		expect(healing.drainCompleted().map(call => JSON.parse(call.arguments))).toEqual([{ path: "a" }, { path: "b" }]);
 	});
 
-	it("keeps a section close or call open inside a JSON string as argument text", () => {
-		// A grep for the leaked tokens themselves: neither occurrence may end the call.
-		const args = { command: 'grep -c "<｜tool▁calls▁end｜>\\|<｜tool_call_begin｜>" omp.log' };
-		const leak = `<｜tool_calls_begin｜><｜tool_call_begin｜>bash<｜tool_sep｜>${JSON.stringify(args)}<｜tool_calls_end｜>`;
-		for (const step of [leak.length, 1]) {
-			const healing = new StreamMarkupHealing({ pattern: "dsml" });
-			let visible = "";
-			for (let i = 0; i < leak.length; i += step) visible += healing.feed(leak.slice(i, i + step));
-			visible += healing.flushPending();
-			expect(visible).toBe("");
-			expect(healing.drainCompleted().map(call => JSON.parse(call.arguments))).toEqual([args]);
+	it("keeps inferred terminators inside a JSON string as argument text", () => {
+		// Greps and file writes naming the tokens themselves: none of these
+		// occurrences may end the call; only the trailing close does.
+		const cases = [
+			[
+				"bash",
+				{ command: 'grep -c "<｜tool▁calls▁end｜>\\|<｜tool_call_begin｜>\\|<tool_call_end｜>" omp.log' },
+				"<｜tool_calls_end｜>",
+			],
+			[
+				"write",
+				{ content: "x <｜tool▁calls▁end｜> <｜tool▁call▁begin｜> <tool_call_end｜> y" },
+				"<｜tool▁call▁end｜>",
+			],
+		] as const;
+		for (const [name, args, close] of cases) {
+			const leak = `<｜tool_calls_begin｜><｜tool_call_begin｜>${name}<｜tool_sep｜>${JSON.stringify(args)}${close}<｜tool_calls_end｜>`;
+			for (const step of [leak.length, 1]) {
+				const healing = new StreamMarkupHealing({ pattern: "dsml" });
+				let visible = "";
+				for (let i = 0; i < leak.length; i += step) visible += healing.feed(leak.slice(i, i + step));
+				visible += healing.flushPending();
+				expect(visible).toBe("");
+				expect(healing.drainCompleted().map(call => [call.name, JSON.parse(call.arguments)])).toEqual([
+					[name, args],
+				]);
+			}
 		}
+	});
+
+	it("drops template tokens after a stray section open but keeps prose", () => {
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		const visible =
+			healing.feed("Hi.<｜tool▁calls▁begin｜>Done.<｜tool▁sep｜><｜end▁of▁sentence｜>") + healing.flushPending();
+		expect(visible).toBe("Hi.Done.");
+		expect(healing.drainCompleted()).toEqual([]);
 	});
 
 	it("leaves ASCII-pipe tokens from other templates visible", () => {

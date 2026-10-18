@@ -1,4 +1,4 @@
-Tool call failed: your previous response tried to invoke a tool, but the tool-call markup was malformed, so it arrived as plain text, no tool was executed, and the broken markup was removed from your response. Usually the opening `<｜DSML｜tool_calls>` and/or `<｜DSML｜invoke name="…">` tags are missing, the tool name was written as a plain line, or chat-template tokens such as `<｜tool▁calls▁begin｜>` were written out as text.
+Tool call failed: your previous response tried to invoke a tool, but the tool-call markup was malformed, so it arrived as plain text, no tool was executed, and the broken markup was removed from your response. Usually the opening `<｜DSML｜tool_calls>` and/or `<｜DSML｜invoke name="…">` tags are missing, the tool name was written as a plain line, or the chat template's tool-call special tokens were typed out as text.
 
 A tool call must be one complete envelope:
 

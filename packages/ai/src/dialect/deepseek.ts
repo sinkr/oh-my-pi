@@ -140,9 +140,10 @@ const OUTSIDE_TEMPLATE_TOKENS: Readonly<Record<string, true>> = Object.fromEntri
 );
 const SEPARATOR_TOKENS: Readonly<Record<string, true>> = { [DEEPSEEK_TOOL_SEPARATOR]: true };
 // A call's arguments end at its own close or, when the model skips that close,
-// at the section close or the next call's open. Those two fallbacks are left in
-// the buffer for the next state to consume, and only count once the arguments
-// before them are no longer an open JSON prefix (see `#consumeArgs`).
+// at the section close or the next call's open (left in the buffer for the next
+// state to consume). Only the canonical close ends them unconditionally; a
+// re-spelled close and both fallbacks count once the arguments before them are
+// no longer an open JSON prefix (see `#consumeArgs`).
 const ARGS_TERMINATOR_TOKENS: Readonly<Record<string, true>> = {
 	[DEEPSEEK_TOOL_CALL_END]: true,
 	[DEEPSEEK_TOOL_CALLS_END]: true,
@@ -445,6 +446,12 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				this.#state = "header";
 				return true;
 			}
+			if (lead) {
+				// Any other template token here (`<｜end▁of▁sentence｜>`, a stray
+				// `<｜tool▁sep｜>`) is template structure, never prose: drop it.
+				this.#buffer = this.#buffer.slice(lead.raw.length);
+				continue;
+			}
 			if (!final && templateTokenPartialLength(this.#buffer) === this.#buffer.length) return false;
 			if (this.#buffer.length === 0) return false;
 			// The template puts nothing but calls in a section, so anything else is
@@ -509,12 +516,14 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				const fence = rawArgs.lastIndexOf(CODE_FENCE);
 				if (fence !== -1) rawArgs = rawArgs.slice(0, fence);
 			}
-			// The call's own close always ends it, even after malformed JSON (the
-			// parser repairs or flags it). A fallback inside a still-open JSON
-			// string or container is argument text — e.g. a grep for the token.
+			// The call's own close in its canonical spelling always ends it, even
+			// after malformed JSON (the parser repairs or flags it). A re-spelled
+			// close and the fallbacks are inferred: inside a still-open JSON string
+			// or container they are argument text — e.g. a grep for the token, or
+			// a write of this very file.
 			const trimmed = rawArgs.trim();
 			if (
-				candidate.token === DEEPSEEK_TOOL_CALL_END ||
+				candidate.raw === DEEPSEEK_TOOL_CALL_END ||
 				trimmed.length === 0 ||
 				classifyJsonPrefix(trimmed) !== "prefix"
 			) {
