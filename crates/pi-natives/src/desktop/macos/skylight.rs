@@ -27,7 +27,9 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	ax, capture, permission,
+	ax, capture,
+	key_reroute::KeyReroute,
+	permission,
 };
 
 const EVENT_RECORD_LENGTH: usize = 248;
@@ -418,6 +420,24 @@ fn front_process(get_front: SLPSGetFrontProcessFn) -> Option<FrontProcess> {
 		return None;
 	}
 	Some(FrontProcess { psn, pid: psn_pid(&psn) })
+}
+
+/// The front process and the process that has the keyboard, by pid: `None`
+/// when `WindowServer` cannot name the front one, and no keyboard holder when
+/// it cannot name that one.
+pub(super) fn keyboard_holders() -> Option<(pid_t, Option<pid_t>)> {
+	let spi = FOREGROUND.as_ref()?;
+	let front = front_process(spi.get_front)?.pid?;
+	let focus = spi.get_key_focus.and_then(|get_key_focus| {
+		let mut psn = ProcessSerialNumber::default();
+		let mut status = 0u8;
+		// SAFETY: Both out-pointers are writable for the synchronous call, which
+		// writes the 8-byte PSN and one status byte.
+		(unsafe { get_key_focus(&mut psn, &mut status) } == 0)
+			.then(|| psn_pid(&psn))
+			.flatten()
+	});
+	Some((front, focus))
 }
 
 /// Joins the action and its cleanup without hiding a failed restoration or
@@ -991,6 +1011,9 @@ pub(super) fn with_background_watch<T>(
 		SwitchSignals::read(spi, now, previous.pid),
 		now,
 	));
+	// Sends the user's keys back to their app while the target holds the
+	// keyboard uninvited, until the guard below has put their app back.
+	let _reroute = previous.pid.and_then(|user| KeyReroute::arm(user, pid));
 	let stopped = AtomicBool::new(false);
 	let visited = AtomicBool::new(false);
 	let start_failed = |error: std::io::Error| {
