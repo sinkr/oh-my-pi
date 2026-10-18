@@ -2773,11 +2773,16 @@ export declare function notebookToEditableText(json: string, displayPath: string
 export declare function parseCodeStatus(options: ParseStatusOptions): ParseStatus
 
 /**
- * An opened application and the window it shows. On macOS `window` is its
- * frontmost window once one is on screen; other platforms report none.
+ * An opened application: its [`Application`] fields and the window it
+ * shows. On macOS `window` is its frontmost window once one is on screen;
+ * other platforms report none.
  */
 export interface OpenedApplication {
-  application: Application
+  id: string
+  name: string
+  path: string
+  running: boolean
+  pid?: number
   window?: DesktopWindow
 }
 

@@ -47,13 +47,25 @@ pub struct ApplicationOpenOptions {
 	pub activate: Option<bool>,
 }
 
-/// An opened application and the window it shows. On macOS `window` is its
-/// frontmost window once one is on screen; other platforms report none.
+/// An opened application: its [`Application`] fields and the window it
+/// shows. On macOS `window` is its frontmost window once one is on screen;
+/// other platforms report none.
 #[napi(object)]
 #[derive(Clone, Debug)]
 pub struct OpenedApplication {
-	pub application: Application,
-	pub window:      Option<DesktopWindow>,
+	pub id:      String,
+	pub name:    String,
+	pub path:    String,
+	pub running: bool,
+	pub pid:     Option<u32>,
+	pub window:  Option<DesktopWindow>,
+}
+
+impl OpenedApplication {
+	pub(crate) fn new(application: Application, window: Option<DesktopWindow>) -> Self {
+		let Application { id, name, path, running, pid } = application;
+		Self { id, name, path, running, pid, window }
+	}
 }
 
 pub(crate) const fn supported() -> bool {
@@ -149,7 +161,7 @@ pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<O
 		return platform::open(app, activate);
 		#[cfg(not(target_os = "macos"))]
 		return platform::open(app, activate)
-			.map(|application| OpenedApplication { application, window: None });
+			.map(|application| OpenedApplication::new(application, None));
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 	{

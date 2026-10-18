@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { createDesktopSession } from "../native/desktop.js";
-import { DesktopSession } from "../native/index.js";
+import { type Application, DesktopSession, type DesktopWindow } from "../native/index.js";
 
 const ERROR_CODE_PREFIX = /^([A-Z][A-Za-z]+): /;
 const PERMISSION_STATES = ["granted", "denied", "unknown", "unavailable", "prompt-or-granted"];
@@ -93,5 +93,12 @@ describe("DesktopSession", () => {
 		await expectRejectionCode(() => session.capture("desktop"), ["Closed"]);
 		await expectRejectionCode(() => session.listWindows(), ["Closed"]);
 		await expectRejectionCode(() => session.click("desktop", 1, 1), ["Closed"]);
+	});
+
+	it("resolves openApplication to an Application carrying the window it shows", () => {
+		// A type check: `bun check` fails once the result stops being an Application.
+		const open: (this: DesktopSession, id: string) => Promise<Application & { window?: DesktopWindow }> =
+			DesktopSession.prototype.openApplication;
+		expect(open).toBe(DesktopSession.prototype.openApplication);
 	});
 });
