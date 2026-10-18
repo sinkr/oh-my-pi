@@ -962,8 +962,9 @@ impl Worker {
 			}
 		}
 		#[cfg(target_os = "macos")]
-		if result.is_ok() {
+		if let Ok(response) = &result {
 			self.read = watch.read;
+			self.watch_found(request, response);
 		}
 		// A `StaleRef` search reads the whole window, which can take long
 		// enough to keep other sessions from input: it runs once the call has
@@ -1035,7 +1036,13 @@ impl Worker {
 		let started = Instant::now();
 		let (app, input) = match access {
 			AppAccess::Read(id) | AppAccess::Look(id) | AppAccess::Input(id) => {
-				(self.backend()?.window_app(id), None)
+				let backend = self.backend()?;
+				let app = backend.window_app(id);
+				// The user's input into a panel another process draws goes to
+				// that process from the first read on, before any input of the
+				// session's names it.
+				let input = app.as_ref().map(|(pid, _)| backend.window_input(id, *pid));
+				(app, input)
 			},
 			AppAccess::Element(reference) => match self.element_app(reference)? {
 				Some((app, input)) => (Some(app), Some(input)),
@@ -1052,12 +1059,7 @@ impl Worker {
 				_ => Ok(AppWatch::default()),
 			};
 		};
-		self
-			.listener
-			.touch(pid, macos::process_started(pid), || name);
-		if let Some(input) = input {
-			self.listener.route(input, pid);
-		}
+		self.enrol(pid, name, input);
 		Ok(match access {
 			AppAccess::Read(_) => AppWatch { read: Some((pid, started)), _input: None },
 			AppAccess::Look(_) => AppWatch::default(),
@@ -1065,6 +1067,36 @@ impl Worker {
 				AppWatch { read: None, _input: Some(self.listener.admit(pid, token)?) }
 			},
 		})
+	}
+
+	/// Records the user's input into `pid`, the app `name`, from now on, with
+	/// their input into process `input`, which draws its content, as input into
+	/// it.
+	#[cfg(target_os = "macos")]
+	fn enrol(&self, pid: libc::pid_t, name: String, input: Option<libc::pid_t>) {
+		self
+			.listener
+			.touch(pid, macos::process_started(pid), || name);
+		if let Some(input) = input {
+			self.listener.route(input, pid);
+		}
+	}
+
+	/// Watches the app of the element a read found outside any window the
+	/// request named, such as the focused element, so the user's input there
+	/// before the session acts on its ref counts. The read shows only that
+	/// element, not the window, so input the user left unread stays unread.
+	#[cfg(target_os = "macos")]
+	fn watch_found(&mut self, request: &Request, response: &Response) {
+		let Response::Node(Some(node)) = response else {
+			return;
+		};
+		if request.app_access().is_some() || !self.listener.listening() {
+			return;
+		}
+		if let Ok(Some(((pid, name), input))) = self.element_app(&node.ref_) {
+			self.enrol(pid, name, Some(input));
+		}
 	}
 
 	/// The app an element ref acts in, with the process that owns the element.
@@ -2409,6 +2441,9 @@ mod capture_tests {
 		hang_windows:           Option<(flume::Sender<()>, flume::Receiver<()>)>,
 		/// Runs as each menu read is served.
 		on_menu_read:           Option<Box<dyn Fn() + Send>>,
+		/// Another process drawing the window, such as an Open panel's.
+		#[cfg(target_os = "macos")]
+		drawn_by:               Option<libc::pid_t>,
 	}
 
 	impl FakeWaylandBackend {
@@ -2456,6 +2491,8 @@ mod capture_tests {
 				unlock_on_layout:       Arc::new(Mutex::new(false)),
 				hang_windows:           None,
 				on_menu_read:           None,
+				#[cfg(target_os = "macos")]
+				drawn_by:               None,
 			}
 		}
 	}
@@ -2590,6 +2627,11 @@ mod capture_tests {
 		}
 
 		fn focused_element(&mut self) -> CoreResult<Option<AxHandle>> {
+			// This test process's own application element, which names a real
+			// process.
+			#[cfg(target_os = "macos")]
+			return macos::application_handle(i32::try_from(std::process::id()).unwrap()).map(Some);
+			#[cfg(not(target_os = "macos"))]
 			unreachable!("focus not exercised")
 		}
 
@@ -2654,6 +2696,11 @@ mod capture_tests {
 		#[cfg(target_os = "macos")]
 		fn window_app(&mut self, id: &str) -> Option<(libc::pid_t, String)> {
 			(id == self.window.id || id == OFF_SPACE_ID).then(|| (1234, self.window.app.clone()))
+		}
+
+		#[cfg(target_os = "macos")]
+		fn window_input(&mut self, _: &str, pid: libc::pid_t) -> libc::pid_t {
+			self.drawn_by.unwrap_or(pid)
 		}
 
 		fn screen_state(&mut self, display: Option<&DisplaySelector>) -> ScreenState {
@@ -3842,6 +3889,61 @@ mod capture_tests {
 			worker.execute(&raise("gone"), &token).err().unwrap().code,
 			ErrorCode::WindowNotFound
 		);
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn the_users_input_into_a_panel_another_process_draws_counts_from_the_first_read() {
+		let mut backend = FakeWaylandBackend::new();
+		// The window is an Open panel that process 4321 draws and takes input for.
+		backend.drawn_by = Some(4321);
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let source = CancellationSource::default();
+		let target = Target::Window(WAYLAND_ID.to_string());
+		worker.dispatch(capture_request(target.clone()), &source.token());
+		// The user clicks in the panel before the session's first input names
+		// its drawing process.
+		worker.listener.record_for_test(4321, Instant::now());
+		source.set_deadline(Some(Instant::now()));
+		let click = Request::Click {
+			target,
+			x: 1.0,
+			y: 1.0,
+			options: ParsedPointerOptions::parse(None).unwrap(),
+			reply: flume::unbounded().0,
+		};
+		let error = worker.execute(&click, &source.token()).err().unwrap();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(clicks.lock().is_empty());
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn the_focused_elements_app_is_watched_from_the_read_that_found_it() {
+		let backend = FakeWaylandBackend::new();
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let source = CancellationSource::default();
+		// The fake's focused element is this test process's application.
+		let (reply, read) = flume::bounded(1);
+		worker.dispatch(Request::AxFocused { reply }, &source.token());
+		let Ok(Response::Node(Some(node))) = read.recv().unwrap() else {
+			panic!("expected the focused element");
+		};
+		// The user types into that app before the session acts on the ref.
+		worker
+			.listener
+			.record_for_test(i32::try_from(std::process::id()).unwrap(), Instant::now());
+		source.set_deadline(Some(Instant::now()));
+		let click = Request::AxClick {
+			reference: node.ref_,
+			options:   ParsedPointerOptions::parse(None).unwrap(),
+			reply:     flume::unbounded().0,
+		};
+		let error = worker.execute(&click, &source.token()).err().unwrap();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(clicks.lock().is_empty());
 	}
 
 	#[test]

@@ -120,6 +120,12 @@ pub trait Backend: Send {
 	/// when the window is off the current Space, without listing every window.
 	#[cfg(target_os = "macos")]
 	fn window_app(&mut self, id: &str) -> Option<(libc::pid_t, String)>;
+	/// The process that draws window `id` of process `pid` and takes the
+	/// user's input there, such as `openAndSavePanelService` for a system Open
+	/// or Save panel; `pid` itself when the window draws its own content or
+	/// cannot be read.
+	#[cfg(target_os = "macos")]
+	fn window_input(&mut self, id: &str, pid: libc::pid_t) -> libc::pid_t;
 	/// Live lock and display-sleep state; `display` narrows the sleep check to
 	/// the display a request targets, else the session's. Backends that cannot
 	/// tell report both as false.

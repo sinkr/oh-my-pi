@@ -8,6 +8,8 @@ mod session;
 mod skylight;
 mod spaces;
 
+#[cfg(test)]
+pub(super) use ax::application_handle;
 pub(super) use ax::{ax_window_ids, has_open_window, menus};
 pub(super) use capture::{application_windows, has_onscreen_window};
 use image::RgbaImage;
@@ -101,6 +103,17 @@ impl Backend for MacosBackend {
 	fn window_app(&mut self, id: &str) -> Option<(libc::pid_t, String)> {
 		let pid = skylight::window_owner_pid(id.parse().ok()?)?;
 		Some((pid, app_name(pid)))
+	}
+
+	fn window_input(&mut self, id: &str, pid: libc::pid_t) -> libc::pid_t {
+		match self
+			.capture
+			.window(id)
+			.map(|window| ax::window_content(pid, &window))
+		{
+			Ok(ax::WindowContent::Remote { pid: owner, .. }) => owner,
+			_ => pid,
+		}
 	}
 
 	fn screen_state(&mut self, display: Option<&DisplaySelector>) -> ScreenState {

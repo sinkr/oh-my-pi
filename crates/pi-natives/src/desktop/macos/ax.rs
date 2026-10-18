@@ -1750,6 +1750,13 @@ fn create_application(pid: libc::pid_t) -> CoreResult<CFRetained<AXUIElement>> {
 	Ok(unsafe { CFRetained::from_raw(pointer) })
 }
 
+/// Process `pid`'s application element, for tests that need an element a real
+/// process owns.
+#[cfg(test)]
+pub(in crate::desktop) fn application_handle(pid: libc::pid_t) -> CoreResult<AxHandle> {
+	create_application(pid).map(AxHandle::Mac)
+}
+
 fn create_system_wide() -> CFRetained<AXUIElement> {
 	// SAFETY: The framework constructor returns a valid create-rule retained
 	// system-wide element.
