@@ -118,7 +118,7 @@ The inner `tab` is the full worker helper API. In addition to the direct surface
 
 Runs use a persistent, per-tab JavaScript runtime with ordinary Eval helpers and full Bun/Node and tool-bridge access. This is API isolation, not a security sandbox. Raw `page.setRequestInterception` and run-added request listeners are cleaned up at run end; `tab.route` handlers persist until `unroute` or tab close.
 
-The return value stays structured. Nonempty text emitted by inner `display(...)` calls prints in the outer Eval cell, object/image displays remain Eval output, and a run with no display text emits no placeholder.
+The return value stays structured. Nonempty text printed inside the run (`print`, `console.*`) prints in the outer Eval cell, printed images remain Eval output, and a run with no printed text emits no placeholder.
 
 ## Python API
 
@@ -153,9 +153,11 @@ Reusing one tab name across browser kinds is rejected until the existing tab is 
 
 `tab.screenshot({ selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold? })` returns a saved path, or `{ path?, changed, revision, pixelChangeRatio }` when change detection is enabled. `format` is `png` or `jpeg`; integer `quality` (0–100) requires JPEG. `threshold` is a changed-pixel ratio from 0–1 and implies change detection. An unchanged tracked capture saves/emits nothing.
 
+Chromium-backed captures never activate the tab or raise its window: a background tab, a minimized window, or a window behind other apps is captured where it is, with its current content, so the user's frontmost app keeps focus. On relay and CDP-attached browsers this includes an adopted tab the user has since switched away from.
+
 Images are saved beneath `browser.screenshotDir`, or the OS temporary directory when unset. Chromium saves full resolution when that directory or an explicit format is supplied; otherwise it saves the resized image. Model-visible images are resized to at most 1024×1024 and 150 KiB. When the image's pixels are not CSS pixels (resized, or captured at a device scale other than 1), the capture text gives the factor from image coordinates to CSS pixels: viewport pixels for `clickAt` on a plain capture, page pixels for `fullPage`, element-relative pixels for `selector`. Unless `silent: true`, a capture emits an Eval image. `annotate: true` overlays numeric interactive-element labels and refreshes `tab.id` mappings. Screenshot options do not accept an output path; `diffScreenshot(baselinePath, { threshold?, output? })` does, and `pdf({ path?, ... })` writes a PDF.
 
-Host result details preserve structured `value` separately from displayed content. Display text is capped by the shared inline-output policy; over-cap text is stored as a session artifact and the capped text is printed.
+Host result details preserve structured `value` separately from displayed content. Printed text is capped by the shared inline-output policy; over-cap text is stored as a session artifact and the capped text is printed.
 
 ## Safety and lifecycle
 
