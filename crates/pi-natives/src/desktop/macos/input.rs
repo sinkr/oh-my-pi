@@ -67,23 +67,26 @@ impl MacInput {
 						// A sheet or popover is a window of its own, but its elements
 						// report the window it is attached to as theirs, so input for
 						// a point inside it goes to the attached window on top there.
-						let (window, wid) = match pressed_point(&event) {
-							Some(point) => {
-								let windows = capture.windows_of(pid)?;
-								match attached_at(wid, point, &windows, skylight::window_parent) {
-									Some(overlay) => (overlay.clone(), window_identity(overlay)?.1),
+						let (entry_front, (window, wid, in_overlay)) =
+							EntryFront::before(skylight::front_pid, || {
+								let (window, wid) = match pressed_point(&event) {
+									Some(point) => {
+										let windows = capture.windows_of(pid)?;
+										match attached_at(wid, point, &windows, skylight::window_parent) {
+											Some(overlay) => (overlay.clone(), window_identity(overlay)?.1),
+											None => (window, wid),
+										}
+									},
 									None => (window, wid),
-								}
-							},
-							None => (window, wid),
-						};
-						let in_overlay =
-							takes_overlay_focus(wid, ax::key_focus(pid), skylight::window_parent);
-						background_guard(&window, pid, &event)?;
+								};
+								let in_overlay =
+									takes_overlay_focus(wid, ax::key_focus(pid), skylight::window_parent);
+								background_guard(&window, pid, &event)?;
+								Ok((window, wid, in_overlay))
+							})?;
 						let owner = || {
 							input_owner(pid, wid, ax::window_content(pid, &window), ax::focused_window_id)
 						};
-						let entry_front = skylight::front_pid();
 						skylight::with_background_watch(pid, |visit| {
 							background_pointer(
 								&self.source,
@@ -124,15 +127,23 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
-						if process::is_screen_sharing(pid) {
-							return Err(screen_sharing_refusal(&window, "synthesized text"));
-						}
-						if !process::is_terminal(pid) && ax::insert_native_text(pid, wid, text)? {
+						let (entry_front, inserted) = EntryFront::before(skylight::front_pid, || {
+							if process::is_screen_sharing(pid) {
+								return Err(screen_sharing_refusal(&window, "synthesized text"));
+							}
+							Ok(!process::is_terminal(pid) && ax::insert_native_text(pid, wid, text)?)
+						})?;
+						if inserted {
 							return Ok(());
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, |to, guard| {
-							background_type(&self.source, to, text, guard)
-						})
+						with_background_keyboard(
+							&self.source,
+							pid,
+							wid,
+							&window,
+							entry_front,
+							|to, guard| background_type(&self.source, to, text, guard),
+						)
 					},
 					DeliveryMode::Foreground => {
 						// Screen Sharing relays physical key transitions only; map
@@ -179,6 +190,7 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
+						let entry_front = EntryFront::now();
 						if keys.iter().copied().any(KeyName::is_modifier)
 							&& process::is_screen_sharing(pid)
 						{
@@ -187,9 +199,14 @@ impl MacInput {
 								"modifier flags on routed chords",
 							));
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, |to, guard| {
-							background_chord(&self.source, to, keys, guard)
-						})?;
+						with_background_keyboard(
+							&self.source,
+							pid,
+							wid,
+							&window,
+							entry_front,
+							|to, guard| background_chord(&self.source, to, keys, guard),
+						)?;
 						confirm_shortcut_answered(&window, keys, || {
 							control::wait(SHORTCUT_REPLY_DELAY)?;
 							Ok(ax::stopped_answering(pid, SHORTCUT_REPLY_TIMEOUT_SECONDS))
@@ -226,19 +243,27 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
+						let entry_front = EntryFront::now();
 						if process::is_screen_sharing(pid) {
 							return Err(screen_sharing_refusal(&window, "held keys"));
 						}
-						with_background_keyboard(&self.source, pid, wid, &window, |to, guard| {
-							with_held_keys(
-								&self.source,
-								keys,
-								|event| {
-									post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
-								},
-								|| control::wait(duration),
-							)
-						})
+						with_background_keyboard(
+							&self.source,
+							pid,
+							wid,
+							&window,
+							entry_front,
+							|to, guard| {
+								with_held_keys(
+									&self.source,
+									keys,
+									|event| {
+										post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
+									},
+									|| control::wait(duration),
+								)
+							},
+						)
 					},
 					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
 						control::wait(first_key_settle(activated))?;
@@ -291,6 +316,8 @@ enum KeyboardConflict {
 /// Background keyboard delivery to window `wid`: inside the self-activation
 /// guard, makes `wid` its application's key window, then runs `deliver` with
 /// the process to post the keys to and a check to run before every press.
+/// `entry_front` was read as the input began, before this reads the target's
+/// windows and focus ([`EntryFront`]).
 ///
 /// macOS posts key events to a *process*, which hands them to whichever window
 /// it treats as key; unlike pointer events they carry no window id. Keys are
@@ -311,6 +338,7 @@ fn with_background_keyboard<T>(
 	pid: libc::pid_t,
 	wid: u32,
 	window: &DesktopWindow,
+	entry_front: EntryFront,
 	deliver: impl FnOnce(libc::pid_t, &dyn Fn() -> CoreResult<()>) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	let conflict = ax::window_records(pid).map_or(Some(KeyboardConflict::Unmapped), |records| {
@@ -338,7 +366,6 @@ fn with_background_keyboard<T>(
 		return Err(key_refusal(wid, destination, conflict, skylight::window_parent));
 	}
 	let in_overlay = focus.in_overlay_of(wid, skylight::window_parent);
-	let entry_front = skylight::front_pid();
 	skylight::with_background_watch(pid, |visit| {
 		let prepared =
 			make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit)?;
@@ -876,8 +903,33 @@ enum FrontTarget {
 	Unknown,
 }
 
+/// The front process as background input began, read before anything about
+/// its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct EntryFront(Option<libc::pid_t>);
+
+impl EntryFront {
+	pub(super) fn now() -> Self {
+		Self(skylight::front_pid())
+	}
+
+	/// Reads the front process with `front`, then runs `probe`, the target's
+	/// reads and checks that come before its focus guard. An accessibility
+	/// probe blocks while the application is busy, and the user may pick the
+	/// target meanwhile; read after it, the front process would show the
+	/// target as the user's own front app, and the input would go into the
+	/// window they just picked instead of refusing ([`front_target`]).
+	pub(super) fn before<T>(
+		front: impl FnOnce() -> Option<libc::pid_t>,
+		probe: impl FnOnce() -> CoreResult<T>,
+	) -> CoreResult<(Self, T)> {
+		let entry = Self(front());
+		probe().map(|value| (entry, value))
+	}
+}
+
 fn front_target(
-	entry_front: Option<libc::pid_t>,
+	entry_front: EntryFront,
 	front: Option<libc::pid_t>,
 	pid: libc::pid_t,
 	wid: u32,
@@ -886,7 +938,7 @@ fn front_target(
 	match front {
 		None => FrontTarget::Unknown,
 		Some(front) if front != pid => FrontTarget::Background,
-		Some(_) if entry_front != Some(pid) => FrontTarget::CameForward,
+		Some(_) if entry_front.0 != Some(pid) => FrontTarget::CameForward,
 		Some(_) if focused() == Some(wid) => FrontTarget::Key,
 		Some(_) => FrontTarget::UserSibling,
 	}
@@ -906,9 +958,10 @@ fn front_target(
 /// user's keystrokes and key equivalents, stay with the user's app. In the
 /// frontmost application itself, nothing is posted: the target already is
 /// key, or making it key would move the user's typing, so the input refuses.
-/// `entry_front` is the front process sampled before the caller's focus guard
-/// began; a target that has come forward since then refuses, because the
-/// user may have just picked the window that would receive the input.
+/// `entry_front` is the front process read as the input began
+/// ([`EntryFront`]); a target that has come forward since then refuses,
+/// because the user may have just picked the window that would receive the
+/// input.
 ///
 /// `focus_in_overlay` says the caller has seen the application's keyboard
 /// focus in an overlay window attached to `wid`, such as Finder's inline
@@ -928,7 +981,7 @@ pub(super) fn make_key_in_background(
 	pid: libc::pid_t,
 	wid: u32,
 	window: &DesktopWindow,
-	entry_front: Option<libc::pid_t>,
+	entry_front: EntryFront,
 	focus_in_overlay: bool,
 	visit: skylight::TargetVisit<'_>,
 ) -> CoreResult<bool> {
@@ -1231,7 +1284,7 @@ fn background_pointer(
 	wid: u32,
 	window: &DesktopWindow,
 	event: PointerEvent,
-	entry_front: Option<libc::pid_t>,
+	entry_front: EntryFront,
 	owner: impl FnOnce() -> CoreResult<(libc::pid_t, u32)>,
 	in_overlay: bool,
 	visit: skylight::TargetVisit<'_>,
@@ -3226,19 +3279,43 @@ mod tests {
 		// preparing it would send the user's next keystrokes and pastes there.
 		let unread =
 			|| -> Option<u32> { panic!("a background process's focused window is not read") };
-		assert_eq!(front_target(Some(9), Some(9), 7, 42, unread), FrontTarget::Background);
-		assert_eq!(front_target(Some(9), None, 7, 42, unread), FrontTarget::Unknown);
-		assert_eq!(front_target(Some(7), Some(7), 7, 42, || Some(42)), FrontTarget::Key);
-		assert_eq!(front_target(Some(7), Some(7), 7, 42, || Some(43)), FrontTarget::UserSibling);
-		assert_eq!(front_target(Some(7), Some(7), 7, 42, || None), FrontTarget::UserSibling);
+		let (user, target) = (EntryFront(Some(9)), EntryFront(Some(7)));
+		assert_eq!(front_target(user, Some(9), 7, 42, unread), FrontTarget::Background);
+		assert_eq!(front_target(user, None, 7, 42, unread), FrontTarget::Unknown);
+		assert_eq!(front_target(target, Some(7), 7, 42, || Some(42)), FrontTarget::Key);
+		assert_eq!(front_target(target, Some(7), 7, 42, || Some(43)), FrontTarget::UserSibling);
+		assert_eq!(front_target(target, Some(7), 7, 42, || None), FrontTarget::UserSibling);
 	}
 
 	#[test]
 	fn a_target_brought_forward_before_its_key_window_step_refuses_even_as_key() {
 		// The user brought the background target forward and picked its window:
 		// delivering now would type into the window they just selected.
-		assert_eq!(front_target(Some(9), Some(7), 7, 42, || Some(42)), FrontTarget::CameForward);
-		assert_eq!(front_target(None, Some(7), 7, 42, || Some(42)), FrontTarget::CameForward);
+		assert_eq!(
+			front_target(EntryFront(Some(9)), Some(7), 7, 42, || Some(42)),
+			FrontTarget::CameForward
+		);
+		assert_eq!(
+			front_target(EntryFront(None), Some(7), 7, 42, || Some(42)),
+			FrontTarget::CameForward
+		);
+	}
+
+	#[test]
+	fn a_target_picked_while_its_probes_block_refuses_as_come_forward() {
+		// The user brings the target (7) forward while an accessibility probe
+		// of it blocks: the input began with their app (9) in front.
+		let front = std::cell::Cell::new(9);
+		let (entry, ()) = EntryFront::before(
+			|| Some(front.get()),
+			|| {
+				front.set(7);
+				Ok(())
+			},
+		)
+		.unwrap();
+		assert_eq!(entry, EntryFront(Some(9)));
+		assert_eq!(front_target(entry, Some(7), 7, 42, || Some(42)), FrontTarget::CameForward);
 	}
 
 	#[test]

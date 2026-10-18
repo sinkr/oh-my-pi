@@ -4,7 +4,9 @@ use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
 use super::{
-	super::input::{await_key_window, make_key_in_background, recheck_background, source},
+	super::input::{
+		EntryFront, await_key_window, make_key_in_background, recheck_background, source,
+	},
 	MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element, copy_required_string,
 	copy_string, copy_strings_from_action_names, create_application, element_pid, key_focus,
 	mac_handle, perform_action, reports_active, set_timeout, skylight, window_id,
@@ -179,11 +181,12 @@ fn with_window_menu<T>(
 	access: MenuAccess,
 	action: impl FnOnce(&AXUIElement, libc::pid_t, &dyn Fn() -> CoreResult<()>, bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
-	let (app, pid, wid) = window_menu_context(window)?;
+	let (entry_front, (app, pid, wid, activated)) = EntryFront::before(skylight::front_pid, || {
+		let (app, pid, wid) = window_menu_context(window)?;
+		Ok((app, pid, wid, reports_active(pid) == Some(false)))
+	})?;
 	// Application menus validate and dispatch through the key window, not their
 	// AX parent.
-	let entry_front = skylight::front_pid();
-	let activated = reports_active(pid) == Some(false);
 	skylight::with_background_watch(pid, |visit| {
 		let prepared = enter_menu_context(access, || {
 			// A read must not end an overlay's editing, such as a popover's: the
