@@ -342,14 +342,7 @@ fn with_background_keyboard<T>(
 	entry_front: EntryFront,
 	deliver: impl FnOnce(libc::pid_t, &dyn Fn() -> CoreResult<()>) -> CoreResult<T>,
 ) -> CoreResult<T> {
-	let conflict = ax::window_records(pid).map_or(Some(KeyboardConflict::Unmapped), |records| {
-		keyboard_conflict(wid, &records, || {
-			ax::focused_window_id(pid) == Some(wid)
-				|| attached_under(wid, skylight::window_parent, |parent| {
-					records.iter().any(|record| record.id == Some(parent))
-				})
-		})
-	});
+	let conflict = keyboard_conflict_now(pid, wid);
 	if conflict == Some(KeyboardConflict::Unmapped) {
 		return Err(DesktopError::background_unavailable(format!(
 			"window {wid} is not among its application's accessibility windows, is not its focused \
@@ -387,7 +380,7 @@ fn with_background_keyboard<T>(
 					keys_still_reach(
 						pid,
 						wid,
-						conflict,
+						|| keyboard_conflict_now(pid, wid),
 						focus,
 						|| ax::key_focus(pid),
 						skylight::window_parent,
@@ -395,6 +388,19 @@ fn with_background_keyboard<T>(
 					owner_still_focused(pid, wid, owner, ax::focused_window_id)
 				},
 			)
+		})
+	})
+}
+
+/// [`keyboard_conflict`] for window `wid` of `pid` as its accessibility
+/// windows are now.
+fn keyboard_conflict_now(pid: libc::pid_t, wid: u32) -> Option<KeyboardConflict> {
+	ax::window_records(pid).map_or(Some(KeyboardConflict::Unmapped), |records| {
+		keyboard_conflict(wid, &records, || {
+			ax::focused_window_id(pid) == Some(wid)
+				|| attached_under(wid, skylight::window_parent, |parent| {
+					records.iter().any(|record| record.id == Some(parent))
+				})
 		})
 	})
 }
@@ -421,7 +427,10 @@ fn activate_owner(
 /// `wid` as `proven`, the focus that admitted delivery, showed. The focus read
 /// now must pass the same [`key_route`]; once the user or the application
 /// makes another window key, including one opened since, the press would land
-/// there. When the focused element decided, because the application did not
+/// there. When the application reports no focused window, `wid` being its
+/// only possible key window is the proof, so the windows are read again
+/// (`conflict`): one it opened or unminimized since could be taking the keys.
+/// When the focused element decided, because the application did not
 /// report `wid` as its focused window (Finder's rename field, Reminders'
 /// popover), the element must still be in the window it was in: once that
 /// overlay closes or another takes focus, the press would land in the window
@@ -429,7 +438,7 @@ fn activate_owner(
 fn keys_still_reach(
 	pid: libc::pid_t,
 	wid: u32,
-	conflict: Option<KeyboardConflict>,
+	conflict: impl FnOnce() -> Option<KeyboardConflict>,
 	proven: ax::KeyFocus,
 	focus: impl FnOnce() -> ax::KeyFocus,
 	parent_of: impl Fn(u32) -> Option<u32>,
@@ -437,10 +446,15 @@ fn keys_still_reach(
 	let now = focus();
 	let element_decided =
 		proven.window != ax::FocusedWindow::Id(wid) && proven.element_window.is_some();
-	let routed = matches!(
-		key_route(pid, now.destination(pid, wid, parent_of), conflict),
-		KeyRoute::Deliver(_)
-	);
+	let destination = now.destination(pid, wid, parent_of);
+	// Only a destination the application does not report depends on the
+	// window set.
+	let conflict = if destination == ax::KeyDestination::Unreported {
+		conflict()
+	} else {
+		None
+	};
+	let routed = matches!(key_route(pid, destination, conflict), KeyRoute::Deliver(_));
 	if routed && (!element_decided || now.element_window == proven.element_window) {
 		return Ok(());
 	}
@@ -2731,7 +2745,7 @@ mod tests {
 		let window = |id| focus_in(ax::FocusedWindow::Id(id), Some(id));
 		let focused = std::cell::Cell::new(window(7));
 		let siblings = Some(KeyboardConflict::Siblings(1));
-		let guard = || keys_still_reach(1, 7, siblings, window(7), || focused.get(), |_| None);
+		let guard = || keys_still_reach(1, 7, || siblings, window(7), || focused.get(), |_| None);
 		let mut typed = Vec::new();
 		let result = type_text(&source, "ab", |event| {
 			post_guarded(event, guard, |event| {
@@ -2786,7 +2800,7 @@ mod tests {
 		let rename = |id| (id == 12).then_some(7);
 		let renaming = focus_in(unreported, Some(12));
 		let focused = std::cell::Cell::new(renaming);
-		let guard = || keys_still_reach(1, 7, siblings, renaming, || focused.get(), rename);
+		let guard = || keys_still_reach(1, 7, || siblings, renaming, || focused.get(), rename);
 		let mut typed = Vec::new();
 		let result = type_text(&source, "ab", |event| {
 			post_guarded(event, guard, |event| {
@@ -2802,16 +2816,16 @@ mod tests {
 		assert_eq!(typed, [down, up, up]);
 		// The rename ending with no focused window reported stops it too.
 		let ended = focus_in(unreported, None);
-		assert!(keys_still_reach(1, 7, siblings, renaming, || ended, rename).is_err());
+		assert!(keys_still_reach(1, 7, || siblings, renaming, || ended, rename).is_err());
 		// Reminders reports window 79 focused under its details popover 90:
 		// once the popover closes, or another one on 79 takes focus, keys for
 		// the popover would reach window 79 or that other popover.
 		let popovers = |id| [90, 91].contains(&id).then_some(79);
 		let in_popover = focus_in(id(79), Some(90));
 		let closed = focus_in(id(79), Some(79));
-		assert!(keys_still_reach(1, 90, siblings, in_popover, || closed, popovers).is_err());
+		assert!(keys_still_reach(1, 90, || siblings, in_popover, || closed, popovers).is_err());
 		let other = focus_in(id(79), Some(91));
-		assert!(keys_still_reach(1, 90, siblings, in_popover, || other, popovers).is_err());
+		assert!(keys_still_reach(1, 90, || siblings, in_popover, || other, popovers).is_err());
 	}
 
 	#[test]
@@ -2895,7 +2909,7 @@ mod tests {
 		let (id, unreported) = (ax::FocusedWindow::Id, ax::FocusedWindow::Unreported);
 		let siblings = Some(KeyboardConflict::Siblings(1));
 		let still = |wid, conflict, proven, now, parent_of: fn(u32) -> Option<u32>| {
-			keys_still_reach(1, wid, conflict, proven, || now, parent_of).is_ok()
+			keys_still_reach(1, wid, || conflict, proven, || now, parent_of).is_ok()
 		};
 		// Reminders reports the window under its details popover 25579 as
 		// focused while the popover takes the keys.
@@ -2918,6 +2932,25 @@ mod tests {
 		// A lone window: one opened during the input stops it once key.
 		assert!(!still(7, None, window, focus_in(id(9), Some(9)), rename));
 		assert!(still(7, None, window, focus_in(unreported, None), rename));
+	}
+
+	#[test]
+	fn a_window_the_app_opens_while_it_reports_no_focus_stops_the_keys() {
+		// Window 7 was the app's only window and it reported no focused window
+		// when the keys began; during a long type() it opens window 9 and still
+		// reports none, so 9 may be taking the keys.
+		let unreported = focus_in(ax::FocusedWindow::Unreported, None);
+		let read = std::cell::Cell::new(false);
+		let now = || {
+			read.set(true);
+			Some(KeyboardConflict::Siblings(1))
+		};
+		assert!(keys_still_reach(1, 7, now, unreported, || unreported, |_| None).is_err());
+		assert!(read.get(), "the window set is read again");
+		// While the app reports window 7 itself, the window set proves nothing.
+		let window = focus_in(ax::FocusedWindow::Id(7), Some(7));
+		let unread = || -> Option<KeyboardConflict> { panic!("the window set is not read") };
+		assert!(keys_still_reach(1, 7, unread, window, || window, |_| None).is_ok());
 	}
 
 	#[test]
