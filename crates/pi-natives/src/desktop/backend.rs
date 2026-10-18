@@ -29,12 +29,18 @@ pub(crate) fn is_raise_action(action: &str) -> bool {
 /// unsupported routes refuse, and detected focus side effects surface as
 /// potentially delivered input. `Foreground` is the explicit `takeover: true`
 /// escalation: it activates the target and restores state where the OS allows,
-/// without overwriting a newer user focus choice.
+/// without overwriting a newer user focus choice. `ForegroundReturnFocus`
+/// (`takeover` with `returnFocus`) is the host's own rerun of a refused
+/// background action: it hands focus back to the user's app even after the user
+/// clicked or pressed a shortcut meanwhile, and leaves it only on a third app
+/// the user switched to. Backends that cannot tell the two apart treat it as
+/// `Foreground`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeliveryMode {
 	#[default]
 	Background,
 	Foreground,
+	ForegroundReturnFocus,
 }
 
 impl DeliveryMode {
@@ -43,6 +49,14 @@ impl DeliveryMode {
 			Self::Foreground
 		} else {
 			Self::Background
+		}
+	}
+
+	/// Upgrades a foreground mode to return focus; background stays background.
+	pub(crate) const fn returning_focus(self, return_focus: bool) -> Self {
+		match self {
+			Self::Foreground if return_focus => Self::ForegroundReturnFocus,
+			mode => mode,
 		}
 	}
 }
@@ -216,6 +230,14 @@ pub trait Backend: Send {
 			ErrorCode::Unsupported,
 			"choosing a menu item in the click that opens the menu is available only on macOS",
 		))
+	}
+	/// Refuses, before anything is sent, background pointer input `ev` on
+	/// `target` whose left press would open a control's menu: a click that
+	/// lands on one, or a mouse hold or drag that starts there. Only macOS opens
+	/// one for a plain background press (a menu button or popup button), so
+	/// other backends accept every press.
+	fn refuse_menu_press(&mut self, _target: &Target, _ev: &PointerEvent) -> CoreResult<()> {
+		Ok(())
 	}
 	fn type_text(
 		&mut self,

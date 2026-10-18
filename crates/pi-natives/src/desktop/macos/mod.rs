@@ -187,6 +187,10 @@ impl Backend for MacosBackend {
 		})
 	}
 
+	fn refuse_menu_press(&mut self, target: &Target, event: &PointerEvent) -> CoreResult<()> {
+		input::refuse_menu_press(target, event, &self.capture)
+	}
+
 	fn type_text(
 		&mut self,
 		target: &Target,
@@ -331,7 +335,7 @@ fn window_owner(
 /// user's own keyboard and mouse share, or to the target's process.
 const fn presses(target: &Target, mode: DeliveryMode) -> Presses {
 	if matches!(target, Target::Desktop | Target::Display(_))
-		|| matches!(mode, DeliveryMode::Foreground)
+		|| !matches!(mode, DeliveryMode::Background)
 	{
 		Presses::Hid
 	} else {

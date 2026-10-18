@@ -472,6 +472,13 @@ pub(in crate::desktop) fn started(pid: libc::pid_t) -> Option<u64> {
 	})
 }
 
+/// `pid`'s application name as the Dock shows it.
+pub(super) fn application_name(pid: libc::pid_t) -> Option<String> {
+	NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?
+		.localizedName()
+		.map(|name| name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{

@@ -1,4 +1,5 @@
 use std::{
+	cell::Cell,
 	ffi::c_void,
 	ptr,
 	sync::{
@@ -23,11 +24,12 @@ use parking_lot::Mutex;
 use super::{
 	super::{
 		control,
-		error::{CoreResult, DesktopError},
+		error::{CoreResult, DesktopError, ErrorCode},
+		types::DesktopFocusReturn,
 	},
 	ax, capture,
 	key_reroute::KeyReroute,
-	permission,
+	permission, process,
 	release::Route,
 	release_guard,
 	route::{self, Routes, symbol},
@@ -200,8 +202,7 @@ pub(super) fn takeover_available() -> bool {
 fn required() -> CoreResult<&'static RequiredSpi> {
 	REQUIRED.as_ref().ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"skylight-spi-missing: required SkyLight background input symbols are unavailable; retry \
-			 with takeover:true or use ax actions",
+			"skylight-spi-missing: required SkyLight background input symbols are unavailable",
 		)
 	})
 }
@@ -276,6 +277,18 @@ pub(super) fn post_routed(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	post_to_pid(Route::Routed(pid), event, |routes, event| {
 		// SAFETY: `post_to_pid` passes the live event it retains for the call.
 		unsafe { routes.routed(pid, event) };
+		mark_sent();
+		Ok(())
+	})
+}
+
+/// [`post_routed`] for an event that only makes a window key, outside its
+/// frame: no input of the call has reached the target yet
+/// ([`reporting_partial`]).
+pub(super) fn post_activation(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
+	post_to_pid(Route::Routed(pid), event, |routes, event| {
+		// SAFETY: `post_to_pid` passes the live event it retains for the call.
+		unsafe { routes.routed(pid, event) };
 		Ok(())
 	})
 }
@@ -286,6 +299,7 @@ pub(super) fn post_dual(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	post_to_pid(Route::Dual(pid), event, |routes, event| {
 		// SAFETY: `post_to_pid` passes the live event it retains for the call.
 		unsafe { routes.routed(pid, event) };
+		mark_sent();
 		control::check()?;
 		// SAFETY: as above.
 		unsafe { routes.public(pid, event) };
@@ -299,6 +313,7 @@ pub(super) fn post_keyboard(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	post_to_pid(Route::Keyboard(pid), event, |routes, event| {
 		// SAFETY: `post_to_pid` passes the live event it retains for the call.
 		unsafe { routes.keyboard(pid, event) };
+		mark_sent();
 		Ok(())
 	})
 }
@@ -320,6 +335,42 @@ fn post_to_pid(
 	release_guard::post(route, event, || post(routes, event_ptr(event)))?;
 	note_send();
 	Ok(())
+}
+
+thread_local! {
+	/// Whether the background call running on this thread has posted input
+	/// to its target ([`reporting_partial`]).
+	static SENT: Cell<bool> = const { Cell::new(false) };
+}
+
+fn mark_sent() {
+	SENT.with(|sent| sent.set(true));
+}
+
+/// Runs one background call's `action`. A `BackgroundUnavailable` it returns
+/// after it posted input becomes `InputFailed`: the tool reruns only
+/// `BackgroundUnavailable` in takeover, which would repeat input that landed.
+pub(super) fn reporting_partial<T>(action: impl FnOnce() -> CoreResult<T>) -> CoreResult<T> {
+	let outer = SENT.with(|sent| sent.replace(false));
+	let result = action();
+	let sent = SENT.with(|sent| sent.replace(outer || sent.get()));
+	partial(sent, result)
+}
+
+fn partial<T>(sent: bool, result: CoreResult<T>) -> CoreResult<T> {
+	match result {
+		Err(error) if sent && error.code == ErrorCode::BackgroundUnavailable => {
+			let reason = [", so nothing was sent", "; nothing was sent", " so nothing was sent"]
+				.into_iter()
+				.find_map(|unsent| error.message.strip_suffix(unsent))
+				.unwrap_or(&error.message);
+			Err(DesktopError::input_failed(format!(
+				"{reason}; earlier input of this call may already have landed, so inspect the target \
+				 before retrying"
+			)))
+		},
+		result => result,
+	}
 }
 
 /// This process's `WindowServer` connection, which `AppKit` stamps on the
@@ -928,17 +979,17 @@ pub(super) fn with_background_watch<T>(
 	pid: pid_t,
 	action: impl FnOnce(TargetVisit<'_>) -> CoreResult<T>,
 ) -> CoreResult<T> {
+	let action = |visit: TargetVisit<'_>| reporting_partial(|| action(visit));
 	control::check()?;
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"focus-restoration SPI is unavailable; use ax actions that do not activate the app or \
-			 takeover:true",
+			"the focus-restoration SPI is unavailable, so background input could not keep the user's \
+			 focus; nothing was sent",
 		)
 	})?;
 	let previous = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"cannot establish the current front process before background input; retry with \
-			 takeover:true",
+			"cannot establish the current front process before background input; nothing was sent",
 		)
 	})?;
 	if previous.pid == Some(pid) {
@@ -946,7 +997,7 @@ pub(super) fn with_background_watch<T>(
 	}
 	let target = process_psn(spi.psn, pid, 0).ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"cannot resolve the background target process; retry with takeover:true or use ax actions",
+			"cannot resolve the background target process; nothing was sent",
 		)
 	})?;
 	let previous_key = restoration_key_in_front(
@@ -969,8 +1020,7 @@ pub(super) fn with_background_watch<T>(
 	let visited = AtomicBool::new(false);
 	let start_failed = |error: std::io::Error| {
 		DesktopError::background_unavailable(format!(
-			"could not start the background focus guard: {error}; retry with takeover:true or use ax \
-			 actions"
+			"could not start the background focus guard: {error}; nothing was sent"
 		))
 	};
 	thread::scope(|scope| {
@@ -1194,8 +1244,8 @@ fn guard_focus(
 				return Err(DesktopError::input_failed(format!(
 					"{} came forward during the background action and is still in front of {}: it came \
 					 back after focus restoration or macOS refused to send it back while the user \
-					 typed; input may already have landed there; inspect the desktop and use \
-					 takeover:true or ax actions",
+					 typed; input may already have landed there; inspect the desktop before sending \
+					 more",
 					desktop.describe(front),
 					desktop.describe(previous),
 				)));
@@ -1380,8 +1430,8 @@ fn restoration_key_in_front(
 ) -> CoreResult<Option<u32>> {
 	let key = probe().ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"cannot establish the user's key window for background focus restoration; retry with \
-			 takeover:true or use ax actions",
+			"cannot establish the user's key window for background focus restoration; nothing was \
+			 sent",
 		)
 	})?;
 	let now = front();
@@ -1420,9 +1470,12 @@ fn restorable_key(
 /// already is the key window of the front process is not re-activated:
 /// re-activating it can clear Chromium's renderer focus. The window is made
 /// key without being raised; callers that need it unobstructed raise it.
+/// `return_focus` restores even after user input during the action; see
+/// [`hands_focus_back`].
 pub(super) fn with_foreground<T>(
 	pid: pid_t,
 	wid: u32,
+	return_focus: bool,
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
@@ -1446,7 +1499,9 @@ pub(super) fn with_foreground<T>(
 	})?;
 	let focused = ax::focused_window_id(pid);
 	if preserves_exact_existing_focus(Some(previous.psn), target, focused, wid) {
-		return action(false).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+		let result = action(false).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+		report_focus_return(false, previous.pid);
+		return result;
 	}
 	let previous_pid = previous.pid.ok_or_else(|| {
 		DesktopError::input_failed(
@@ -1460,7 +1515,8 @@ pub(super) fn with_foreground<T>(
 			)
 		})?
 		.window();
-	let restore = |preparation_failed: bool| {
+	let handed_back = Cell::new(false);
+	let restore = || {
 		// Keys the user types while takeover holds the front land in the target
 		// without them choosing it, so only a click or a shortcut of theirs, or
 		// a switch elsewhere, leaves the front application alone.
@@ -1473,12 +1529,12 @@ pub(super) fn with_foreground<T>(
 			)
 		};
 		let still_ours = || {
-			!user_chose()
-				// A user-selected third app or sibling window must not be
-				// overwritten.
-				&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
-				&& !ax::focused_window_id(pid)
-					.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
+			let now = if front_process(spi.get_front).is_some_and(|front| front.psn == target) {
+				FocusAfterTakeover::Target
+			} else {
+				FocusAfterTakeover::Elsewhere
+			};
+			hands_focus_back(return_focus, user_chose(), now)
 		};
 		if !still_ours() {
 			return Ok(());
@@ -1487,18 +1543,19 @@ pub(super) fn with_foreground<T>(
 		// clicks, which `WindowServer` counts like the user's, came before this
 		// timestamp; user input after it refuses the hand-back, and the
 		// make-key records below are then never posted.
-		let handed_back = hand_back_through_typing(
+		let request = hand_back_through_typing(
 			control::uptime_ns,
 			still_ours,
 			|since| control::last_user_typing() >= since,
 			|| monitor_settled(progress),
 			|since| set_front_unless_user_acted(spi, previous.psn, previous_key.unwrap_or(0), since),
 		)?;
-		if handed_back != Some(FrontRequest::Done) {
+		if request != Some(FrontRequest::Done) {
 			return Ok(());
 		}
 		// A previous app that showed no window gets only its front status back.
 		let Some(previous_key) = previous_key else {
+			handed_back.set(true);
 			return Ok(());
 		};
 		if !rekey_unless_user_chose(
@@ -1507,18 +1564,64 @@ pub(super) fn with_foreground<T>(
 			user_chose,
 			|| make_exact_window_key(spi, previous.psn, previous_key),
 		)? {
+			// The user picked another window of their own app, which is front.
+			handed_back.set(true);
 			return Ok(());
 		}
-		await_window_focused(spi, previous_pid, previous_key, previous.psn)
+		await_window_focused(spi, previous_pid, previous_key, previous.psn)?;
+		handed_back.set(true);
+		Ok(())
 	};
 	let prepare = set_front(spi, target, wid)
 		.and_then(|()| make_exact_window_key(spi, target, wid))
 		.and_then(|()| await_window_focused(spi, pid, wid, target));
-	if let Err(error) = prepare {
-		return after_cleanup(Err(error), control::cleanup(|| restore(true)));
+	let result = if let Err(error) = prepare {
+		after_cleanup(Err(error), control::cleanup(restore))
+	} else {
+		let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+		after_cleanup(result, control::cleanup(restore))
+	};
+	report_focus_return(handed_back.get(), previous.pid);
+	result
+}
+
+/// Records for the host where a takeover left focus, read from `WindowServer`
+/// after restoration.
+fn report_focus_return(handed_back: bool, previous: Option<pid_t>) {
+	let pid = |pid: pid_t| u32::try_from(pid).ok();
+	control::report_focus_return(DesktopFocusReturn {
+		handed_back,
+		previous_pid: previous.and_then(pid),
+		front_pid: front_pid().and_then(pid),
+	});
+}
+
+/// Where focus sits when a takeover ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusAfterTakeover {
+	/// The target process is front, whichever of its windows is key.
+	Target,
+	/// Another process is front: the user's own app again, or a third app.
+	Elsewhere,
+}
+
+/// Whether a takeover hands focus back to the app the user was in.
+///
+/// An explicit takeover yields to a click or shortcut of the user's during the
+/// action (`user_chose`), so a window they picked keeps focus where it went;
+/// typing is no choice, since it lands in the target without the user picking
+/// it. Otherwise it hands focus back whichever of the target's windows is key:
+/// a document the action opened or a sheet it closed is not the user's
+/// choice. A returning takeover (the host's rerun of a refused background
+/// action) hands focus back even after such a choice: the user was working in
+/// their own app when the agent took the screen. Neither overwrites a process
+/// the user switched to, which is either their own app already or a
+/// deliberately chosen third app.
+const fn hands_focus_back(return_focus: bool, user_chose: bool, now: FocusAfterTakeover) -> bool {
+	match now {
+		FocusAfterTakeover::Elsewhere => false,
+		FocusAfterTakeover::Target => return_focus || !user_chose,
 	}
-	let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
-	after_cleanup(result, control::cleanup(|| restore(false)))
 }
 
 /// Makes `previous_key` key again after takeover handed the front back,
@@ -1710,7 +1813,8 @@ fn make_exact_window_key(
 ///
 /// Global HID input goes to whichever window is key, so a target that still
 /// reports another focused window at the deadline refuses before any input is
-/// sent. A front process alone is not proof of the exact key window.
+/// sent. A front process alone is not proof of the exact key window. The
+/// refusal names what held focus instead, so the caller can address it.
 fn await_window_focused(
 	spi: &ForegroundSpi,
 	pid: pid_t,
@@ -1720,17 +1824,57 @@ fn await_window_focused(
 	let deadline = Instant::now() + ACTIVATION_TIMEOUT;
 	loop {
 		let focused = ax::focused_window_id(pid);
-		let target_front = front_process(spi.get_front).is_some_and(|front| front.psn == target);
+		let front = front_process(spi.get_front);
+		let target_front = front.is_some_and(|front| front.psn == target);
 		if focused == Some(wid) && target_front {
 			return Ok(());
 		}
 		if Instant::now() >= deadline {
-			return Err(DesktopError::input_failed(format!(
-				"window {wid} could not be confirmed as the exact frontmost key window",
-			)));
+			let seen = if target_front {
+				KeyWindowSeen::Focused(ax::focused_window_label(pid))
+			} else {
+				let pid = front.and_then(|front| front.pid);
+				KeyWindowSeen::Front { pid, name: pid.and_then(process::application_name) }
+			};
+			return Err(DesktopError::input_failed(unconfirmed_key_window(wid, &seen)));
 		}
 		control::wait(ACTIVATION_POLL)?;
 	}
+}
+
+/// What held focus when a window could not be confirmed as the frontmost key
+/// window.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyWindowSeen {
+	/// Another process stayed in front.
+	Front { pid: Option<pid_t>, name: Option<String> },
+	/// The target's process came to the front with this focused window, if any.
+	Focused(Option<ax::WindowLabel>),
+}
+
+fn unconfirmed_key_window(wid: u32, seen: &KeyWindowSeen) -> String {
+	let held = match seen {
+		KeyWindowSeen::Front { pid: Some(pid), name: Some(name) } => {
+			format!("{name} (pid {pid}) stayed the front application")
+		},
+		KeyWindowSeen::Front { pid: Some(pid), name: None } => {
+			format!("pid {pid} stayed the front application")
+		},
+		KeyWindowSeen::Front { pid: None, .. } => {
+			"the front application could not be identified".to_owned()
+		},
+		KeyWindowSeen::Focused(None) => "its application reports no focused window".to_owned(),
+		KeyWindowSeen::Focused(Some(window)) => {
+			let title = window.title.as_ref().map(|title| format!(" \"{title}\""));
+			let kind = window.kind.as_ref().map(|kind| format!(" ({kind})"));
+			let (title, kind) = (title.unwrap_or_default(), kind.unwrap_or_default());
+			match window.id {
+				Some(id) => format!("its application's focused window is window {id}{title}{kind}"),
+				None => format!("its application's focused window{title}{kind} has no window id"),
+			}
+		},
+	};
+	format!("window {wid} could not be confirmed as the exact frontmost key window: {held}")
 }
 
 fn process_psn(lookup: PsnLookup, pid: pid_t, wid: u32) -> Option<ProcessSerialNumber> {
@@ -1873,6 +2017,42 @@ mod tests {
 		spotlight.observe(keyboard_in(SPOTLIGHT), PREVIOUS, t0 + ms(100));
 		spotlight.observe(keyboard_in(THIRD), PREVIOUS, t0 + ms(110));
 		assert_eq!(spotlight.picked(t0 + ms(115), THIRD), Some(UserSwitch::Panel));
+	}
+
+	#[test]
+	fn a_refusal_after_the_call_posted_input_is_never_offered_for_a_rerun() {
+		let refused = || -> CoreResult<()> {
+			Err(DesktopError::background_unavailable(
+				"window 41 did not become its application's key window; nothing was sent",
+			))
+		};
+		// Before anything went out: the tool may rerun it in takeover.
+		assert_eq!(reporting_partial(refused).unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		// `win.type("hello")` sent "he", then the next key was refused.
+		let error = reporting_partial(|| {
+			mark_sent();
+			refused()
+		})
+		.unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(!error.message.contains("nothing was sent"), "{}", error.message);
+		assert!(error.message.contains("may already have landed"), "{}", error.message);
+		// A nested call's input counts for the call around it.
+		let nested = reporting_partial(|| {
+			reporting_partial(|| {
+				mark_sent();
+				Ok(())
+			})?;
+			refused()
+		});
+		assert_eq!(nested.unwrap_err().code, ErrorCode::InputFailed);
+		// The next call starts unsent, and other codes pass through.
+		assert_eq!(reporting_partial(refused).unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		let cancelled = reporting_partial(|| -> CoreResult<()> {
+			mark_sent();
+			Err(DesktopError::cancelled("stopped"))
+		});
+		assert_eq!(cancelled.unwrap_err().code, ErrorCode::Cancelled);
 	}
 
 	#[test]
@@ -2768,5 +2948,70 @@ mod tests {
 			|| panic!("nor records"),
 		);
 		assert_eq!(rekeyed.ok(), Some(true));
+	}
+
+	#[test]
+	fn an_unconfirmed_key_window_names_what_held_focus_instead() {
+		let focused = |id, title: Option<&str>, kind: &str| {
+			KeyWindowSeen::Focused(Some(ax::WindowLabel {
+				id,
+				title: title.map(str::to_owned),
+				kind: Some(kind.to_owned()),
+			}))
+		};
+		let refusal = |wid, seen| unconfirmed_key_window(wid, &seen);
+		let prefix = "could not be confirmed as the exact frontmost key window: ";
+		// Calendar's untitled recurring-event alert held key over its window 66.
+		assert_eq!(
+			refusal(66, focused(Some(93), None, "AXDialog")),
+			format!("window 66 {prefix}its application's focused window is window 93 (AXDialog)")
+		);
+		assert_eq!(
+			refusal(186, focused(Some(191), Some("Go to Folder"), "AXSheet")),
+			format!(
+				"window 186 {prefix}its application's focused window is window 191 \"Go to Folder\" \
+				 (AXSheet)"
+			)
+		);
+		assert_eq!(
+			refusal(186, focused(None, Some("Open"), "AXSheet")),
+			format!(
+				"window 186 {prefix}its application's focused window \"Open\" (AXSheet) has no window \
+				 id"
+			)
+		);
+		assert_eq!(
+			refusal(66, KeyWindowSeen::Focused(None)),
+			format!("window 66 {prefix}its application reports no focused window")
+		);
+		assert_eq!(
+			refusal(66, KeyWindowSeen::Front { pid: Some(367), name: Some("iTerm2".to_owned()) }),
+			format!("window 66 {prefix}iTerm2 (pid 367) stayed the front application")
+		);
+		assert_eq!(
+			refusal(66, KeyWindowSeen::Front { pid: Some(367), name: None }),
+			format!("window 66 {prefix}pid 367 stayed the front application")
+		);
+		assert_eq!(
+			refusal(66, KeyWindowSeen::Front { pid: None, name: None }),
+			format!("window 66 {prefix}the front application could not be identified")
+		);
+	}
+
+	#[test]
+	fn a_returning_takeover_hands_focus_back_after_typing_but_not_over_a_third_app() {
+		use FocusAfterTakeover::{Elsewhere, Target};
+		// The user clicked or pressed a shortcut while the target was front: a
+		// returning takeover still hands focus back, an explicit one yields.
+		assert!(hands_focus_back(true, true, Target));
+		assert!(!hands_focus_back(false, true, Target));
+		// With no such choice both hand focus back, whichever of the target's
+		// windows the action left key (a document it opened, a sheet it closed).
+		assert!(hands_focus_back(true, false, Target));
+		assert!(hands_focus_back(false, false, Target));
+		// A process the user switched to keeps focus either way.
+		for (return_focus, user_chose) in [(true, true), (true, false), (false, false)] {
+			assert!(!hands_focus_back(return_focus, user_chose, Elsewhere));
+		}
 	}
 }

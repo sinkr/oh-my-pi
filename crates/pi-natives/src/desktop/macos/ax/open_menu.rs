@@ -177,15 +177,15 @@ pub(crate) fn guard(
 		},
 		(delivered, Ok(_)) => delivered,
 		// Settling stopped before pressing an item because the call was
-		// cancelled or the user used the app; the menu was closed.
+		// cancelled, or the user came to or used the app; the menu was closed.
 		(_, Err(error)) if stops_the_call(&error) => Err(error),
 		(delivered, Err(error)) => skylight::after_cleanup(delivered, Err(error)),
 	}
 }
 
 /// Whether settling stopped for a reason that ends the whole call rather than
-/// refusing the menu path: the agent was stopped, or the user pressed a key or
-/// clicked in the app.
+/// refusing the menu path: the agent was stopped, or the user came to the app
+/// or pressed a key or clicked in it.
 const fn stops_the_call(error: &DesktopError) -> bool {
 	matches!(error.code, ErrorCode::Cancelled | ErrorCode::UserIntervened)
 }
@@ -1125,6 +1125,16 @@ mod tests {
 		let unread =
 			|_: &[u32], _: Option<&[String]>| -> CoreResult<Settled> { panic!("no menu handling") };
 		assert!(guard(Press::Action("AXPress"), None, None, || Ok(()), unread).is_ok());
+		// The user came to the target before the item was pressed: the menu
+		// was closed, and the call says why rather than a failed restoration.
+		let intervened = guard(
+			Press::Action("AXPress"),
+			Some(&[5]),
+			Some(&["Show in Finder".to_string()]),
+			|| Ok(()),
+			|_, _| Err(DesktopError::user_intervened("window 42's application came to the front")),
+		);
+		assert_eq!(intervened.expect_err("refused").code.as_str(), "UserIntervened");
 		let unreadable = guard(
 			Press::Action("AXPress"),
 			Some(&[]),
