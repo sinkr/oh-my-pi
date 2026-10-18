@@ -178,21 +178,19 @@ interface RegistryWithRejections extends ModelRegistry {
 		settings: Settings;
 		revision: number;
 		roleChain: RoleChainCandidate[];
-		list: RoleChainCandidate[];
 		expiresAt: number;
 	};
 }
 
 /**
- * The resolved `judge` role chain and its text {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS}
- * across judges over the same settings and registry. A settings change (e.g. a new judge role) resolves
- * afresh; registry or credential changes still wait out the TTL, so {@link hasNativeJudge} (uncached) can
- * briefly see a different chain after a login or discovery change.
+ * The resolved `judge` role chain, reused for {@link CANDIDATE_TTL_MS} across judges over the same
+ * settings and registry. A settings change resolves afresh; registry or credential changes still
+ * wait out the TTL, so {@link hasNativeJudge} can briefly see a different chain after login or discovery.
  */
 function cachedJudgeRoleChain(
 	settings: Settings,
 	registry: RegistryWithRejections,
-): { roleChain: RoleChainCandidate[]; list: RoleChainCandidate[] } {
+): { roleChain: RoleChainCandidate[] } {
 	const now = Date.now();
 	const revision = settings.revision;
 	const cached = registry[kRoleChain];
@@ -204,7 +202,6 @@ function cachedJudgeRoleChain(
 		settings,
 		revision,
 		roleChain,
-		list: textJudgeRoleChain(roleChain),
 		expiresAt: now + CANDIDATE_TTL_MS,
 	};
 	registry[kRoleChain] = entry;
@@ -257,29 +254,14 @@ function supportsImageJudgment(model: Model): boolean {
 }
 
 /**
- * The `judge` role's candidates in attempt order, drawn from credentialed
- * judge-capable models. From the first native candidate on, only native
- * candidates remain: a prompted model never stands in for a failed native
- * judgment, whose calibrated probabilities it cannot reproduce.
- */
-function textJudgeRoleChain(chain: RoleChainCandidate[]): RoleChainCandidate[] {
-	const firstNative = chain.findIndex(candidate => kindOf(candidate) === "native");
-	if (firstNative < 0) return chain;
-	return chain.filter((candidate, index) => index < firstNative || kindOf(candidate) === "native");
-}
-
-/**
- * Filter candidates that cannot take `images` before applying the native-only tail policy. A native
- * judge gets each image fitted into its bounds ({@link fitNativeImages}), so only its image support and
- * count cap decide; prompted chat models normalize images per model, so their image support alone decides.
+ * Filter candidates that cannot take `images`. Native images are fitted into their bounds, so only
+ * image support and count decide; prompted models normalize images per model.
  */
 function imageJudgeRoleChain(chain: RoleChainCandidate[], images: readonly ImageContent[]): RoleChainCandidate[] {
-	return textJudgeRoleChain(
-		chain.filter(candidate =>
-			kindOf(candidate) === "native"
-				? nativeTakesImages(candidate.model, images)
-				: supportsImageJudgment(candidate.model),
-		),
+	return chain.filter(candidate =>
+		kindOf(candidate) === "native"
+			? nativeTakesImages(candidate.model, images)
+			: supportsImageJudgment(candidate.model),
 	);
 }
 
@@ -348,10 +330,6 @@ function unfitBox(box: BoxEdges, content: BoxEdges): BoxEdges {
 	return { top: y(box.top), bottom: y(box.bottom), left: x(box.left), right: x(box.right) };
 }
 
-function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
-	return textJudgeRoleChain(resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry)));
-}
-
 /**
  * Whether the `judge` role resolves first to a native judgment backend
  * (TypeSafe jev, OpenRouter or OpenAI Decisions, Workers AI Clef) rather than a
@@ -359,7 +337,7 @@ function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainC
  * tool under `find.enabled: auto`.
  */
 export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boolean {
-	const [primary] = judgeRoleChain(settings, registry);
+	const [primary] = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
 	return primary !== undefined && kindOf(primary) === "native";
 }
 
@@ -449,6 +427,8 @@ export class ChainJudge implements Judge {
 		let lastUnavailable: string | undefined;
 		let compatibleCandidate = false;
 		let unsupportedCandidate = false;
+		// Account rejection permits prompted fallback; other native failures must retain calibration.
+		let nativeFailed = false;
 		const candidates = this.#resolveCandidates(request);
 		const rejections = this.#rejections();
 		const timeouts = this.#timeouts();
@@ -458,6 +438,8 @@ export class ChainJudge implements Judge {
 		const lastExplicitIndex = candidates.findLastIndex(candidate => candidate.explicit);
 		let timedOutBefore = false;
 		for (const [index, candidate] of candidates.entries()) {
+			const kind = kindOf(candidate);
+			if (nativeFailed && kind !== "native") continue;
 			if (signal?.aborted) {
 				throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 			}
@@ -480,7 +462,6 @@ export class ChainJudge implements Judge {
 			}
 			// Outside the candidate's failure handling: a refusal ends the judgment.
 			this.#deps.costGate?.admit();
-			const kind = kindOf(candidate);
 			let timeout: AbortSignal | undefined;
 			try {
 				// Image fitting is local work, not evidence that a provider route has stalled.
@@ -512,6 +493,7 @@ export class ChainJudge implements Judge {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
 				}
+				if (!rejected && !timedOut && kind === "native") nativeFailed = true;
 				lastFailure = error instanceof Error ? error.message : String(error);
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
@@ -580,15 +562,15 @@ export class ChainJudge implements Judge {
 
 	#resolveCandidates(request?: JudgmentRequest): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
-		const { roleChain, list: chain } = cachedJudgeRoleChain(settings, registry);
+		const { roleChain: chain } = cachedJudgeRoleChain(settings, registry);
 		const images = request?.images ?? [];
 		// A prompted model cannot locate anything, so no session fallback either.
 		if (request && asksForBoxes(request.questions)) {
-			return roleChain.filter(
+			return chain.filter(
 				candidate => nativeJudgmentSupportsBoxes(candidate.model) && nativeTakesImages(candidate.model, images),
 			);
 		}
-		if (images.length > 0) return withSessionFallback(imageJudgeRoleChain(roleChain, images), sessionModel, true);
+		if (images.length > 0) return withSessionFallback(imageJudgeRoleChain(chain, images), sessionModel, true);
 		if (chain === this.#candidates?.chain) return this.#candidates.list;
 		const list = withSessionFallback(chain, sessionModel);
 		this.#candidates = { chain, list };
