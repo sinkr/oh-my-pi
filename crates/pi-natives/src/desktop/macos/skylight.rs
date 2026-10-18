@@ -20,7 +20,7 @@ use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFStrin
 use super::{
 	super::{
 		control,
-		error::{CoreResult, DesktopError},
+		error::{CoreResult, DesktopError, ErrorCode},
 		types::DesktopFocusReturn,
 	},
 	ax, capture, process,
@@ -268,6 +268,15 @@ pub(super) fn set_window_location(event: &CGEvent, location: CGPoint) -> CoreRes
 /// authentication envelope, which would route it past the session event tap
 /// Chromium's window handler listens on.
 pub(super) fn post_routed(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
+	post_activation(pid, event)?;
+	mark_sent();
+	Ok(())
+}
+
+/// [`post_routed`] for an event that only makes a window key, outside its
+/// frame: no input of the call has reached the target yet
+/// ([`reporting_partial`]).
+pub(super) fn post_activation(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	control::check()?;
 	event.set_integer_value_field(
 		core_graphics::event::EventField::EVENT_SOURCE_USER_DATA,
@@ -309,7 +318,44 @@ pub(super) fn post_keyboard(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	// key twice. SAFETY: `event` remains retained and the exact symbol is part
 	// of the required atomic probe.
 	unsafe { (spi.post_to_pid)(pid, event_ptr(event)) };
+	mark_sent();
 	Ok(())
+}
+
+thread_local! {
+	/// Whether the background call running on this thread has posted input
+	/// to its target ([`reporting_partial`]).
+	static SENT: Cell<bool> = const { Cell::new(false) };
+}
+
+fn mark_sent() {
+	SENT.with(|sent| sent.set(true));
+}
+
+/// Runs one background call's `action`. A `BackgroundUnavailable` it returns
+/// after it posted input becomes `InputFailed`: the tool reruns only
+/// `BackgroundUnavailable` in takeover, which would repeat input that landed.
+pub(super) fn reporting_partial<T>(action: impl FnOnce() -> CoreResult<T>) -> CoreResult<T> {
+	let outer = SENT.with(|sent| sent.replace(false));
+	let result = action();
+	let sent = SENT.with(|sent| sent.replace(outer || sent.get()));
+	partial(sent, result)
+}
+
+fn partial<T>(sent: bool, result: CoreResult<T>) -> CoreResult<T> {
+	match result {
+		Err(error) if sent && error.code == ErrorCode::BackgroundUnavailable => {
+			let reason = [", so nothing was sent", "; nothing was sent", " so nothing was sent"]
+				.into_iter()
+				.find_map(|unsent| error.message.strip_suffix(unsent))
+				.unwrap_or(&error.message);
+			Err(DesktopError::input_failed(format!(
+				"{reason}; earlier input of this call may already have landed, so inspect the target \
+				 before retrying"
+			)))
+		},
+		result => result,
+	}
 }
 
 /// This process's `WindowServer` connection, which `AppKit` stamps on the
@@ -514,6 +560,7 @@ pub(super) fn with_background_watch<T>(
 	pid: pid_t,
 	action: impl FnOnce(TargetVisit<'_>) -> CoreResult<T>,
 ) -> CoreResult<T> {
+	let action = |visit: TargetVisit<'_>| reporting_partial(|| action(visit));
 	control::check()?;
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::background_unavailable(
@@ -1264,6 +1311,42 @@ fn attach_keyboard_authentication(pid: pid_t, event: &CGEvent) {
 mod tests {
 	use super::*;
 	use crate::desktop::error::ErrorCode;
+
+	#[test]
+	fn a_refusal_after_the_call_posted_input_is_never_offered_for_a_rerun() {
+		let refused = || -> CoreResult<()> {
+			Err(DesktopError::background_unavailable(
+				"window 41 did not become its application's key window; nothing was sent",
+			))
+		};
+		// Before anything went out: the tool may rerun it in takeover.
+		assert_eq!(reporting_partial(refused).unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		// `win.type("hello")` sent "he", then the next key was refused.
+		let error = reporting_partial(|| {
+			mark_sent();
+			refused()
+		})
+		.unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(!error.message.contains("nothing was sent"), "{}", error.message);
+		assert!(error.message.contains("may already have landed"), "{}", error.message);
+		// A nested call's input counts for the call around it.
+		let nested = reporting_partial(|| {
+			reporting_partial(|| {
+				mark_sent();
+				Ok(())
+			})?;
+			refused()
+		});
+		assert_eq!(nested.unwrap_err().code, ErrorCode::InputFailed);
+		// The next call starts unsent, and other codes pass through.
+		assert_eq!(reporting_partial(refused).unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		let cancelled = reporting_partial(|| -> CoreResult<()> {
+			mark_sent();
+			Err(DesktopError::cancelled("stopped"))
+		});
+		assert_eq!(cancelled.unwrap_err().code, ErrorCode::Cancelled);
+	}
 
 	#[test]
 	fn user_focus_changes_permanently_disarm_background_restoration() {

@@ -1073,11 +1073,32 @@ impl EntryFront {
 	}
 }
 
+/// The user has come to the target: it is never rerun in takeover, which
+/// would take over the app they are using.
 fn came_forward_refusal(wid: u32) -> DesktopError {
-	DesktopError::background_unavailable(format!(
+	DesktopError::user_intervened(format!(
 		"window {wid}'s application came to the front while background input was prepared, so \
 		 nothing was sent",
 	))
+}
+
+/// The refusal for a target whose front state ([`front_target`]) forbids
+/// making its window key behind the user's app; only an unknown front app
+/// may be retried in takeover.
+fn front_refusal(front: FrontTarget, wid: u32) -> DesktopError {
+	match front {
+		FrontTarget::UserSibling => DesktopError::user_intervened(format!(
+			"window {wid} belongs to the frontmost application but is not its key window; making it \
+			 key would move the user's typing there, so nothing was sent",
+		)),
+		FrontTarget::Unknown => DesktopError::background_unavailable(format!(
+			"window {wid}: the frontmost application could not be identified, so making the window \
+			 key could move the user's typing there; nothing was sent",
+		)),
+		FrontTarget::CameForward | FrontTarget::Background | FrontTarget::Key => {
+			came_forward_refusal(wid)
+		},
+	}
 }
 
 fn front_target(
@@ -1147,19 +1168,7 @@ pub(super) fn make_key_in_background(
 	match front_target(entry_front, skylight::front_pid(), pid, wid, focused) {
 		FrontTarget::Background => {},
 		FrontTarget::Key => return Ok(false),
-		FrontTarget::CameForward => return Err(came_forward_refusal(wid)),
-		FrontTarget::UserSibling => {
-			return Err(DesktopError::background_unavailable(format!(
-				"window {wid} belongs to the frontmost application but is not its key window; making \
-				 it key would move the user's typing there, so nothing was sent",
-			)));
-		},
-		FrontTarget::Unknown => {
-			return Err(DesktopError::background_unavailable(format!(
-				"window {wid}: the frontmost application could not be identified, so making the \
-				 window key could move the user's typing there; nothing was sent",
-			)));
-		},
+		refused => return Err(front_refusal(refused, wid)),
 	}
 	let context = skylight::sender_connection()?;
 	activate_in_background(source, pid, wid, context)?;
@@ -1182,7 +1191,7 @@ pub(super) fn make_key_in_background(
 			(FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE, i64::from(wid)),
 		])?;
 		skylight::set_window_location(&event, local)?;
-		skylight::post_routed(pid, &event)
+		skylight::post_activation(pid, &event)
 	};
 	press(CGEventType::LeftMouseDown, 1)?;
 	let release = control::cleanup(|| press(CGEventType::LeftMouseUp, 2));
@@ -1211,7 +1220,7 @@ fn activate_in_background(
 			(FIELD_WINDOW_CONTEXT, context),
 			(FIELD_APPKIT_SUBTYPE, APPLICATION_ACTIVATED),
 		])?;
-		skylight::post_routed(pid, &activated)
+		skylight::post_activation(pid, &activated)
 	};
 	activate_then_await(
 		ax::reports_active(pid),
@@ -1252,13 +1261,23 @@ pub(super) fn recheck_background(
 	target_holds: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
 	target_holds()?;
-	if prepared && (visited() || left_background(front(), pid)) {
-		return Err(DesktopError::background_unavailable(format!(
-			"window {wid}'s application came to the front, or the front application could not be \
-			 identified, during background input; no further input was sent; inspect the window",
+	if !prepared {
+		return Ok(());
+	}
+	let front = front();
+	if visited() || front == Some(pid) {
+		return Err(DesktopError::user_intervened(format!(
+			"window {wid}'s application came to the front during background input; no further input \
+			 was sent; inspect the window",
 		)));
 	}
-	Ok(())
+	if !left_background(front, pid) {
+		return Ok(());
+	}
+	Err(DesktopError::background_unavailable(format!(
+		"the front application could not be identified during background input, so window {wid}'s \
+		 application may be in front; nothing was sent",
+	)))
 }
 
 const fn left_background(front: Option<libc::pid_t>, pid: libc::pid_t) -> bool {
@@ -1669,26 +1688,43 @@ pub(super) fn refuse_menu_press(
 	let window = capture.window(id)?;
 	let (pid, wid) = window_identity(&window)?;
 	let (window, wid) = attached_window(capture, window, pid, wid, event)?;
-	let Ok((owner, _)) =
-		input_owner(pid, wid, ax::window_content(pid, &window), ax::focused_window_id)
-	else {
-		return Ok(());
-	};
-	if presses_menu_control(event, pid, owner) {
+	menu_press_verdict(skylight::front_pid, pid, wid, || {
+		let (owner, _) =
+			input_owner(pid, wid, ax::window_content(pid, &window), ax::focused_window_id).ok()?;
+		if !presses_menu_control(event, pid, owner) {
+			return None;
+		}
 		let verb = if matches!(event, PointerEvent::Click { .. }) {
 			"lands"
 		} else {
 			"starts"
 		};
-		return Err(DesktopError::background_unavailable(format!(
+		Some(DesktopError::background_unavailable(format!(
 			"the {} on window {} ({}), which {verb} on a menu button or popup button, would open its \
 			 menu; nothing was sent",
 			pointer_kind(event),
 			window.id,
 			window.app,
-		)));
+		)))
+	})
+}
+
+/// [`refuse_menu_press`]'s verdict: `probe`'s refusal, if any. Its
+/// accessibility probes block while the application is busy, and the user may
+/// pick the target meanwhile, which the input that follows would not see once
+/// the target is in front; so the front process is read before them
+/// ([`EntryFront::before`]) and again after.
+fn menu_press_verdict(
+	front: impl Fn() -> Option<libc::pid_t>,
+	pid: libc::pid_t,
+	wid: u32,
+	probe: impl FnOnce() -> Option<DesktopError>,
+) -> CoreResult<()> {
+	let (entry, refusal) = EntryFront::before(&front, || Ok(probe()))?;
+	if let Some(refusal) = refusal {
+		return Err(refusal);
 	}
-	Ok(())
+	entry.require_behind(front(), pid, wid)
 }
 
 /// Posts background pointer `event` for window `wid` of `pid` to `to_wid` of
@@ -3690,7 +3726,7 @@ mod tests {
 				Ok(())
 			})
 		});
-		assert_eq!(result.unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
 		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
 		assert_eq!(typed, [down, up, up]);
 		// Input into the app the user already had in front is not stopped.
@@ -3703,8 +3739,53 @@ mod tests {
 		// back to their app 9: the front process alone shows nothing, the focus
 		// guard's record does.
 		let error = recheck_background(true, 7, 41, || Some(9), || true, || Ok(())).unwrap_err();
-		assert_eq!(error.code, crate::desktop::error::ErrorCode::BackgroundUnavailable);
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::UserIntervened);
 		assert!(recheck_background(true, 7, 41, || Some(9), || false, || Ok(())).is_ok());
+	}
+
+	#[test]
+	fn a_menu_press_check_refuses_once_the_user_picked_the_target_during_its_probes() {
+		use crate::desktop::error::ErrorCode;
+		// App 9 is in front as the check begins; the user picks target 7 while
+		// its accessibility probes block.
+		let front = std::cell::Cell::new(Some(9));
+		let error = menu_press_verdict(
+			|| front.get(),
+			7,
+			41,
+			|| {
+				front.set(Some(7));
+				None
+			},
+		)
+		.expect_err("the target came forward during the probes");
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		// Still behind the user: no menu control, nothing to refuse.
+		front.set(Some(9));
+		assert!(menu_press_verdict(|| front.get(), 7, 41, || None).is_ok());
+		// The target was already the user's own front app at entry.
+		front.set(Some(7));
+		assert!(menu_press_verdict(|| front.get(), 7, 41, || None).is_ok());
+	}
+
+	#[test]
+	fn a_user_who_came_to_the_target_is_never_handed_a_takeover_rerun() {
+		use crate::desktop::error::ErrorCode;
+		// The tool reruns only `BackgroundUnavailable` in takeover; the user
+		// coming to the target must stop the call with another code.
+		let code = |front: Option<i32>, visited: bool| {
+			recheck_background(true, 7, 41, || front, || visited, || Ok(()))
+				.unwrap_err()
+				.code
+		};
+		assert_eq!(code(Some(7), false), ErrorCode::UserIntervened);
+		assert_eq!(code(Some(9), true), ErrorCode::UserIntervened);
+		assert_eq!(code(None, true), ErrorCode::UserIntervened);
+		// An unknown front app may not be the user's doing.
+		assert_eq!(code(None, false), ErrorCode::BackgroundUnavailable);
+		assert_eq!(front_refusal(FrontTarget::CameForward, 41).code, ErrorCode::UserIntervened);
+		assert_eq!(front_refusal(FrontTarget::UserSibling, 41).code, ErrorCode::UserIntervened);
+		assert_eq!(front_refusal(FrontTarget::Unknown, 41).code, ErrorCode::BackgroundUnavailable);
 	}
 
 	#[test]
@@ -3806,7 +3887,7 @@ mod tests {
 			before_press,
 			post,
 		);
-		assert_eq!(result.unwrap_err().code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
 		// The hover and the off-screen press and release went out; the real
 		// press did not.
 		let (moved, down, up) = (
@@ -5045,7 +5126,7 @@ mod tests {
 		// A right click, move or scroll (never prepared) while the user (9)
 		// brought the target (7) forward during its owner lookup.
 		let error = pointer_recheck(false, user, 7, 42, || Some(7), || false).unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(error.code, ErrorCode::UserIntervened);
 		// The user came to the target and left again.
 		assert!(pointer_recheck(false, user, 7, 42, || Some(9), || true).is_err());
 		// Still behind the user, or the user's own front app from the start.
@@ -5063,7 +5144,7 @@ mod tests {
 		let error = EntryFront(Some(9))
 			.require_behind(Some(7), 7, 42)
 			.unwrap_err();
-		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(error.code, ErrorCode::UserIntervened);
 		// Still behind the user, or already the user's own app: the write goes.
 		EntryFront(Some(9)).require_behind(Some(9), 7, 42).unwrap();
 		EntryFront(Some(7)).require_behind(Some(7), 7, 42).unwrap();

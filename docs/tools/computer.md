@@ -187,7 +187,7 @@ On macOS a screenshot taken behind the lock screen sets `screenLocked: true` and
 
 Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
-- `PermissionDenied`, `CaptureFailed`, `InputFailed`, `BackgroundUnavailable`, `InputBusy`, `Cancelled`
+- `PermissionDenied`, `CaptureFailed`, `InputFailed`, `BackgroundUnavailable`, `InputBusy`, `Cancelled`, `UserIntervened` (macOS)
 - `WindowNotFound`, `InvalidTarget`, `InvalidKey`, `InvalidCoordinateFrame`
 - `StaleRef`, `AxUnsupported`, `AxFailed`, `AxUnconfirmed`, `Timeout`, `Closed`, `Internal`
 - `Unsupported`, `SpaceUnsupported`, `SpaceMoveDenied`

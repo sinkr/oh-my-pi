@@ -461,8 +461,10 @@ async function focusReport(
 /**
  * Sends one window input call. A model-supplied `takeover: true` is refused
  * under `computer.backgroundFallback: "refuse"`. When the background route
- * throws `BackgroundUnavailable` and the call did not set `takeover`, the
- * setting decides: `takeover` reruns that call in takeover, handing focus back
+ * throws `BackgroundUnavailable`, which native raises only before any of the
+ * call's input was sent (a user who came to the target gets `UserIntervened`,
+ * which is never rerun), and the call did not set `takeover`, the setting
+ * decides: `takeover` reruns that call in takeover, handing focus back
  * to the user's app, and reports it in the run output; `refuse` fails without
  * taking over.
  */
@@ -486,12 +488,16 @@ async function sendInput(
 		await nativeCall(context.signal, () => send());
 		return;
 	} catch (error) {
-		if (takeover !== undefined || !(error instanceof ToolError) || !error.message.startsWith(BACKGROUND_UNAVAILABLE))
-			throw error;
+		if (!(error instanceof ToolError) || !error.message.startsWith(BACKGROUND_UNAVAILABLE)) throw error;
+		const refuse = context.snapshot.backgroundFallback === "refuse";
+		// Native refuses a menu control's press only for the setting, so it says so
+		// even when the call set `takeover: false`.
+		const control = refuse ? MENU_CONTROL_REFUSAL.exec(error.message) : null;
+		if (control) refuseMenu(session, context, control[1], "its menu", MENU_CONTROL_ROUTE);
+		if (takeover !== undefined) throw error;
 		const reason = error.message.slice(BACKGROUND_UNAVAILABLE.length);
-		if (context.snapshot.backgroundFallback === "refuse") {
-			const control = MENU_CONTROL_REFUSAL.exec(error.message);
-			if (control) refuseMenu(session, context, control[1], "its menu", MENU_CONTROL_ROUTE);
+		const why = reason.replace(UNSENT_CLAUSE, "");
+		if (refuse) {
 			throw new ToolError(
 				`${error.message}; the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background, so no takeover happened`,
 			);
@@ -505,12 +511,17 @@ async function sendInput(
 		} catch (rerun) {
 			if (rerun instanceof ToolAbortError) throw rerun;
 			const message = rerun instanceof Error ? rerun.message : String(rerun);
-			throw new ToolError(`${method} fell back to takeover because ${reason}, and the takeover failed: ${message}`);
+			// Keep the rerun's error code in front, as every computer error has it.
+			const [, code, detail] = /^(\w+): ([\s\S]*)$/.exec(message) ?? [];
+			const failed = code === undefined ? message : detail;
+			throw new ToolError(
+				`${code === undefined ? "" : `${code}: `}${method} fell back to takeover because ${why}, and the takeover failed: ${failed}`,
+			);
 		}
 		const focus = await focusReport(session, context.signal, report, target);
 		context.output.push({
 			type: "text",
-			text: `${method} ran in takeover because ${reason.replace(UNSENT_CLAUSE, "")}; the input was delivered, and ${focus}`,
+			text: `${method} ran in takeover because ${why}; the input was delivered, and ${focus}`,
 		});
 	}
 }

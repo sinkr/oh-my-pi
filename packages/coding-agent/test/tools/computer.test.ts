@@ -3074,6 +3074,37 @@ describe("computer background fallback", () => {
 		expect(background.sent).toEqual([{ takeover: false }]);
 	});
 
+	it("never reruns a call the user stepped into, and keeps the code of a failed rerun", async () => {
+		const stepped = new RefusingSession();
+		stepped.refusal =
+			"UserIntervened: window 42's application came to the front during background input; no further input was sent; inspect the window";
+		const intervened = await run(stepped, clickTarget, "takeover");
+		expect(intervened.ok).toBe(false);
+		if (intervened.ok) return;
+		expect(intervened.error.message).toStartWith("UserIntervened: window 42's application came to the front");
+		expect(stepped.sent).toEqual([{}]);
+
+		class FailingRerun extends RefusingSession {
+			override async click(
+				_target: string,
+				_x: number,
+				_y: number,
+				opts?: PointerOptions | null,
+			): Promise<DesktopFocusReturn | null | void> {
+				this.sent.push(opts);
+				throw new Error(opts?.takeover === true ? "InputFailed: window 42 rejected the event" : this.refusal);
+			}
+		}
+		const failing = new FailingRerun();
+		const failed = await run(failing, clickTarget, "takeover");
+		expect(failed.ok).toBe(false);
+		if (failed.ok) return;
+		expect(failed.error.message).toBe(
+			`InputFailed: click fell back to takeover because ${reason}, and the takeover failed: window 42 rejected the event`,
+		);
+		expect(failing.sent).toEqual([{}, { takeover: true, returnFocus: true }]);
+	});
+
 	describe("refuse beats the model's own foreground requests", () => {
 		/** Records every native call that could take the user's foreground. */
 		class ForegroundSession extends FakeNativeSession {
@@ -3624,6 +3655,8 @@ describe("computer background fallback", () => {
 					for (const [method, code] of [
 						["click", `${win}.click(1, 2)`],
 						["drag", `${win}.drag([[1, 2], [3, 4]])`],
+						// The setting refused the press, not the model's `takeover: false`.
+						["click", `${win}.click(1, 2, { takeover: false })`],
 					] as const) {
 						const native = new LandingSession();
 						const result = await run(native, code, "refuse");
