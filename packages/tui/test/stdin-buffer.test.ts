@@ -847,6 +847,30 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual([key, "a"]);
 			expect(buffer.getBuffer()).toBe("");
 		});
+
+		it("drops an abandoned string head at the first typed key, even one its payload allows", () => {
+			// A truncated reply must not swallow typing: a terminal writes string
+			// payload in bulk, so a read holding a single key is the user typing.
+			processInput(head);
+			processInput("h");
+			processInput("i");
+			expect(emittedSequences).toEqual(["h", "i"]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("keeps legacy Alt+] usable without the kitty keyboard protocol", () => {
+			vi.useFakeTimers();
+			processInput("\x1b]");
+			processInput("x");
+			expect(emittedSequences).toEqual(["\x1b]", "x"]);
+
+			// Alt+] and a key batched into one read is not an OSC reply (those
+			// open with a numeric command), so the key timer still recovers it.
+			processInput("\x1b]a");
+			vi.advanceTimersByTime(100);
+			expect(emittedSequences).toEqual(["\x1b]", "x", "\x1b]a"]);
+			expect(buffer.getBuffer()).toBe("");
+		});
 	});
 
 	describe("Destroy", () => {

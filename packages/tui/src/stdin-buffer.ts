@@ -516,6 +516,24 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			str = this.#consumeStringDiscard(str);
 			if (str.length === 0) return;
 		}
+		if (
+			STRING_SEQ_PARTIAL.test(this.#buffer) &&
+			!this.#buffer.endsWith(ESC) &&
+			str !== ESC &&
+			str !== "\x07" &&
+			str.length === (str.codePointAt(0)! > 0xffff ? 2 : 1)
+		) {
+			// A terminal writes a string sequence in bulk; a read holding one key
+			// is typing, so the pending head was abandoned (or is a legacy
+			// Alt+]/Alt+P/Alt+_ chord). Deliver the chord, drop protocol data,
+			// and let the key parse normally. ESC and BEL may still terminate it.
+			const head = this.#buffer;
+			this.#buffer = "";
+			this.#escapeSearchOffset = 0;
+			this.#partialHoldStartMs = 0;
+			this.#clearFlushTimer();
+			if (head.length === 2) this.#emitDataSequence(head);
+		}
 
 		if (this.#flushDeferral && this.#isFreshEscapeAfterDeferredFlush(str)) {
 			// The buffered partial already hit its flush timeout. A new escape is
@@ -848,10 +866,16 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	 * Whether the buffer is the head of an OSC/DCS/APC string: terminal
 	 * protocol data (OSC 5522 clipboard read, graphics reply), never a key.
 	 * Without the kitty keyboard protocol a lone `\x1b]`/`\x1bP`/`\x1b_` may
-	 * be Alt+]/Alt+P/Alt+_, but any byte after the introducer makes it a string.
+	 * be Alt+]/Alt+P/Alt+_, and a terminal's OSC reply always opens with its
+	 * numeric command, so `\x1b]` plus a non-digit stays on the key timer.
 	 */
 	#bufferIsStringHead(): boolean {
-		return STRING_SEQ_PARTIAL.test(this.#buffer) && (this.#buffer.length > 2 || isKittyProtocolActive());
+		const buffer = this.#buffer;
+		if (!STRING_SEQ_PARTIAL.test(buffer)) return false;
+		if (isKittyProtocolActive()) return true;
+		if (buffer.length <= 2) return false;
+		const command = buffer.charCodeAt(2);
+		return buffer.charCodeAt(1) !== 0x5d /* ] */ || (command >= 0x30 && command <= 0x39);
 	}
 
 	/** Timeout-driven flush: hold unambiguous partials (bounded), else deliver. */
