@@ -265,6 +265,8 @@ interface ActiveRun extends CacheWarmRequest {
 export interface PromptCacheEntry {
 	/** When a request last wrote or read the entry (send time of the latest real or warm request). */
 	touchedAt: number;
+	/** Retention tier the entry was written under. */
+	tier: PromptCacheTier;
 	/** How long the provider keeps the entry after it was last touched. */
 	ttlMs: number;
 }
@@ -348,7 +350,9 @@ export class CacheWarmer {
 		const entry = this.#entry;
 		if (!entry?.isCurrent()) return undefined;
 		const seconds = entry.model.promptCache?.[entry.tier];
-		return seconds === undefined ? undefined : { touchedAt: entry.touchedAt, ttlMs: seconds * 1000 };
+		return seconds === undefined
+			? undefined
+			: { touchedAt: entry.touchedAt, tier: entry.tier, ttlMs: seconds * 1000 };
 	}
 
 	/** Keep the prompt cache entry written by `request` warm while `isCurrent` holds. */

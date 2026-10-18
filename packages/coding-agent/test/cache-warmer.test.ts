@@ -478,7 +478,7 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.cacheEntry).toBeUndefined();
 		// The provider's reported write tier wins over the credential guess.
 		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })));
-		expect(h.warmer.cacheEntry).toEqual({ touchedAt: sentAt, ttlMs: 3_600_000 });
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: sentAt, tier: "long", ttlMs: 3_600_000 });
 		h.current = false;
 		expect(h.warmer.cacheEntry).toBeUndefined();
 	});
@@ -502,7 +502,7 @@ describe("cache warmer lifecycle", () => {
 		vi.advanceTimersByTime(1_000);
 		start(kept);
 		kept.warmer.onResponse(makeMessage(makeUsage({}), "error"));
-		expect(kept.warmer.cacheEntry).toEqual({ touchedAt: confirmedAt, ttlMs: 300_000 });
+		expect(kept.warmer.cacheEntry).toEqual({ touchedAt: confirmedAt, tier: "short", ttlMs: 300_000 });
 	});
 
 	test("a refresh that hits the cache confirms and extends the entry; a miss does not", async () => {
@@ -511,7 +511,7 @@ describe("cache warmer lifecycle", () => {
 		const firstTouch = Date.now();
 		// Still pending: the long-running request has not answered yet.
 		await advance(SHORT_DELAY_MS);
-		expect(h.warmer.cacheEntry).toEqual({ touchedAt: firstTouch + SHORT_DELAY_MS, ttlMs: 300_000 });
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: firstTouch + SHORT_DELAY_MS, tier: "short", ttlMs: 300_000 });
 
 		const missed = harness();
 		missed.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };

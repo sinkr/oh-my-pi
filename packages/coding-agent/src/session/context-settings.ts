@@ -344,7 +344,7 @@ export const cfgCompactionIdleTimeoutSeconds = register({
 		group: "Compaction",
 		label: "Idle Compaction Delay",
 		description:
-			"Seconds to wait while idle before compacting when the model's prompt cache lifetime is unknown; otherwise compaction runs just before the cache expires",
+			"Seconds to wait while idle before compacting; with a 1-hour prompt cache, compaction instead runs just before the cache expires",
 		options: [
 			{ value: "60", label: "1 minute" },
 			{ value: "120", label: "2 minutes" },

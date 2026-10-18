@@ -2795,11 +2795,14 @@ export class EventController {
 		if (threshold <= 0) return;
 		if (this.#currentContextTokens() < threshold) return;
 
-		// Compact just before the prompt cache entry expires, while the summary
-		// request can still read the cached prefix; a turn that settles past that
-		// point but before expiry compacts right away. Without a known lifetime, or
-		// once the entry has expired, fall back to the configured delay.
-		const cacheEntry = this.ctx.viewSession.promptCacheEntry;
+		// Compact just before a 1h (long-tier) prompt cache entry expires, while
+		// the summary request can still read the cached prefix; a turn that settles
+		// past that point but before expiry compacts right away. A 5-minute entry
+		// lapses too soon after a turn for compaction to be worth starting on its
+		// schedule, so it, an unknown lifetime, and an expired entry all fall back
+		// to the configured delay.
+		const promptCacheEntry = this.ctx.viewSession.promptCacheEntry;
+		const cacheEntry = promptCacheEntry?.tier === "long" ? promptCacheEntry : undefined;
 		const refreshDelayMs = cacheEntry ? getCacheWarmingDelayMs(cacheEntry.ttlMs) : undefined;
 		const now = Date.now();
 		const timeoutMs =
