@@ -13,6 +13,7 @@
 - Added `UserIntervened` on macOS: keys and clicks stop at your first key or click in the app they go to, and input to an app you used since it was last read waits up to 5 s for you to pause, then fails without sending (needs Input Monitoring) ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
+- Reading recent commit subjects in a long Git history now reads only the commits requested instead of walking the whole history ([#16210](https://github.com/can1357/oh-my-pi/pull/16210) by [@kyle-elliott](https://github.com/kyle-elliott)).
 - Improved AST search and edit performance in directories containing many unsupported files ([#16213](https://github.com/can1357/oh-my-pi/pull/16213) by [@kyle-elliott](https://github.com/kyle-elliott)).
 - Faster numbered source formatting for hashline reads ([#16211](https://github.com/can1357/oh-my-pi/pull/16211) by [@kyle-elliott](https://github.com/kyle-elliott)).
 - Improved word-diff performance for inline change highlighting ([#16212](https://github.com/can1357/oh-my-pi/pull/16212) by [@kyle-elliott](https://github.com/kyle-elliott)).
