@@ -6,7 +6,7 @@ import * as path from "node:path";
 import {
 	chromiumExecutableProbeForTest,
 	resolveSharedBrowserLaunchSpec,
-	stealthIgnoreDefaultArgsForTest,
+	stealthIgnoreDefaultArgs,
 	systemChromiumCandidatesForTest,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -33,7 +33,7 @@ const CHROME_EXECUTABLE_PATHS = [
 describe("browser launch stealth defaults", () => {
 	it("keeps Puppeteer's automation default for Microsoft Edge executables", () => {
 		for (const executablePath of EDGE_EXECUTABLE_PATHS) {
-			const ignoreDefaultArgs = stealthIgnoreDefaultArgsForTest(executablePath);
+			const ignoreDefaultArgs = stealthIgnoreDefaultArgs(executablePath);
 
 			expect(ignoreDefaultArgs).not.toContain(AUTOMATION_FLAG);
 			expect(ignoreDefaultArgs).toContain("--disable-extensions");
@@ -42,7 +42,7 @@ describe("browser launch stealth defaults", () => {
 
 	it("continues filtering Puppeteer's automation default for Chrome and Chromium executables", () => {
 		for (const executablePath of CHROME_EXECUTABLE_PATHS) {
-			const ignoreDefaultArgs = stealthIgnoreDefaultArgsForTest(executablePath);
+			const ignoreDefaultArgs = stealthIgnoreDefaultArgs(executablePath);
 
 			expect(ignoreDefaultArgs).toContain(AUTOMATION_FLAG);
 		}

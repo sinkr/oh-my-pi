@@ -7,7 +7,13 @@ import { logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import type { Browser } from "puppeteer-core";
 import { gracefulKillTreeOnce } from "../tools/browser/attach";
-import { ensureChromiumExecutable, loadPuppeteer, removeUserDataDir } from "../tools/browser/launch";
+import {
+	DISABLE_AUTOMATION_CONTROLLED_ARG,
+	ensureChromiumExecutable,
+	loadPuppeteer,
+	removeUserDataDir,
+	stealthIgnoreDefaultArgs,
+} from "../tools/browser/launch";
 
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
 
@@ -33,13 +39,19 @@ export async function captureBrowserSession(
 		lifetime.throwIfAborted();
 		// Do not race launch: retain ownership even if cancellation happens before it resolves.
 		// Unlike general browser tooling, authentication keeps sandbox and TLS checks enabled.
+		// Automation mode must stay off: Google sign-in rejects automation-controlled browsers.
 		browser = await puppeteer.launch({
 			executablePath,
 			headless: false,
 			defaultViewport: null,
 			pipe: true,
-			ignoreDefaultArgs: ["--no-sandbox", "--disable-setuid-sandbox", "--ignore-certificate-errors"],
-			args: [`--user-data-dir=${userDataDir}`],
+			ignoreDefaultArgs: [
+				...stealthIgnoreDefaultArgs(executablePath),
+				"--no-sandbox",
+				"--disable-setuid-sandbox",
+				"--ignore-certificate-errors",
+			],
+			args: [DISABLE_AUTOMATION_CONTROLLED_ARG, `--user-data-dir=${userDataDir}`],
 			signal: lifetime,
 			timeout: 30_000,
 		});

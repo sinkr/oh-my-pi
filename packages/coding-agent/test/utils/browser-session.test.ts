@@ -66,6 +66,23 @@ describe("browser session capture", () => {
 		await expectProfilesRemoved();
 	});
 
+	it("launches Chromium outside automation mode with sandbox and TLS checks intact", async () => {
+		const puppeteer = await launchModule.loadPuppeteer();
+		const fixture = browserFixture();
+		await captureBrowserSession(request);
+		const options = fixture.launch.mock.calls[0][0];
+		const ignored = options.ignoreDefaultArgs;
+		if (!Array.isArray(ignored)) throw new Error("Sign-in launch must filter Puppeteer defaults selectively");
+		// Same filtering Puppeteer applies when building the Chromium command line.
+		const argv = (await puppeteer.defaultArgs(options)).filter(arg => !ignored.includes(arg));
+		// Google sign-in rejects automation-controlled browsers as "may not be secure" (#16141).
+		expect(argv).not.toContain("--enable-automation");
+		expect(argv).toContain("--disable-blink-features=AutomationControlled");
+		for (const flag of ["--no-sandbox", "--disable-setuid-sandbox", "--ignore-certificate-errors"]) {
+			expect(argv).not.toContain(flag);
+		}
+	});
+
 	it("captures an unprefixed Perplexity session when the secure cookie is absent", async () => {
 		const fixture = browserFixture();
 		fixture.readCookies.mockResolvedValue({

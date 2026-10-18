@@ -84,10 +84,18 @@ function isMicrosoftEdgeExecutable(executablePath: string | undefined): boolean 
 	);
 }
 
-function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[] {
+/**
+ * Puppeteer default args to pass as `ignoreDefaultArgs` so Chromium does not run in
+ * automation mode. Used by the browser tool and the sign-in browser, where Google
+ * rejects automation-controlled browsers as insecure.
+ */
+export function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[] {
 	if (!isMicrosoftEdgeExecutable(executablePath)) return [...STEALTH_IGNORE_DEFAULT_ARGS];
 	return STEALTH_IGNORE_DEFAULT_ARGS.filter(arg => arg !== ENABLE_AUTOMATION_FLAG);
 }
+
+/** Launch arg that keeps `navigator.webdriver` false; pair with {@link stealthIgnoreDefaultArgs}. */
+export const DISABLE_AUTOMATION_CONTROLLED_ARG = "--disable-blink-features=AutomationControlled";
 
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
@@ -506,7 +514,7 @@ export function buildHeadlessLaunchArgs(
 	const launchArgs = [
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
-		"--disable-blink-features=AutomationControlled",
+		DISABLE_AUTOMATION_CONTROLLED_ARG,
 		"--hide-scrollbars",
 		"--enable-features=WebMCPTesting,DevToolsWebMCPSupport",
 		`--window-size=${viewport.width},${viewport.height}`,
@@ -1127,10 +1135,6 @@ export function systemChromiumCandidatesForTest(
 
 export async function chromiumExecutableProbeForTest(executablePath: string): Promise<boolean> {
 	return isChromiumExecutable(executablePath);
-}
-
-export function stealthIgnoreDefaultArgsForTest(executablePath: string | undefined): string[] {
-	return stealthIgnoreDefaultArgs(executablePath);
 }
 
 export function targetSupportsUserAgentOverrideForTest(target: Target): boolean {
