@@ -176,7 +176,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	}
 	async openApplication(id: string) {
 		this.operations.push(`open:${id}`);
-		return (await this.listApplications())[0]!;
+		return { ...(await this.listApplications())[0]!, window: windowFixture };
 	}
 	async menuItems(_target: string, path: string[] = []) {
 		return [{ title: "Save", path: [...path, "Save"], enabled: true, checked: false, hasSubmenu: false }];
@@ -2268,8 +2268,9 @@ describe("expanded computer APIs", () => {
 				await display.holdKeys(["space"], { duration: 0 });
 				await win.holdMouse(1, 2, { duration: 0, keys: ["space"] });
 				const apps = await computer.apps.list({ runningOnly: true });
-				await computer.apps.open(apps[0].id, { activate: false });
-				return { menu, observation, display: { ...display }, apps };
+				const opened = await computer.apps.open(apps[0].id, { activate: false });
+				await opened.window.click(7, 8);
+				return { menu, observation, display: { ...display }, apps, opened: { ...opened, window: String(opened.window) } };
 			})()`,
 				realm,
 			);
@@ -2282,9 +2283,11 @@ describe("expanded computer APIs", () => {
 				ax: "- button [ref=e1]",
 			});
 			expect(value.display).toEqual({ id: "display-1" });
+			expect(value.opened).toEqual({ ...value.apps[0], window: "<window 42 Code>" });
 			expect(native.clicks).toEqual([
 				{ target: "42", x: 60, y: 30 },
 				{ target: "display:display-1", x: 60, y: 30 },
+				{ target: "42", x: 7, y: 8 },
 			]);
 			expect(native.operations).toEqual([
 				"menu:42:File/Save",
@@ -2321,8 +2324,8 @@ describe("expanded computer APIs", () => {
 					"await monitor.holdKeys(['space'], duration=0)",
 					"await win.holdMouse(1, 2, duration=0)",
 					"apps = await computer.apps.list(runningOnly=True)",
-					"await computer.apps.open(apps[0]['id'], activate=False)",
-					"print(obs['nodeCount'], monitor.id, (await computer.control.state())['active'])",
+					"opened = await computer.apps.open(apps[0]['id'], activate=False)",
+					"print(obs['nodeCount'], monitor.id, (await computer.control.state())['active'], opened['name'], opened['window'])",
 				].join("\n"),
 				{
 					cwd: process.cwd(),
@@ -2332,7 +2335,7 @@ describe("expanded computer APIs", () => {
 				},
 			);
 			expect(result.exitCode).toBe(0);
-			expect(result.output).toContain("1 display-1 False");
+			expect(result.output).toContain("1 display-1 False Editor <computer.Window id='42' app='Code'>");
 			expect(result.output).toContain("['File', 'Save']");
 			expect(result.output).toContain("select-none: menu.select requires a menu path");
 			expect(result.output).toContain('got ["File",null]');
@@ -2479,6 +2482,16 @@ describe("expanded computer APIs", () => {
 		expect(readOnly.ok ? undefined : readOnly.error.message).toBe(
 			"read-only run: 'setValue' requires read_only: false",
 		);
+		// A menu read makes its macOS window key, so a read-only run refuses it too.
+		const menuRead = await runWorker(
+			transport,
+			"menu-read-only",
+			"await (await desktop.window(42)).menu.items()",
+			true,
+		);
+		expect(menuRead.ok ? undefined : menuRead.error.message).toBe(
+			"read-only run: 'menu.items' requires read_only: false",
+		);
 		// The JavaScript facade's direct ref call checks the argument before the ref lookup too.
 		const session = toolSession();
 		const prelude = workerPrelude(session, native);
@@ -2621,14 +2634,14 @@ describe("expanded computer APIs", () => {
 			expect(isReadOnlyComputerCall([{ method, args: [] }])).toBe(true);
 		for (const method of ["apps.open", "control.acquire", "control.release", "holdKeys", "holdMouse"])
 			expect(isReadOnlyComputerCall([{ method, args: [] }])).toBe(false);
-		for (const method of ["observe", "menu.items"])
+		for (const method of ["observe"])
 			expect(
 				isReadOnlyComputerCall([
 					{ method: "window", args: [42] },
 					{ method, args: [] },
 				]),
 			).toBe(true);
-		for (const method of ["menu.select", "bringToCurrentSpace", "holdKeys", "holdMouse"])
+		for (const method of ["menu.items", "menu.select", "bringToCurrentSpace", "holdKeys", "holdMouse"])
 			expect(
 				isReadOnlyComputerCall([
 					{ method: "window", args: [42] },
