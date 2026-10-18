@@ -902,19 +902,24 @@ describe("Factory Droid gemini wire — tool schema allowlist", () => {
 
 	const dotted = { description: "d", parameters: { type: "object", properties: {} } };
 
-	it("returns calls under the caller's tool name, not the sanitized wire name", async () => {
-		const call = JSON.stringify({
-			candidates: [{ content: { parts: [{ functionCall: { name: "my_tool", args: { a: "1" } } }] } }],
+	it.each([
+		["my.tool", "my_tool"],
+		[`mcp.${"t".repeat(69)}`, `mcp_${"t".repeat(51)}_`],
+	])("returns a call to %s under the caller's tool name, not the sanitized wire name", async (name, wirePrefix) => {
+		const first = await run({
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [{ name, ...dotted }],
 		});
-		const { result, captured } = await run(
-			{ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [{ name: "my.tool", ...dotted }] },
+		const wire = String(declarations(first.captured)[0].name);
+		expect(wire.startsWith(wirePrefix)).toBe(true);
+		const call = JSON.stringify({
+			candidates: [{ content: { parts: [{ functionCall: { name: wire, args: { a: "1" } } }] } }],
+		});
+		const { result } = await run(
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools: [{ name, ...dotted }] },
 			[call, finishChunk("STOP")],
 		);
-		expect(declarations(captured)[0].name).toBe("my_tool");
-		expect(result.content.find(block => block.type === "toolCall")).toMatchObject({
-			name: "my.tool",
-			arguments: { a: "1" },
-		});
+		expect(result.content.find(block => block.type === "toolCall")).toMatchObject({ name, arguments: { a: "1" } });
 	});
 
 	it("rejects two tools that encode to the same wire name before sending", async () => {
