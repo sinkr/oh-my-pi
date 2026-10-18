@@ -850,9 +850,9 @@ impl BackgroundFocusLease {
 		}
 	}
 
-	/// When `front` came forward, first seen at `now`, and whether the action
-	/// brought it: it came within [`ACTION_REFLEX`] of the action's latest act
-	/// on its target.
+	/// When `front` came forward, first seen at `now`, and whether it came
+	/// within [`ACTION_REFLEX`] of the action's latest act on its target: what
+	/// makes an app other than the target the action's doing.
 	fn came_forward(
 		&mut self,
 		front: ProcessSerialNumber,
@@ -2140,7 +2140,7 @@ mod tests {
 	}
 
 	#[test]
-	fn only_an_app_that_comes_forward_right_after_the_actions_acts_is_sent_back() {
+	fn the_target_is_sent_back_however_late_but_another_app_only_right_after_an_act() {
 		let t0 = Instant::now();
 		let idle = input(0, NO_MODIFIERS);
 		// Finder's ⌘O sent at 800 ms brings TextEdit forward 200 ms later.
