@@ -36,6 +36,21 @@ function createGoogleModel(
 	});
 }
 
+function createCloudCodeAssistModel(provider: "google-antigravity" | "google-gemini-cli"): Model<"google-gemini-cli"> {
+	return buildModel({
+		id: "gemini-3.5-flash",
+		name: "gemini-3.5-flash",
+		api: "google-gemini-cli",
+		provider,
+		baseUrl: "https://cloudcode-pa.googleapis.com",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+	});
+}
+
 function contextWithToolResult(toolName = "stale_tool_name"): Context {
 	return {
 		messages: [
@@ -186,10 +201,8 @@ describe("Google GenerateContent parallel function response order", () => {
 	it.each([
 		{ route: "Gemini API, Gemini 2.5", model: createGoogleModel("gemini-2.5-flash") },
 		{ route: "Vertex", model: createGoogleModel("gemini-3.5-flash", "google-vertex") },
-		{
-			route: "Antigravity",
-			model: createGoogleModel("gemini-3.5-flash", "google-generative-ai", "google-antigravity"),
-		},
+		{ route: "Antigravity", model: createCloudCodeAssistModel("google-antigravity") },
+		{ route: "Gemini CLI", model: createCloudCodeAssistModel("google-gemini-cli") },
 		{ route: "Gemini API, Gemini 3.5", model: createGoogleModel("gemini-3.5-flash") },
 	])("sends same-name results in call order: $route", ({ model }) => {
 		const contents = convertMessages(model, contextWithResultsStoredOutOfOrder());

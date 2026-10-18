@@ -186,6 +186,7 @@ function toGeminiContents(
 } {
 	const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [];
 	const callOrdinals = new Map<string, number>();
+	let nextCallOrdinal = 0;
 	const responseCallOrdinals = new Map<Part, number>();
 	const messages = transformMessages(
 		context.messages.map(message => adoptFactoryReplay(message, model)),
@@ -214,7 +215,7 @@ function toGeminiContents(
 				} else if (block.type === "thinking" && block.thinkingSignature) {
 					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
 				} else if (block.type === "toolCall") {
-					callOrdinals.set(block.id, callOrdinals.size);
+					callOrdinals.set(block.id, nextCallOrdinal++);
 					parts.push({
 						functionCall: { name: block.name, args: block.arguments },
 						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),

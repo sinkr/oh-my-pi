@@ -189,6 +189,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
 	const callOrdinals = new Map<string, number>();
+	let nextCallOrdinal = 0;
 	const responseCallOrdinals = new Map<Part, number>();
 
 	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
@@ -275,7 +276,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					}
 				} else if (block.type === "toolCall") {
 					emittedToolCallNames.set(block.id, block.name);
-					callOrdinals.set(block.id, callOrdinals.size);
+					callOrdinals.set(block.id, nextCallOrdinal++);
 					// Gemini 3 requires a thought signature on function calls it makes. The
 					// public API requires the bypass sentinel on every unsigned call. Cloud
 					// Code Assist requires it only when the first call itself is unsigned;
