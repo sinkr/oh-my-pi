@@ -1648,6 +1648,31 @@ describe("closeRelayTarget", () => {
 	});
 });
 
+describe("RelayBridge RPC ids", () => {
+	it("numbers RPCs above every id a relay started earlier sent", () => {
+		const firstCreateId = (startedAt: number, creates: number): number => {
+			setSystemTime(startedAt);
+			try {
+				const bridge = new RelayBridge({});
+				const ext = new FakeExtSocket();
+				connect(bridge, ext, []);
+				const connId = bridge.cdpConnected(new FakeCdpSocket());
+				for (let i = 0; i < creates; i++) {
+					bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
+				}
+				const ids = ext.rpcs("createTab").map(rpc => rpc.id);
+				return creates === 1 ? ids[0]! : ids.at(-1)!;
+			} finally {
+				setSystemTime();
+			}
+		};
+		// An earlier relay that sent many RPCs, and one started a millisecond later: the later one's ids never collide.
+		const earlierLast = firstCreateId(1_800_000_000_000, 50);
+		const laterFirst = firstCreateId(1_800_000_000_001, 1);
+		expect(laterFirst).toBeGreaterThan(earlierLast);
+	});
+});
+
 describe("RelayBridge last-hello fallback and offline instance pruning", () => {
 	it("falls back to a live instance for browser-wide requests when the last hello goes offline", async () => {
 		const bridge = new RelayBridge({});

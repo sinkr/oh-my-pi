@@ -257,7 +257,11 @@ export class RelayBridge {
 	#conns = new Map<number, CdpConnection>();
 	#connSeq = 0;
 	#sessionSeq = 0;
-	#rpcSeq = 0;
+	/**
+	 * RPC ids start from this process's start time, so a relay started later never reuses an id an earlier one
+	 * sent: the extension routes an answer by id to the socket its RPC came in on.
+	 */
+	#rpcSeq = Date.now() * 1000;
 	/** Connected extension browser instances, keyed by stable instance id. */
 	#instances = new Map<string, ExtInstance>();
 	#socketInstance = new Map<RelaySocket, string>();

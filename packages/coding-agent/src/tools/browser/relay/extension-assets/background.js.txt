@@ -115,12 +115,27 @@ async function restoreGroups() {
       await chrome.tabs.ungroup(ids).catch(() => {});
   }
 }
-var unsentResults = [];
-var helloSocket = null;
+var rpcOrigins = new Map;
+function trackOrigin(msg, origin) {
+  if (msg.t === "rpc")
+    rpcOrigins.set(msg.id, { socket: origin, op: msg.op });
+  return msg;
+}
+function isCreatedTab(result) {
+  return typeof result === "object" && result !== null && "tab" in result;
+}
 function post(msg) {
-  if (msg.t === "rpcResult" && (helloSocket === null || helloSocket !== ws))
-    unsentResults.push(msg);
-  else if (ws?.readyState === WebSocket.OPEN)
+  if (msg.t === "rpcResult") {
+    const origin = rpcOrigins.get(msg.id);
+    rpcOrigins.delete(msg.id);
+    if (origin && (origin.socket !== ws || origin.socket.readyState !== WebSocket.OPEN)) {
+      if (origin.op === "createTab" && msg.ok && isCreatedTab(msg.result)) {
+        removeTab(msg.result.tab.tabId).catch(() => {});
+      }
+      return;
+    }
+  }
+  if (ws?.readyState === WebSocket.OPEN)
     ws.send(JSON.stringify(msg));
 }
 async function removeTab(tabId) {
@@ -204,10 +219,10 @@ async function runRpc(msg) {
       return {};
   }
 }
-function handleRelayMessage(raw) {
+function handleRelayMessage(raw, origin) {
   let msg;
   try {
-    msg = JSON.parse(raw);
+    msg = trackOrigin(JSON.parse(raw), origin);
   } catch {
     return;
   }
@@ -232,20 +247,13 @@ async function connect() {
   socket.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
-    buildHello().then((hello) => {
-      if (ws !== socket)
-        return;
-      post(hello);
-      helloSocket = socket;
-      for (const result of unsentResults.splice(0))
-        post(result);
-    });
+    buildHello().then((hello) => post(hello));
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
   };
   socket.onmessage = (event) => {
     if (typeof event.data === "string")
-      handleRelayMessage(event.data);
+      handleRelayMessage(event.data, socket);
   };
   socket.onclose = () => {
     if (ws !== socket)

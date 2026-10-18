@@ -139,18 +139,36 @@ async function restoreGroups(): Promise<void> {
 	}
 }
 
-/**
- * RPC results that finished while the relay had not heard this socket's hello (the socket down, or open but the
- * hello not sent yet), sent right after the next hello: the relay keeps the undo of a call it gave up on (a tab
- * created for an open that already failed), and drops a result that arrives before the hello names the browser.
- */
-const unsentResults: ExtToRelayMessage[] = [];
-/** The socket whose hello has been sent; null until then. */
-let helloSocket: WebSocket | null = null;
+/** The socket each in-flight RPC came in on, and its op, by RPC id (unique across relay processes). */
+const rpcOrigins = new Map<number, { socket: WebSocket; op: string }>();
 
+function trackOrigin(msg: RelayToExtMessage, origin: WebSocket): RelayToExtMessage {
+	if (msg.t === "rpc") rpcOrigins.set(msg.id, { socket: origin, op: msg.op });
+	return msg;
+}
+
+/** A `createTab` result: the tab Chrome opened. */
+function isCreatedTab(result: unknown): result is { tab: { tabId: number } } {
+	return typeof result === "object" && result !== null && "tab" in result;
+}
+
+/**
+ * Send to the relay. An RPC's answer goes only on the socket the RPC came in on: once that socket has closed
+ * (dropped, or replaced after a settings change), the relay has already failed the call, so the answer is dropped,
+ * and a tab created for it is closed here, since no one can learn its id any more.
+ */
 function post(msg: ExtToRelayMessage): void {
-	if (msg.t === "rpcResult" && (helloSocket === null || helloSocket !== ws)) unsentResults.push(msg);
-	else if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+	if (msg.t === "rpcResult") {
+		const origin = rpcOrigins.get(msg.id);
+		rpcOrigins.delete(msg.id);
+		if (origin && (origin.socket !== ws || origin.socket.readyState !== WebSocket.OPEN)) {
+			if (origin.op === "createTab" && msg.ok && isCreatedTab(msg.result)) {
+				void removeTab(msg.result.tab.tabId).catch(() => {});
+			}
+			return;
+		}
+	}
+	if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
 /** Chrome can refuse a tab close for a moment (a tab being dragged, an unload in progress); try again before failing. */
@@ -245,10 +263,11 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 	}
 }
 
-function handleRelayMessage(raw: string): void {
+/** Handle a message from the relay on `origin`, the socket it came in on (see {@link post}). */
+function handleRelayMessage(raw: string, origin: WebSocket): void {
 	let msg: RelayToExtMessage;
 	try {
-		msg = JSON.parse(raw) as RelayToExtMessage;
+		msg = trackOrigin(JSON.parse(raw) as RelayToExtMessage, origin);
 	} catch {
 		return;
 	}
@@ -275,17 +294,12 @@ async function connect(): Promise<void> {
 	socket.onopen = () => {
 		reconnectDelay = RECONNECT_MIN_MS;
 		void setBadge(true);
-		void buildHello().then(hello => {
-			if (ws !== socket) return;
-			post(hello);
-			helloSocket = socket;
-			for (const result of unsentResults.splice(0)) post(result);
-		});
+		void buildHello().then(hello => post(hello));
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
 	socket.onmessage = event => {
-		if (typeof event.data === "string") handleRelayMessage(event.data);
+		if (typeof event.data === "string") handleRelayMessage(event.data, socket);
 	};
 	socket.onclose = () => {
 		if (ws !== socket) return;
