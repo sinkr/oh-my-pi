@@ -31,7 +31,7 @@ use super::{
 };
 use crate::desktop::{
 	control,
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	menus::{DesktopMenuItem, match_index, require_enabled},
 	types::DesktopWindow,
 };
@@ -168,6 +168,9 @@ pub(crate) fn guard(
 			Err(DesktopError::input_failed(no_menu_message(press)))
 		},
 		(delivered, Ok(_)) => delivered,
+		// Settling stopped before pressing an item because the call was
+		// cancelled; the menu was closed.
+		(_, Err(error)) if error.code == ErrorCode::Cancelled => Err(error),
 		(delivered, Err(error)) => skylight::after_cleanup(delivered, Err(error)),
 	}
 }
@@ -267,10 +270,15 @@ trait Menus {
 /// Settles a menu that a press of `app_pid` opened, within `timeout`, since
 /// the menu windows of `menu_pid`, the process that shows its menus
 /// ([`menu_process`]), were `before`: chooses `path` in it, or closes it; see
-/// [`guard`]. `holds` runs right before a path's item is pressed: the menu
-/// can take the whole timeout to appear, and the user may have brought the
-/// target forward meanwhile, which [`input::recheck_background`] tells; when
-/// it refuses, the menu is closed and nothing is pressed.
+/// [`guard`]. Right before a path's item is pressed, the call must not have
+/// been cancelled ([`control::check_new_input`]: settling runs under cleanup,
+/// where [`control::check`] lets everything through) and `holds` must pass:
+/// the menu can take the whole timeout to appear, and the user may have
+/// stopped the agent or brought the target forward meanwhile, which
+/// [`input::recheck_background`] tells. When either refuses, the menu is
+/// closed and nothing is pressed: a cancelled call reports `Cancelled`, and a
+/// target that no longer holds is a refusal of the path, reported as
+/// delivered ([`guard`]), since the press that opened the menu went out.
 pub(crate) fn settle(
 	menu_pid: libc::pid_t,
 	app_pid: libc::pid_t,
@@ -326,12 +334,13 @@ fn settle_with<M: Menus>(
 	let menu = menus.locate(window);
 	let (refusal, items) = match (path, &menu) {
 		(Some(path), Some(menu)) => match choose(menus, menu, path) {
-			Ok(leaf) => {
-				if let Err(error) = holds() {
+			Ok(leaf) => match control::check_new_input().and_then(|()| holds()) {
+				Err(error) if error.code == ErrorCode::Cancelled => {
 					close(menus, window, Some(menu))?;
 					return Err(error);
-				}
-				match menus.press(&leaf.node) {
+				},
+				Err(error) => (Some(error.message), String::new()),
+				Ok(()) => match menus.press(&leaf.node) {
 					Ok(()) if end_chosen(menus, window, menu)? => return Ok(Settled::Chosen),
 					Ok(()) => (
 						Some(format!("the menu stayed open after {} was pressed", quote_path(path))),
@@ -344,7 +353,7 @@ fn settle_with<M: Menus>(
 						)),
 						String::new(),
 					),
-				}
+				},
 			},
 			Err(refusal) => (Some(refusal.message), refusal.items),
 		},
@@ -781,9 +790,14 @@ mod tests {
 		let wanted = path(&["Show in Finder"]);
 		let refused =
 			|| Err(DesktopError::background_unavailable("window 42's application came to the front"));
-		let error = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT, refused)
-			.expect_err("the recheck refuses");
-		assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT, refused);
+		// The press that opened the menu went out, so this is a delivered
+		// call whose path chose nothing, not a refusal before any input.
+		assert_eq!(settled.expect("settled"), Settled::Unchosen {
+			refusal: Some("window 42's application came to the front".to_string()),
+			items:   String::new(),
+			closed:  true,
+		});
 		assert_eq!(*app.log.borrow(), ["cancel"]);
 		assert!(app.open.is_empty());
 		// A path that matches nothing refuses without the recheck.
@@ -792,6 +806,34 @@ mod tests {
 		let unasked = || -> CoreResult<()> { panic!("nothing is pressed, so nothing is rechecked") };
 		let settled = settle_with(&mut app, &[], Some(&wanted), CONTEXT_MENU_TIMEOUT, unasked);
 		assert!(matches!(settled, Ok(Settled::Unchosen { closed: true, .. })), "{settled:?}");
+	}
+
+	#[test]
+	fn a_path_presses_nothing_once_the_call_was_cancelled() {
+		// The agent was stopped after the click went out and before its menu
+		// appeared: the menu is settled under cleanup, which lets releases
+		// through, but its item is new input and is not pressed.
+		let cancellation = control::CancellationSource::default();
+		let token = cancellation.token();
+		let wanted = path(&["Show in Finder"]);
+		let (error, log) = control::with_token_for_test(&token, || {
+			let press = Press::Action("AXPress");
+			let mut app = font_book();
+			let error = guard(
+				press,
+				Some(&[]),
+				Some(&wanted),
+				|| {
+					cancellation.cancel();
+					Ok(())
+				},
+				|before, path| settle_with(&mut app, before, path, CONTEXT_MENU_TIMEOUT, held),
+			)
+			.expect_err("cancelled");
+			(error, app.log.borrow().clone())
+		});
+		assert_eq!(error.code.as_str(), "Cancelled");
+		assert_eq!(log, ["cancel"]);
 	}
 
 	#[test]

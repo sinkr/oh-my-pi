@@ -454,14 +454,6 @@ fn unmapped_keyboard_refusal(wid: u32) -> DesktopError {
 	))
 }
 
-fn sibling_keyboard_refusal(wid: u32, siblings: usize) -> DesktopError {
-	DesktopError::background_unavailable(format!(
-		"window {wid} shares its application with {siblings} other window(s) and did not become its \
-		 key window, so background keystrokes could reach another window; retry with takeover:true \
-		 or use ax actions",
-	))
-}
-
 /// Before a background press: keys posted to the process now still reach
 /// `wid` as `proven`, the focus that admitted delivery, showed. The focus read
 /// now must pass the same [`key_route`]; once the user or the application
@@ -1468,8 +1460,10 @@ fn background_pointer(
 		|| make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit);
 	let (prepared, (to, to_wid)) = pointer_owner(&event, prepare, owner)?;
 	let menu_pid = to;
-	let timeout =
-		menu_watch(window, &event, menu.is_some(), || presses_menu_control(&event, pid, menu_pid))?;
+	let background = skylight::front_pid() != Some(pid);
+	let timeout = menu_watch(window, &event, background, menu.is_some(), || {
+		presses_menu_control(&event, pid, menu_pid)
+	})?;
 	let before = match timeout {
 		Some(_) => Some(capture::menu_windows(menu_pid).ok_or_else(|| {
 			DesktopError::background_unavailable(format!(
@@ -1496,6 +1490,7 @@ fn background_pointer(
 				entry_front,
 				(to, to_wid),
 				prepared,
+				in_overlay,
 				visit,
 				&skylight_post,
 			)
@@ -1510,7 +1505,7 @@ fn background_pointer(
 					wid,
 					skylight::front_pid,
 					|| visit.happened(),
-					control::check,
+					|| Ok(()),
 				)
 			};
 			ax::open_menu::settle(menu_pid, pid, before, path, timeout.unwrap_or_default(), holds)
@@ -1519,36 +1514,41 @@ fn background_pointer(
 }
 
 /// How long background `event` waits for a menu it may open, or `None` when
-/// it opens none: a secondary press may open a context menu, and a left press
-/// on a menu button or popup button (`on_menu_control`) opens its menu, as
-/// does any click with a `menu` path to choose. A mouse hold, drag or
-/// multi-click on such a control refuses before its gesture is posted: the
-/// menu opens on the first press and keeps the keyboard from the user's app
-/// until the hold, the stroke or the later clicks end, and only then could it
-/// be closed.
+/// it opens none: in an application behind the user's (`background`), a
+/// secondary press may open a context menu, and a left press on a menu button
+/// or popup button (`on_menu_control`) opens its menu; any click with a `menu`
+/// path to choose waits for its menu wherever it opens. A frontmost
+/// application's menu stays open for the next call, as the user's would. A
+/// mouse hold, drag or multi-click on such a control refuses before its gesture
+/// is posted: the menu opens on the first press and keeps the keyboard from the
+/// user's app until the hold, the stroke or the later clicks end, and only then
+/// could it be closed.
 fn menu_watch(
 	window: &DesktopWindow,
 	event: &PointerEvent,
+	background: bool,
 	menu: bool,
 	on_menu_control: impl FnOnce() -> bool,
 ) -> CoreResult<Option<Duration>> {
 	if may_open_context_menu(event) {
-		return Ok(Some(ax::open_menu::CONTEXT_MENU_TIMEOUT));
+		return Ok((background || menu).then_some(ax::open_menu::CONTEXT_MENU_TIMEOUT));
 	}
 	let on_control = on_menu_control();
 	let gesture = match event {
-		PointerEvent::Click { count, .. } if *count > 1 => Some(format!("these {count} clicks")),
-		PointerEvent::Hold { .. } => Some("this mouse hold".to_string()),
-		PointerEvent::Drag { .. } => Some("this drag".to_string()),
+		PointerEvent::Click { count, .. } if *count > 1 => {
+			Some((format!("these {count} clicks"), "end", "were"))
+		},
+		PointerEvent::Hold { .. } => Some(("this mouse hold".to_string(), "ends", "was")),
+		PointerEvent::Drag { .. } => Some(("this drag".to_string(), "ends", "was")),
 		_ => None,
 	};
-	if on_control && let Some(gesture) = gesture {
+	if on_control && let Some((gesture, ends, was)) = gesture {
 		return Err(DesktopError::background_unavailable(format!(
 			"window {} ({}) has a menu button or popup button where {gesture} presses, and its menu \
 			 would open on the first press and keep the keyboard from the user's app until {gesture} \
-			 ends, so {gesture} was not sent; to choose an item in the background, click the control \
-			 once with the item's path as the menu option, e.g. menu: [\"<item>\"], or retry with \
-			 takeover:true",
+			 {ends}, so {gesture} {was} not sent; to choose an item in the background, click the \
+			 control once with the item's path as the menu option, e.g. menu: [\"<item>\"], or retry \
+			 with takeover:true",
 			window.id, window.app,
 		)));
 	}
@@ -1579,8 +1579,11 @@ fn left_press(event: &PointerEvent) -> Option<(f64, f64)> {
 
 /// Posts background pointer `event` for window `wid` of `pid` to `to_wid` of
 /// `to`, the process and window that take its input. Held presses ready
-/// `wid` in its own application first; their events go out through `post`,
-/// which is [`skylight_post`] outside tests.
+/// `wid` in its own application first ([`prepare_press`]), without the press
+/// outside its frame when it is a sheet or popover holding the focus
+/// (`in_overlay`); their events go out through `post`, which is
+/// [`skylight_post`] outside tests, and each key they hold first passes the
+/// checks typing makes before every key ([`guarded_keys`]).
 fn background_gesture(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1590,6 +1593,7 @@ fn background_gesture(
 	entry_front: EntryFront,
 	(to, to_wid): (libc::pid_t, u32),
 	prepared: bool,
+	in_overlay: bool,
 	visit: skylight::TargetVisit<'_>,
 	post: Post<'_>,
 ) -> CoreResult<()> {
@@ -1640,15 +1644,21 @@ fn background_gesture(
 			if path.len() < 2 {
 				return Err(DesktopError::input_failed("drag path must contain at least two points"));
 			}
-			prepare_press(source, pid, wid, window, button, &keys, entry_front, visit)?;
+			let proof =
+				prepare_press(source, pid, wid, window, button, &keys, entry_front, in_overlay, visit)?;
 			before_post()?;
-			background_drag(source, to, to_wid, window, &path, button, &keys, post)
+			let key_guard = || held_key_check(pid, wid, proof, &before_post);
+			let post = guarded_keys(post, &key_guard);
+			background_drag(source, to, to_wid, window, &path, button, &keys, &post)
 		},
 		PointerEvent::Hold { x, y, button, keys, duration } => {
 			let at = point(x, y)?;
-			prepare_press(source, pid, wid, window, button, &keys, entry_front, visit)?;
+			let proof =
+				prepare_press(source, pid, wid, window, button, &keys, entry_front, in_overlay, visit)?;
 			before_post()?;
-			background_hold(source, to, to_wid, window, at, button, &keys, duration, post)
+			let key_guard = || held_key_check(pid, wid, proof, &before_post);
+			let post = guarded_keys(post, &key_guard);
+			background_hold(source, to, to_wid, window, at, button, &keys, duration, &post)
 		},
 	}
 }
@@ -1684,6 +1694,42 @@ enum Posted {
 }
 
 type Post<'a> = &'a dyn Fn(Posted, libc::pid_t, &CGEvent) -> CoreResult<()>;
+
+/// `post` with `guard` run before each key press it posts ([`post_guarded`]);
+/// pointer events and key releases go out as they are.
+fn guarded_keys<'a>(
+	post: Post<'a>,
+	guard: &'a dyn Fn() -> CoreResult<()>,
+) -> impl Fn(Posted, libc::pid_t, &CGEvent) -> CoreResult<()> + 'a {
+	move |posted, to, event| match posted {
+		Posted::Pointer => post(posted, to, event),
+		Posted::Key => post_guarded(event, guard, |event| post(posted, to, event)),
+	}
+}
+
+/// The check before each key a background drag or hold presses: the target
+/// still passes `recheck`, and when the gesture holds keys, the focus that
+/// proved they reach window `wid` of `pid` (`proof`, from [`prepare_press`])
+/// still holds ([`keys_still_reach`]).
+fn held_key_check(
+	pid: libc::pid_t,
+	wid: u32,
+	proof: Option<ax::KeyFocus>,
+	recheck: &dyn Fn() -> CoreResult<()>,
+) -> CoreResult<()> {
+	recheck()?;
+	let Some(proven) = proof else {
+		return Ok(());
+	};
+	keys_still_reach(
+		pid,
+		wid,
+		|| keyboard_conflict_now(pid, wid),
+		proven,
+		|| ax::key_focus(pid),
+		skylight::window_parent,
+	)
+}
 
 /// [`Post`] through `SkyLight`: `post_dual` for pointer events,
 /// `post_keyboard` for keys.
@@ -1735,13 +1781,18 @@ pub(super) fn post_escape(pid: libc::pid_t) -> CoreResult<()> {
 	post_key(&source, KeyName::Escape, false, flags, &mut post)
 }
 
-/// Readies a background window for a held press and the keys held around it.
+/// Readies a background window for a held press and the keys held around it;
+/// with keys, returns the focus that proved they reach `wid`.
 ///
 /// A view that refuses first mouse, as Chromium and Electron pages do, drops a
 /// left press into a window its application does not yet consider key, which
-/// a click survives but a press that stays down does not. Held keys go to the
-/// process, which hands them to its key window, so they need the same proof
-/// that `wid` is that window as background typing does.
+/// a click survives but a press that stays down does not. A sheet or popover
+/// holding the focus (`in_overlay`) gets only the activation, as a left click
+/// into it does: the press that makes a window key would close a popover or
+/// reach the window a sheet is attached to. Held keys go to the process,
+/// which hands them to its key window, so they need the same proof that `wid`
+/// is that window as background typing does ([`await_key_destination`]),
+/// which refuses keys a focused sheet attached to `wid` would take.
 fn prepare_press(
 	source: &CGEventSource,
 	pid: libc::pid_t,
@@ -1750,60 +1801,60 @@ fn prepare_press(
 	button: MouseButton,
 	keys: &[KeyName],
 	entry_front: EntryFront,
+	in_overlay: bool,
 	visit: skylight::TargetVisit<'_>,
-) -> CoreResult<()> {
+) -> CoreResult<Option<ax::KeyFocus>> {
 	ready_press(
 		wid,
 		button,
 		!keys.is_empty(),
-		|| {
-			ax::window_records(pid).map_or(Some(KeyboardConflict::Unmapped), |records| {
-				keyboard_conflict(wid, &records, || {
-					ax::focused_window_id(pid) == Some(wid)
-						|| attached_under(wid, skylight::window_parent, |parent| {
-							records.iter().any(|record| record.id == Some(parent))
-						})
-				})
-			})
-		},
-		|| make_key_in_background(source, pid, wid, window, entry_front, false, visit),
-		|| await_key_window(pid, wid),
+		in_overlay,
+		|| keyboard_conflict_now(pid, wid),
+		|in_overlay| make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit),
+		|| await_key_window(pid, wid).map(drop),
+		|conflict| await_key_destination(pid, wid, conflict).map(|(_, focus)| focus),
 		|| still_behind_user(pid, wid, visit),
 	)
 }
 
-/// [`prepare_press`] with its probes and the key-window step as closures.
-/// When `make_key` ran the activation step, `still_behind` re-checks after the
-/// wait for the key window that the user has not brought the target forward.
-fn ready_press(
+/// [`prepare_press`] with its probes and steps as closures. `make_key` gets
+/// `in_overlay`. Without keys, a left press waits for the window to become
+/// key (`await_key`), which a sheet or popover holding the focus never does;
+/// with keys, `prove_keys` must show they reach the window, given the
+/// `conflict` read before. When `make_key` ran the activation step,
+/// `still_behind` re-checks afterwards that the user has not brought the
+/// target forward.
+fn ready_press<P>(
 	wid: u32,
 	button: MouseButton,
 	holds_keys: bool,
+	in_overlay: bool,
 	conflict: impl FnOnce() -> Option<KeyboardConflict>,
-	make_key: impl FnOnce() -> CoreResult<bool>,
-	is_key: impl FnOnce() -> CoreResult<bool>,
+	make_key: impl FnOnce(bool) -> CoreResult<bool>,
+	await_key: impl FnOnce() -> CoreResult<()>,
+	prove_keys: impl FnOnce(Option<KeyboardConflict>) -> CoreResult<P>,
 	still_behind: impl FnOnce() -> CoreResult<()>,
-) -> CoreResult<()> {
-	let siblings = if holds_keys {
-		match conflict() {
-			Some(KeyboardConflict::Unmapped) => return Err(unmapped_keyboard_refusal(wid)),
-			Some(KeyboardConflict::Siblings(siblings)) => siblings,
-			None => 0,
-		}
-	} else {
-		0
-	};
+) -> CoreResult<Option<P>> {
+	let conflict = if holds_keys { conflict() } else { None };
+	if conflict == Some(KeyboardConflict::Unmapped) {
+		return Err(unmapped_keyboard_refusal(wid));
+	}
 	if !holds_keys && !matches!(button, MouseButton::Left) {
-		return Ok(());
+		return Ok(None);
 	}
-	let prepared = make_key()?;
-	if !is_key()? && siblings > 0 {
-		return Err(sibling_keyboard_refusal(wid, siblings));
-	}
+	let prepared = make_key(in_overlay)?;
+	let proof = if holds_keys {
+		Some(prove_keys(conflict)?)
+	} else {
+		if !in_overlay {
+			await_key()?;
+		}
+		None
+	};
 	if prepared {
 		still_behind()?;
 	}
-	Ok(())
+	Ok(proof)
 }
 
 /// One event of a background drag.
@@ -2666,7 +2717,7 @@ fn foreground_pointer(
 							Some(path),
 							|| global_pointer(source, event),
 							|before, path| {
-								ax::open_menu::settle(pid, pid, before, path, timeout, control::check)
+								ax::open_menu::settle(pid, pid, before, path, timeout, || Ok(()))
 							},
 						)
 					},
@@ -3542,6 +3593,7 @@ mod tests {
 				event.clone(),
 				EntryFront(Some(9)),
 				(7592, 556),
+				false,
 				false,
 				skylight::TargetVisit::none(),
 				&post,
@@ -4441,7 +4493,7 @@ mod tests {
 		// The popup's menu would take the user's keyboard from the first press
 		// until the whole gesture ends.
 		for event in [hold.clone(), drag.clone(), left(2)] {
-			let error = menu_watch(&window, &event, false, || true).expect_err("refused");
+			let error = menu_watch(&window, &event, true, false, || true).expect_err("refused");
 			assert_eq!(error.code.as_str(), "BackgroundUnavailable", "{event:?}");
 			assert!(
 				error
@@ -4453,16 +4505,19 @@ mod tests {
 		}
 		// One click opens the menu and waits for it, as does one with a path.
 		assert_eq!(
-			menu_watch(&window, &left(1), false, || true).expect("click"),
+			menu_watch(&window, &left(1), true, false, || true).expect("click"),
 			Some(ax::open_menu::CONTROL_MENU_TIMEOUT)
 		);
 		assert_eq!(
-			menu_watch(&window, &left(1), true, || false).expect("click"),
+			menu_watch(&window, &left(1), true, true, || false).expect("click"),
 			Some(ax::open_menu::CONTROL_MENU_TIMEOUT)
 		);
 		// Elsewhere the gestures run, watching for no menu.
 		for event in [hold, drag, left(2)] {
-			assert_eq!(menu_watch(&window, &event, false, || false).expect("off a control"), None);
+			assert_eq!(
+				menu_watch(&window, &event, true, false, || false).expect("off a control"),
+				None
+			);
 		}
 		let right = PointerEvent::Click {
 			x:         1.0,
@@ -4472,54 +4527,88 @@ mod tests {
 			modifiers: Modifiers::default(),
 		};
 		assert_eq!(
-			menu_watch(&window, &right, false, || panic!("a secondary press is not hit-tested"))
+			menu_watch(&window, &right, true, false, || panic!("a secondary press is not hit-tested"))
 				.expect("right-click"),
+			Some(ax::open_menu::CONTEXT_MENU_TIMEOUT)
+		);
+		// A frontmost app's context menu stays open for the next call, as the
+		// user's would, unless the click names an item to choose.
+		let unasked = || panic!("a secondary press is not hit-tested");
+		assert_eq!(menu_watch(&window, &right, false, false, unasked).expect("front"), None);
+		assert_eq!(
+			menu_watch(&window, &right, false, true, unasked).expect("front with menu"),
 			Some(ax::open_menu::CONTEXT_MENU_TIMEOUT)
 		);
 	}
 
 	#[test]
-	fn held_keys_need_the_target_as_key_window_whatever_the_button() {
-		let ready = |button, holds_keys, conflict: Option<KeyboardConflict>, keyed| {
+	fn held_keys_need_the_proof_typing_needs_whatever_the_button() {
+		let ready = |button, holds_keys, in_overlay, conflict: Option<KeyboardConflict>, proven| {
 			let steps = std::cell::RefCell::new(Vec::new());
 			let result = ready_press(
 				42,
 				button,
 				holds_keys,
+				in_overlay,
 				|| conflict,
-				|| {
-					steps.borrow_mut().push("make key");
+				|in_overlay| {
+					steps
+						.borrow_mut()
+						.push(format!("make key, overlay {in_overlay}"));
 					Ok(true)
 				},
 				|| {
-					steps.borrow_mut().push("await key");
-					Ok(keyed)
+					steps.borrow_mut().push("await key".to_string());
+					Ok(())
+				},
+				|seen| {
+					steps.borrow_mut().push(format!("prove keys {seen:?}"));
+					if proven {
+						Ok(())
+					} else {
+						Err(DesktopError::invalid_target("a sheet attached to window 42 has focus"))
+					}
 				},
 				|| Ok(()),
 			);
-			(result.map_err(|error| error.code.as_str()), steps.into_inner())
+			(
+				result
+					.map(|proof| proof.is_some())
+					.map_err(|error| error.code.as_str()),
+				steps.into_inner(),
+			)
 		};
-		let both = vec!["make key", "await key"];
+		let made = "make key, overlay false".to_string();
 		// A right or middle press without keys needs no key window.
-		assert_eq!(ready(MouseButton::Right, false, None, false), (Ok(()), Vec::new()));
-		// A left press is readied, and goes ahead even when the app never
-		// reports its key window: it has no other window to reach.
-		assert_eq!(ready(MouseButton::Left, false, None, false), (Ok(()), both.clone()));
-		// Held keys into an app with other windows go only once the target is
-		// key, for any button.
+		assert_eq!(ready(MouseButton::Right, false, false, None, false), (Ok(false), Vec::new()));
+		// A left press waits for the window to become key.
+		assert_eq!(
+			ready(MouseButton::Left, false, false, None, false),
+			(Ok(false), vec![made.clone(), "await key".to_string()])
+		);
+		// In a sheet or popover holding the focus, only the activation goes out,
+		// and a popover never becomes the focused window to wait for.
+		assert_eq!(
+			ready(MouseButton::Left, false, true, None, false),
+			(Ok(false), vec!["make key, overlay true".to_string()])
+		);
 		for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
-			let siblings = Some(KeyboardConflict::Siblings(1));
+			// Held keys go only with the proof typing needs, even into an app
+			// whose window list shows no other window: a focused sheet is left
+			// out of that list and would take them.
 			assert_eq!(
-				ready(button, true, siblings, false),
-				(Err("BackgroundUnavailable"), both.clone())
+				ready(button, true, false, None, false),
+				(Err("InvalidTarget"), vec![made.clone(), "prove keys None".to_string()])
 			);
 			let siblings = Some(KeyboardConflict::Siblings(1));
-			assert_eq!(ready(button, true, siblings, true), (Ok(()), both.clone()));
 			assert_eq!(
-				ready(button, true, Some(KeyboardConflict::Unmapped), true),
+				ready(button, true, false, siblings, true),
+				(Ok(true), vec![made.clone(), "prove keys Some(Siblings(1))".to_string()])
+			);
+			assert_eq!(
+				ready(button, true, false, Some(KeyboardConflict::Unmapped), true),
 				(Err("BackgroundUnavailable"), Vec::new())
 			);
-			assert_eq!(ready(button, true, None, false), (Ok(()), both.clone()));
 		}
 	}
 
@@ -4531,24 +4620,63 @@ mod tests {
 				42,
 				MouseButton::Left,
 				false,
+				false,
 				|| None,
-				|| Ok(prepared),
+				|_| Ok(prepared),
 				|| {
 					steps.borrow_mut().push("await key");
-					Ok(true)
+					Ok(())
 				},
+				|_| -> CoreResult<()> { panic!("no keys are held") },
 				|| {
 					steps.borrow_mut().push("still behind");
 					Err(DesktopError::background_unavailable("came to the front"))
 				},
 			);
-			(result.map_err(|error| error.code.as_str()), steps.into_inner())
+			(result.map(|_| ()).map_err(|error| error.code.as_str()), steps.into_inner())
 		};
 		// The user can bring the target forward while it becomes key; the press
 		// would then switch the key window of the app they type into.
 		assert_eq!(ready(true), (Err("BackgroundUnavailable"), vec!["await key", "still behind"]));
 		// The target already was the frontmost key window: nothing to re-check.
 		assert_eq!(ready(false), (Ok(()), vec!["await key"]));
+	}
+
+	#[test]
+	fn a_held_key_is_pressed_only_while_its_check_passes() {
+		let source = source().expect("event source");
+		let posted = std::cell::RefCell::new(Vec::new());
+		let post = |posted_as: Posted, _, event: &CGEvent| {
+			posted
+				.borrow_mut()
+				.push((posted_as, event.get_type() as u32));
+			Ok(())
+		};
+		// The user moved focus to a sheet after the gesture was readied.
+		let refused = || Err(DesktopError::background_unavailable("focus moved to window 43"));
+		let guarded = guarded_keys(&post, &refused);
+		let window = background_window("TextEdit");
+		let result = background_hold(
+			&source,
+			7,
+			42,
+			&window,
+			CGPoint::new(10.0, 10.0),
+			MouseButton::Left,
+			&[KeyName::Space],
+			Duration::from_millis(1),
+			&guarded,
+		);
+		assert_eq!(result.expect_err("refused").code.as_str(), "BackgroundUnavailable");
+		// Neither the key nor the press went out.
+		assert!(
+			posted
+				.borrow()
+				.iter()
+				.all(|&(as_, kind)| as_ == Posted::Key && kind != CGEventType::KeyDown as u32),
+			"{:?}",
+			posted.borrow()
+		);
 	}
 
 	#[test]

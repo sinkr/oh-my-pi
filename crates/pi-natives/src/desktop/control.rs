@@ -192,6 +192,14 @@ pub(crate) fn check() -> CoreResult<()> {
 	CURRENT.with_borrow(|token| token.as_ref().map_or(Ok(()), OperationToken::check))
 }
 
+/// [`check`] for a step that would send new input from inside [`cleanup`],
+/// such as pressing an item of a menu that cleanup is settling: cleanup lets
+/// releases through after cancellation, never fresh input.
+#[cfg(target_os = "macos")]
+pub(crate) fn check_new_input() -> CoreResult<()> {
+	CURRENT.with_borrow(|token| token.as_ref().map_or(Ok(()), OperationToken::check))
+}
+
 pub(crate) fn wait(duration: Duration) -> CoreResult<()> {
 	if CLEANUP.get() {
 		thread::sleep(duration);
