@@ -11,8 +11,8 @@ use objc2_core_foundation::{CFRange, CFString};
 
 use super::{
 	AxTextSelection, CoreResult, DesktopError, TextSelectRequest, Utf16Range, attribute_settable,
-	ax_result, control, copy_bool, copy_range, copy_string, element_pid, may_borrow_focus,
-	popup::poll, skylight, utf16_slice,
+	ax_result, control, copy_bool, copy_held_attribute, copy_range, copy_string, element_pid,
+	may_borrow_focus, popup::poll, skylight, utf16_slice,
 };
 
 const SELECTED_RANGE: &str = "AXSelectedTextRange";
@@ -29,7 +29,11 @@ pub(super) fn select(
 	// Selecting moves the caret that typing into a focused field replaces, so
 	// an app the user brings forward during the call is left to them.
 	let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
-	let role = copy_string(element, "AXRole").unwrap_or_else(|| "element".to_owned());
+	// A destroyed element throws `StaleRef` here, as from every element
+	// operation, rather than reading as an unsettable one.
+	let role = copy_held_attribute(element, "AXRole")?
+		.and_then(|value| value.downcast::<CFString>().ok())
+		.map_or_else(|| "element".to_owned(), |role| role.to_string());
 	if !attribute_settable(element, SELECTED_RANGE) {
 		return Err(DesktopError::ax_failed(format!(
 			"{SELECTED_RANGE} is not settable on this {role}, so its text cannot be selected by \

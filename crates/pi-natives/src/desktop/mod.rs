@@ -450,6 +450,7 @@ impl Request {
 			| Self::AxParent { reference, .. }
 			| Self::AxPerform { reference, .. }
 			| Self::AxSetValue { reference, .. }
+			| Self::AxSelectText { reference, .. }
 			| Self::AxFocus { reference, .. }
 			| Self::AxClick { reference, .. } => Some(reference),
 			_ => None,
@@ -2309,6 +2310,17 @@ mod capture_tests {
 			Err(DesktopError::stale_ref("the element no longer exists"))
 		}
 
+		fn select_text(
+			&mut self,
+			h: &AxHandle,
+			_: &text_range::TextSelectRequest,
+		) -> CoreResult<AxTextSelection> {
+			if let Some(tree) = &self.tree {
+				tree.lock().element(h)?;
+			}
+			unreachable!("text selection not exercised")
+		}
+
 		fn set_value(&mut self, h: &AxHandle, _: &str) -> CoreResult<()> {
 			if let Some(tree) = &self.tree {
 				tree.lock().element(h)?;
@@ -3119,13 +3131,18 @@ mod capture_tests {
 		}
 		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
 		rebuild(&tree, 2, &[(4, "Go"), (3, "Stop")]);
-		let requests: [fn(Reply) -> Request; 8] = [
+		let requests: [fn(Reply) -> Request; 9] = [
 			|reply| Request::AxNode { reference: e2(), reply },
 			|reply| Request::AxAttributes { reference: e2(), reply },
 			|reply| Request::AxChildren { reference: e2(), reply },
 			|reply| Request::AxParent { reference: e2(), reply },
 			|reply| Request::AxPerform { reference: e2(), action: "press".to_string(), reply },
 			|reply| Request::AxSetValue { reference: e2(), value: "Stop".to_string(), reply },
+			|reply| Request::AxSelectText {
+				reference: e2(),
+				request: text_range::TextSelectRequest { text: "Go".to_string(), ..Default::default() },
+				reply,
+			},
 			|reply| Request::AxFocus { reference: e2(), reply },
 			|reply| Request::AxClick {
 				reference: e2(),
