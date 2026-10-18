@@ -160,6 +160,14 @@ export interface SessionStorage {
 	 */
 	readonly defersSyncPublish?: boolean;
 	/**
+	 * `true` when transcripts never land on the local filesystem, so the
+	 * terminal-facing session keeps an empty local placeholder at its path
+	 * (see `session-placeholder.ts`). The backend moves and removes those
+	 * placeholders with its own renames and deletes; `SessionManager` creates
+	 * them. File and memory backends leave this unset.
+	 */
+	readonly keepsLocalPlaceholders?: boolean;
+	/**
 	 * Resolve once every write this storage queued for `path` has been confirmed
 	 * by, or rejected by, the backing store. In-body backends never queue, so
 	 * they omit this; {@link defersSyncPublish} marks the backends that provide
