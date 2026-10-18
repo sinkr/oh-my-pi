@@ -1,6 +1,6 @@
 ---
 description: "Never use `any` in TypeScript annotations or assertions — use `unknown`, generics, a schema parse at trust boundaries, or the actual type"
-condition: "(?m)^(?![ \\t]*(?://|/\\*|\\*))(?:(?!//)[^\\n])*?(?:: |\\bas )any(?=\\s*(?:[;,)\\]\\[>|&=}{?!:\\n]|//|/\\*|(?:as|satisfies)\\s))"
+condition: "(?m)^(?![ \\t]*(?://|/\\*|\\*(?:\\s|/)))(?:(?!//)[^\\n])*?(?:: |\\bas )any(?=\\s*(?:[;,)\\]\\[>|&=}{?!:\\n]|//|/\\*|(?:as|satisfies)\\s))"
 scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
 interruptMode: never
 ---

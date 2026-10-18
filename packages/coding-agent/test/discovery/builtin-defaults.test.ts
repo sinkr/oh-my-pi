@@ -326,6 +326,7 @@ describe("builtin-defaults rule provider", () => {
 			'const LABELS = new Map([\n\t["text", "Text"],\n\t["json", "JSON"],\n]);',
 			'const ALIASES = new Map<string, string[]>([["ts", ["typescript", "tsx"]]]);',
 			'const COLUMNS = new Map([["first", ROW[0]], ["second", ROW[1]]]);',
+			"const KINDS = new Set([`text`, `json`]);",
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
 
@@ -335,6 +336,8 @@ describe("builtin-defaults rule provider", () => {
 			"#pending = new Map<number, (m: { result?: unknown }) => void>();",
 			"const byId = new Map(items.map(item => [item.id, item]));",
 			"const keys = new Set([...Object.keys(a), ...Object.keys(b)]);",
+			// oxlint-disable-next-line no-template-curly-in-string -- literal TypeScript source fed to the rule
+			"const prefixed = new Set([`${prefix}-a`]);",
 			"for (const id of new Set(ids)) {}",
 			'const labels = new Map<string, string>().set("key", choose<string>(["a", "b"]));',
 			'const keep = new Set(["vendor", ...legs.map(leg => leg.id)]);',
@@ -357,6 +360,7 @@ describe("builtin-defaults rule provider", () => {
 			'type Load = () => typeof import("./mod");',
 			'type Pair = [typeof import("./a"), string];',
 			'type Both = Base & typeof import("./mod");',
+			'type Thing = import("pkg", { with: { "resolution-mode": "import" } }).Thing;',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
 
@@ -392,6 +396,7 @@ describe("builtin-defaults rule provider", () => {
 			"const id = value as any!;",
 			"let entry: any /* TODO */;",
 			"let entry: any // TODO: type this\n",
+			"\t*next(value: any) {}",
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-no-any"]);
 
