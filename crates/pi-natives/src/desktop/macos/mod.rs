@@ -17,7 +17,11 @@ pub(super) use spaces::window_on_another_space;
 
 use self::{ax::MacAx, capture::MacCapture, input::MacInput};
 use super::{
-	backend::{AxBackend, Backend, DeliveryMode, DisplayAwakeHold, PointerEvent},
+	ax::AxHandle,
+	backend::{
+		AxBackend, Backend, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
+		PointerEvent,
+	},
 	control::OperationToken,
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
@@ -147,6 +151,24 @@ impl Backend for MacosBackend {
 		token.check()?;
 		Self::require_input_permission()?;
 		self.input.key_chord(target, keys, mode, &self.capture)
+	}
+
+	fn element_input(
+		&mut self,
+		target: &Target,
+		element: &AxHandle,
+		input: &ElementInput,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<ElementDelivery> {
+		token.check()?;
+		Self::require_input_permission()?;
+		let Target::Window(id) = target else {
+			return Err(DesktopError::invalid_target("element input needs the element's window"));
+		};
+		self
+			.input
+			.element_input(id, ax::mac_handle(element)?, input, mode, &self.capture)
 	}
 
 	fn hold_keys(
