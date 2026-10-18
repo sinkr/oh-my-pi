@@ -12,6 +12,7 @@
 - Fixed non-streaming requests reporting a missing API key when the credential resolver actually failed, hiding auth broker, OAuth and network outages behind "No API key" ([#16655](https://github.com/can1357/oh-my-pi/pull/16655) by [@adi-IL](https://github.com/adi-IL))
 - Fixed auth-gateway requests failing when a client requests an unsupported thinking effort; the gateway now uses the nearest supported tier ([#16671](https://github.com/can1357/oh-my-pi/pull/16671) by [@codyw912](https://github.com/codyw912))
 - Fixed Anthropic tools whose parameters are a root `anyOf`/`oneOf`/`allOf` of objects being sent as an empty closed object that only accepts `{}`; variant properties now fold into the root `input_schema` ([#16630](https://github.com/can1357/oh-my-pi/issues/16630))
+- Fixed a tool call from a Claude model that declined mid-response still running after its server-side fallback model took over ([#16250](https://github.com/can1357/oh-my-pi/pull/16250) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.5] - 2026-10-21
 
@@ -65,10 +66,6 @@
 - Fixed Factory Droid Gemini requests failing with 400 "For schema with items, schema type should be ARRAY" when a tool parameter accepts a string or a list, as the default `task` tool's `model` field does ([#16249](https://github.com/can1357/oh-my-pi/pull/16249) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `PI_REQ_DEBUG=1` request dumps writing your API key, bearer token and response cookies to disk in plain text: credential headers now read `[redacted]`, as in rejected-request dumps ([#16293](https://github.com/can1357/oh-my-pi/pull/16293) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed finalized signed reasoning disappearing from displayed thinking when no deltas streamed ([#16227](https://github.com/can1357/oh-my-pi/issues/16227))
-
-### Fixed
-
-- Fixed a tool call from a Claude model that declined mid-response still running after the server-side fallback model took over: the finished turn, including one that ends in an error, drops the declining model's tool calls and reasoning, and requests with server-side fallbacks enabled hold tool-call events until the response ends so a declined call never starts speculatively or reaches an auth-gateway client ([#16250](https://github.com/can1357/oh-my-pi/pull/16250) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
