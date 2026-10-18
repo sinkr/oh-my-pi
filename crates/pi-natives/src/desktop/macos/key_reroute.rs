@@ -41,7 +41,7 @@ use libc::pid_t;
 use parking_lot::Mutex;
 
 use super::skylight;
-use crate::desktop::control::SYNTHETIC_EVENT_TAG;
+use crate::desktop::control::{self, SYNTHETIC_EVENT_TAG};
 
 type Ref = *mut c_void;
 type ConstRef = *const c_void;
@@ -128,7 +128,6 @@ unsafe extern "C" {
 	static kCFRunLoopCommonModes: Ref;
 	static kCFRunLoopDefaultMode: Ref;
 	fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: isize) -> Ref;
-	fn CFMachPortInvalidate(port: Ref);
 	fn CFRunLoopGetCurrent() -> ConstRef;
 	fn CFRunLoopAddSource(run_loop: ConstRef, source: Ref, mode: Ref);
 	fn CFRunLoopRemoveSource(run_loop: ConstRef, source: Ref, mode: Ref);
@@ -746,6 +745,9 @@ impl KeyReroute {
 						}
 						CGEventTapEnable(focus_tap, true);
 						CGEventTapEnable(key_tap, true);
+						// Listed so a host exiting mid-action closes them too.
+						control::add_live_tap(focus_tap);
+						control::add_live_tap(key_tap);
 						// From here this action's taps decide for its target, and
 						// older actions stop moving new keys.
 						context.theft.register(&mut REGISTRY.lock());
@@ -796,7 +798,7 @@ impl KeyReroute {
 					}
 					for tap in [focus_tap, key_tap] {
 						if !tap.is_null() {
-							CFMachPortInvalidate(tap);
+							control::invalidate_live_tap(tap);
 							CFRelease(tap);
 						}
 					}

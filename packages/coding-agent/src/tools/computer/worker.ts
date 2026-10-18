@@ -75,6 +75,8 @@ export interface NativeDesktopSession {
 	holdDisplayUntilReleased(): void;
 	/** Let a turn's hold go now (activity outside a turn keeps its grace); later activity gets the grace again. */
 	releaseDisplayAwake(): void;
+	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause. */
+	setRunDeadline(remainingMs: number): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
 	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
 	menuItems(target: string, path?: string[]): Promise<MenuItem[]>;
@@ -929,6 +931,7 @@ export class ComputerWorkerCore {
 			return;
 		}
 		const timeoutSignal = AbortSignal.timeout(message.timeoutMs);
+		const deadline = performance.now() + message.timeoutMs;
 		const ac = new AbortController();
 		const runAc = new AbortController();
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
@@ -971,6 +974,7 @@ export class ComputerWorkerCore {
 			throwIfAborted(signal);
 			// An Escape after the host's check still ends the run before the script starts.
 			this.#checkEscape();
+			session.setRunDeadline(deadline - performance.now());
 			const { displayTurn } = active;
 			if (displayTurn !== undefined && displayTurn > this.#releasedTurn) session.holdDisplayUntilReleased();
 			const runtime = this.#ensureRuntime(message.session);

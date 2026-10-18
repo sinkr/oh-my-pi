@@ -181,6 +181,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	releaseDisplayAwake(): void {
 		this.displayHolds.push("release");
 	}
+	setRunDeadline(_remainingMs: number): void {}
 	async listApplications() {
 		return [{ id: "test.editor", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 }];
 	}

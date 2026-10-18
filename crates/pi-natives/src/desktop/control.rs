@@ -20,6 +20,8 @@ use parking_lot::{Condvar, Mutex};
 
 use super::error::{CoreResult, DesktopError};
 
+#[cfg(target_os = "macos")]
+pub(crate) mod intervention;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -28,8 +30,8 @@ mod macos;
 mod windows;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
-	MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, is_pointer_press, monitor_seen,
-	uptime_ns,
+	MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, add_live_tap, invalidate_live_tap,
+	is_pointer_press, monitor_seen, uptime_ns,
 };
 
 #[derive(Default)]
@@ -41,6 +43,10 @@ struct CancellationState {
 	/// retirement and release never count, so the host can tell the user's
 	/// stop from its own. Shared with every session under the same key.
 	escape_stops: Arc<AtomicU32>,
+	/// When the current computer run ends; input waiting for the user to
+	/// pause stops shortly before it.
+	#[cfg(target_os = "macos")]
+	deadline:     Mutex<Option<Instant>>,
 	#[cfg(target_os = "linux")]
 	async_wake:   tokio::sync::Notify,
 }
@@ -56,8 +62,10 @@ impl CancellationSource {
 
 	pub(crate) fn token(&self) -> OperationToken {
 		OperationToken {
-			source:     self.clone(),
+			source: self.clone(),
 			generation: self.0.generation.load(Ordering::Acquire),
+			#[cfg(target_os = "macos")]
+			reply_by: None,
 		}
 	}
 
@@ -110,6 +118,13 @@ impl CancellationSource {
 	pub(crate) fn escape_stops(&self) -> u32 {
 		self.0.escape_stops.load(Ordering::Acquire)
 	}
+
+	/// Sets when the current computer run ends, `None` for no deadline. Each
+	/// run sets it before its first call.
+	#[cfg(target_os = "macos")]
+	pub(crate) fn set_deadline(&self, deadline: Option<Instant>) {
+		*self.0.deadline.lock() = deadline;
+	}
 }
 
 /// Weak callback ownership avoids a lease -> monitor -> source -> lease cycle.
@@ -137,9 +152,29 @@ impl EmergencyStop {
 pub(crate) struct OperationToken {
 	source:     CancellationSource,
 	generation: u64,
+	/// When the caller stops waiting for this request's reply.
+	#[cfg(target_os = "macos")]
+	reply_by:   Option<Instant>,
 }
 
 impl OperationToken {
+	/// When this operation must have answered: the run's end or the caller's
+	/// reply timeout, whichever comes first.
+	#[cfg(target_os = "macos")]
+	pub(crate) fn deadline(&self) -> Option<Instant> {
+		let run = *self.source.0.deadline.lock();
+		match (run, self.reply_by) {
+			(Some(run), Some(reply)) => Some(run.min(reply)),
+			(run, reply) => run.or(reply),
+		}
+	}
+
+	/// This token for a request whose caller waits for its reply until `at`.
+	#[cfg(target_os = "macos")]
+	pub(crate) fn replying_by(self, at: Instant) -> Self {
+		Self { reply_by: Some(at), ..self }
+	}
+
 	pub(crate) fn enter(&self) -> OperationScope {
 		let previous = CURRENT.with_borrow_mut(|current| current.replace(self.clone()));
 		OperationScope { previous, _thread: PhantomData }
@@ -324,6 +359,17 @@ pub(crate) fn escape_stops(key: &str) -> u32 {
 
 pub(crate) fn forget_escape_stops(key: &str) {
 	ESCAPE_STOPS.lock().remove(key);
+}
+
+/// Invalidates this process's event taps before it exits
+/// (`macos::close_taps`); only macOS taps are known to need it.
+#[cfg_attr(
+	not(target_os = "macos"),
+	allow(clippy::missing_const_for_fn, reason = "only macOS closes taps")
+)]
+pub(crate) fn close_event_taps() {
+	#[cfg(target_os = "macos")]
+	macos::close_taps();
 }
 
 #[cfg(target_os = "macos")]

@@ -90,8 +90,15 @@ impl MacInput {
 								background_guard(&window, pid, &event)?;
 								Ok((window, wid, in_overlay))
 							})?;
-						let owner = || {
-							input_owner(pid, wid, ax::window_content(pid, &window), ax::focused_window_id)
+						let owner = || -> CoreResult<(libc::pid_t, u32)> {
+							let owner = input_owner(
+								pid,
+								wid,
+								ax::window_content(pid, &window),
+								ax::focused_window_id,
+							)?;
+							control::intervention::input_goes_to(owner.0);
+							Ok(owner)
 						};
 						skylight::with_background_watch(pid, |visit| {
 							if process::remote_screen(pid) == Some(RemoteScreen::HidReports) {
@@ -562,29 +569,33 @@ fn with_background_keyboard<T>(
 		let (to, focus) = await_key_destination(pid, wid, conflict)?;
 		let owner =
 			key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
+		control::intervention::input_goes_to(owner.0);
 		activate_owner(pid, owner, |(owner, window)| {
 			activate_in_background(source, owner, window, skylight::sender_connection()?)
 		})?;
-		deliver(owner.0, &|| {
-			recheck_background(
-				prepared,
-				pid,
-				wid,
-				skylight::front_pid,
-				|| visit.happened(),
-				|| {
-					keys_still_reach(
-						pid,
-						wid,
-						|| keyboard_conflict_now(pid, wid),
-						focus,
-						|| ax::key_focus(pid),
-						skylight::window_parent,
-					)?;
-					owner_still_focused(pid, wid, owner, ax::focused_window_id)
-				},
-			)
-		})
+		deliver(
+			owner.0,
+			&intervention_guard(|| {
+				recheck_background(
+					prepared,
+					pid,
+					wid,
+					skylight::front_pid,
+					|| visit.happened(),
+					|| {
+						keys_still_reach(
+							pid,
+							wid,
+							|| keyboard_conflict_now(pid, wid),
+							focus,
+							|| ax::key_focus(pid),
+							skylight::window_parent,
+						)?;
+						owner_still_focused(pid, wid, owner, ax::focused_window_id)
+					},
+				)
+			}),
+		)
 	})
 }
 
@@ -752,8 +763,20 @@ fn keys_still_reach(
 	)))
 }
 
-/// Posts `event`, first running `guard` when it presses a key or modifier;
-/// releases always go out so nothing stays held.
+/// `guard` behind the check that the user has not used the target's app since
+/// the call began ([`control::intervention::check_press`]). The background
+/// keyboard route hands this out as its per-press guard, so every way of
+/// sending background keys that runs the guard before a key or modifier press
+/// stops there, before pressing anything more.
+fn intervention_guard(guard: impl Fn() -> CoreResult<()>) -> impl Fn() -> CoreResult<()> {
+	move || {
+		control::intervention::check_press()?;
+		guard()
+	}
+}
+
+/// Posts `event`, running `guard` before a key or modifier press; releases
+/// always go out so nothing stays held.
 fn post_guarded(
 	event: &CGEvent,
 	guard: impl FnOnce() -> CoreResult<()>,
@@ -1707,13 +1730,15 @@ fn background_pointer(
 }
 
 /// The check right before background pointer input for window `wid` of `pid`
-/// (application `app`) posts. The probes that chose where it goes can block,
-/// and the user may bring the target forward meanwhile, or come to it and
-/// leave again (`visited`): the input then refuses, whether or not it first
-/// made the window key (`prepared`), as it does when the front process cannot
-/// be read. A target that was already the user's own front app as the input
-/// began (`entry_front`) still takes it. `sent` says whether this input
-/// already posted events, which the refusal then reports.
+/// (application `app`) posts. The user's own key or click in the target's app
+/// since the call was admitted refuses it
+/// ([`control::intervention::check_press`]). The probes that chose where it
+/// goes can block, and the user may bring the target forward meanwhile, or
+/// come to it and leave again (`visited`): the input then refuses, whether or
+/// not it first made the window key (`prepared`), as it does when the front
+/// process cannot be read. A target that was already the user's own front app
+/// as the input began (`entry_front`) still takes it. `sent` says whether this
+/// input already posted events, which the refusal then reports.
 fn pointer_recheck(
 	(prepared, sent): (bool, bool),
 	entry_front: EntryFront,
@@ -1721,6 +1746,7 @@ fn pointer_recheck(
 	front: impl FnOnce() -> Option<libc::pid_t>,
 	visited: impl FnOnce() -> bool,
 ) -> CoreResult<()> {
+	control::intervention::check_press()?;
 	let now = front();
 	let why = if now.is_none() {
 		"the front application could not be identified"
@@ -3239,10 +3265,23 @@ fn post_global_mouse(
 }
 
 fn post_global(event: &CGEvent) -> CoreResult<()> {
+	post_hid(event, |event| {
+		skylight::note_hid_post(event.get_type());
+		event.post(CGEventTapLocation::HID);
+	})
+}
+
+/// Tags and posts `event` at the HID tap through `post`. A key, modifier or
+/// pointer press first checks that the user has not used the target's app
+/// since the call began ([`control::intervention::check_press`]); releases
+/// always go out.
+fn post_hid(event: &CGEvent, post: impl FnOnce(&CGEvent)) -> CoreResult<()> {
 	control::check()?;
+	if is_key_press(event) || control::is_pointer_press(event.get_type() as u32) {
+		control::intervention::check_press()?;
+	}
 	event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, control::SYNTHETIC_EVENT_TAG);
-	skylight::note_hid_post(event.get_type());
-	event.post(CGEventTapLocation::HID);
+	post(event);
 	Ok(())
 }
 
@@ -4028,6 +4067,158 @@ mod tests {
 			SHIFT_SPACE_TRANSITIONS[2],
 			SHIFT_SPACE_TRANSITIONS[3]
 		]);
+	}
+
+	#[test]
+	fn keys_stop_at_the_users_first_key_or_click_in_the_target_app() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let mut events = Vec::new();
+		let result = {
+			let _watch = listener
+				.admit(7, &token)
+				.expect("the user has not used TextEdit");
+			key_chord(&source, &[KeyName::Ctrl, KeyName::Enter], KEY_GAP, |event| {
+				post_guarded(event, intervention_guard(|| Ok(())), |event| {
+					// The user types in TextEdit right after Ctrl goes down.
+					listener.record_for_test(7, Instant::now());
+					events.push((
+						event.get_type() as u32,
+						event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+					));
+					Ok(())
+				})
+			})
+		};
+		let error = result.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("in TextEdit during this input"), "{}", error.message);
+		assert!(error.message.contains("nothing more was sent"), "{}", error.message);
+		// Enter is never pressed; its release and Ctrl's still go out.
+		assert_eq!(events, [
+			(CGEventType::FlagsChanged as u32, 59),
+			(CGEventType::KeyUp as u32, 36),
+			(CGEventType::FlagsChanged as u32, 59),
+		]);
+	}
+
+	#[test]
+	fn any_background_key_path_that_runs_the_route_guard_stops_at_the_users_input() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let guard = intervention_guard(|| Ok(()));
+		let mut events = Vec::new();
+		// Typing runs the route's guard before each press itself, without
+		// `post_guarded`.
+		let result = {
+			let _watch = listener
+				.admit(7, &token)
+				.expect("the user has not used TextEdit");
+			type_keys(&source, &unicode_keys("abc"), Duration::ZERO, &guard, |event| {
+				// The user types in TextEdit right after the first key goes out.
+				listener.record_for_test(7, Instant::now());
+				events.push(event.get_type() as u32);
+				Ok(())
+			})
+		};
+		let error = result.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("in TextEdit during this input"), "{}", error.message);
+		// Only a is typed; b and c are never pressed.
+		assert_eq!(&events[..2], [CGEventType::KeyDown as u32, CGEventType::KeyUp as u32]);
+		assert!(!events[2..].contains(&(CGEventType::KeyDown as u32)), "{events:?}");
+	}
+
+	#[test]
+	fn takeover_keys_held_around_a_pointer_gesture_stop_at_the_users_input() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let mut events = Vec::new();
+		// A takeover drag or held mouse holds its keys through the HID tap.
+		let result = {
+			let _watch = listener
+				.admit(7, &token)
+				.expect("the user has not used TextEdit");
+			with_held_keys(
+				&source,
+				&[KeyName::Shift, KeyName::Space],
+				KEY_GAP,
+				|event| {
+					post_hid(event, |event| {
+						// The user types in TextEdit right after Shift goes down.
+						listener.record_for_test(7, Instant::now());
+						events.push(shift_transition(event));
+					})
+				},
+				|| panic!("a refused press must not run the gesture"),
+			)
+		};
+		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
+		// Space is never pressed; its release and Shift's still go out.
+		assert_eq!(events, [
+			SHIFT_SPACE_TRANSITIONS[0],
+			SHIFT_SPACE_TRANSITIONS[2],
+			SHIFT_SPACE_TRANSITIONS[3]
+		]);
+	}
+
+	#[test]
+	fn a_background_click_stops_at_the_users_input_during_its_preparation() {
+		use crate::desktop::error::ErrorCode;
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let _watch = listener
+			.admit(7, &token)
+			.expect("the user has not used TextEdit");
+		let recheck = || {
+			pointer_recheck(
+				(true, false),
+				EntryFront(Some(9)),
+				(7, 42, "TextEdit"),
+				|| Some(9),
+				|| false,
+			)
+		};
+		recheck().unwrap();
+		// The user types in TextEdit while the click makes its window key.
+		listener.record_for_test(7, Instant::now());
+		assert_eq!(recheck().unwrap_err().code, ErrorCode::UserIntervened);
+	}
+
+	#[test]
+	fn a_takeover_click_stops_at_the_users_input_before_its_press() {
+		use crate::desktop::error::ErrorCode;
+		let source = source().expect("event source");
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, Some(1), || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let _watch = listener
+			.admit(7, &token)
+			.expect("the user has not used TextEdit");
+		let event = |kind| {
+			CGEvent::new_mouse_event(source.clone(), kind, CGPoint::new(1.0, 1.0), CGMouseButton::Left)
+				.expect("mouse event")
+		};
+		let mut posted = Vec::new();
+		let mut post = |kind| post_hid(&event(kind), |event| posted.push(event.get_type() as u32));
+		// The user clicks in TextEdit while takeover brings the target forward.
+		listener.record_for_test(7, Instant::now());
+		let press = post(CGEventType::LeftMouseDown);
+		assert_eq!(press.unwrap_err().code, ErrorCode::UserIntervened);
+		// Moves and releases still go out.
+		post(CGEventType::MouseMoved).unwrap();
+		post(CGEventType::LeftMouseUp).unwrap();
+		assert_eq!(posted, [CGEventType::MouseMoved as u32, CGEventType::LeftMouseUp as u32]);
 	}
 
 	#[test]

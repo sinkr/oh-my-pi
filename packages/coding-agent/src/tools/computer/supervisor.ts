@@ -1,7 +1,7 @@
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { postmortem, untilAborted } from "@oh-my-pi/pi-utils";
 import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
-import { desktopEscapeStops, forgetDesktopEscapeStops } from "@oh-my-pi/pi-natives/desktop";
+import { closeDesktopEventTaps, desktopEscapeStops, forgetDesktopEscapeStops } from "@oh-my-pi/pi-natives/desktop";
 import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
@@ -135,8 +135,17 @@ function wrapWorker(worker: Worker): ComputerWorkerHandle {
 	};
 }
 
+let closesEventTapsAtExit = false;
+
 /** Spawns the computer worker through the active CLI host when available. */
 export function spawnComputerWorker(): ComputerWorkerHandle {
+	if (!closesEventTapsAtExit) {
+		closesEventTapsAtExit = true;
+		// A macOS event tap the worker's session still holds when this process dies makes WindowServer deliver the
+		// key the user is typing at that moment twice or more. Bun's process.exit runs no native exit hook, and the
+		// worker's own exit handlers do not run when the main thread exits, so the taps are closed from here.
+		postmortem.register("computer-event-taps", () => closeDesktopEventTaps(), { exitOnly: true });
+	}
 	const hostEntry = workerHostEntry();
 	const worker = hostEntry
 		? new Worker(hostEntry, { type: "module", argv: [COMPUTER_WORKER_ARG] })

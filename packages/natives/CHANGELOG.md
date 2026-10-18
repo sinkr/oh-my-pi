@@ -7,6 +7,7 @@
 - Added `DesktopSession.axSelectText` (macOS) to select text in an accessibility element's value by UTF-16 range, refusing missing or ambiguous matches and returning the selection read back ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `DesktopSession.axType` and `axKeyChord`, which type into or press keys in one accessibility element; on macOS a field that does not report keyboard focus gets nothing and the error names what has focus; on Windows background input goes straight to the element's own control window and refuses a windowless element ([#15563](https://github.com/can1357/oh-my-pi/pull/15563) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `DesktopSession.escapeStops` and `desktopEscapeStops(key)`, counting takeover input you stopped with physical Escape on macOS, Windows and X11, apart from host cancels ([#15564](https://github.com/can1357/oh-my-pi/pull/15564) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `UserIntervened` on macOS: keys and clicks stop at your first key or click in the app they go to, and input to an app you used since it was last read waits up to 5 s for you to pause, then fails without sending (needs Input Monitoring) ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -31,6 +32,7 @@
 - Fixed your typing landing in the macOS app a background action targets when that app brings itself to the front while you type ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input sending you back to your previous app after you opened the target app from Spotlight during the action ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed an app that a macOS background action opens something in, such as TextEdit after a background ⌘O in Finder, staying in front of your app; it is sent back like the target ([#15195](https://github.com/can1357/oh-my-pi/pull/15195) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a key you typed on macOS reaching your app twice or more when a process holding a computer-use event tap exited; `closeDesktopEventTaps()` closes them first ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS typing into Screen Sharing and iPhone Mirroring arriving as the wrong characters: it now presses your keyboard layout's keys, types unmodified text in the background and stops while you hold a modifier or Caps Lock is on, and iPhone Mirroring taps and scrolls land where aimed ([#15193](https://github.com/can1357/oh-my-pi/pull/15193) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed your keystrokes landing in the app a macOS background action targets, or vanishing into a menu it opened, when it takes the keyboard mid-action; they now reach your app ([#16140](https://github.com/can1357/oh-my-pi/pull/16140) by [@will-bogusz](https://github.com/will-bogusz))
 

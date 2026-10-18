@@ -85,6 +85,12 @@ export declare class DesktopSession {
   controlState(): DesktopControlState
   /** Retire queued work from a completed helper without revoking task control. */
   retire(): void
+  /**
+   * Sets when the current run ends, `remaining_ms` from now; each run sets
+   * it before its first call. On macOS, input waiting for the user to pause
+   * in its app gives up shortly before it.
+   */
+  setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   /**
    * Capture a fresh native-detail region without replacing the full input
@@ -1293,6 +1299,15 @@ export interface ClipboardImage {
   /** MIME type for the encoded image payload. */
   mimeType: string
 }
+
+/**
+ * Invalidates this process's event taps; for a host about to
+ * exit, after which no desktop session here sees the user's input again. A
+ * macOS tap that dies with its process while the user types makes
+ * `WindowServer` deliver their key again; Bun's `process.exit` runs no native
+ * exit hook, so the host calls this from its exit handler.
+ */
+export declare function closeDesktopEventTaps(): void
 
 /** A context line (before or after a match). */
 export interface ContextLine {

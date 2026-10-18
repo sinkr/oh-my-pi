@@ -1824,6 +1824,13 @@ fn create_application(pid: libc::pid_t) -> CoreResult<CFRetained<AXUIElement>> {
 	Ok(unsafe { CFRetained::from_raw(pointer) })
 }
 
+/// Process `pid`'s application element, for tests that need an element a real
+/// process owns.
+#[cfg(test)]
+pub(in crate::desktop) fn application_handle(pid: libc::pid_t) -> CoreResult<AxHandle> {
+	create_application(pid).map(AxHandle::Mac)
+}
+
 fn create_system_wide() -> CFRetained<AXUIElement> {
 	// SAFETY: The framework constructor returns a valid create-rule retained
 	// system-wide element.
@@ -2046,6 +2053,11 @@ pub(super) fn mac_handle(handle: &AxHandle) -> CoreResult<&AXUIElement> {
 		#[cfg(test)]
 		_ => Err(DesktopError::ax_failed("non-macOS AX handle passed to MacAx")),
 	}
+}
+
+/// The process owning the element `h` names.
+pub(super) fn handle_pid(h: &AxHandle) -> CoreResult<libc::pid_t> {
+	element_pid(mac_handle(h)?)
 }
 
 fn bounds_matches_window(bounds: AxBounds, window: &DesktopWindow) -> bool {
