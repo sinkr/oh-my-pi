@@ -993,10 +993,11 @@ fn trim_end_spaces_in_place(line: &mut Vec<u16>) {
 /// inside runs that contain no spaces.
 ///
 /// Chinese and Japanese prose has no spaces between words, so every
-/// ideographic grapheme is a break opportunity (CSS `line-break: normal`),
-/// subject to basic kinsoku: closing punctuation never starts a row and opening
-/// punctuation never ends one. A break that would violate kinsoku is dropped,
-/// so the punctuation travels with its neighbouring character instead.
+/// ideographic grapheme is a break opportunity, subject to kinsoku: closing
+/// punctuation, small kana, and the prolonged sound mark never start a row,
+/// and opening punctuation never ends one (CSS `line-break: strict`). A break
+/// that would violate kinsoku is dropped, so the character travels with its
+/// neighbour instead.
 #[derive(Clone, Copy)]
 struct BreakClass {
 	/// Wide grapheme that admits a break on either side.
@@ -1032,8 +1033,9 @@ const fn is_hangul(cp: u32) -> bool {
 	matches!(cp, 0x1100..=0x11ff | 0x3130..=0x318f | 0xa960..=0xa97f | 0xac00..=0xd7ff)
 }
 
-/// Closing punctuation, iteration marks, and middle dots that CJK line
-/// breaking never places at the start of a row.
+/// Closing punctuation, iteration marks, middle dots, small kana, and the
+/// prolonged sound mark (Unicode line-break classes CL, CP, EX, IS, NS, CJ)
+/// that CJK line breaking never places at the start of a row.
 const fn is_kinsoku_no_start(cp: u32) -> bool {
 	matches!(
 		cp,
@@ -1050,6 +1052,14 @@ const fn is_kinsoku_no_start(cp: u32) -> bool {
 		// ！ ） ， ． ： ； ？ ］ ｝ ｠ ｡ ｣ ､ ･
 		| 0xff01 | 0xff09 | 0xff0c | 0xff0e | 0xff1a | 0xff1b | 0xff1f | 0xff3d | 0xff5d | 0xff60
 		| 0xff61 | 0xff63 | 0xff64 | 0xff65
+		// ぁ ぃ ぅ ぇ ぉ っ ゃ ゅ ょ ゎ ゕ ゖ
+		| 0x3041 | 0x3043 | 0x3045 | 0x3047 | 0x3049 | 0x3063 | 0x3083 | 0x3085 | 0x3087 | 0x308e
+		| 0x3095 | 0x3096
+		// ァ ィ ゥ ェ ォ ッ ャ ュ ョ ヮ ヵ ヶ ー
+		| 0x30a1 | 0x30a3 | 0x30a5 | 0x30a7 | 0x30a9 | 0x30c3 | 0x30e3 | 0x30e5 | 0x30e7 | 0x30ee
+		| 0x30f5 | 0x30f6 | 0x30fc
+		// ㇰ..ㇿ (small katakana for Ainu), ｧ..ｯ ｰ (halfwidth small kana, prolonged mark)
+		| 0x31f0..=0x31ff | 0xff67..=0xff70
 	)
 }
 
@@ -2272,6 +2282,12 @@ mod tests {
 	#[test]
 	fn test_wrap_text_with_ansi_cjk_opening_punctuation_never_ends_row() {
 		assert_eq!(wrap("一二三四「五六」", 10), ["一二三四", "「五六」"]);
+	}
+
+	#[test]
+	fn test_wrap_text_with_ansi_small_kana_and_prolonged_mark_never_start_row() {
+		assert_eq!(wrap("一コード", 4), ["一", "コー", "ド"]);
+		assert_eq!(wrap("一二ちょ", 6), ["一二", "ちょ"]);
 	}
 
 	#[test]
