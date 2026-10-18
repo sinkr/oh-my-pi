@@ -404,7 +404,7 @@ describe("ChainJudge", () => {
 		expect(chat).not.toHaveBeenCalled();
 	});
 
-	it("uses vision chat when the image falls outside the native judge's size bounds", async () => {
+	it("fits an image outside the native judge's size bounds instead of falling back", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}` },
 			"retry.fallbackChains": { judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`] },
@@ -413,12 +413,18 @@ describe("ChainJudge", () => {
 			openrouter: "or-key",
 			[VISION_CHAT.provider]: "vision-key",
 		});
-		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));
-		const chat = vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {
-			const response = reply(model, "visible: yes");
-			options?.onAttempt?.(response);
-			return response;
-		});
+		let state: unknown;
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				state = JSON.parse(String(init?.body)).state;
+				return Response.json({
+					model: OPENROUTER_JEV.id,
+					answers: { visible: { type: "noul", noul: 0.75 } },
+					usage: { input_tokens: 8, output_tokens: 0 },
+				});
+			}),
+		);
+		const chat = vi.spyOn(ai, "completeSimple");
 
 		// IMAGE_ONE is 1x1, below Jev's 280 px minimum side, which Jev rejects rather than resizes.
 		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
@@ -427,9 +433,11 @@ describe("ChainJudge", () => {
 			images: [IMAGE_ONE],
 		});
 
-		expect(result.answers.visible.noul).toBe(1);
-		expect(native).not.toHaveBeenCalled();
-		expect(chat).toHaveBeenCalledTimes(1);
+		expect(result.answers.visible.noul).toBe(0.75);
+		expect(chat).not.toHaveBeenCalled();
+		const [, part] = state as [string, { image_url: { url: string } }];
+		const sent = await new Bun.Image(Buffer.from(part.image_url.url.split(",")[1], "base64")).metadata();
+		expect([sent.width, sent.height]).toEqual([280, 280]);
 	});
 
 	it("reports an explicit error when no candidate supports image judgments", async () => {

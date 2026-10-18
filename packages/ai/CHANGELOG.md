@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `nativeJudgmentImageBounds()`: the image bounds a native judge enforces, its wire's transport limits tightened by the catalog's model bounds
+
 ## [18.12.1] - 2026-10-17
 
 ### Fixed

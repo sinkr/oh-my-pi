@@ -25,6 +25,7 @@ import {
 	type ImageContent,
 	isJudgmentApi,
 	nativeJudgmentAcceptsImages,
+	nativeJudgmentImageBounds,
 	nativeJudgmentSupportsImages,
 	type Judge,
 	type JudgeOptions,
@@ -47,6 +48,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { normalizeModelContextImages } from "../utils/image-loading";
+import { fitImage } from "../utils/image-resize";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -251,17 +253,38 @@ function textJudgeRoleChain(chain: RoleChainCandidate[]): RoleChainCandidate[] {
 
 /**
  * Filter candidates that cannot take `images` before applying the native-only tail policy. A native
- * judge is checked against its dialect's documented bounds, which it never resizes to fit; prompted
- * chat models normalize images per model, so their image support alone decides.
+ * judge gets each image fitted into its bounds ({@link fitNativeImages}), so only its image support and
+ * count cap decide; prompted chat models normalize images per model, so their image support alone decides.
  */
 function imageJudgeRoleChain(chain: RoleChainCandidate[], images: readonly ImageContent[]): RoleChainCandidate[] {
 	return textJudgeRoleChain(
-		chain.filter(candidate =>
-			kindOf(candidate) === "native"
-				? nativeJudgmentAcceptsImages(candidate.model, images)
-				: supportsImageJudgment(candidate.model),
-		),
+		chain.filter(candidate => {
+			if (kindOf(candidate) !== "native") return supportsImageJudgment(candidate.model);
+			const bounds = nativeJudgmentImageBounds(candidate.model);
+			return bounds !== undefined && images.length <= (bounds.maxCount ?? images.length);
+		}),
 	);
+}
+
+/**
+ * `images` sized into `model`'s native judgment bounds, which the API enforces by rejecting rather than
+ * resizing: an image already within them is sent as is, any other goes through {@link fitImage}. A
+ * request-wide byte cap is split evenly so the fitted set also fits as a whole.
+ */
+async function fitNativeImages(model: Model, images: readonly ImageContent[]): Promise<ImageContent[]> {
+	const bounds = nativeJudgmentImageBounds(model);
+	if (!bounds) return [...images];
+	const maxBytes = Math.min(
+		bounds.maxBytes ?? Infinity,
+		Math.floor((bounds.maxTotalBytes ?? Infinity) / images.length),
+	);
+	const fitted: ImageContent[] = [];
+	// Sequential on purpose: each fit decodes and re-encodes a whole image.
+	for (const image of images) {
+		const within = nativeJudgmentAcceptsImages(model, [image]) && Buffer.byteLength(image.data, "base64") <= maxBytes;
+		fitted.push(within ? image : await fitImage(image, { ...bounds, maxBytes }));
+	}
+	return fitted;
 }
 
 function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
@@ -316,8 +339,11 @@ export class ChainJudge implements Judge {
 		}
 		return this.#withCandidate(
 			async (candidateJudge, kind, model) => {
-				if (kind !== "online" || requestImages.length === 0) return candidateJudge.judge(request, options);
-				const images = (await normalizeModelContextImages([...requestImages], { model })) ?? [];
+				if (kind === "local" || requestImages.length === 0) return candidateJudge.judge(request, options);
+				const images =
+					kind === "native"
+						? await fitNativeImages(model, requestImages)
+						: ((await normalizeModelContextImages([...requestImages], { model })) ?? []);
 				const signal = options.signal;
 				if (signal?.aborted) {
 					const reason = signal.reason;

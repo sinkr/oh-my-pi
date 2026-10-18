@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as zlib from "node:zlib";
 import { decodePng } from "@oh-my-pi/pi-coding-agent/tools/browser/screenshot";
 import {
+	fitImage,
 	formatDimensionNote,
 	formatScreenshot,
 	type ResizedImage,
@@ -418,6 +419,68 @@ describe("resizeImage minimum dimension", () => {
 		expect(meta.width).toBe(1568);
 		expect(meta.height).toBe(139);
 		expect(formatDimensionNote(result)).toContain("Multiply coordinates by 0.44");
+	});
+});
+
+describe("fitImage", () => {
+	// TypeSafe Jev's documented bounds.
+	const JEV = { minSide: 280, maxSide: 1568, minPixels: 78_400, maxPixels: 2_458_624, maxBytes: 16 * 1024 * 1024 };
+
+	async function size(data: string): Promise<[number, number]> {
+		const { width, height } = await new Bun.Image(Buffer.from(data, "base64")).metadata();
+		return [width, height];
+	}
+
+	it("downscales past the max side keeping the aspect ratio", async () => {
+		const result = await fitImage({ type: "image", data: await makeRedPng(2000, 1000), mimeType: "image/png" }, JEV);
+
+		expect(await size(result.data)).toEqual([1568, 784]);
+		expect(result.mimeType).toBe("image/png");
+	});
+
+	it("upscales a tiny image to the min side", async () => {
+		const result = await fitImage({ type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" }, JEV);
+
+		expect(await size(result.data)).toEqual([280, 280]);
+	});
+
+	it("pads a strip the max side stops short of the min with its top-left pixel, content centered", async () => {
+		// 401x41 red strip with a blue top-left pixel: scaling stops at 1568x160, padding makes 1568x280.
+		const pixels = new Uint8Array(401 * 41 * 4);
+		for (let i = 0; i < pixels.length; i += 4) pixels.set([255, 0, 0, 255], i);
+		pixels.set([0, 0, 255, 255], 0);
+		const strip = encodeRawPng(pixels, 401, 41, 4).toBase64();
+
+		const result = await fitImage({ type: "image", data: strip, mimeType: "image/png" }, JEV);
+
+		const { width, height, pixels: out } = decodePng(Buffer.from(result.data, "base64"));
+		expect([width, height]).toEqual([1568, 280]);
+		const pixel = (x: number, y: number) => [...out.subarray((y * width + x) * 4, (y * width + x) * 4 + 4)];
+		expect(pixel(784, 0)).toEqual([0, 0, 255, 255]);
+		expect(pixel(784, 279)).toEqual([0, 0, 255, 255]);
+		expect(pixel(784, 140)).toEqual([255, 0, 0, 255]);
+	});
+
+	it("falls back to JPEG when the PNG exceeds the byte cap", async () => {
+		const noise = makeNoisePng(400, 400);
+		const maxBytes = noise.length / 2;
+
+		const result = await fitImage(
+			{ type: "image", data: noise.toBase64(), mimeType: "image/png" },
+			{ ...JEV, maxBytes },
+		);
+
+		expect(result.mimeType).toBe("image/jpeg");
+		expect(Buffer.byteLength(result.data, "base64")).toBeLessThanOrEqual(maxBytes);
+		expect(await size(result.data)).toEqual([400, 400]);
+	});
+
+	it("throws when no encoding fits the byte cap", async () => {
+		const noise = makeNoisePng(400, 400);
+
+		await expect(
+			fitImage({ type: "image", data: noise.toBase64(), mimeType: "image/png" }, { ...JEV, maxBytes: 64 }),
+		).rejects.toThrow("no encoding fits 64 bytes");
 	});
 });
 
