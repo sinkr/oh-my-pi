@@ -848,27 +848,53 @@ describe("StdinBuffer", () => {
 			expect(buffer.getBuffer()).toBe("");
 		});
 
-		it("drops an abandoned string head at the first typed key, even one its payload allows", () => {
-			// A truncated reply must not swallow typing: a terminal writes string
-			// payload in bulk, so a read holding a single key is the user typing.
+		it("keeps a one-byte read inside the packet when chunking splits the payload", () => {
+			// SSH/tmux chunking does not follow terminal writes: a lone payload
+			// byte arriving right after the head is still part of the packet.
+			vi.useFakeTimers();
 			processInput(head);
+			processInput("I");
+			processInput("HdvcmxkIQ==\x1b\\");
+			expect(emittedSequences).toEqual([`${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it("replays keys typed into a stalled head once a control key abandons it", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
 			processInput("h");
+			vi.advanceTimersByTime(200);
 			processInput("i");
-			expect(emittedSequences).toEqual(["h", "i"]);
+			processInput("\r");
+			expect(emittedSequences).toEqual(["h", "i", "\r"]);
 			expect(buffer.getBuffer()).toBe("");
 		});
 
-		it("keeps legacy Alt+] usable without the kitty keyboard protocol", () => {
+		it("abandons a head without terminal progress and replays the keys typed into it", () => {
 			vi.useFakeTimers();
-			processInput("\x1b]");
-			processInput("x");
-			expect(emittedSequences).toEqual(["\x1b]", "x"]);
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput("h");
+			processInput("i");
+			vi.advanceTimersByTime(4000);
+			expect(emittedSequences).toEqual([]);
 
-			// Alt+] and a key batched into one read is not an OSC reply (those
-			// open with a numeric command), so the key timer still recovers it.
+			vi.advanceTimersByTime(1000);
+			expect(emittedSequences).toEqual(["h", "i"]);
+			expect(buffer.getBuffer()).toBe("");
+
+			// The terminal's late tail still completes the packet, not typed.
+			processInput("IHdvcmxkIQ==\x1b\\");
+			expect(emittedSequences).toEqual(["h", "i", `${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it("keeps legacy Alt+] plus a key on the key timer without the kitty keyboard protocol", () => {
+			// Terminal OSC replies open with a numeric command, so `\x1b]a` is a
+			// legacy Alt+] chord batched with a key, not a string to wait on.
+			vi.useFakeTimers();
 			processInput("\x1b]a");
 			vi.advanceTimersByTime(100);
-			expect(emittedSequences).toEqual(["\x1b]", "x", "\x1b]a"]);
+			expect(emittedSequences).toEqual(["\x1b]a"]);
 			expect(buffer.getBuffer()).toBe("");
 		});
 	});

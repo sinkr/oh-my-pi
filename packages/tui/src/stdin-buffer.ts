@@ -69,6 +69,10 @@ const STRING_DISCARD_MAX_BYTES = 2 * MAX_STRING_SEQ_BYTES;
 const STRING_DISCARD_INACTIVITY_MS = 1000;
 // Partial that can only be the head of an OSC/DCS/APC string sequence.
 const STRING_SEQ_PARTIAL = /^\x1b[\]P_]/;
+// A pending string head is abandoned after this long without terminal-shaped
+// progress. Generous: a slow clipboard owner or SSH link may stall a packet
+// for a while, and abandoning a live packet types nothing but loses it.
+const STRING_ABANDON_MS = 5000;
 
 // SGR mouse report bodies live between `<` and the terminating `M`/`m`.
 // Matched only when the trailing byte is a valid terminator, so the regex
@@ -273,10 +277,18 @@ function parseUnmodifiedKittyPrintableCodepoint(sequence: string): number | unde
 function extractCompleteSequences(
 	buffer: string,
 	resumeSearchFrom: number,
-): { sequences: string[]; remainder: string; resumeSearchFrom: number; discardFrom?: number } {
+): {
+	sequences: string[];
+	remainder: string;
+	resumeSearchFrom: number;
+	discardFrom?: number;
+	/** The buffered string head at offset 0 was abandoned (see `resolveStringEnd`). */
+	abortedHead?: boolean;
+} {
 	const sequences: string[] = [];
 	const length = buffer.length;
 	let pos = 0;
+	let abortedHead = false;
 
 	// Index-based scanning: this is the input hot path. Slicing the remaining
 	// buffer (or Array.from-ing it) per iteration would make plain-text bursts
@@ -310,7 +322,7 @@ function extractCompleteSequences(
 				//   window so cases 1/2 can still arrive; if no follower
 				//   arrives, `flush()` splits the held remainder into two ESC
 				//   events (#3857).
-				return { sequences, remainder: buffer.slice(pos), resumeSearchFrom: 0 };
+				return { sequences, remainder: buffer.slice(pos), resumeSearchFrom: 0, abortedHead };
 			}
 			const third = buffer.charCodeAt(pos + 2);
 			if (third !== 0x5b && third !== 0x4f) {
@@ -329,7 +341,7 @@ function extractCompleteSequences(
 			//   text (settings search filling with "[B" or "[<35;22;17M").
 			const innerEnd = resolveEscapeEnd(buffer, pos + 1, length, 0);
 			if (innerEnd === -1) {
-				return { sequences, remainder: buffer.slice(pos), resumeSearchFrom: 0 };
+				return { sequences, remainder: buffer.slice(pos), resumeSearchFrom: 0, abortedHead };
 			}
 			if (innerEnd === -2) {
 				// `third` is CSI/SS3 here, never a string type.
@@ -361,6 +373,7 @@ function extractCompleteSequences(
 		if (end <= STRING_ABORTED) {
 			// The terminal abandoned this string: drop the head (protocol
 			// data, never keys) and parse the interrupting byte normally.
+			if (pos === 0) abortedHead = true;
 			pos = STRING_ABORTED - end;
 			hint = 0;
 			continue;
@@ -371,7 +384,7 @@ function extractCompleteSequences(
 			// resumes from there instead of rescanning the whole buffer.
 			const next = pos + 1 < length ? buffer.charCodeAt(pos + 1) : -1;
 			const nextHint = pos === 0 && (next === 0x5d || next === 0x50 || next === 0x5f) ? length : 0;
-			return { sequences, remainder: buffer.slice(pos), resumeSearchFrom: nextHint };
+			return { sequences, remainder: buffer.slice(pos), resumeSearchFrom: nextHint, abortedHead };
 		}
 		if (end === -2) {
 			const next = buffer.charCodeAt(pos + 1);
@@ -393,7 +406,7 @@ function extractCompleteSequences(
 		hint = 0;
 	}
 
-	return { sequences, remainder: "", resumeSearchFrom: 0 };
+	return { sequences, remainder: "", resumeSearchFrom: 0, abortedHead };
 }
 
 export type StdinBufferOptions = {
@@ -477,6 +490,17 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	#stringDiscardBytes = 0;
 	#stringDiscardEscHeld = false;
 	#stringDiscardWatchdog?: NodeJS.Timeout;
+	// Pending string head bookkeeping (see `#trackStringRead`): when the head
+	// last made terminal-shaped progress (0 = no head tracked), keys typed
+	// while it stalled, and the abandonment timer.
+	#stringProgressMs = 0;
+	#stringTypedKeys: string[] = [];
+	// Buffer offset of each typed key, parallel to `#stringTypedKeys`.
+	#stringTypedAt: number[] = [];
+	#stringAbandonTimer?: NodeJS.Timeout;
+	// An abandoned string head, kept so a late terminal-shaped tail still
+	// completes it instead of being typed (see `#resumeDormantString`).
+	#dormantString: string | undefined;
 
 	constructor(options: StdinBufferOptions = {}) {
 		super();
@@ -516,24 +540,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			str = this.#consumeStringDiscard(str);
 			if (str.length === 0) return;
 		}
-		if (
-			STRING_SEQ_PARTIAL.test(this.#buffer) &&
-			!this.#buffer.endsWith(ESC) &&
-			str !== ESC &&
-			str !== "\x07" &&
-			str.length === (str.codePointAt(0)! > 0xffff ? 2 : 1)
-		) {
-			// A terminal writes a string sequence in bulk; a read holding one key
-			// is typing, so the pending head was abandoned (or is a legacy
-			// Alt+]/Alt+P/Alt+_ chord). Deliver the chord, drop protocol data,
-			// and let the key parse normally. ESC and BEL may still terminate it.
-			const head = this.#buffer;
-			this.#buffer = "";
-			this.#escapeSearchOffset = 0;
-			this.#partialHoldStartMs = 0;
-			this.#clearFlushTimer();
-			if (head.length === 2) this.#emitDataSequence(head);
-		}
+		if (this.#dormantString !== undefined && this.#buffer.length === 0) this.#resumeDormantString(str);
+		if (this.#bufferIsStringHead()) this.#trackStringRead(str);
 
 		if (this.#flushDeferral && this.#isFreshEscapeAfterDeferredFlush(str)) {
 			// The buffered partial already hit its flush timeout. A new escape is
@@ -590,6 +598,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
 		const startIndex = this.#buffer.indexOf(BRACKETED_PASTE_START);
 		if (startIndex !== -1) {
+			// Keys typed while a string head stalled precede the paste.
+			for (const key of this.#takeStringTypedKeys()) this.#emitDataSequence(key);
 			if (startIndex > 0) {
 				const beforePaste = this.#buffer.slice(0, startIndex);
 				const result = extractCompleteSequences(beforePaste, 0);
@@ -616,6 +626,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			const junk = this.#buffer.slice(result.discardFrom);
 			this.#buffer = "";
 			this.#escapeSearchOffset = 0;
+			this.#takeStringTypedKeys();
 			for (const sequence of result.sequences) {
 				this.#emitDataSequence(sequence);
 			}
@@ -627,16 +638,27 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#buffer = result.remainder;
 		this.#escapeSearchOffset = result.resumeSearchFrom;
 
+		// An abandoned string head hands back the keys typed while it stalled;
+		// they precede the byte that aborted it.
+		if (result.abortedHead) {
+			for (const key of this.#takeStringTypedKeys()) this.#emitDataSequence(key);
+		}
 		for (const sequence of result.sequences) {
 			this.#emitDataSequence(sequence);
 		}
 
-		// A string head waits for its terminator or an aborting byte, never a
-		// timer (`resolveStringEnd`); every other partial gets the flush window.
-		if (this.#buffer.length > 0 && !this.#bufferIsStringHead()) {
-			this.#armFlushTimer();
-		} else {
+		// A string head waits for its terminator, an aborting byte, or the
+		// abandonment bound (`#trackStringRead`), never the key flush window.
+		if (this.#bufferIsStringHead()) {
+			if (this.#stringProgressMs === 0) {
+				this.#dormantString = undefined;
+				this.#noteStringProgress();
+			}
 			this.#partialHoldStartMs = 0;
+		} else {
+			this.#takeStringTypedKeys();
+			if (this.#buffer.length > 0) this.#armFlushTimer();
+			else this.#partialHoldStartMs = 0;
 		}
 	}
 
@@ -878,6 +900,81 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		return buffer.charCodeAt(1) !== 0x5d /* ] */ || (command >= 0x30 && command <= 0x39);
 	}
 
+	/**
+	 * Classify a read arriving while a string head is pending. Chunk boundaries
+	 * do not follow terminal writes (SSH, tmux), so no read is ever torn out of
+	 * the string: every byte stays payload until the terminator completes it or
+	 * an impossible byte aborts it. But a lone printable key arriving after the
+	 * flush window passed without progress is probably the user typing; it is
+	 * remembered so that, if the head is then abandoned (aborting byte or
+	 * {@link STRING_ABANDON_MS} without terminal-shaped progress), the keys are
+	 * replayed instead of lost. A head that completes keeps them as payload.
+	 */
+	#trackStringRead(str: string): void {
+		const code = str.codePointAt(0)!;
+		const loneKey = str.length === (code > 0xffff ? 2 : 1);
+		if (!loneKey || Date.now() - this.#stringProgressMs < this.#timeoutMs) {
+			this.#noteStringProgress();
+		} else if (code >= 0x20 && code !== 0x7f) {
+			this.#stringTypedKeys.push(str);
+			this.#stringTypedAt.push(this.#buffer.length);
+		}
+	}
+
+	#noteStringProgress(): void {
+		this.#stringProgressMs = Date.now();
+		clearTimeout(this.#stringAbandonTimer);
+		this.#stringAbandonTimer = setTimeout(() => {
+			this.#stringAbandonTimer = undefined;
+			if (!this.#bufferIsStringHead()) return;
+			// The replayed keys are not payload: cut them from the dormant head
+			// so a late tail completes the packet the terminal actually sent.
+			let dormant = this.#buffer;
+			for (let i = this.#stringTypedAt.length - 1; i >= 0; i--) {
+				const at = this.#stringTypedAt[i]!;
+				dormant = dormant.slice(0, at) + dormant.slice(at + this.#stringTypedKeys[i]!.length);
+			}
+			this.#dormantString = dormant;
+			this.#buffer = "";
+			this.#escapeSearchOffset = 0;
+			for (const key of this.#takeStringTypedKeys()) this.#emitDataSequence(key);
+		}, STRING_ABANDON_MS);
+	}
+
+	/** End string head tracking; returns the keys typed while it stalled. */
+	#takeStringTypedKeys(): string[] {
+		if (this.#stringProgressMs === 0) return [];
+		const keys = this.#stringTypedKeys;
+		this.#stringTypedKeys = [];
+		this.#stringTypedAt = [];
+		this.#stringProgressMs = 0;
+		clearTimeout(this.#stringAbandonTimer);
+		this.#stringAbandonTimer = undefined;
+		return keys;
+	}
+
+	/**
+	 * Re-attach a late tail to an abandoned string head. A multi-byte read
+	 * that continues the head's grammar (strict base64 for OSC 5522) is the
+	 * terminal's delayed payload, so the head resumes and the tail completes
+	 * it rather than being typed. Lone printable keys pass through as typing
+	 * and keep the head dormant; anything else means input moved on.
+	 */
+	#resumeDormantString(str: string): void {
+		const head = this.#dormantString!;
+		const code = str.codePointAt(0)!;
+		if (str.length === (code > 0xffff ? 2 : 1)) {
+			if (code < 0x20 || code === 0x7f) this.#dormantString = undefined;
+			return;
+		}
+		this.#dormantString = undefined;
+		const candidate = head + str;
+		const end = resolveStringEnd(candidate, 0, candidate.length, head.length, head.charCodeAt(1) === 0x5d);
+		if (end <= STRING_ABORTED) return;
+		this.#buffer = head;
+		this.#escapeSearchOffset = head.length;
+	}
+
 	/** Timeout-driven flush: hold unambiguous partials (bounded), else deliver. */
 	#flushExpired(): void {
 		if (this.#buffer.length === 0) {
@@ -1004,6 +1101,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#clearPasteWatchdog();
 		this.#clearRawPasteTimer();
 		this.#exitStringDiscard();
+		this.#takeStringTypedKeys();
+		this.#dormantString = undefined;
 		this.#buffer = "";
 		this.#rawPasteCandidate = "";
 		this.#pasteMode = false;
