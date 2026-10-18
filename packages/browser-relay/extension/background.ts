@@ -81,49 +81,82 @@ async function ensureBrowserSession(): Promise<string> {
 	return created;
 }
 
-/** Orphan tab ids, with the browser session they belong to, in `chrome.storage.local`. */
+/** Orphan tabs, with the browser session they belong to, in `chrome.storage.local`. */
 const ORPHAN_TABS_KEY = "relayOrphanTabs";
-/** Serializes edits of the stored orphan-tab list, so concurrent passes do not overwrite each other's changes. */
-let orphanEdits: Promise<number[]> = Promise.resolve([]);
 
-/** Apply `edit` to this browser session's stored orphan-tab ids; resolves with the list as stored. */
-function editOrphanTabs(edit: (ids: number[]) => number[]): Promise<number[]> {
+/** A tab created for an RPC whose relay connection was gone, with the URLs it was opened at (requested, reported). */
+interface OrphanTab {
+	id: number;
+	urls: string[];
+}
+
+function isOrphanTab(value: unknown): value is OrphanTab {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"id" in value &&
+		typeof value.id === "number" &&
+		"urls" in value &&
+		Array.isArray(value.urls) &&
+		value.urls.every(url => typeof url === "string")
+	);
+}
+
+/** Serializes edits of the stored orphan-tab list, so concurrent passes do not overwrite each other's changes. */
+let orphanEdits: Promise<OrphanTab[]> = Promise.resolve([]);
+
+/** Apply `edit` to this browser session's stored orphan tabs; resolves with the list as stored. */
+function editOrphanTabs(edit: (tabs: OrphanTab[]) => OrphanTab[]): Promise<OrphanTab[]> {
 	orphanEdits = orphanEdits
 		.catch(() => [])
 		.then(async () => {
 			const session = await ensureBrowserSession();
 			const stored = (await chrome.storage.local.get({ [ORPHAN_TABS_KEY]: null }))[ORPHAN_TABS_KEY];
-			// Ids saved in an earlier browser session may name other tabs now.
+			// Tabs saved in an earlier browser session may have ids that name other tabs now.
 			const current =
 				typeof stored === "object" && stored !== null && "session" in stored && stored.session === session;
-			const listed = current && "ids" in stored && Array.isArray(stored.ids) ? stored.ids : [];
-			const before = listed.filter((id): id is number => typeof id === "number");
-			const ids = edit(before);
-			if (ids.length !== before.length || ids.some((id, i) => id !== before[i])) {
-				await chrome.storage.local.set({ [ORPHAN_TABS_KEY]: { session, ids } });
+			const listed = current && "tabs" in stored && Array.isArray(stored.tabs) ? stored.tabs : [];
+			const before = listed.filter(isOrphanTab);
+			const tabs = edit(before);
+			if (tabs.length !== before.length || tabs.some((tab, i) => tab !== before[i])) {
+				await chrome.storage.local.set({ [ORPHAN_TABS_KEY]: { session, tabs } });
 			}
-			return ids;
+			return tabs;
 		});
 	return orphanEdits;
 }
 
+/** Whether tab `orphan.id` is still the tab omp created: same id and URL (the id alone could be reused). */
+async function isStillOrphan(orphan: OrphanTab): Promise<boolean> {
+	try {
+		const tab = await chrome.tabs.get(orphan.id);
+		return [tab.url, tab.pendingUrl].some(url => url !== undefined && url !== "" && orphan.urls.includes(url));
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Close tabs created for RPCs whose relay connection was gone. Each is kept in `chrome.storage.local`, which
- * outlives service-worker restarts and extension reloads, until Chrome confirms its close, and tried again on the
- * next connect and keepalive; `added` is stored before any close is tried.
+ * outlives service-worker restarts and extension reloads, until Chrome confirms its close or the tab is gone or
+ * shows another URL, and tried again on the next connect and keepalive; `added` is stored before any close is tried.
  */
-async function closeOrphanTabs(added?: number): Promise<void> {
+async function closeOrphanTabs(added?: OrphanTab): Promise<void> {
 	try {
-		const ids = await editOrphanTabs(ids => (added === undefined || ids.includes(added) ? ids : [...ids, added]));
-		for (const id of ids) {
-			const closed = await removeTab(id).then(
-				() => true,
-				() => false,
-			);
-			if (closed) await editOrphanTabs(list => list.filter(other => other !== id));
+		const tabs = await editOrphanTabs(tabs =>
+			added === undefined || tabs.some(tab => tab.id === added.id) ? tabs : [...tabs, added],
+		);
+		for (const orphan of tabs) {
+			const done = (await isStillOrphan(orphan))
+				? await removeTab(orphan.id).then(
+						() => true,
+						() => false,
+					)
+				: true;
+			if (done) await editOrphanTabs(list => list.filter(tab => tab.id !== orphan.id));
 		}
 	} catch {
-		// Storage unavailable: the ids stay as stored for the next pass.
+		// Storage unavailable: the tabs stay as stored for the next pass.
 	}
 }
 
@@ -225,16 +258,18 @@ async function restoreGroups(): Promise<void> {
 	}
 }
 
-/** The socket each in-flight RPC came in on, and its op, by RPC id (unique across relay processes). */
-const rpcOrigins = new Map<number, { socket: WebSocket; op: string }>();
+/** The socket each in-flight RPC came in on, its op, and a `createTab`'s URL, by RPC id (unique across relays). */
+const rpcOrigins = new Map<number, { socket: WebSocket; op: string; url?: string }>();
 
 function trackOrigin(msg: RelayToExtMessage, origin: WebSocket): RelayToExtMessage {
-	if (msg.t === "rpc") rpcOrigins.set(msg.id, { socket: origin, op: msg.op });
+	if (msg.t === "rpc") {
+		rpcOrigins.set(msg.id, { socket: origin, op: msg.op, url: msg.op === "createTab" ? msg.url : undefined });
+	}
 	return msg;
 }
 
 /** A `createTab` result: the tab Chrome opened. */
-function isCreatedTab(result: unknown): result is { tab: { tabId: number } } {
+function isCreatedTab(result: unknown): result is { tab: TabSnapshot } {
 	return typeof result === "object" && result !== null && "tab" in result;
 }
 
@@ -249,7 +284,8 @@ function post(msg: ExtToRelayMessage): void {
 		rpcOrigins.delete(msg.id);
 		if (origin && (origin.socket !== ws || origin.socket.readyState !== WebSocket.OPEN)) {
 			if (origin.op === "createTab" && msg.ok && isCreatedTab(msg.result)) {
-				void closeOrphanTabs(msg.result.tab.tabId);
+				const urls = [origin.url, msg.result.tab.url].filter((url): url is string => !!url);
+				void closeOrphanTabs({ id: msg.result.tab.tabId, urls });
 			}
 			return;
 		}

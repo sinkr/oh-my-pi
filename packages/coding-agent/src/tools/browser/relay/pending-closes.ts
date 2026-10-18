@@ -25,7 +25,9 @@ export function fileCloseStore(
 				if (!Array.isArray(parsed)) return [];
 				return parsed.filter(
 					(entry): entry is RelayPendingClose =>
-						typeof entry?.key === "string" && typeof entry?.instanceId === "string",
+						typeof entry?.key === "string" &&
+						typeof entry?.instanceId === "string" &&
+						typeof entry?.url === "string",
 				);
 			} catch {
 				return [];

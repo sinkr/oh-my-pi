@@ -253,12 +253,13 @@ const CHROME_DETACH_REPORT_MS = 1_000;
 const OFFLINE_BROWSER_HOLD_MS = 60_000;
 
 /**
- * A tab close waiting for its browser's extension. The key's instance code names the browser session, so a close
- * meant for a browser that restarted since is never applied to a tab that reused its id.
+ * A tab close waiting for its browser's extension. The key's instance code names the browser session, and the
+ * tab must still show `url`, so a close is never applied to another tab that reused the id.
  */
 export interface RelayPendingClose {
 	key: string;
 	instanceId: string;
+	url: string;
 }
 
 /** Where {@link RelayBridge.keepPendingClosesIn} keeps pending closes between relay processes. */
@@ -292,10 +293,11 @@ export class RelayBridge {
 	/** Instance ids by hello, the most recent last. */
 	#helloOrder = new Set<string>();
 	/**
-	 * Tabs omp opened whose close failed (see {@link #closeTab}), by tab key: closed at their browser's next hello
-	 * unless that browser restarted since. `durable` closes (from an extension naming its session) are saved.
+	 * Tabs omp opened whose close failed (see {@link #closeTab}), by tab key, with the URL the tab showed: closed at
+	 * their browser's next hello unless that browser restarted since or the tab shows another URL. `durable` closes
+	 * (from an extension naming its session) are saved.
 	 */
-	#closeOnHello = new Map<string, { instanceId: string; durable: boolean }>();
+	#closeOnHello = new Map<string, { instanceId: string; url: string; durable: boolean }>();
 	/** Where pending closes outlive this relay process; see {@link keepPendingClosesIn}. */
 	#pendingCloseStore: RelayPendingCloseStore | null = null;
 	/** `Date.now()` when the last ready extension socket closed; null while one is ready or none ever was. */
@@ -615,7 +617,7 @@ export class RelayBridge {
 		for (const [key, pending] of this.#closeOnHello) {
 			if (pending.instanceId !== instanceId) continue;
 			const closed = this.#tabs.get(key);
-			if (!closed || !key.startsWith(`${inst.code}:`)) {
+			if (!closed || !key.startsWith(`${inst.code}:`) || closed.url !== pending.url) {
 				this.#closeOnHello.delete(key);
 				dropped = true;
 				continue;
@@ -1839,7 +1841,8 @@ export class RelayBridge {
 		if (tab) tab.closing = true;
 		// Recorded before the extension is asked, so a relay stopped while it answers leaves the close to the next.
 		if (!this.#closeOnHello.has(key)) {
-			this.#closeOnHello.set(key, { instanceId: inst.instanceId, durable: inst.browserSession !== undefined });
+			const durable = inst.browserSession !== undefined;
+			this.#closeOnHello.set(key, { instanceId: inst.instanceId, url: tab?.url ?? "", durable });
 			this.#savePendingCloses();
 		}
 		try {
@@ -1860,8 +1863,8 @@ export class RelayBridge {
 	 */
 	keepPendingClosesIn(store: RelayPendingCloseStore): void {
 		this.#pendingCloseStore = store;
-		for (const { key, instanceId } of store.load()) {
-			if (!this.#closeOnHello.has(key)) this.#closeOnHello.set(key, { instanceId, durable: true });
+		for (const { key, instanceId, url } of store.load()) {
+			if (!this.#closeOnHello.has(key)) this.#closeOnHello.set(key, { instanceId, url, durable: true });
 		}
 	}
 
@@ -1869,8 +1872,8 @@ export class RelayBridge {
 		const store = this.#pendingCloseStore;
 		if (!store) return;
 		const kept: RelayPendingClose[] = [];
-		for (const [key, { instanceId, durable }] of this.#closeOnHello) {
-			if (durable) kept.push({ key, instanceId });
+		for (const [key, { instanceId, url, durable }] of this.#closeOnHello) {
+			if (durable) kept.push({ key, instanceId, url });
 		}
 		store.save(kept);
 	}

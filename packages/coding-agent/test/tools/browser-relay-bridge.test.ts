@@ -1695,7 +1695,9 @@ describe("RelayBridge pending closes across relay processes", () => {
 
 	it("closes a tab an earlier relay could not once the browser reconnects in the same session, keeping it until confirmed", async () => {
 		const kept = await closeWhileOffline();
-		expect(kept).toEqual([{ key: `${instanceCode("chrome", "session-1")}:7`, instanceId: "chrome" }]);
+		expect(kept).toEqual([
+			{ key: `${instanceCode("chrome", "session-1")}:7`, instanceId: "chrome", url: "https://example.com/" },
+		]);
 		// A new relay process loads what the stopped one kept.
 		let left: RelayPendingClose[] = kept;
 		const bridge = new RelayBridge({});
@@ -1721,6 +1723,18 @@ describe("RelayBridge pending closes across relay processes", () => {
 		expect(left).toEqual([]);
 	});
 
+	it("drops a kept close whose tab now shows another page, even in the same browser session", async () => {
+		// An extension disabled across a Chrome restart keeps its session id, and tab 7 is a restored user tab.
+		const kept = await closeWhileOffline();
+		let left: RelayPendingClose[] = kept;
+		const bridge = new RelayBridge({});
+		bridge.keepPendingClosesIn({ load: () => kept, save: closes => (left = closes) });
+		const chrome = new FakeExtSocket();
+		helloIn(bridge, chrome, "session-1", [tab({ tabId: 7, url: "https://mail.example/" })]);
+		expect(chrome.rpcs("removeTab")).toHaveLength(0);
+		expect(left).toEqual([]);
+	});
+
 	it("keeps a close while the extension has not answered it, so a relay stopping meanwhile leaves it to the next", async () => {
 		let kept: RelayPendingClose[] = [];
 		const bridge = new RelayBridge({});
@@ -1738,7 +1752,9 @@ describe("RelayBridge pending closes across relay processes", () => {
 		);
 		await flush();
 		expect(chrome.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([7]);
-		expect(kept).toEqual([{ key: `${instanceCode("chrome", "session-1")}:7`, instanceId: "chrome" }]);
+		expect(kept).toEqual([
+			{ key: `${instanceCode("chrome", "session-1")}:7`, instanceId: "chrome", url: "https://example.com/" },
+		]);
 		ack(bridge, chrome, "removeTab");
 		await flush();
 		expect(kept).toEqual([]);
