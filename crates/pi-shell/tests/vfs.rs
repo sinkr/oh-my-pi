@@ -53,16 +53,33 @@ impl FileSystem for DelayedFilesystem {
 
 	async fn backing_path(&self, path: &Path) -> io::Result<Option<PathBuf>> {
 		delay().await;
+		let Some(spelled) = path.to_str().filter(|path| path.starts_with("virtual://")) else {
+			// A scheme this provider does not serve aliases nothing.
+			return Ok(None);
+		};
 		// `virtual://rendered/…` stands in for a scheme that aliases no file
 		// (`omp://`, `history://`): the provider serves it, but there is
 		// nothing for the operating system to open.
-		if path
-			.to_str()
-			.is_some_and(|path| path.starts_with("virtual://rendered"))
-		{
+		if spelled.starts_with("virtual://rendered") {
 			return Ok(None);
 		}
 		self.path(path).map(Some)
+	}
+
+	/// `virtual://frozen/…` stands in for an immutable file-backed scheme
+	/// (`skill://`, `artifact://`): readable, but refusing every mutation.
+	async fn access(&self, path: &Path, read: bool, write: bool, execute: bool) -> io::Result<()> {
+		delay().await;
+		if write
+			&& path
+				.to_str()
+				.is_some_and(|path| path.starts_with("virtual://frozen"))
+		{
+			return Err(pi_vfs::read_only_filesystem());
+		}
+		Fs::native()
+			.access(self.path(path)?, read, write, execute)
+			.await
 	}
 
 	async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<File> {
@@ -311,7 +328,8 @@ async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 /// An external program cannot open a provider URL, so one it is handed must
 /// name the file that URL aliases, in the bare spelling and in the
 /// attached-value spelling a tool's own flags use. A scheme the filesystem
-/// does not route is not a path and must reach the child as written.
+/// does not route is not a path and must reach the child as written, as must a
+/// bare scheme root, which is far likelier a search pattern than a directory.
 #[tokio::test]
 async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
@@ -322,11 +340,12 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	let mut shell = virtual_shell(directory.path()).await;
 	let parameters = capture_parameters(&shell, &output, &error);
 	#[cfg(unix)]
-	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs'"#;
+	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3" "$4" "$5"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs' virtual:// --root=virtual://"#;
 	#[cfg(windows)]
 	let script = "cmd.exe /c echo virtual://docs/a.txt && cmd.exe /c echo \
 	              --data-dir=virtual://docs && cmd.exe /c echo https://example.com/a.txt && \
-	              cmd.exe /c echo 'https://example.com/?next=virtual://docs'";
+	              cmd.exe /c echo 'https://example.com/?next=virtual://docs' && cmd.exe /c \
+	              echo virtual:// && cmd.exe /c echo --root=virtual://";
 	let result = shell
 		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
 		.await
@@ -352,6 +371,38 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 		stdout.contains("https://example.com/?next=virtual://docs"),
 		"a url embedded in a query string was rewritten: {stdout}"
 	);
+	let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+	assert!(
+		lines.contains(&"virtual://") && lines.contains(&"--root=virtual://"),
+		"a bare scheme root was rewritten: {stdout}"
+	);
+}
+
+/// A URL the provider cannot resolve fails the command with the provider's
+/// reason instead of reaching the child, which could only fail on it later
+/// with no hint why.
+#[tokio::test]
+async fn external_commands_refuse_url_arguments_the_provider_rejects() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let script = "/bin/sh -c 'printf ran' virtual://../escape";
+	#[cfg(windows)]
+	let script = "cmd.exe /c echo ran virtual://../escape";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
+		.await
+		.expect("external command with a rejected url argument");
+	assert_ne!(u8::from(result.exit_code), 0, "a rejected url reached the child");
+	assert!(!captured_text(&output).contains("ran"), "the child ran: {}", captured_text(&output));
+	assert!(
+		captured_text(&error).contains("outside mount"),
+		"the provider's reason was lost: {}",
+		captured_text(&error)
+	);
 }
 
 /// A provider directory that aliases a real one is a usable working directory
@@ -363,6 +414,7 @@ async fn external_commands_start_in_backed_working_directories_only() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
 	fs::create_dir(directory.path().join("docs")).expect("provider directory");
 	fs::create_dir(directory.path().join("rendered")).expect("unbacked directory");
+	fs::create_dir(directory.path().join("frozen")).expect("read-only directory");
 	let output = tempfile::tempfile().expect("captured stdout");
 	let error = tempfile::tempfile().expect("captured stderr");
 	let mut shell = virtual_shell(directory.path()).await;
@@ -398,6 +450,25 @@ async fn external_commands_start_in_backed_working_directories_only() {
 	assert_ne!(u8::from(result.exit_code), 0, "an unbacked directory hosted a child process");
 	assert!(
 		captured_text(&error).contains("virtual working directory"),
+		"unexpected failure: {}",
+		captured_text(&error)
+	);
+
+	// A child may write anywhere under its working directory, so a directory
+	// the shell refuses to mutate is no working directory for one either.
+	let error = tempfile::tempfile().expect("captured stderr");
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let frozen = "cd virtual://frozen && /bin/sh -c 'exit 0'";
+	#[cfg(windows)]
+	let frozen = "cd virtual://frozen && cmd.exe /c exit 0";
+	let result = shell
+		.run_string(frozen, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in a read-only working directory");
+	assert_ne!(u8::from(result.exit_code), 0, "a read-only directory hosted a child process");
+	assert!(
+		captured_text(&error).contains("read-only working directory"),
 		"unexpected failure: {}",
 		captured_text(&error)
 	);

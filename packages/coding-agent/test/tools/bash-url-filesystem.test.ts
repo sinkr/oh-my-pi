@@ -82,13 +82,43 @@ describe("bash internal URLs through the shell filesystem", () => {
 		await fs.mkdir(path.join(localRoot, "index"), { recursive: true });
 
 		const { text, isError } = await run(
-			`'${process.execPath}' '${script}' local://data.txt --index=local://index https://example.com/a.txt`,
+			`'${process.execPath}' '${script}' local://data.txt --index=local://index https://example.com/a.txt 'local://'`,
 		);
 
 		expect(isError).toBeUndefined();
 		expect(text).toContain(path.join(localRoot, "data.txt"));
 		expect(text).toContain(`--index=${path.join(localRoot, "index")}`);
 		expect(text).toContain("https://example.com/a.txt");
+		// A bare scheme root is search-pattern text far more often than a directory.
+		expect(text.split("\n")).toContain("local://");
+	});
+
+	it("runs a skill's script by URL but refuses the read-only skill directory as a working directory", async () => {
+		const skillDir = path.join(tempDir, "skills", "demo");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "---\nname: demo\n---\n");
+		await fs.writeFile(path.join(skillDir, "tool.js"), "console.log('tool-ran');\n");
+		session = {
+			...session,
+			skills: [{ name: "demo", baseDir: skillDir, filePath: path.join(skillDir, "SKILL.md") }],
+		} as unknown as ToolSession;
+
+		const ran = await run(`'${process.execPath}' skill://demo/tool.js`);
+		expect(ran.isError).toBeUndefined();
+		expect(ran.text).toContain("tool-ran");
+
+		// The child could write anywhere under its working directory; skill:// refuses mutation.
+		const refused = await run(`'${process.execPath}' tool.js`, "skill://demo");
+		expect(refused.isError).toBe(true);
+		expect(refused.text).toContain("read-only working directory");
+	});
+
+	it("fails the command when a URL argument names nothing the provider knows", async () => {
+		const { text, isError } = await run(`'${process.execPath}' -e "console.log('ran')" skill://nope/tool.js`);
+
+		expect(isError).toBe(true);
+		expect(text).not.toContain("ran\n");
+		expect(text).toContain("Unknown skill: nope");
 	});
 
 	it("starts an external program in the directory a URL working directory aliases", async () => {
