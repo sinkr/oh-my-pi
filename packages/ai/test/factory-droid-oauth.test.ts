@@ -391,3 +391,101 @@ describe("Factory Droid OAuth", () => {
 		expect(credentials.orgId).toBeUndefined();
 	});
 });
+
+describe("Factory Droid organization lookup", () => {
+	const unscoped = makeJwt({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + 3600 });
+	const scoped = makeJwt({ sub: "user_1", external_org_id: "factory-org", exp: Math.floor(Date.now() / 1000) + 3600 });
+
+	/** WorkOS hands out an org-scoped bearer only when the grant names a WorkOS organization. */
+	function factoryBackend(workosOrgIds: string[]) {
+		const calls: Array<{ url: string; body: string; authorization?: string; factoryOrg?: string }> = [];
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const url = String(input);
+			const headers = new Headers(init?.headers);
+			const body = String(init?.body ?? "");
+			calls.push({
+				url,
+				body,
+				authorization: headers.get("authorization") ?? undefined,
+				factoryOrg: headers.get("x-factory-org-id") ?? undefined,
+			});
+			if (url.endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (url.endsWith("/api/cli/org")) return jsonResponse(200, { workosOrgIds });
+			if (url.endsWith("/api/cli/whoami")) {
+				return headers.get("authorization") === `Bearer ${scoped}`
+					? jsonResponse(200, { orgId: "factory-org", region: "eu" })
+					: jsonResponse(401, { detail: "User not affiliated with an organization" });
+			}
+			const organization = new URLSearchParams(body).get("organization_id");
+			return organization
+				? jsonResponse(200, {
+						access_token: scoped,
+						refresh_token: "refresh-scoped",
+						organization_id: organization,
+					})
+				: jsonResponse(200, { access_token: unscoped, refresh_token: "refresh-unscoped" });
+		};
+		return { calls, fetchImpl };
+	}
+
+	async function withGlobalFetch<T>(fetchImpl: FetchImpl, run: () => Promise<T>): Promise<T> {
+		const spy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign((input: string | URL | Request, init?: RequestInit) => fetchImpl(input, init), {
+				preconnect: fetch.preconnect,
+			}),
+		);
+		try {
+			return await run();
+		} finally {
+			spy.mockRestore();
+		}
+	}
+
+	it("scopes an org-less login to the account's WorkOS organization", async () => {
+		const { calls, fetchImpl } = factoryBackend(["org_workos"]);
+		const credentials = await withGlobalFetch(fetchImpl, () => loginViaRegistry({ fetch: fetchImpl }));
+
+		const lookup = calls.find(call => call.url.endsWith("/api/cli/org"));
+		expect(lookup?.authorization).toBe(`Bearer ${unscoped}`);
+		const grant = calls.find(call => new URLSearchParams(call.body).get("grant_type") === "refresh_token");
+		expect(new URLSearchParams(grant?.body).get("refresh_token")).toBe("refresh-unscoped");
+		expect(new URLSearchParams(grant?.body).get("organization_id")).toBe("org_workos");
+		expect(credentials).toMatchObject({
+			access: scoped,
+			refresh: "refresh-scoped",
+			orgId: "factory-org",
+			activeOrganizationId: "org_workos",
+			region: "eu",
+		});
+		// The WorkOS id scopes the grant only; Factory requests carry the Factory org.
+		expect(calls.some(call => call.factoryOrg === "org_workos")).toBe(false);
+	});
+
+	it("scopes an org-less refresh to the account's WorkOS organization", async () => {
+		const { calls, fetchImpl } = factoryBackend(["org_workos"]);
+		const credentials = await refreshViaRegistry("refresh-old", fetchImpl);
+
+		expect(calls.filter(call => call.url.endsWith("/api/cli/org"))).toHaveLength(1);
+		expect(credentials).toMatchObject({ access: scoped, orgId: "factory-org", activeOrganizationId: "org_workos" });
+	});
+
+	it("keeps the organization error when the account has no organization", async () => {
+		const { calls, fetchImpl } = factoryBackend([]);
+		await expect(withGlobalFetch(fetchImpl, () => loginViaRegistry({ fetch: fetchImpl }))).rejects.toThrow(
+			/Factory identity check failed \(401\).*User not affiliated with an organization/,
+		);
+		expect(calls.some(call => call.url.endsWith("/api/cli/org"))).toBe(true);
+		expect(calls.some(call => new URLSearchParams(call.body).get("grant_type") === "refresh_token")).toBe(false);
+	});
+
+	it("does not look up the organization when the token already carries one", async () => {
+		const { calls, fetchImpl } = factoryBackend(["org_workos"]);
+		const credentials = await refreshViaRegistry("refresh-old", async (input, init) =>
+			String(input).endsWith("/authenticate")
+				? jsonResponse(200, { access_token: scoped, refresh_token: "refresh-scoped" })
+				: fetchImpl(input, init),
+		);
+		expect(credentials.orgId).toBe("factory-org");
+		expect(calls.some(call => call.url.endsWith("/api/cli/org"))).toBe(false);
+	});
+});
