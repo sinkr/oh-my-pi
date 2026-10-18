@@ -1866,25 +1866,40 @@ enum Stroke {
 }
 
 /// Posts a drag along `path` (at least two points): the press at its start,
-/// one dragged event per later point, and the release. The release is posted
-/// whatever happens before it, at the last point attempted, since a failed
-/// post may still have been delivered.
+/// one dragged event per later point, and the release; returns whether the
+/// drag picked up an item. The release is posted whatever happens before it,
+/// at the last point attempted, since a failed post may still have been
+/// delivered. Before each later point, `picked_up` says whether the source
+/// has begun a drag-and-drop session; the stroke then goes no further, but
+/// back to its start, and is released there ([`drag_session_outcome`]).
 fn stroke_path(
 	path: &[CGPoint],
+	mut picked_up: impl FnMut() -> bool,
 	mut post: impl FnMut(Stroke, CGPoint) -> CoreResult<()>,
-) -> CoreResult<()> {
+) -> CoreResult<bool> {
 	let mut last = path[0];
+	let mut session = false;
 	let result = (|| {
 		post(Stroke::Down, last)?;
 		for &at in &path[1..] {
 			control::wait(DRAG_STEP_GAP)?;
+			if picked_up() {
+				session = true;
+				return Ok(());
+			}
 			last = at;
 			post(Stroke::Dragged, at)?;
 		}
 		control::wait(DRAG_RELEASE_GAP)
 	})();
-	let release = control::cleanup(|| post(Stroke::Up, last));
-	skylight::after_cleanup(result, release)
+	let release = control::cleanup(|| {
+		if session && (last.x, last.y) != (path[0].x, path[0].y) {
+			last = path[0];
+			post(Stroke::Dragged, last)?;
+		}
+		post(Stroke::Up, last)
+	});
+	skylight::after_cleanup(result, release).map(|()| session)
 }
 
 /// A background drag along `path` (global points, at least two) for window
@@ -1908,6 +1923,7 @@ fn background_drag(
 	let flags = held_flags(keys);
 	let group = click_group_id();
 	let sessions = drag_pasteboard_count();
+	let mut picked_up = false;
 	let pointer = |event: &CGEvent, at: CGPoint, click_state, button_number| {
 		route_window_pointer(pid, wid, window, event, at.x, at.y, click_state, button_number, group)?;
 		post(Posted::Pointer, pid, event)
@@ -1925,23 +1941,49 @@ fn background_drag(
 				0,
 			)?;
 			control::wait(Duration::from_millis(12))?;
-			stroke_path(path, |stroke, at| {
-				let event_type = match stroke {
-					Stroke::Down => down,
-					Stroke::Dragged => dragged,
-					Stroke::Up => up,
-				};
-				let event = mouse_event(source, event_type, at, cg_button)?;
-				event.set_flags(flags);
-				pointer(&event, at, 1, number)
-			})
+			stroke_path(
+				path,
+				|| drag_pasteboard_count() != sessions,
+				|stroke, at| {
+					let event_type = match stroke {
+						Stroke::Down => down,
+						Stroke::Dragged => dragged,
+						Stroke::Up => up,
+					};
+					let event = mouse_event(source, event_type, at, cg_button)?;
+					event.set_flags(flags);
+					pointer(&event, at, 1, number)
+				},
+			)
+			.map(|session| picked_up = session)
 		},
 	)?;
+	if picked_up {
+		return Err(picked_up_refusal(window));
+	}
 	// An accessibility round trip, which the target answers from its run loop
 	// once it has handled the events posted before it.
 	drag_session_outcome(window, sessions, drag_pasteboard_count, || {
 		ax::reports_active(pid);
 	})
+}
+
+/// [`background_drag`]'s error for a drag whose source began a drag-and-drop
+/// session during the stroke: macOS completes such a session from the user's
+/// real pointer as well as from the routed events, and on macOS 26.5 a Finder
+/// file followed a user's moving pointer into their own Finder window or onto
+/// the Desktop (3/3 each). The stroke stops as soon as the session begins and
+/// is released where it started, over the item's own place, so the item
+/// drops back on its source rather than wherever the user's pointer is.
+fn picked_up_refusal(window: &DesktopWindow) -> DesktopError {
+	DesktopError::input_failed(format!(
+		"the drag reached window {} ({}) and picked up an item for drag and drop, which macOS \
+		 completes from the user's real pointer, so it was taken back to where it started and \
+		 released there instead of being carried along the path. Read the target before retrying: \
+		 the press and the start of the drag were delivered. Move the item with the app's menu \
+		 command or ax actions, or drag with takeover:true",
+		window.id, window.app,
+	))
 }
 
 /// Change count of the drag pasteboard, which a drag source clears and
@@ -1965,8 +2007,10 @@ fn drag_pasteboard_count() -> isize {
 /// outcome is unknown rather than failed: it throws `InputFailed` saying the
 /// drop could not be confirmed, so the caller reads the target before
 /// retrying, and it is not rerun in takeover, which would repeat a drop that
-/// did land. Escape posted to the source did not cancel the drop, and releasing
-/// early would only drop the item short of the path's end. A drag inside a
+/// did land. Escape posted to the source did not cancel the drop. A session
+/// noticed during the stroke ends it early ([`picked_up_refusal`]); this
+/// covers one the source begins only as it handles the last events. A drag
+/// inside a
 /// view (a slider, a text selection, a web page's mouse-driven drag) leaves
 /// the count alone.
 ///
@@ -4684,14 +4728,18 @@ mod tests {
 		let path = [CGPoint::new(1.0, 1.0), CGPoint::new(5.0, 5.0), CGPoint::new(9.0, 9.0)];
 		let run = |fail_on: Option<(Stroke, f64)>| {
 			let mut posted = Vec::new();
-			let result = stroke_path(&path, |stroke, at| {
-				posted.push((stroke, at.x));
-				if fail_on == Some((stroke, at.x)) {
-					Err(DesktopError::input_failed("delivery may be partial"))
-				} else {
-					Ok(())
-				}
-			});
+			let result = stroke_path(
+				&path,
+				|| false,
+				|stroke, at| {
+					posted.push((stroke, at.x));
+					if fail_on == Some((stroke, at.x)) {
+						Err(DesktopError::input_failed("delivery may be partial"))
+					} else {
+						Ok(())
+					}
+				},
+			);
 			(result.is_ok(), posted)
 		};
 		use Stroke::{Down, Dragged, Up};
@@ -4700,6 +4748,34 @@ mod tests {
 		assert_eq!(run(Some((Down, 1.0))), (false, vec![(Down, 1.0), (Up, 1.0)]));
 		// The release goes where the failed move may have taken the target.
 		assert_eq!(run(Some((Dragged, 5.0))), (false, vec![(Down, 1.0), (Dragged, 5.0), (Up, 5.0)]));
+	}
+
+	#[test]
+	fn a_drag_that_picks_up_an_item_goes_back_to_its_start_and_is_released_there() {
+		use Stroke::{Down, Dragged, Up};
+		let path = [
+			CGPoint::new(1.0, 1.0),
+			CGPoint::new(5.0, 5.0),
+			CGPoint::new(9.0, 9.0),
+			CGPoint::new(13.0, 13.0),
+		];
+		// The source begins a drag-and-drop session while it handles the move
+		// to 5: carried on, the item would drop wherever the user's pointer is.
+		let checks = std::cell::Cell::new(0);
+		let picked_up = || {
+			checks.set(checks.get() + 1);
+			checks.get() > 1
+		};
+		let mut posted = Vec::new();
+		let session = stroke_path(&path, picked_up, |stroke, at| {
+			posted.push((stroke, at.x));
+			Ok(())
+		});
+		assert!(session.expect("stroked"));
+		assert_eq!(posted, [(Down, 1.0), (Dragged, 5.0), (Dragged, 1.0), (Up, 1.0)]);
+		let error = picked_up_refusal(&background_window("Finder"));
+		assert_eq!(error.code.as_str(), "InputFailed");
+		assert!(error.message.contains("released there"), "{}", error.message);
 	}
 
 	#[test]
