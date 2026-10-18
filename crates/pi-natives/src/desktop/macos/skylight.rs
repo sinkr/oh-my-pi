@@ -736,18 +736,16 @@ impl BackgroundFocusLease {
 		}
 	}
 
-	/// Whether, after a restore, the target is in front again at the end of
-	/// the action without the user having switched to it.
-	fn reactivated(
+	/// Whether an app the action brought forward is in front at the end of the
+	/// action without the user having switched to it: it came back after a
+	/// hand-back, or macOS refused every hand-back while the user typed.
+	fn left_in_front(
 		&mut self,
-		restored: bool,
 		front: ProcessSerialNumber,
 		signals: SwitchSignals,
 		now: Instant,
 	) -> bool {
-		restored
-			&& front == self.target
-			&& self.observe(front, None, signals, now) == FocusDecision::Restore
+		front != self.previous && self.observe(front, None, signals, now) == FocusDecision::Restore
 	}
 }
 
@@ -973,7 +971,6 @@ fn guard_focus(
 	desktop: &impl GuardedDesktop,
 	visit: &AtomicBool,
 ) -> CoreResult<()> {
-	let mut restored = false;
 	loop {
 		// Once disarmed, nothing is sent back any more, but the lease keeps
 		// watching for the user coming to the target.
@@ -1010,18 +1007,16 @@ fn guard_focus(
 						},
 						|since| desktop.hand_back(since),
 					)?;
-					// Otherwise the re-check observed instead (a disarm it recorded
-					// stops the hand-backs from the next poll), or `WindowServer`
-					// refused.
-					if handed_back == Some(FrontRequest::Done) {
-						restored = true;
-						if let Some(key) = lease.key
-							&& !desktop.restore_key(key)
-						{
-							return Err(DesktopError::input_failed(
-								"background key-window restoration was rejected",
-							));
-						}
+					// A hand-back puts the user's key window back too. Otherwise the
+					// re-check observed instead (a disarm it recorded stops the
+					// hand-backs from the next poll), or `WindowServer` refused.
+					if handed_back == Some(FrontRequest::Done)
+						&& let Some(key) = lease.key
+						&& !desktop.restore_key(key)
+					{
+						return Err(DesktopError::input_failed(
+							"background key-window restoration was rejected",
+						));
 					}
 				}
 			},
@@ -1031,11 +1026,13 @@ fn guard_focus(
 			let now = desktop.now();
 			if desktop
 				.front()
-				.is_some_and(|front| lease.reactivated(restored, front, desktop.signals(now), now))
+				.is_some_and(|front| lease.left_in_front(front, desktop.signals(now), now))
 			{
 				return Err(DesktopError::input_failed(
-					"the background target reactivated after focus restoration; input may already have \
-					 landed; inspect the desktop and use takeover:true or ax actions",
+					"an application the background action brought forward is still in front: it came \
+					 back after focus restoration or macOS refused to send it back while the user \
+					 typed; input may already have landed there; inspect the desktop and use \
+					 takeover:true or ax actions",
 				));
 			}
 			return Ok(());
@@ -1952,17 +1949,18 @@ mod tests {
 	}
 
 	#[test]
-	fn the_target_back_in_front_at_the_end_is_an_error_only_without_a_user_switch() {
+	fn an_app_the_action_left_in_front_at_the_end_is_an_error_only_without_a_user_switch() {
 		let t0 = Instant::now();
 		let idle = input(0, NO_MODIFIERS);
-		// It reactivated itself after the restore: input may have landed there.
-		assert!(lease_at(t0, None).reactivated(true, TARGET, idle, t0 + ms(10)));
+		// The target, or a third app the action opened something in, is in
+		// front: input may have landed there.
+		assert!(lease_at(t0, None).left_in_front(TARGET, idle, t0 + ms(10)));
+		assert!(lease_at(t0, None).left_in_front(THIRD, idle, t0 + ms(10)));
 		// The user switched to it just as the action ended.
-		assert!(!lease_at(t0, None).reactivated(true, TARGET, input(0, COMMAND), t0 + ms(10)));
-		assert!(!lease_at(t0, None).reactivated(true, TARGET, keyboard_in(THIRD), t0 + ms(10)));
-		// Nothing was restored, or another app is in front.
-		assert!(!lease_at(t0, None).reactivated(false, TARGET, idle, t0 + ms(10)));
-		assert!(!lease_at(t0, None).reactivated(true, THIRD, idle, t0 + ms(10)));
+		assert!(!lease_at(t0, None).left_in_front(TARGET, input(0, COMMAND), t0 + ms(10)));
+		assert!(!lease_at(t0, None).left_in_front(TARGET, keyboard_in(THIRD), t0 + ms(10)));
+		// The user's app is in front.
+		assert!(!lease_at(t0, None).left_in_front(PREVIOUS, idle, t0 + ms(10)));
 	}
 
 	#[test]
@@ -2143,6 +2141,33 @@ mod tests {
 			let (front, hand_backs, keys, visited) = run(choice);
 			assert!(front == TARGET, "the target the user chose stays in front");
 			assert_eq!((hand_backs, keys, visited), (1, vec![], true));
+		}
+	}
+
+	#[test]
+	fn an_app_never_handed_back_before_the_action_ends_fails_it() {
+		// The target, or a third app the action opened something in, came
+		// forward on the action's last poll, and `WindowServer` refused the
+		// hand-back for the user's typing: it keeps the user's keystrokes.
+		let t0 = Instant::now();
+		for brought in [TARGET, THIRD] {
+			let desktop = FakeDesktop {
+				clock:       Cell::new(t0 + ms(20)),
+				end:         t0 + ms(20),
+				front:       Cell::new(brought),
+				signals:     Cell::new(input(0, NO_MODIFIERS)),
+				refused_for: Cell::new(Some(input(0, SHIFT))),
+				hand_backs:  Cell::new(0),
+				keys:        std::cell::RefCell::default(),
+			};
+			let result = guard_focus(&mut lease_at(t0, None), &desktop, &AtomicBool::new(false));
+			assert_eq!(desktop.hand_backs.get(), 1, "the guard asked once");
+			assert_eq!(
+				result.expect_err("the app is still in front").code,
+				ErrorCode::InputFailed,
+				"process {}",
+				brought.low
+			);
 		}
 	}
 
