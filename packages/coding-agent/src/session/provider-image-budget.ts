@@ -10,7 +10,7 @@ import type {
 	ToolResultProviderMetadata,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { reachesOfficialEndpoint } from "@oh-my-pi/pi-ai";
+import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -145,7 +145,7 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
  */
 export function clampProviderContextImageBytes(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const byteBudget = resolveInlineImageByteBudget(model, reachesOfficialEndpoint(model));
+	const byteBudget = resolveInlineImageByteBudget(model, reachesBudgetedHost(model));
 	if (byteBudget === undefined) return context;
 	let inlineBytes = 0;
 	for (const message of context.messages) {

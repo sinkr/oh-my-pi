@@ -1,4 +1,5 @@
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isFactoryDroidHostedBaseUrl } from "@oh-my-pi/pi-catalog/wire/factory-droid";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Api, Model, ProviderSessionState } from "../types";
 import { isFoundryEnabled } from "../utils/foundry";
@@ -30,14 +31,23 @@ export function resolveDirectAnthropicBaseUrl(model: Model<Api>): string {
 /**
  * Whether a request to `model` reaches the official endpoint its compat was built for. `compat.officialEndpoint`
  * classifies the configured `baseUrl`, but a first-party Anthropic model is rerouted at request time by
- * `ANTHROPIC_BASE_URL` or Foundry's `FOUNDRY_BASE_URL` without rebuilding compat. Gates official-only host
- * limits such as the catalog's inline image byte and image count budgets.
+ * `ANTHROPIC_BASE_URL` or Foundry's `FOUNDRY_BASE_URL` without rebuilding compat.
  */
 export function reachesOfficialEndpoint(model: Model<Api>): boolean {
 	const compat = model.compat;
 	if (!compat || !("officialEndpoint" in compat) || !compat.officialEndpoint) return false;
 	if (model.provider !== "anthropic" || model.api !== "anthropic-messages") return true;
 	return isOfficialAnthropicApiUrl(resolveDirectAnthropicBaseUrl(model));
+}
+
+/**
+ * Whether the catalog's host request budgets (inline image bytes, official image count) apply to a request to
+ * `model`: it reaches the official endpoint ({@link reachesOfficialEndpoint}), or it is a Factory Droid model
+ * served by Factory's own hosted API, whose limits the `factory-droid` rules describe. A custom gateway keeps its own.
+ */
+export function reachesBudgetedHost(model: Model<Api>): boolean {
+	if (model.api === "factory-droid-agent") return isFactoryDroidHostedBaseUrl(model.baseUrl);
+	return reachesOfficialEndpoint(model);
 }
 
 /** Build the endpoint-and-model-scoped Anthropic session-state key. */

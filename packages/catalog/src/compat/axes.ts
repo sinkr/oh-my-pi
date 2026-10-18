@@ -477,7 +477,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-count-budget": { key: "imageCountBudget", set: "catalog", shape: "scalar" },
 	/**
 	 * Replaces `image-count-budget` while the request reaches the official
-	 * endpoint (pi-ai `reachesOfficialEndpoint`): a limit measured or documented
+	 * endpoint (pi-ai `reachesBudgetedHost`): a limit measured or documented
 	 * for the host's own endpoint, which a custom `baseUrl` or an
 	 * `ANTHROPIC_BASE_URL`/`FOUNDRY_BASE_URL` reroute (proxy, gateway) need not share.
 	 */

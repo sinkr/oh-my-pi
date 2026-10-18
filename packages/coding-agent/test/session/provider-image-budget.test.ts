@@ -3,6 +3,7 @@ import type { Context, ImageContent, ModelSpec, TextContent } from "@oh-my-pi/pi
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { factoryDroidWireBaseUrl } from "@oh-my-pi/pi-catalog/wire/factory-droid";
 import { decorateContextImages } from "@oh-my-pi/pi-coding-agent/blob-broker/context-images";
 import {
 	capArchiveFrameBytes,
@@ -62,6 +63,23 @@ const XAI_OAUTH_MODEL = getBundledModel("xai-oauth", "grok-4.7");
 const CURSOR_CLAUDE_MODEL = getBundledModel("cursor", "claude-opus-5-high");
 const CURSOR_GPT_MODEL = getBundledModel("cursor", "gpt-5.5");
 const CURSOR_DEFAULT_MODEL = getBundledModel("cursor", "default");
+
+function factoryDroidModel(baseUrl: string) {
+	return buildModel({
+		id: "claude-haiku-4-5-20251001",
+		name: "Haiku 4.5",
+		api: "factory-droid-agent",
+		provider: "factory-droid",
+		baseUrl,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 64_000,
+	});
+}
+// Factory's hosted HTTP routes refuse request bodies over 4,500,000 bytes (HTTP 413).
+const FACTORY_DROID_ROUTE_BODY_LIMIT = 4_500_000;
 // A base64 character occupies one byte in Anthropic's JSON request body.
 const HALF_ANTHROPIC_IMAGE_BUDGET = "A".repeat(12_000_000);
 
@@ -370,6 +388,39 @@ describe("provider context image budgets", () => {
 		expect(clamped.messages.slice(18).every(message => message.content.length === 2)).toBe(true);
 		expect(textData(clamped)).toEqual(Array.from({ length: 62 }, (_, index) => `result-${index}`));
 		expect(imageData(context)).toHaveLength(62);
+	});
+
+	it("keeps a Factory-hosted request's inline images under the route body limit, but not a custom gateway's", () => {
+		const screenshot = "A".repeat(600_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 10 }, (_, index) => ({
+				role: "toolResult",
+				toolCallId: `call-${index}`,
+				toolName: "screenshot",
+				content: [text(`result-${index}`), image(screenshot)],
+				isError: false,
+				timestamp: index,
+			})),
+		};
+		expect(JSON.stringify(context).length).toBeGreaterThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		for (const hosted of [
+			factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global")),
+			factoryDroidModel(factoryDroidWireBaseUrl("openai-responses", "eu")),
+		]) {
+			const clamped = clampProviderContextImageBytes(context, hosted);
+			const kept = imageData(clamped);
+			expect(kept.length).toBeGreaterThan(0);
+			expect(kept.length).toBeLessThan(10);
+			// Oldest screenshots go first; the newest results keep theirs.
+			expect(clamped.messages.at(-1)?.content).toHaveLength(2);
+			expect(clamped.messages[0].content).toHaveLength(1);
+			expect(textData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `result-${index}`));
+			expect(JSON.stringify(clamped).length).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		}
+		const gateway = factoryDroidModel("https://factory-gateway.example.com/api/llm/a");
+		expect(clampProviderContextImageBytes(context, gateway)).toBe(context);
 	});
 
 	it("removes an oversized single tool image but keeps its tool result meaningful", () => {
