@@ -31,6 +31,62 @@ async function lookupWorkOSOrganization(
 	}
 }
 
+/**
+ * Read `/api/cli/whoami` for `identity`'s bearer. A login that whoami leaves
+ * without an organization comes back with the error to report.
+ */
+async function readWhoami(
+	identity: OAuthCredentials,
+	context: ExchangeContext,
+	signal: AbortSignal,
+): Promise<{ identity: OAuthCredentials; failure?: AIError.OAuthError }> {
+	const unresolved = () =>
+		context.phase === "login" && !identity.orgId
+			? new AIError.OAuthError("Factory login did not resolve an organization", {
+					kind: "validation",
+					provider: context.provider,
+				})
+			: undefined;
+	try {
+		const response = await context.fetch(`${factoryDroidApiBaseUrl(identity.region)}/api/cli/whoami`, {
+			headers: {
+				Authorization: `Bearer ${identity.access}`,
+				Accept: "application/json",
+				...(identity.orgId ? { "X-Factory-Org-Id": identity.orgId } : {}),
+			},
+			signal,
+		});
+		if (!response.ok && context.phase === "login") {
+			const failure = new AIError.OAuthError(
+				`Factory identity check failed (${response.status}): ${await response.text()}`,
+				{ kind: "validation", provider: context.provider, status: response.status },
+			);
+			return { identity, failure };
+		}
+		if (response.ok) {
+			const body: unknown = await response.json();
+			if (isRecord(body)) {
+				const orgId = typeof body.orgId === "string" && body.orgId ? body.orgId : identity.orgId;
+				// A different organization must not inherit the stored scope.
+				const carried = !orgId || !identity.orgId || orgId === identity.orgId ? identity : undefined;
+				const region = body.region === "eu" || body.region === "global" ? body.region : carried?.region;
+				const inferenceRegion =
+					body.inferenceRegion === "global" || body.inferenceRegion === "eu" || body.inferenceRegion === "us"
+						? body.inferenceRegion
+						: resolveFactoryDroidInferenceRegion({ region, inferenceRegion: carried?.inferenceRegion });
+				const resolved = { ...identity, orgId, region, inferenceRegion };
+				return { identity: resolved, failure: orgId ? undefined : unresolved() };
+			}
+		}
+	} catch (error) {
+		if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
+		if (context.phase === "login") throw error;
+		// Preserve identity only when this is still the same selected organization.
+	}
+	if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
+	return { identity, failure: unresolved() };
+}
+
 /** Resolve canonical Factory identity; residency chooses the host, inference scope chooses eligible routes. */
 export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, context) => {
 	if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
@@ -58,81 +114,27 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 	};
 	const timeout = AbortSignal.timeout(15_000);
 	const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
-	// Factory rejects a bearer without an org claim, so scope the grant to the
-	// account's WorkOS organization first. The refresh re-enters this hook with
-	// that organization selected, which ends the lookup.
-	if (!credentials.orgId) {
+	const whoami = await readWhoami(identity, context, signal);
+	// Factory rejects a bearer without an org claim. When no WorkOS organization
+	// is selected yet, scope the grant to the account's one. The scoped refresh
+	// re-enters this hook with that organization selected, so it never repeats.
+	if (!whoami.identity.orgId && !selectedOrg) {
 		const workosOrg = await lookupWorkOSOrganization(credentials, identity.region, context, signal);
-		if (workosOrg && workosOrg !== context.stored?.activeOrganizationId) {
-			let scoped: OAuthCredentials | undefined;
+		if (workosOrg) {
 			try {
-				scoped = await refreshOAuthToken(
+				const scoped = await refreshOAuthToken(
 					"factory-droid",
 					{ ...identity, activeOrganizationId: workosOrg },
 					context.signal,
 				);
+				// The scoped grant rotated the refresh token, so a refresh keeps it either way.
+				if (scoped.orgId || context.phase === "refresh") return scoped;
 			} catch {
-				// Fall through: the identity check below reports why the bearer is unusable.
+				// Fall through: the identity check reports why the bearer is unusable.
 				if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
 			}
-			if (scoped) {
-				if (context.phase === "login" && !scoped.orgId) {
-					throw new AIError.OAuthError("Factory login did not resolve an organization", {
-						kind: "validation",
-						provider: context.provider,
-					});
-				}
-				return scoped;
-			}
 		}
 	}
-	try {
-		const response = await context.fetch(`${factoryDroidApiBaseUrl(identity.region)}/api/cli/whoami`, {
-			headers: {
-				Authorization: `Bearer ${credentials.access}`,
-				Accept: "application/json",
-				...(identity.orgId ? { "X-Factory-Org-Id": identity.orgId } : {}),
-			},
-			signal,
-		});
-		if (!response.ok && context.phase === "login") {
-			throw new AIError.OAuthError(`Factory identity check failed (${response.status}): ${await response.text()}`, {
-				kind: "validation",
-				provider: context.provider,
-				status: response.status,
-			});
-		}
-		if (response.ok) {
-			const body: unknown = await response.json();
-			if (isRecord(body)) {
-				const orgId = typeof body.orgId === "string" && body.orgId ? body.orgId : identity.orgId;
-				if (context.phase === "login" && !orgId) {
-					throw new AIError.OAuthError("Factory login did not resolve an organization", {
-						kind: "validation",
-						provider: context.provider,
-					});
-				}
-				// A different organization must not inherit the stored scope.
-				const carried = !orgId || !identity.orgId || orgId === identity.orgId ? identity : undefined;
-				const region = body.region === "eu" || body.region === "global" ? body.region : carried?.region;
-				const inferenceRegion =
-					body.inferenceRegion === "global" || body.inferenceRegion === "eu" || body.inferenceRegion === "us"
-						? body.inferenceRegion
-						: resolveFactoryDroidInferenceRegion({ region, inferenceRegion: carried?.inferenceRegion });
-				return { ...identity, orgId, region, inferenceRegion };
-			}
-		}
-	} catch (error) {
-		if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
-		if (context.phase === "login") throw error;
-		// Preserve identity only when this is still the same selected organization.
-	}
-	if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
-	if (context.phase === "login" && !identity.orgId) {
-		throw new AIError.OAuthError("Factory login did not resolve an organization", {
-			kind: "validation",
-			provider: context.provider,
-		});
-	}
-	return identity;
+	if (whoami.failure) throw whoami.failure;
+	return whoami.identity;
 };
