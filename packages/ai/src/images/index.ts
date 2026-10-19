@@ -1,5 +1,6 @@
 import { type Api, IMAGE_GENERATION_APIS, type ImageGenerationApi, type Model } from "@oh-my-pi/pi-catalog/types";
 import * as AIError from "../error";
+import { isFactoryDroidModel } from "../providers/factory-droid";
 import { generateFactoryDroidImage } from "./factory-droid";
 import { generateAntigravityImage } from "./google-antigravity";
 import { generateGoogleImage } from "./google-generative-ai";
@@ -29,6 +30,7 @@ export async function generateImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
+	if (isFactoryDroidModel(model)) return generateFactoryDroidImage(model, request, options);
 	switch (model.api) {
 		case "openai-images":
 			return generateOpenAIImage(model, request, options);
@@ -41,8 +43,6 @@ export async function generateImage(
 		case "openai-responses":
 		case "openai-codex-responses":
 			return generateHostedImage(model, request, options);
-		case "factory-droid-agent":
-			return generateFactoryDroidImage(model as Model<"factory-droid-agent">, request, options);
 		default:
 			throw new AIError.ValidationError(`Image generation does not support model API ${model.api}`);
 	}

@@ -619,13 +619,15 @@ export function factoryDroidImageRoute(
 	model: Model<"factory-droid-agent">,
 	token: string,
 	sessionId: string | undefined,
+	/** Account identity of the credential serving this attempt; host, org and upstream follow it. */
+	identity: OAuthRequestIdentity | undefined,
 ): FactoryDroidImageRoute {
 	const registry = resolveFactoryDroidPolicy(model);
 	const wire = registry?.wire;
 	if (!registry?.image || (wire !== "openai-responses" && wire !== "google-generate")) {
 		throw new AIError.ValidationError(`Factory Droid ${model.id} is not an image generation model`);
 	}
-	const scope = scopeToAccount(model, registry, wire, undefined, token);
+	const scope = scopeToAccount(model, registry, wire, identity, token);
 	const requestId = crypto.randomUUID();
 	return {
 		wire,
@@ -640,6 +642,11 @@ export function factoryDroidImageRoute(
 		}),
 		identity: DROID_SYSTEM_PREFIX,
 	};
+}
+
+/** Whether a catalog model runs on the Factory Droid transport. */
+export function isFactoryDroidModel(model: Model<Api>): model is Model<"factory-droid-agent"> {
+	return model.api === "factory-droid-agent";
 }
 
 export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (

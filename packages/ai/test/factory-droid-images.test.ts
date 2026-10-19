@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as AIError from "../src/error";
 import { generateImage, type ImageInput } from "../src/images";
 import type { FetchImpl } from "../src/types";
-import { type CapturedRequest, captureFetch, factoryModel, WORKOS_TOKEN } from "./helpers/factory-droid";
+import { type CapturedRequest, captureFetch, factoryModel, WORKOS_TOKEN, workosJwt } from "./helpers/factory-droid";
 
 const IMAGE = Buffer.from("png bytes").toString("base64");
 
@@ -124,8 +124,9 @@ describe("Factory Droid image generation", () => {
 		expect(request.body.systemInstruction).toEqual({
 			parts: [{ text: expect.stringMatching(/^You are Droid.* Treat those images as the subject to change/) }],
 		});
+		// The edit instruction says the references follow the description, so the prompt leads.
 		expect(request.body.contents).toEqual([
-			{ role: "user", parts: [{ inlineData: { data: IMAGE, mimeType: "image/png" } }, { text: "a lighthouse" }] },
+			{ role: "user", parts: [{ text: "a lighthouse" }, { inlineData: { data: IMAGE, mimeType: "image/png" } }] },
 		]);
 		expect(result.images).toEqual([{ data: IMAGE, mimeType: "image/png" }]);
 		expect(result.usage).toMatchObject({ input: 23, output: 1120 });
@@ -168,6 +169,46 @@ describe("Factory Droid image generation", () => {
 				{ apiKey: WORKOS_TOKEN, fetch: jsonFetch([], { data: [] }) },
 			),
 		).rejects.toBeInstanceOf(AIError.ProviderResponseError);
+	});
+
+	it("sends the model's configured headers beside Factory's identity", async () => {
+		const captured: CapturedRequest[] = [];
+		const model = { ...factoryModel("gpt-image-2.5-flare"), headers: { "x-gateway-key": "gw" } };
+		await generateImage(
+			model,
+			{ prompt: "a cat" },
+			{ apiKey: WORKOS_TOKEN, fetch: jsonFetch(captured, imagesResponse) },
+		);
+		expect(captured[0].headers["x-gateway-key"]).toBe("gw");
+		expect(captured[0].headers["x-api-provider"]).toBe("openai");
+	});
+
+	it("sends a rotated sibling's request to that account's region host", async () => {
+		const captured: CapturedRequest[] = [];
+		const euToken = workosJwt({ external_org_id: "org-eu" });
+		const fetchImpl: FetchImpl = async (url, init) => {
+			captured.push({ url: String(url), headers: {}, body: {} });
+			return String(url).startsWith("https://api.factory.ai")
+				? Response.json({ detail: "usage limit reached" }, { status: 429 })
+				: Response.json(imagesResponse);
+		};
+		let calls = 0;
+		const result = await generateImage(
+			factoryModel("gpt-image-2.5-flare"),
+			{ prompt: "a cat" },
+			{
+				apiKey: () =>
+					calls++ === 0
+						? { apiKey: WORKOS_TOKEN, oauthIdentity: { region: "global", inferenceRegion: "global" } }
+						: { apiKey: euToken, oauthIdentity: { region: "eu", inferenceRegion: "eu", orgId: "org-eu" } },
+				fetch: fetchImpl,
+			},
+		);
+		expect(captured.map(request => request.url)).toEqual([
+			"https://api.factory.ai/api/llm/o/v1/images/generations",
+			"https://api.eu.factory.ai/api/llm/o/v1/images/generations",
+		]);
+		expect(result.images).toHaveLength(1);
 	});
 
 	it("maps a proxy rejection to a provider HTTP error carrying Factory's reason", async () => {

@@ -1,13 +1,21 @@
 import type { Model } from "@oh-my-pi/pi-catalog/types";
-import { readSseJson } from "@oh-my-pi/pi-utils";
-import { withAuth } from "../auth-retry";
+import { prompt, readSseJson } from "@oh-my-pi/pi-utils";
+import { type ApiKey, isApiKeyResolver, resolvedApiKeyBearer, withAuth } from "../auth-retry";
+import type { OAuthRequestIdentity } from "../auth/types";
 import * as AIError from "../error";
 import { factoryDroidImageRoute } from "../providers/factory-droid";
 import { googleStreamChunkError } from "../providers/google-shared";
-import editDirective from "./factory-droid-edit-directive.md" with { type: "text" };
-import generateDirective from "./factory-droid-generate-directive.md" with { type: "text" };
-import { type GeminiImageResponse, geminiImageContents, geminiImageResult } from "./google-generative-ai";
-import { decodeImageResponse, errorMessage, ImageApiError, parseImageApiResponse, validateImageInput } from "./shared";
+import type { GenerateContentResponse } from "../providers/google-types";
+import geminiSystemTemplate from "./factory-droid-gemini-system.md" with { type: "text" };
+import { type GeminiImageResponse, geminiImageResult } from "./google-generative-ai";
+import {
+	decodeImageResponse,
+	errorMessage,
+	ImageApiError,
+	modelHeaders,
+	parseImageApiResponse,
+	validateImageInput,
+} from "./shared";
 import type { ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
 /** Reference images Factory's JSON edits contract accepts per request. */
@@ -16,10 +24,32 @@ export const FACTORY_DROID_MAX_EDIT_IMAGES = 16;
 export const FACTORY_DROID_MAX_REFERENCE_BYTES = 5 * 1024 * 1024;
 const FACTORY_DROID_EDIT_MEDIA_TYPES = ["image/png", "image/jpeg", "image/webp"];
 
-type GeminiImageChunk = GeminiImageResponse & {
-	error?: Parameters<typeof googleStreamChunkError>[0];
-	promptFeedback?: { blockReason?: string };
-};
+type GeminiImageChunk = GeminiImageResponse &
+	Pick<GenerateContentResponse, "error"> & { promptFeedback?: { blockReason?: string } };
+
+/**
+ * Wrap a credential resolver so each bearer it hands out keeps the account
+ * identity it came with: `withAuth` passes attempts only the bearer, and a
+ * sibling rotation may move to an account on another host or region.
+ */
+function trackIdentities(apiKey: ApiKey): {
+	apiKey: ApiKey;
+	identityOf: (bearer: string) => OAuthRequestIdentity | undefined;
+} {
+	const identities = new Map<string, OAuthRequestIdentity>();
+	if (!isApiKeyResolver(apiKey)) return { apiKey, identityOf: () => undefined };
+	return {
+		apiKey: async context => {
+			const resolved = await apiKey(context);
+			const bearer = resolvedApiKeyBearer(resolved);
+			if (bearer && typeof resolved === "object" && resolved.oauthIdentity) {
+				identities.set(bearer, resolved.oauthIdentity);
+			}
+			return resolved;
+		},
+		identityOf: bearer => identities.get(bearer),
+	};
+}
 
 /** Reject references the proxy would refuse, before any bytes leave. */
 function validateReferences(model: Model, request: ImageGenerationRequest, openAIEdit: boolean): void {
@@ -66,22 +96,42 @@ export async function generateFactoryDroidImage(
 ): Promise<ImageGenerationResult> {
 	const fetchImpl = options.fetch ?? fetch;
 	const inputImages = request.inputImages ?? [];
+	const auth = trackIdentities(options.apiKey);
 	const result = await withAuth(
-		options.apiKey,
+		auth.apiKey,
 		async (token): Promise<ImageGenerationResult & { blockReason?: string }> => {
-			const route = factoryDroidImageRoute(model, token, options.sessionId);
+			const route = factoryDroidImageRoute(model, token, options.sessionId, auth.identityOf(token));
 			validateReferences(model, request, route.wire === "openai-responses" && inputImages.length > 0);
-			const headers = { ...route.headers, Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+			const headers = {
+				...(await modelHeaders(model, options.signal)),
+				...route.headers,
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+			};
 			const wireModel = model.requestModelId ?? model.id;
 			if (route.wire === "google-generate") {
-				const directive = (inputImages.length > 0 ? editDirective : generateDirective).trim();
 				const response = await fetchImpl(`${route.baseUrl}/generate`, {
 					method: "POST",
 					headers: { ...headers, Accept: "*/*" },
 					body: JSON.stringify({
 						model: wireModel,
-						contents: geminiImageContents(request),
-						systemInstruction: { parts: [{ text: `${route.identity} ${directive}` }] },
+						// The prompt leads and the references follow it, as the system instruction says.
+						contents: [
+							{
+								role: "user",
+								parts: [{ text: request.prompt }, ...inputImages.map(image => ({ inlineData: image }))],
+							},
+						],
+						systemInstruction: {
+							parts: [
+								{
+									text: prompt.render(geminiSystemTemplate, {
+										identity: route.identity,
+										edit: inputImages.length > 0,
+									}),
+								},
+							],
+						},
 						generationConfig: {
 							temperature: 1,
 							topP: 0.95,
