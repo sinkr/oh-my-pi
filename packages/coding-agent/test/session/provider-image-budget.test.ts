@@ -612,6 +612,29 @@ describe("provider context image budgets", () => {
 		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual([fresh]);
 	});
 
+	it("does not reserve room for another provider's payload on a compaction summary", () => {
+		const fresh = "C".repeat(3_800_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: [text("summary")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "openai-codex",
+						items: [{ type: "input_image", image_url: "G".repeat(2_000_000) }],
+					},
+					timestamp: 0,
+				},
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 1 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual([fresh]);
+	});
+
 	it("leaves room for the request envelope added after the clamp", () => {
 		// The context alone fits 4.5 MB with ~10 KB to spare, less than the provider prompt and request fields need.
 		const fresh = "C".repeat(FACTORY_DROID_ROUTE_BODY_LIMIT - 10_000);

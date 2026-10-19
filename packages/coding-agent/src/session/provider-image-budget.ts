@@ -203,13 +203,14 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
 	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
 	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
-	// another provider's native assistant payload, which this request does not replay.
+	// another provider's native payload (assistant turns, compaction summaries), which this request does not replay.
 	const wire = context.messages.map(message => {
 		if (message.role === "toolResult") return { ...message, details: undefined };
-		if (message.role === "assistant" && message.provider !== model.provider) {
-			return { ...message, providerPayload: undefined };
-		}
-		return message;
+		const payload = message.providerPayload;
+		if (!payload) return message;
+		const owner =
+			message.role === "assistant" ? message.provider : "provider" in payload ? payload.provider : undefined;
+		return owner !== undefined && owner !== model.provider ? { ...message, providerPayload: undefined } : message;
 	});
 	const otherBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: wire })) - inlineBytes - unsentBytes;
 	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - REQUEST_ENVELOPE_BYTES - otherBytes;
