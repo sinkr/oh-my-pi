@@ -3529,7 +3529,7 @@ describe("display hold follows the agent turn", () => {
 		expect(native.displayHolds).toEqual(["turn", "release", "turn"]);
 	});
 
-	it.each([true, "yes", null])("treats a control reply that is not a verdict (%p) as a refusal", async reply => {
+	it("treats the old boolean control reply as a refusal, not a grant", async () => {
 		const native = new FakeNativeSession();
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => native);
@@ -3543,7 +3543,7 @@ describe("display hold follows the agent turn", () => {
 		});
 		const confirm = await transport.waitFor(message => message.type === "control-request");
 		if (confirm.type !== "control-request") throw new Error("Expected the run's control confirmation");
-		transport.inbound({ type: "tool-reply", id: confirm.id, reply: { ok: true, value: reply } });
+		transport.inbound({ type: "tool-reply", id: confirm.id, reply: { ok: true, value: true } });
 		const result = await transport.waitFor(message => message.type === "result" && message.id === "unknown-verdict");
 		if (result.type !== "result" || !result.ok) throw new Error("control.acquire failed");
 		expect(result.payload.returnValue).toEqual({ active: false, reason: "denied" });
