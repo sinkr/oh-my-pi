@@ -1334,8 +1334,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		loop: { status: "inactive" },
 	};
 	#reportedModeKey = JSON.stringify(this.#reportedModeState);
-	/** A `ctx.sessionModes.set()` transition is running: concurrent calls are refused and events wait for it. */
+	/** A `ctx.sessionModes.set()` transition is running: concurrent calls are refused. */
 	#modeSetInFlight = false;
+	/** Open mode transitions; `mode_changed` waits until the outermost one settles. */
+	#modeChangeHolds = 0;
 	readonly sessionModes: ExtensionSessionModes = {
 		getState: () => this.#getSessionModeState(),
 		set: request => this.#setSessionMode(request),
@@ -3352,7 +3354,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const goal = this.goalModeEnabled || this.goalModePaused ? this.session.getGoalModeState()?.goal : undefined;
 		return {
 			plan: this.planModeEnabled
-				? { status: "active", planFilePath: this.planModePlanFilePath }
+				? { status: "active", planFilePath: this.session.getPlanModeState()?.planFilePath }
 				: { status: this.planModePaused ? "paused" : "inactive" },
 			vibe: { status: this.vibeModeEnabled ? "active" : "inactive" },
 			goal:
@@ -3373,7 +3375,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * not part of the state, so usage ticks never fire it.
 	 */
 	#notifyModeChanged(): void {
-		if (this.#modeSetInFlight) return;
+		if (this.#modeChangeHolds > 0) return;
 		const state = this.#getSessionModeState();
 		const key = JSON.stringify(state);
 		if (key === this.#reportedModeKey) return;
@@ -3381,6 +3383,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#reportedModeState = state;
 		this.#reportedModeKey = key;
 		void this.session.extensionRunner?.emit({ type: "mode_changed", previous, state: structuredClone(state) });
+	}
+
+	/**
+	 * Defer `mode_changed` until a multi-step transition settles: goal entry/exit flips mode flags
+	 * from `goal_updated` before the goal tool is activated or the prior tools are restored.
+	 */
+	#holdModeChanges(): Disposable {
+		this.#modeChangeHolds++;
+		return {
+			[Symbol.dispose]: () => {
+				this.#modeChangeHolds--;
+				this.#notifyModeChanged();
+			},
+		};
 	}
 
 	async #setSessionMode(request: SessionModeRequest): Promise<SessionModeResult> {
@@ -3400,11 +3416,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const before = this.#reportedModeKey;
 		this.#modeSetInFlight = true;
+		const hold = this.#holdModeChanges();
 		try {
 			await transition();
 		} finally {
 			this.#modeSetInFlight = false;
-			this.#notifyModeChanged();
+			hold[Symbol.dispose]();
 		}
 		return { ok: true, changed: this.#reportedModeKey !== before, state: this.#getSessionModeState() };
 	}
@@ -3491,7 +3508,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				const { limit, condition } = request;
 				const validLimit =
 					limit === undefined ||
-					(limit?.kind === "iterations" && Number.isInteger(limit.iterations) && limit.iterations > 0) ||
+					(limit?.kind === "iterations" && Number.isSafeInteger(limit.iterations) && limit.iterations > 0) ||
 					(limit?.kind === "duration" && Number.isFinite(limit.durationMs) && limit.durationMs > 0);
 				if (!validLimit)
 					return invalid("Loop limit needs a positive integer `iterations` or positive `durationMs`.");
@@ -5581,6 +5598,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		resume?: boolean;
 		silent?: boolean;
 	}): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		if (this.goalModeEnabled) {
 			return;
 		}
@@ -5634,6 +5652,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		paused?: boolean;
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		const previousTools = this.#goalModePreviousTools;
 		// Not gated on goalModeEnabled: a pause's goal_updated clears that flag
 		// before this runs, which used to leave the goal tool active.
@@ -6822,6 +6841,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #pauseGoalAction(): Promise<void> {
+		using _hold = this.#holdModeChanges();
 		if (!this.goalModeEnabled) {
 			this.showWarning("No active goal to pause.");
 			return;
@@ -7031,8 +7051,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const planFilePath = details.planFilePath || this.planModePlanFilePath || (await this.#getPlanFilePath());
 		this.planModePlanFilePath = planFilePath;
-		// A reviewed draft can replace the recorded path; it is part of the reported state.
-		this.#notifyModeChanged();
 		const planContent = await this.#readPlanFile(planFilePath);
 		if (!planContent) {
 			this.showError(`Plan file not found at ${planFilePath}`);
@@ -7056,6 +7074,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (planState?.enabled && planState.planFilePath !== planFilePath) {
 			this.session.setPlanModeState({ ...planState, planFilePath });
 			this.sessionManager.appendModeChange("plan", { planFilePath });
+			// Reported only once committed: the next planning turn reads this state.
+			this.#notifyModeChanged();
 		}
 
 		const contextUsage = this.#getPlanApprovalContextUsage();

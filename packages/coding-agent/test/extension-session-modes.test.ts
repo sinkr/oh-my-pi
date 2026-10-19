@@ -97,13 +97,14 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		const events: ModeChangedEvent[] = [];
 		let ctx: ExtensionContext | undefined;
 		const { session, provider } = await createSession(pi => {
+			// First, so the case's own handlers observe state at emit time.
+			extra?.(pi);
 			pi.on("session_start", (_event, context) => {
 				ctx = context;
 			});
 			pi.on("mode_changed", event => {
 				events.push(event);
 			});
-			extra?.(pi);
 		}, settings);
 		const mode = new InteractiveMode(session, "test");
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
@@ -236,6 +237,23 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		expect(modes.getState().goal).toMatchObject({ status: "active", objective: "Retry" });
 	});
 
+	it("reports native /goal transitions only after the goal tool has been toggled", async () => {
+		const seen: Array<[string, boolean]> = [];
+		const live: { session?: AgentSession } = {};
+		const harness = await tui(pi => {
+			pi.on("mode_changed", event => {
+				seen.push([event.state.goal.status, live.session!.getEnabledToolNames().includes("goal")]);
+			});
+		});
+		live.session = harness.session;
+		await harness.mode.handleGoalModeCommand("set Ship gamma");
+		await harness.mode.handleGoalModeCommand("pause");
+		expect(seen).toEqual([
+			["active", true],
+			["paused", false],
+		]);
+	});
+
 	it("does not report goal accounting as a mode change", async () => {
 		const { session, provider, modes, events } = await tui();
 		provider.fallback = () => ({ content: ["progress"], usage: { input: 1200, output: 300 } });
@@ -256,11 +274,18 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		});
 		await mode.handleLoopCommand("3");
 		await Bun.sleep(0);
-		expect(events.map(event => event.state.loop.status)).toEqual(["active", "inactive"]);
+		// The chaining handler runs first, so the recorder may see the nested exit before the entry.
+		expect(events.map(event => `${event.previous.loop.status}->${event.state.loop.status}`).sort()).toEqual([
+			"active->inactive",
+			"inactive->active",
+		]);
 		expect(modes.getState().loop.status).toBe("inactive");
 		await mode.handlePlanModeCommand();
+		await Bun.sleep(0);
 		expect(modes.getState().plan.status).toBe("active");
-		expect(events.at(-1)?.state.plan.status).toBe("active");
+		expect(
+			events.some(event => event.previous.plan.status === "inactive" && event.state.plan.status === "active"),
+		).toBe(true);
 	});
 
 	it("refuses a nested call from the transition's own goal_updated handler instead of deadlocking", async () => {
@@ -282,6 +307,8 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 			{ mode: "goal", action: "enter", objective: " " },
 			{ mode: "goal", action: "enter", objective: "x", tokenBudget: 0 },
 			{ mode: "loop", action: "enter", limit: { kind: "iterations", iterations: 1.5 } },
+			// Cannot be decremented, so the loop would never end.
+			{ mode: "loop", action: "enter", limit: { kind: "iterations", iterations: 1e20 } },
 			{ mode: "loop", action: "enter", condition: { command: "", until: true } },
 			{ mode: "goal", action: "resume" },
 			{ mode: "turbo", action: "enter" },
