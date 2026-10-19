@@ -658,11 +658,15 @@ export function getReportsDir(): string {
 
 /**
  * Get the logs directory (~/.omp/logs). `bun test` processes get
- * `<tmpdir>/omp-test-logs` instead, so suites never write into the developer's
- * real logs.
+ * `<tmpdir>/omp-test-logs-<uid>` instead, so suites never write into the
+ * developer's real logs; the uid suffix (as for the test session-owners dir)
+ * keeps users of a shared `/tmp` from owning each other's directory.
  */
 export function getLogsDir(): string {
-	if (isBunTestRuntime()) return path.join(os.tmpdir(), "omp-test-logs");
+	if (isBunTestRuntime()) {
+		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+		return path.join(os.tmpdir(), `omp-test-logs-${uid}`);
+	}
 	return dirs.rootSubdir("logs", "state");
 }
 

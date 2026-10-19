@@ -258,7 +258,9 @@ describe("central logger transport lifecycle", () => {
 		expect(result.stderr).toBe("");
 		// The child's HOME stays empty: no ~/.omp/logs was created.
 		expect(await fs.readdir(result.primaryDir)).toEqual([]);
-		const testLogsDir = path.join(result.root, "tmp", "omp-test-logs");
+		// Named per user, so users of a shared /tmp never share it.
+		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+		const testLogsDir = path.join(result.root, "tmp", `omp-test-logs-${uid}`);
 		const log = await readSingleLog(testLogsDir);
 		expect(log.text).toBe(expectedLine(result.pid, "info", "mode-default", { mode: "default" }));
 		// Log readers (report bundles, the stderr guard) resolve the same file.
