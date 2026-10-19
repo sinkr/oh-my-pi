@@ -1,6 +1,16 @@
 ---
 description: "Do not extract 1-2 line functions that only wrap an expression — inline them"
-condition: "(?m)\\{\\s*return [^;{}\\n]+;?\\s*\\}|\\b(?:const|let|var)\\s+[\\w$]+\\s*=\\s*(\\([^)]*\\)|[a-zA-Z_$][\\w$]*)\\s*=>\\s*[^{\\n]+$"
+condition:
+  # Each alternative starts a statement (line start or after `;`, `{`, `}`), so exported names,
+  # callbacks, object and public class members, and if/try/catch blocks don't match.
+  # function declaration whose body is one return (not a type guard)
+  - "(?m)(?:^|[;{}])[ \\t]*(?:async[ \\t]+)?function[ \\t]*\\*?[ \\t]*[\\w$]+[ \\t]*(?:<(?:[^<>\\n]|<[^<>\\n]*>)*>)?[ \\t]*\\((?:[^()]|\\([^()]*\\))*\\)(?:[ \\t]*:(?![ \\t]*(?:asserts[ \\t]+)?[\\w$]+[ \\t]+is[ \\t])(?:[^{};=\\n]|=>|\\{[^{}\\n]*\\})*)?[ \\t]*\\{\\s*return [^;{}\\n]+;?\\s*\\}"
+  # const/let/var bound to a one-expression arrow
+  - "(?m)(?:^|[;{}])[ \\t]*(?:const|let|var)\\s+[\\w$]+\\s*=\\s*(?:\\([^)]*\\)|[a-zA-Z_$][\\w$]*)\\s*=>\\s*[^{\\n]+$"
+  # const/let/var bound to an arrow or function expression whose body is one return
+  - "(?m)(?:^|[;{}])[ \\t]*(?:const|let|var)\\s+[\\w$]+\\s*=\\s*(?:async\\s+)?(?:function\\b[^(\\n]*\\((?:[^()]|\\([^()]*\\))*\\)(?:[ \\t]*:(?![ \\t]*(?:asserts[ \\t]+)?[\\w$]+[ \\t]+is[ \\t])(?:[^{};=\\n]|=>|\\{[^{}\\n]*\\})*)?|(?:\\((?:[^()]|\\([^()]*\\))*\\)|[a-zA-Z_$][\\w$]*)(?:[ \\t]*:(?![ \\t]*(?:asserts[ \\t]+)?[\\w$]+[ \\t]+is[ \\t])(?:[^{};=\\n]|=>|\\{[^{}\\n]*\\})*)?\\s*=>)\\s*\\{\\s*return [^;{}\\n]+;?\\s*\\}"
+  # private class method or getter whose body is one return
+  - "(?m)(?:^|[;{}])[ \\t]*(?:private[ \\t]+(?:static[ \\t]+)?(?:async[ \\t]+)?(?:get[ \\t]+)?[\\w$]+|(?:static[ \\t]+)?(?:async[ \\t]+)?(?:get[ \\t]+)?#[\\w$]+)[ \\t]*(?:<(?:[^<>\\n]|<[^<>\\n]*>)*>)?[ \\t]*\\((?:[^()]|\\([^()]*\\))*\\)(?:[ \\t]*:(?![ \\t]*(?:asserts[ \\t]+)?[\\w$]+[ \\t]+is[ \\t])(?:[^{};=\\n]|=>|\\{[^{}\\n]*\\})*)?[ \\t]*\\{\\s*return [^;{}\\n]+;?\\s*\\}"
 scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
 interruptMode: never
 ---

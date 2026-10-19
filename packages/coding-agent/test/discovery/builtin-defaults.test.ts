@@ -191,7 +191,7 @@ describe("builtin-defaults rule provider", () => {
 		}
 	});
 
-	it("fires ts-no-tiny-functions on one-line arrow functions even with a trailing newline", async () => {
+	it("fires ts-no-tiny-functions on local one-expression functions, not on exported names, public members, type guards or blocks", async () => {
 		const rules = await loadBuiltinRules();
 		const rule = rules.find(r => r.name === "ts-no-tiny-functions");
 		if (!rule) throw new Error("ts-no-tiny-functions rule missing");
@@ -200,12 +200,21 @@ describe("builtin-defaults rule provider", () => {
 		expect(manager.addRule(rule)).toBe(true);
 		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
 
-		// Real files end with a newline, so the arrow alternative must match
-		// before the line terminator, not only at the absolute end of input.
 		const hits = [
+			// Real files end with a newline, so the arrow alternative must match
+			// before the line terminator, not only at the absolute end of input.
 			"const getName = (u) => u.profile.name;\n",
 			"const getName = (u) => u.profile.name;",
 			"const a = 1;\nconst getName = (u) => u.profile.name;\nconst b = 2;",
+			"const original = globalThis.Worker; const out = x => write(x);",
+			"function isEmpty(value: string): boolean {\n\treturn value.length === 0;\n}",
+			"\tfunction double(value: number) { return value * 2; }",
+			"function sizeOf(data: string): { width: number; height: number } | null {\n\treturn imageSize(data);\n}",
+			"function draw<T>(pool: readonly T[], key: (item: T) => string): T[] {\n\treturn [...pool].sort(by(key));\n}",
+			"const getDisplayName = (user: User): string => {\n\treturn user.profile.displayName;\n};",
+			"const pick = function (row: Row) { return row.id; };",
+			"\t#remaining(): number {\n\t\treturn this.#until - Date.now();\n\t}",
+			"\tprivate get label(): string { return this.name; }",
 		];
 		for (const snippet of hits) {
 			manager.resetBuffer();
@@ -215,11 +224,59 @@ describe("builtin-defaults rule provider", () => {
 			).toEqual(["ts-no-tiny-functions"]);
 		}
 
-		// Multi-statement functions (block bodies) are not tiny wrappers.
-		const misses = ["function f(v) { const x = v.a; return x; }", "const f = (v) => { const x = v.a; return x; };"];
+		// The rule's own exemptions (exported names, type guards, public API and test seams),
+		// callbacks, and if/try/catch blocks, which are not functions at all.
+		const misses = [
+			"function f(v) { const x = v.a; return x; }",
+			"const f = (v) => { const x = v.a; return x; };",
+			"export function isEmpty(value: string): boolean {\n\treturn value.length === 0;\n}",
+			"export const getName = (u: User) => u.profile.name;",
+			'function isAssistant(entry: Entry): entry is AssistantEntry {\n\treturn entry.role === "assistant";\n}',
+			"if (!response.ok) {\n\treturn null;\n}",
+			"try {\n\treturn JSON.parse(text);\n} catch {\n\treturn undefined;\n}",
+			"class Clock {\n\tnow(): number { return this.time; }\n\tget size(): number {\n\t\treturn this.#items.size;\n\t}\n}",
+			"const fake = { async capabilities() { return undefined; }, get ready() { return true; } };",
+			"const ids = items.map(item => { return item.id; });",
+			"promise.then(function (value) { return value.id; });",
+		];
 		for (const snippet of misses) {
 			manager.resetBuffer();
 			expect(manager.checkDelta(snippet, ctx), snippet).toEqual([]);
+		}
+	});
+
+	it("fires ts-promise-with-resolvers on executors that take a resolver, not on never-settling promises", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "ts-promise-with-resolvers");
+		if (!rule) throw new Error("ts-promise-with-resolvers rule missing");
+
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "write", filePaths: ["src/foo.ts"] };
+		const fires = (deltas: string[]) => {
+			manager.resetBuffer();
+			return deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(m => m.name));
+		};
+
+		for (const deltas of [
+			["return new Promise(resolve => {\n\tsetTimeout(resolve, ms);\n});"],
+			["await new Promise(r => setImmediate(r));"],
+			["new Promise((resolve, reject) => {"],
+			["new Promise(function (resolve) {"],
+			["new Promise(async (resolve) => {"],
+			["await new Promise(requestAnimationFrame);"],
+			["await new Promise(", "r => setImmediate(r));"],
+		]) {
+			expect(fires(deltas), deltas.join("")).toEqual(["ts-promise-with-resolvers"]);
+		}
+		// No resolver for Promise.withResolvers() to replace; a stream paused right after
+		// `new Promise(` must not fire before the executor arrives.
+		for (const deltas of [
+			["await new Promise(() => {});"],
+			["new Promise(function hang() {});"],
+			["await new Promise(", "() => {});"],
+		]) {
+			expect(fires(deltas), deltas.join("")).toEqual([]);
 		}
 	});
 

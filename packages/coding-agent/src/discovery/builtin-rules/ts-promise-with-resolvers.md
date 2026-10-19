@@ -1,6 +1,7 @@
 ---
 description: Use Promise.withResolvers() instead of new Promise() constructor
-condition: "new Promise\\("
+# an executor that takes a resolver: `new Promise(() => {})` has none for withResolvers to replace
+condition: "new Promise\\(\\s*(?:async\\s+)?(?:\\(\\s*[A-Za-z_$]|[A-Za-z_$][\\w$]*\\s*=>|function\\b[^(]*\\(\\s*[A-Za-z_$]|[A-Za-z_$][\\w$.]*\\s*\\))"
 scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
 interruptMode: never
 ---
