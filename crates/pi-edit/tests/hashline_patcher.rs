@@ -117,54 +117,6 @@ async fn rejection_names_the_path_a_foreign_tag_was_issued_for() {
 	assert_eq!(workspace.read("wt/crates/a/mcp.rs").as_deref(), Some("worktree\n"));
 }
 
-#[tokio::test]
-async fn recovered_rem_reports_authored_and_deleted_paths() {
-	let workspace = common::Workspace::new(EditMode::Hashline);
-	let target = workspace.write("correct/target.ts", "const value = 1;\n");
-	let tag = workspace.snapshot("correct/target.ts", "const value = 1;\n", None);
-	let input = format!("[wrong/target.ts#{tag}]\nREM\n");
-	let outcome = workspace
-		.apply_json(&json!({ "input": input }), &common::DiskWriter::default())
-		.await
-		.expect("recovered delete");
-
-	assert!(!target.exists());
-	let deleted = pi_edit::path_policy::canonical_key(&target);
-	assert!(
-		outcome
-			.text
-			.contains(&format!("Deleted {}", deleted.display())),
-		"{}",
-		outcome.text
-	);
-	assert!(
-		outcome.text.contains(&format!(
-			"Warnings:\nPath \"wrong/target.ts\" does not exist; matched its filename and snapshot \
-			 tag #{tag} to {}",
-			deleted.display()
-		)),
-		"{}",
-		outcome.text
-	);
-}
-
-#[test]
-fn completed_preview_surfaces_stale_hash_error() {
-	let workspace = common::Workspace::new(EditMode::Hashline);
-	workspace.write("a.txt", "a\n");
-	let mut session = workspace.session();
-	session.set_args_json(&json!({ "input": "[a.txt#FFFF]\nPUT 1.=1:\n+A\n" }).to_string());
-	session.finish();
-	let batch = session.preview();
-	assert!(!batch.streaming);
-	assert!(
-		batch.files[0]
-			.error
-			.as_deref()
-			.is_some_and(|error| error.contains("not from this session"))
-	);
-}
-
 const UNTAGGED_TEXT: &str = "alpha\nbeta\ngamma\n";
 
 #[tokio::test]
@@ -309,4 +261,52 @@ fn completed_preview_surfaces_the_current_tag_for_an_untagged_section() {
 	let current = pi_edit::store::file_hash(UNTAGGED_TEXT);
 	let error = batch.files[0].error.as_deref().unwrap_or_default();
 	assert!(error.contains(&format!("The current file hashes to #{current}.")), "{error}");
+}
+
+#[tokio::test]
+async fn recovered_rem_reports_authored_and_deleted_paths() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	let target = workspace.write("correct/target.ts", "const value = 1;\n");
+	let tag = workspace.snapshot("correct/target.ts", "const value = 1;\n", None);
+	let input = format!("[wrong/target.ts#{tag}]\nREM\n");
+	let outcome = workspace
+		.apply_json(&json!({ "input": input }), &common::DiskWriter::default())
+		.await
+		.expect("recovered delete");
+
+	assert!(!target.exists());
+	let deleted = pi_edit::path_policy::canonical_key(&target);
+	assert!(
+		outcome
+			.text
+			.contains(&format!("Deleted {}", deleted.display())),
+		"{}",
+		outcome.text
+	);
+	assert!(
+		outcome.text.contains(&format!(
+			"Warnings:\nPath \"wrong/target.ts\" does not exist; matched its filename and snapshot \
+			 tag #{tag} to {}",
+			deleted.display()
+		)),
+		"{}",
+		outcome.text
+	);
+}
+
+#[test]
+fn completed_preview_surfaces_stale_hash_error() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("a.txt", "a\n");
+	let mut session = workspace.session();
+	session.set_args_json(&json!({ "input": "[a.txt#FFFF]\nPUT 1.=1:\n+A\n" }).to_string());
+	session.finish();
+	let batch = session.preview();
+	assert!(!batch.streaming);
+	assert!(
+		batch.files[0]
+			.error
+			.as_deref()
+			.is_some_and(|error| error.contains("not from this session"))
+	);
 }
