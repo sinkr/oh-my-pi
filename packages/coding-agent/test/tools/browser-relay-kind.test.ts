@@ -6,6 +6,7 @@ import {
 	resolveBrowserKind,
 	resolveRelayKind,
 } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import type { BrowserKindTag } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
 describe("resolveRelayKind", () => {
@@ -45,13 +46,23 @@ describe("resolveRelayKind", () => {
 });
 
 describe("browser prelude relay guidance", () => {
-	const savedRelayEnv = process.env.PI_BROWSER_RELAY;
+	const ENV_KEYS = [
+		"PI_BROWSER_RELAY",
+		"PI_BROWSER_TERN",
+		"PI_BROWSER_CMUX",
+		"TERN_PANE_SOCKET",
+		"TERN_PANE",
+		"CMUX_SOCKET_PATH",
+	] as const;
+	const savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 	beforeEach(() => {
-		delete process.env.PI_BROWSER_RELAY;
+		for (const key of ENV_KEYS) delete process.env[key];
 	});
 	afterEach(() => {
-		if (savedRelayEnv === undefined) delete process.env.PI_BROWSER_RELAY;
-		else process.env.PI_BROWSER_RELAY = savedRelayEnv;
+		for (const key of ENV_KEYS) {
+			if (savedEnv[key] === undefined) delete process.env[key];
+			else process.env[key] = savedEnv[key];
+		}
 	});
 
 	const sessionWith = (settings: Record<string, unknown>): ToolSession =>
@@ -60,7 +71,7 @@ describe("browser prelude relay guidance", () => {
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
-			settings: Settings.isolated({ "browser.tern": false, "browser.cmux": false, ...settings }),
+			settings: Settings.isolated(settings),
 		}) as ToolSession;
 
 	it("tells the model an open without app drives the user's Chrome only while that is what it does", () => {
@@ -80,14 +91,40 @@ describe("browser prelude relay guidance", () => {
 		}
 	});
 
-	it("names browser.cdpUrl as where app.relay:false goes when it is configured", () => {
-		const session = sessionWith({ "browser.relay": true, "browser.cdpUrl": "http://127.0.0.1:9333" });
-		expect(resolveBrowserKind({ action: "open", app: { relay: false } }, session)).toEqual({
-			kind: "connected",
-			cdpUrl: "http://127.0.0.1:9333",
-		});
-		const guidance = createBrowserPrelude(session).guidance;
-		expect(guidance).toContain("open in the browser at `browser.cdpUrl` (http://127.0.0.1:9333)");
-		expect(guidance).not.toContain("throwaway");
+	it("names the browser app.relay:false falls through to", () => {
+		const cases: {
+			settings: Record<string, unknown>;
+			env: Record<string, string>;
+			kind: BrowserKindTag;
+			says: string;
+		}[] = [
+			{
+				settings: { "browser.cdpUrl": "http://127.0.0.1:9333" },
+				env: {},
+				kind: "connected",
+				says: "open in the browser at `browser.cdpUrl` (http://127.0.0.1:9333) instead",
+			},
+			{
+				settings: {},
+				env: { TERN_PANE_SOCKET: "/tmp/tern.sock", TERN_PANE: "1" },
+				kind: "tern",
+				says: "omp's own Tern picture-in-picture instead",
+			},
+			{
+				settings: {},
+				env: { CMUX_SOCKET_PATH: "/tmp/cmux.sock" },
+				kind: "cmux",
+				says: "omp's own cmux browser surface instead",
+			},
+		];
+		for (const { settings, env, kind, says } of cases) {
+			for (const key of ENV_KEYS) delete process.env[key];
+			Object.assign(process.env, env);
+			const session = sessionWith({ "browser.relay": true, ...settings });
+			expect(resolveBrowserKind({ action: "open", app: { relay: false } }, session).kind).toBe(kind);
+			const guidance = createBrowserPrelude(session).guidance;
+			expect(guidance).toContain(says);
+			expect(guidance).not.toContain("throwaway");
+		}
 	});
 });
