@@ -171,7 +171,8 @@ class TarStreamPayload implements TarPayload {
 			throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' is truncated`);
 		}
 		this.#stream = stream;
-		return bytes;
+		// A view into a decoder chunk would keep the whole chunk alive with the member.
+		return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
 	}
 }
 

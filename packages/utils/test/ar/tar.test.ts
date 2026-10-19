@@ -220,18 +220,35 @@ describe("compressed tar past maxInMemorySize", () => {
 		expect(passes - indexPasses).toBe(1);
 	});
 
+	test("a streamed member read holds only the member's bytes", async () => {
+		const bytes = await gzipCompress(await encodeTar(members));
+		const archive = await openArchive({ bytes, format: "tar.gz" }, { limits });
+		const first = (await archive.readFile("first.txt")).bytes;
+		expect(new TextDecoder().decode(first)).toBe("first\n");
+		expect(first.buffer.byteLength).toBe(first.byteLength);
+	});
+
 	test("rejects a stream whose gzip trailer is cut off", async () => {
 		const bytes = await gzipCompress(await encodeTar(members));
-		await expect(
-			openArchive({ bytes: bytes.subarray(0, bytes.byteLength - 8), format: "tar.gz" }, { limits }),
-		).rejects.toBeInstanceOf(ArchiveError);
+		const error = await openArchive(
+			{ bytes: bytes.subarray(0, bytes.byteLength - 8), format: "tar.gz" },
+			{ limits },
+		).then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toBeInstanceOf(ArchiveError);
 	});
 
 	test("a stream that is not a tar fails on the in-memory limit", async () => {
 		const bytes = await gzipCompress(new TextEncoder().encode("log line\n".repeat(1000)));
-		await expect(openArchive({ bytes, format: "gz" }, { limits })).rejects.toThrow(
-			"Archive is too large to read in memory (decompressed > 4.0KB limit)",
+		const error = await openArchive({ bytes, format: "gz" }, { limits }).then(
+			() => undefined,
+			(reason: unknown) => reason,
 		);
+		expect(error).toBeInstanceOf(ArchiveError);
+		expect(String(error)).toContain("too large to read in memory");
+		expect(String(error)).toContain("4.0KB limit");
 	});
 });
 
