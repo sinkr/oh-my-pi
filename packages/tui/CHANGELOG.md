@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed transparent images with empty top rows disappearing inside Zellij ([#16346](https://github.com/can1357/oh-my-pi/pull/16346) by [@Bouska](https://github.com/Bouska))
 - Fixed the composer caret drifting one cell left per pasted image or video chip in terminals that draw the chip icon as a wide emoji (JetBrains terminal); the `unicode` preset now uses `📷`/`🎬` chip icons ([#16270](https://github.com/can1357/oh-my-pi/issues/16270))
 - Fixed Tern hiding user text sent with `/skill:<name>` inside a collapsed skill card; only the loaded skill prompt is hidden ([#16311](https://github.com/can1357/oh-my-pi/issues/16311))
 
