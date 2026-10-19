@@ -455,10 +455,10 @@ pub fn ambiguous_boundary_placement_message(start_line: u32, end_line: u32) -> S
 /// comma the surrounding syntax rejects (the last element of a JSON array).
 pub fn trailing_comma_replacement_message(start_line: u32, end_line: u32) -> String {
 	format!(
-		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: the body's last row ends with a \
-		 comma that does not parse in place (e.g. a trailing comma before a closing `]` or `}}`); \
-		 without that comma the file parses. Drop the comma, or include the rows that should follow \
-		 it in the same body."
+		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: the body's last non-blank row ends \
+		 with a comma that does not parse in place (e.g. a trailing comma before a closing `]` or \
+		 `}}`); without that comma this replacement parses. Drop the comma, or include the rows \
+		 that should follow it in the same body."
 	)
 }
 

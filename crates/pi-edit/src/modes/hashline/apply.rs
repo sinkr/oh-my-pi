@@ -459,8 +459,8 @@ enum Undecided {
 	TrailingComma,
 }
 
-/// Whether `replaced` parses once its last non-blank inserted row drops a
-/// trailing comma.
+/// Whether `replaced` parses once the trailing comma of its last non-blank
+/// inserted row is removed (whatever follows the comma stays).
 fn parses_without_trailing_comma(replaced: &[Edit], lines: &[&str], path: &str) -> bool {
 	let mut stripped = replaced.to_vec();
 	let Some(text) = stripped.iter_mut().rev().find_map(|edit| match edit {
@@ -469,10 +469,10 @@ fn parses_without_trailing_comma(replaced: &[Edit], lines: &[&str], path: &str) 
 	}) else {
 		return false;
 	};
-	let Some(len) = text.trim_end().strip_suffix(',').map(str::len) else {
+	let Some(comma) = text.trim_end().strip_suffix(',').map(str::len) else {
 		return false;
 	};
-	text.truncate(len);
+	text.remove(comma);
 	parses_cleanly(Some(path), &materialize(lines, &stripped).0)
 }
 

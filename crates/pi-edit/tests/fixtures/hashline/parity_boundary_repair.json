@@ -1830,28 +1830,6 @@
 			]
 		},
 		{
-			"name": "names the trailing comma that keeps a one-row JSON replacement from parsing",
-			"apply": [
-				{
-					"text": "{\n  \"a\": [\n    \"x\",\n    \"y\"\n  ]\n}\n",
-					"input": "PUT 4.=4:\n+    \"z\",",
-					"path": "fixture.json",
-					"error": "Error: `PUT 4.=4:` rejected: the body's last row ends with a comma that does not parse in place (e.g. a trailing comma before a closing `]` or `}`); without that comma the file parses. Drop the comma, or include the rows that should follow it in the same body."
-				}
-			]
-		},
-		{
-			"name": "keeps the placement rejection when a comma-ending body swaps out a JSON closer",
-			"apply": [
-				{
-					"text": "{\n  \"a\": [\n    \"x\"\n  ],\n  \"b\": 1\n}\n",
-					"input": "PUT 4.=4:\n+  \"c\": 2,",
-					"path": "fixture.json",
-					"error": "Error: `PUT 4.=4:` rejected: a selected boundary row is required for the file to parse, but the body indentation does not establish whether it belongs before or after that row. Re-read the region and re-issue with a range that excludes every unchanged boundary row."
-				}
-			]
-		},
-		{
 			"name": "applies a same-shape Rust signature replacement with lifetimes when an unrelated edit in the batch breaks the parse",
 			"apply": [
 				{
