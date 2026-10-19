@@ -8,12 +8,12 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use block2::RcBlock;
-use objc2::rc::autoreleasepool;
+use block2::{DynBlock, RcBlock};
+use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFBoolean, CFRetained, CFString, CFType};
-use objc2_foundation::{NSBundle, NSError, NSString, NSURL, ns_string};
+use objc2_foundation::{NSArray, NSBundle, NSError, NSString, NSURL, ns_string};
 
 use super::{
 	super::{
@@ -142,10 +142,7 @@ pub(super) fn list() -> CoreResult<Vec<Application>> {
 }
 
 fn read_bundle(path: &Path) -> CoreResult<Application> {
-	if !path
-		.extension()
-		.is_some_and(|extension| extension.as_encoded_bytes().eq_ignore_ascii_case(b"app"))
-	{
+	if !super::is_app_bundle(path) {
 		return Err(DesktopError::invalid_target(
 			"macOS application paths must identify an existing .app bundle",
 		));
@@ -248,11 +245,7 @@ pub(super) fn from_path(path: &Path) -> CoreResult<Application> {
 /// ([`show_in_background`]). `activate` always goes through Launch Services,
 /// which activates, unhides and reopens.
 pub(super) fn open(app: Application, activate: bool) -> CoreResult<OpenedApplication> {
-	let wait = || {
-		control::check()?;
-		std::thread::sleep(FIRST_WINDOW_POLL);
-		Ok(())
-	};
+	let wait = poll_window;
 	if let Some(pid) = app.pid.filter(|_| app.running && !activate) {
 		let path = app.path.clone();
 		return open_running(
@@ -428,6 +421,13 @@ fn ask_for_window(
 	reopen()
 }
 
+/// One poll of [`first_window`]'s wait for an application's first window.
+fn poll_window() -> CoreResult<()> {
+	control::check()?;
+	std::thread::sleep(FIRST_WINDOW_POLL);
+	Ok(())
+}
+
 fn launch(path: &str, activate: bool) -> CoreResult<Application> {
 	autoreleasepool(|_| {
 		// Validate explicit paths as bundles, never as shell commands or
@@ -435,74 +435,200 @@ fn launch(path: &str, activate: bool) -> CoreResult<Application> {
 		// policy/Gatekeeper.
 		let app = read_bundle(Path::new(path))?;
 		let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&app.path), true);
-		let configuration = NSWorkspaceOpenConfiguration::configuration();
-		configuration.setActivates(activate);
-		configuration.setCreatesNewApplicationInstance(false);
-		configuration.setAddsToRecentItems(false);
-		configuration.setPromptsUserIfNeeded(false);
-		let (sender, receiver) = flume::bounded(1);
-		let completion =
-			RcBlock::new(move |running: *mut NSRunningApplication, error: *mut NSError| {
-				// SAFETY: AppKit supplies borrowed live objects for this callback.
-				// Only owned Rust values leave the callback; pointers
-				// are never retained.
-				let result = unsafe {
-					if let Some(error) = error.as_ref() {
-						let domain = error.domain().to_string();
-						let message = format!(
-							"Launch Services could not open the application ({} {}): {}",
-							domain,
-							error.code(),
-							error.localizedDescription(),
-						);
-						Err(
-							if (domain == "NSCocoaErrorDomain" && matches!(error.code(), 257 | 513))
-								|| (domain == "NSOSStatusErrorDomain"
-									&& matches!(error.code(), -54 | -5000))
-							{
-								DesktopError::permission_denied(message)
-							} else {
-								DesktopError::input_failed(message)
-							},
-						)
-					} else if let Some(running) = running.as_ref() {
-						running_application(running).ok_or_else(|| {
-							DesktopError::invalid_target(
-								"Launch Services returned an application without a bundle path",
-							)
-						})
-					} else {
-						Err(DesktopError::internal(
-							"Launch Services returned neither an application nor an error",
-						))
-					}
-				};
-				let _ = sender.send(result);
-			});
-		NSWorkspace::sharedWorkspace().openApplicationAtURL_configuration_completionHandler(
-			&url,
-			&configuration,
-			Some(&completion),
-		);
-		let deadline = Instant::now() + Duration::from_secs(30);
-		loop {
-			control::check()?;
-			let remaining = deadline.saturating_duration_since(Instant::now());
-			if remaining.is_zero() {
-				return Err(DesktopError::timeout(
-					"Launch Services did not confirm launch within 30 seconds; the application may \
-					 still launch",
-				));
-			}
-			match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
-				Ok(result) => return result,
-				Err(flume::RecvTimeoutError::Timeout) => {},
-				Err(flume::RecvTimeoutError::Disconnected) => {
-					return Err(DesktopError::internal("Launch Services completion channel closed"));
-				},
-			}
-		}
+		let configuration = open_configuration(activate);
+		launch_services("the application", |completion| {
+			NSWorkspace::sharedWorkspace().openApplicationAtURL_configuration_completionHandler(
+				&url,
+				&configuration,
+				Some(completion),
+			);
+		})
 	})
+}
+
+/// Opens the file, folder or URL `target` in `app`, or else its default
+/// application, and returns that application with the window showing it, as
+/// [`open`] does. Without `activate`, Launch Services opens it behind the
+/// user's app. `reveal` instead shows the file or folder selected in Finder,
+/// which `NSWorkspace` always brings to the front.
+pub(super) fn open_document(
+	target: &str,
+	app: Option<Application>,
+	reveal: bool,
+	activate: bool,
+) -> CoreResult<OpenedApplication> {
+	let opened = autoreleasepool(|_| {
+		let url = document_url(target, reveal)?;
+		let workspace = NSWorkspace::sharedWorkspace();
+		let urls = NSArray::from_retained_slice(std::slice::from_ref(&url));
+		if reveal {
+			workspace.activateFileViewerSelectingURLs(&urls);
+			return finder();
+		}
+		let application = match &app {
+			Some(app) => NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&app.path), true),
+			None => workspace.URLForApplicationToOpenURL(&url).ok_or_else(|| {
+				DesktopError::invalid_target(format!("no application opens {target:?}"))
+			})?,
+		};
+		let configuration = open_configuration(activate);
+		launch_services(target, |completion| {
+			workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+				&urls,
+				&application,
+				&configuration,
+				Some(completion),
+			);
+		})
+	})?;
+	// The window that shows the item: titled with its name (a revealed item's
+	// folder), rather than an Open panel or another document of the app.
+	let path = Path::new(target).canonicalize().ok();
+	let shown = if reveal {
+		path.as_deref().and_then(Path::parent)
+	} else {
+		path.as_deref()
+	};
+	let name = shown
+		.and_then(Path::file_name)
+		.map(|name| name.to_string_lossy().into_owned());
+	let window = match opened.pid {
+		Some(pid) => first_window(
+			false,
+			FIRST_WINDOW_WAIT,
+			|| key_capable_windows(pid).map(|windows| showing(windows, name.as_deref())),
+			|| false,
+			|| false,
+			poll_window,
+		)?,
+		None => None,
+	};
+	Ok(OpenedApplication::new(opened, window))
+}
+
+/// The `windows` whose title names the opened item (`name`): all of them for a
+/// URL, or when no title can be read (without Screen Recording other apps'
+/// titles are empty), since nothing then tells the windows apart.
+fn showing(windows: Vec<DesktopWindow>, name: Option<&str>) -> Vec<DesktopWindow> {
+	match name {
+		Some(name) if windows.iter().any(|window| !window.title.is_empty()) => windows
+			.into_iter()
+			.filter(|window| window.title.contains(name))
+			.collect(),
+		_ => windows,
+	}
+}
+
+/// The URL [`open_document`] opens: an existing file or folder, or, unless
+/// revealing, a URL with a scheme.
+fn document_url(target: &str, reveal: bool) -> CoreResult<Retained<NSURL>> {
+	let path = Path::new(target);
+	if path.exists() {
+		let path = path.canonicalize().map_err(|error| {
+			DesktopError::invalid_target(format!("cannot open {target:?}: {error}"))
+		})?;
+		let path = path
+			.to_str()
+			.ok_or_else(|| DesktopError::invalid_target(format!("{target:?} is not valid UTF-8")))?;
+		return Ok(NSURL::fileURLWithPath(&NSString::from_str(path)));
+	}
+	if !reveal && super::url_scheme(target).is_some() {
+		return NSURL::URLWithString(&NSString::from_str(target))
+			.ok_or_else(|| DesktopError::invalid_target(format!("{target:?} is not a valid URL")));
+	}
+	Err(DesktopError::invalid_target(if reveal {
+		format!("cannot find {target:?}; reveal shows an existing file or folder")
+	} else {
+		format!(
+			"cannot find {target:?}; apps.open opens an application, an existing file or folder, or \
+			 a URL"
+		)
+	}))
+}
+
+/// Finder, which `activateFileViewerSelectingURLs` reveals items in.
+fn finder() -> CoreResult<Application> {
+	NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!("com.apple.finder"))
+		.firstObject()
+		.and_then(|running| running_application(&running))
+		.ok_or_else(|| DesktopError::internal("Finder is not running after revealing the item"))
+}
+
+/// Launch Services options shared by every `apps.open` launch: no new
+/// instance, recent-items entry or prompt, and activation only when asked.
+fn open_configuration(activate: bool) -> Retained<NSWorkspaceOpenConfiguration> {
+	let configuration = NSWorkspaceOpenConfiguration::configuration();
+	configuration.setActivates(activate);
+	configuration.setCreatesNewApplicationInstance(false);
+	configuration.setAddsToRecentItems(false);
+	configuration.setPromptsUserIfNeeded(false);
+	configuration
+}
+
+type LaunchCompletion = DynBlock<dyn Fn(*mut NSRunningApplication, *mut NSError)>;
+
+/// Waits up to 30 seconds for the Launch Services request `start` makes with
+/// the completion handler it is given, and returns the application that
+/// opened `what`.
+fn launch_services(what: &str, start: impl FnOnce(&LaunchCompletion)) -> CoreResult<Application> {
+	let (sender, receiver) = flume::bounded(1);
+	let subject = what.to_owned();
+	let completion: RcBlock<dyn Fn(*mut NSRunningApplication, *mut NSError)> =
+		RcBlock::new(move |running: *mut NSRunningApplication, error: *mut NSError| {
+			// SAFETY: AppKit supplies borrowed live objects for this callback.
+			// Only owned Rust values leave the callback; pointers
+			// are never retained.
+			let result = unsafe {
+				if let Some(error) = error.as_ref() {
+					let domain = error.domain().to_string();
+					let message = format!(
+						"Launch Services could not open {} ({} {}): {}",
+						subject,
+						domain,
+						error.code(),
+						error.localizedDescription(),
+					);
+					Err(
+						if (domain == "NSCocoaErrorDomain" && matches!(error.code(), 257 | 513))
+							|| (domain == "NSOSStatusErrorDomain" && matches!(error.code(), -54 | -5000))
+						{
+							DesktopError::permission_denied(message)
+						} else {
+							DesktopError::input_failed(message)
+						},
+					)
+				} else if let Some(running) = running.as_ref() {
+					running_application(running).ok_or_else(|| {
+						DesktopError::invalid_target(
+							"Launch Services returned an application without a bundle path",
+						)
+					})
+				} else {
+					Err(DesktopError::internal(
+						"Launch Services returned neither an application nor an error",
+					))
+				}
+			};
+			let _ = sender.send(result);
+		});
+	start(&completion);
+	let deadline = Instant::now() + Duration::from_secs(30);
+	loop {
+		control::check()?;
+		let remaining = deadline.saturating_duration_since(Instant::now());
+		if remaining.is_zero() {
+			return Err(DesktopError::timeout(format!(
+				"Launch Services did not confirm opening {what} within 30 seconds; it may still open"
+			)));
+		}
+		match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
+			Ok(result) => return result,
+			Err(flume::RecvTimeoutError::Timeout) => {},
+			Err(flume::RecvTimeoutError::Disconnected) => {
+				return Err(DesktopError::internal("Launch Services completion channel closed"));
+			},
+		}
+	}
 }
 
 #[cfg(test)]
@@ -704,5 +830,19 @@ mod tests {
 		assert_eq!(kept.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(), ["500"]);
 		// Without accessibility windows nothing is dropped.
 		assert_eq!(in_ax_windows(listed, None).len(), 2);
+	}
+
+	#[test]
+	fn an_opened_document_returns_the_window_titled_with_its_name() {
+		let titled = |id: &str, title: &str| DesktopWindow { title: title.into(), ..window(id) };
+		// TextEdit launched by a document shows its Open panel first.
+		let listed = vec![titled("1", "Open"), titled("2", "notes.txt")];
+		let ids = |windows: Vec<DesktopWindow>| windows.into_iter().map(|w| w.id).collect::<Vec<_>>();
+		assert_eq!(ids(showing(listed.clone(), Some("notes.txt"))), ["2"]);
+		// Until it appears there is none, so the wait goes on.
+		assert!(showing(vec![titled("1", "Open")], Some("notes.txt")).is_empty());
+		// A URL, or titles nobody can read, leave the frontmost window.
+		assert_eq!(ids(showing(listed, None)), ["1", "2"]);
+		assert_eq!(ids(showing(vec![window("3"), window("4")], Some("notes.txt"))), ["3", "4"]);
 	}
 }

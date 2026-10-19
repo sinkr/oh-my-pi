@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import * as path from "node:path";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -30,6 +31,7 @@ import {
 import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import type {
+	ApplicationOpenOptions,
 	AxNode,
 	AxQuery,
 	AxSelectTextOptions,
@@ -4015,6 +4017,11 @@ describe("computer background fallback", () => {
 				call: "open:test.editor:true",
 				route: "without activate",
 			},
+			{
+				code: 'await desktop.apps.open("/tmp/report.pdf", { reveal: true })',
+				call: "open:/tmp/report.pdf:-",
+				route: "apps.open(folder)",
+			},
 			{ code: 'await desktop.type("x")', call: "type:desktop:-", route: "window handle" },
 			{
 				code: 'await (await desktop.display("active")).click(1, 2)',
@@ -4086,6 +4093,31 @@ describe("computer background fallback", () => {
 				"axClick:false",
 				"holdKeys:42:false",
 				"open:test.editor:false",
+			]);
+		});
+
+		it("opens a relative file path in the session's folder, and passes reveal and app on", async () => {
+			class FileSession extends ForegroundSession {
+				readonly opened: Array<{ id: string; options?: ApplicationOpenOptions }> = [];
+				override async openApplication(id: string, options?: ApplicationOpenOptions) {
+					this.opened.push({ id, options });
+					return super.openApplication(id, options);
+				}
+			}
+			const native = new FileSession();
+			const code = [
+				'await desktop.apps.open("computer.test.ts", { reveal: true });',
+				'await desktop.apps.open("computer.test.ts", { app: "Editor" });',
+				'await desktop.apps.open("Editor");',
+				'await desktop.apps.open("/tmp/report.pdf");',
+			].join("\n");
+			expect((await run(native, code, "takeover")).ok).toBe(true);
+			const here = path.join(import.meta.dir, "computer.test.ts");
+			expect(native.opened).toEqual([
+				{ id: here, options: { reveal: true } },
+				{ id: here, options: { app: "Editor" } },
+				{ id: "Editor", options: {} },
+				{ id: "/tmp/report.pdf", options: {} },
 			]);
 		});
 
