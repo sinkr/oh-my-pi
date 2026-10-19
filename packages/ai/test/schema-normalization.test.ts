@@ -1539,6 +1539,26 @@ describe("normalizeSchemaForFactoryDroid", () => {
 		).toEqual({ type: "object", properties: { a: { type: "string" } } });
 	});
 
+	it("drops required names that narrowing a mixed union leaves undefined", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { x: { type: "string" } },
+			anyOf: [{ type: "string" }, { type: "object", required: ["a"] }],
+		});
+		expect(normalized).toEqual({ type: "object", properties: { x: { type: "string" } }, nullable: false });
+	});
+
+	it("keeps the stricter bound when allOf and a union both set it", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			anyOf: [
+				{ type: "number", minimum: 5 },
+				{ type: "number", minimum: 10 },
+			],
+			allOf: [{ type: "number", minimum: 0 }],
+		});
+		expect(normalized).toEqual({ type: "number", minimum: 5, nullable: false });
+	});
+
 	it("counts allOf fields when deciding whether anyOf can stay", () => {
 		const normalized = normalizeSchemaForFactoryDroid({
 			anyOf: [{ type: "string" }, { type: "number" }],

@@ -45,6 +45,16 @@ function dedupe(values: unknown[]): unknown[] {
 	return values.filter((entry, index, array) => array.indexOf(entry) === index);
 }
 
+/** Bound keywords whose conjunction keeps the stricter value. */
+const STRICTER_BOUND: Record<string, (a: number, b: number) => number> = {
+	minimum: Math.max,
+	minLength: Math.max,
+	minItems: Math.max,
+	maximum: Math.min,
+	maxLength: Math.min,
+	maxItems: Math.min,
+};
+
 function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredMerge: RequiredMerge): JsonObject {
 	const merged: JsonObject = { ...left };
 	for (const [key, value] of Object.entries(right)) {
@@ -62,6 +72,10 @@ function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredM
 			merged.properties = properties;
 		} else if (key === "required") {
 			// Combined below: intersection must also see a missing right-hand `required`.
+		} else if (requiredMerge === "union" && key in STRICTER_BOUND && typeof value === "number") {
+			// Conjunctions keep the tighter of two bounds.
+			const current = merged[key];
+			merged[key] = typeof current === "number" ? STRICTER_BOUND[key](current, value) : value;
 		} else if (key === "enum" && Array.isArray(left.enum) && Array.isArray(value)) {
 			merged.enum = dedupe([...(left.enum as unknown[]), ...(value as unknown[])]);
 		} else if (!(key in merged)) {
@@ -129,6 +143,12 @@ function settleUnion(out: JsonObject, branches: JsonObject[], nullable: boolean)
 	if (collapsed) {
 		collapsed.nullable = nullable;
 		Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
+		// Narrowing can drop the branch that defined a required property.
+		if (mixedTypes && Array.isArray(out.required)) {
+			const kept = withoutUndefinedRequired(out);
+			if (kept.required) out.required = kept.required;
+			else delete out.required;
+		}
 	}
 }
 
