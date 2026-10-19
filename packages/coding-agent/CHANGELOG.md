@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a parked subagent waking up with the `todo` tool and its instructions when messaged, though subagents are spawned without them
+- Fixed a parked subagent waking up with the `todo` tool and its instructions when messaged, though subagents are spawned without them ([#16281](https://github.com/can1357/oh-my-pi/pull/16281) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
