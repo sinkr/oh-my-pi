@@ -44,8 +44,8 @@ For normal file-like reads, `splitPathAndSel()` in `packages/tui/src/tools/read.
 | `:N` / `:LN` / `:N-` / `:N..` | Start at 1-indexed line `N`, open-ended.                                                                                                       |
 | `:A-B` / `:LA-LB` / `:A..B`   | Inclusive 1-indexed line range (`..` is a forgiving alias normalized to `-`).                                                                  |
 | `:A+C` / `:LA+LC`             | `C` lines starting at `A`; tool converts this to end line `A + C - 1`.                                                                         |
-| `:-N`                        | Last `N` lines; `N` must be positive. Also combines with `:raw`. |
-| `:R1,R2,...`                  | Multiple ranges, sorted and merged before reading (for example `:5-16,960-973`). A `-N` chunk adds the last `N` lines (`:1-12,-15`); a colon repeated after a comma is dropped (`:1-30,:-30`). |
+| `:-N`                        | Last `N` lines; `N` must be positive. Also combines with `:raw` and with ranges in a comma list (`:1-12,-15`). |
+| `:R1,R2,...`                  | Multiple ranges, sorted and merged before reading (for example `:5-16,960-973`).                                                               |
 | `:range:raw` or `:raw:range`  | Same line selection, but raw output.                                                                                                           |
 
 Validation in `parseLineRangeChunk()`:
@@ -55,6 +55,8 @@ Validation in `parseLineRangeChunk()`:
 - `-` end must be `>= start`.
 
 Selector parsing intentionally falls through for unrecognized trailing `:...`; archive and SQLite paths consume their own colon syntax.
+
+A comma list may repeat the selector colon after a comma (`:1-30,:-30` reads as `:1-30,-30`, `:raw` on either side included). `splitPathAndSel(path, { foldListColons: false })` keeps that colon in the path, and the literal-preferring splitters use it so an existing file named like the list's head (`a:1-30,`) still wins.
 
 URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts`, but use the same line-range parser for `:raw`, `:N`, `:A-B`, `:A+C`, `:5-10,20-30`, and `:range:raw` / `:raw:range`. Because URL ports also use `:`, add a trailing slash before a selector on a host/port URL, e.g. `https://example.com/:80`.
 Literal filesystem paths take precedence over selector interpretation, so an existing POSIX filename that ends in selector-looking text is read literally.
