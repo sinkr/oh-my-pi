@@ -503,13 +503,16 @@ const contentText = (el, skip, visibility = "visible") => {
 			const inner = visibility === "any" ? "any" : style.visibility;
 			const label = child.getAttribute("aria-label");
 			const field = child.localName === "input" || child.localName === "select" || child.localName === "textarea";
-			// A checkbox's or radio's value ("on" by default) is not text it shows.
-			const valueIsText = field && (child.localName !== "input" || !["checkbox", "radio", "file", "hidden"].includes(inputType(child)));
+			const inputButton = child.localName === "input" && ["button", "submit", "reset"].includes(inputType(child));
+			// A text field's value stands in for it; a checkbox's or radio's value ("on" by default) is not
+			// text it shows, and an input button is named by its label before its value.
+			const valueIsText = field && !inputButton && (child.localName !== "input" || !["checkbox", "radio", "file", "hidden", "image"].includes(inputType(child)));
 			// A nested field contributes its value, not its own label.
 			if (valueIsText) {
 				if (shown) out += child.localName === "select" ? Array.from(child.selectedOptions, option => option.text).join(" ") : child.value || "";
 			} else if (label) out += shown ? label : "";
 			else if (child.localName === "img") out += shown ? child.getAttribute("alt") || "" : "";
+			else if (inputButton) out += shown ? child.value || "" : "";
 			else if (!field && child.shadowRoot) walk(child.shadowRoot, inner);
 			else if (!field) walk(child, inner);
 			if (block) out += " ";

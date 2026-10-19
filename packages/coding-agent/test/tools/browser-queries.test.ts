@@ -80,7 +80,7 @@ beforeAll(async () => {
 		<button>Pick <select><option>Red</option><option selected>Blue</option></select></button>
 		<label for="quantity">Size <input value="10"></label><input id="quantity">
 		<button aria-labelledby="draft-label"></button><span id="draft-label" style="visibility:hidden"><b>Save draft</b></span>
-		<ul role="tree"><li role="treeitem"><input type="checkbox">Node</li><li role="treeitem"><select multiple><option selected>Red</option><option selected>Blue</option></select></li><li role="treeitem"><select aria-label="Palette"><option selected>Green</option></select></li></ul>`;
+		<ul role="tree"><li role="treeitem"><input type="checkbox">Node</li><li role="treeitem"><select multiple><option selected>Red</option><option selected>Blue</option></select></li><li role="treeitem"><select aria-label="Palette"><option selected>Green</option></select></li><li role="treeitem"><input type="button" value="Delete" aria-label="Remove"></li></ul>`;
 	await invoke({ action: "open", name: namesTab, url: `data:text/html,${encodeURIComponent(namesHtml)}` });
 });
 
@@ -122,6 +122,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		["a checkbox's value is not its text", "treeitem", "Node"],
 		["a multi-select contributes every selected option", "treeitem", "Red Blue"],
 		["a nested select contributes its value, not its label", "treeitem", "Green"],
+		["a nested input button contributes its label", "treeitem", "Remove"],
 	])("matches role/ exact names to the name observe() shows when %s", async (_, role, elementName) => {
 		const result = (await invoke({
 			action: "run",

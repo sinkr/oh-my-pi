@@ -174,11 +174,15 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 					value?: string;
 					selectedOptions?: ArrayLike<{ text: string }>;
 				};
-				// A checkbox's or radio's `value` ("on" by default) is not text it shows.
+				const inputType = tag === "input" ? (control.type ?? "").toLocaleLowerCase() : "";
+				const inputButton = ["button", "submit", "reset"].includes(inputType);
+				// A text field's value stands in for it; a checkbox's or radio's `value` ("on" by default) is not
+				// text it shows, and an input button is named by its label before its value.
 				const valueIsText =
 					tag === "textarea" ||
 					(tag === "input" &&
-						!["checkbox", "radio", "file", "hidden"].includes((control.type ?? "").toLocaleLowerCase()));
+						!inputButton &&
+						!["checkbox", "radio", "file", "hidden", "image"].includes(inputType));
 				text += gap;
 				// A nested field contributes its value, not its own label.
 				if (tag === "select") {
@@ -186,6 +190,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
 				else if (label) text += shown ? label : "";
 				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
+				else if (inputButton) text += shown ? (control.value ?? "") : "";
 				else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
 				text += gap;
 			}
