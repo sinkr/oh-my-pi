@@ -3864,23 +3864,31 @@ export class AgentSession implements SettingsScope {
 	 * `await abort()`, so the result the abort gives a running tool reaches no
 	 * persisting handler. Record it before the transition rewrites or leaves the
 	 * session; otherwise its call is left without a result and replay fills in a
-	 * synthetic one. Its call was persisted when the assistant turn ended, before
-	 * the tool started. A successful `rewind` result is the exception: the
+	 * synthetic one. Only results of calls the last assistant turn before the
+	 * disconnect made qualify: that turn was persisted at its `message_end`. A turn
+	 * the abort cut short mid-stream was never persisted, so its synthetic results
+	 * would be orphans. A successful `rewind` result is the exception too: the
 	 * aborted turn never applies it, so recording "rewind requested" would claim
 	 * a branch cut that never happened.
 	 */
 	#persistToolResultsEndedWhileDisconnected(): void {
 		const start = this.#disconnectedMessageCount;
 		if (start === undefined) return;
+		// Once per disconnect: the transition may replace the agent's messages next (compaction, reset).
+		this.#disconnectedMessageCount = undefined;
 		const messages = this.agent.state.messages;
+		let lastAssistant: AgentMessage | undefined;
+		for (let index = Math.min(start, messages.length) - 1; index >= 0 && !lastAssistant; index--) {
+			if (messages[index].role === "assistant") lastAssistant = messages[index];
+		}
+		if (lastAssistant?.role !== "assistant") return;
+		const knownCalls = new Set(lastAssistant.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])));
 		for (let index = start; index < messages.length; index++) {
 			const message = messages[index];
-			if (message.role !== "toolResult") continue;
+			if (message.role !== "toolResult" || !knownCalls.has(message.toolCallId)) continue;
 			if (!message.isError && semanticToolResult(message.toolName, message)?.toolName === "rewind") continue;
 			this.#persistSessionMessageIfMissing(message);
 		}
-		// Once per disconnect: the transition may replace the agent's messages next (compaction, reset).
-		this.#disconnectedMessageCount = undefined;
 	}
 
 	/**
