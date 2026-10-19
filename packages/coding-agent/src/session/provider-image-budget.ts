@@ -25,6 +25,12 @@ const IMAGE_OMISSION: TextContent = {
 };
 
 /**
+ * Body bytes added after the clamp sees the context: injected reminders, the provider's own system prompt, and
+ * request fields (model, limits, thinking, stream). Reserved before protecting images against a body limit.
+ */
+const REQUEST_ENVELOPE_BYTES = 64_000;
+
+/**
  * Images the clamp below is actually able to remove, and therefore the only
  * ones worth charging against the provider budget.
  *
@@ -196,12 +202,17 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	if (inlineBytes <= byteBudget) return context;
 	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
 	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
-	// images. Base64 is ASCII, so its characters are its bytes. Tool-result `details` are UI-only and never sent.
-	const wire = context.messages.map(message =>
-		message.role === "toolResult" ? { ...message, details: undefined } : message,
-	);
+	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
+	// another provider's native assistant payload, which this request does not replay.
+	const wire = context.messages.map(message => {
+		if (message.role === "toolResult") return { ...message, details: undefined };
+		if (message.role === "assistant" && message.provider !== model.provider) {
+			return { ...message, providerPayload: undefined };
+		}
+		return message;
+	});
 	const otherBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: wire })) - inlineBytes - unsentBytes;
-	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - otherBytes;
+	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - REQUEST_ENVELOPE_BYTES - otherBytes;
 	const kept = newestImageMessages(context, model, imageRoom);
 	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, kept });
 }

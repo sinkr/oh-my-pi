@@ -577,6 +577,53 @@ describe("provider context image budgets", () => {
 		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual([fresh]);
 	});
 
+	it("does not reserve room for another provider's native assistant payload", () => {
+		const fresh = "C".repeat(3_800_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "assistant",
+					content: [text("generated")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "openai",
+						items: [{ type: "image_generation_call", result: "G".repeat(2_000_000) }],
+					},
+					api: "openai-responses",
+					provider: "openai",
+					model: OPENAI_RESPONSES_MODEL.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 0,
+				},
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 1 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual([fresh]);
+	});
+
+	it("leaves room for the request envelope added after the clamp", () => {
+		// The context alone fits 4.5 MB with ~10 KB to spare, less than the provider prompt and request fields need.
+		const fresh = "C".repeat(FACTORY_DROID_ROUTE_BODY_LIMIT - 10_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 0 }],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual([]);
+	});
+
 	it("removes an oversized single tool image but keeps its tool result meaningful", () => {
 		const context: Context = {
 			systemPrompt: [],
