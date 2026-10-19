@@ -1771,6 +1771,96 @@ describe("ACP agent", () => {
 		}
 	});
 
+	it("does not let an unrelated prompt consume a pending steer's resubmission credit", async () => {
+		// Regression: the resubmission allowance was a bare count, so an
+		// unrelated `session/prompt` arriving between a refused steer and its
+		// real resubmission consumed the credit — queueing where it should
+		// have implicitly cancelled, and leaving the real resubmission to
+		// cancel the replacement turn. Credits are now keyed by the refused
+		// steer's content; only a matching prompt consumes one.
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		expectAcpStructure(zNewSessionResponse, created);
+		const session = harness.findSession(created.sessionId)!;
+
+		const dispatchStarted = Promise.withResolvers<void>();
+		const preprocessingDone = Promise.withResolvers<void>();
+		const streamingStarted = Promise.withResolvers<void>();
+		const turnFinished = Promise.withResolvers<void>();
+		const emitAgentEnd = (text: string) => {
+			const assistant = makeAssistantMessage(text);
+			session.sessionManager.appendMessage(assistant);
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [assistant] } as AgentSessionEvent);
+			}
+		};
+		session.prompt = async (text: string) => {
+			session.promptCalls.push(text);
+			if (text === "first") {
+				dispatchStarted.resolve();
+				await preprocessingDone.promise;
+				session.isStreaming = true;
+				streamingStarted.resolve();
+				await turnFinished.promise;
+				session.isStreaming = false;
+				emitAgentEnd("first answer");
+				return true;
+			}
+			emitAgentEnd(`answer to ${text}`);
+			return true;
+		};
+		const abortSpy = spyOn(session, "abort");
+
+		try {
+			const firstPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "first" }],
+			});
+			await dispatchStarted.promise;
+
+			// The steer is refused in the pre-dispatch window: one credit,
+			// keyed by its content.
+			const steer = await harness.agent.extMethod("_session/steering", {
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "steered" }],
+			});
+			expect(steer).toEqual({ outcome: "promptRequired", queue: "steering" });
+
+			preprocessingDone.resolve();
+			await streamingStarted.promise;
+
+			// An unrelated prompt arrives while the turn streams. It shares no
+			// content with the refused steer, so it must take the ordinary
+			// overlapping-prompt path — implicitly cancelling the run — not
+			// the steer's queued-resubmission credit.
+			const unrelated = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "unrelated" }],
+			});
+			await Bun.sleep(0);
+			expect(abortSpy).toHaveBeenCalledTimes(1);
+
+			// The unrelated prompt ran as the replacement turn, to completion.
+			const [first, second] = await Promise.all([firstPrompt, unrelated]);
+			expect(first.stopReason).toBe("cancelled");
+			expect(second.stopReason).toBe("end_turn");
+
+			// The real resubmission still consumes its own credit — no second
+			// cancellation — and answers in turn.
+			const third = await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "steered" }],
+			});
+			expect(abortSpy).toHaveBeenCalledTimes(1);
+			expect(third.stopReason).toBe("end_turn");
+			expect(session.promptCalls).toEqual(["first", "unrelated", "steered"]);
+		} finally {
+			abortSpy.mockRestore();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
 	it("replays messageIds and returns turn usage for prompts", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
