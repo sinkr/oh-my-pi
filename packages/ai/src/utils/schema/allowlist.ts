@@ -45,6 +45,16 @@ function dedupe(values: unknown[]): unknown[] {
 	return values.filter((entry, index, array) => array.indexOf(entry) === index);
 }
 
+/** Bound keywords whose conjunction keeps the stricter value. */
+const STRICTER_BOUND: Record<string, (a: number, b: number) => number> = {
+	minimum: Math.max,
+	minLength: Math.max,
+	minItems: Math.max,
+	maximum: Math.min,
+	maxLength: Math.min,
+	maxItems: Math.min,
+};
+
 function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredMerge: RequiredMerge): JsonObject {
 	const merged: JsonObject = { ...left };
 	for (const [key, value] of Object.entries(right)) {
@@ -62,6 +72,10 @@ function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredM
 			merged.properties = properties;
 		} else if (key === "required") {
 			// Combined below: intersection must also see a missing right-hand `required`.
+		} else if (requiredMerge === "union" && key in STRICTER_BOUND && typeof value === "number") {
+			// Conjunctions keep the tighter of two bounds.
+			const current = merged[key];
+			merged[key] = typeof current === "number" ? STRICTER_BOUND[key](current, value) : value;
 		} else if (key === "enum" && Array.isArray(left.enum) && Array.isArray(value)) {
 			merged.enum = dedupe([...(left.enum as unknown[]), ...(value as unknown[])]);
 		} else if (!(key in merged)) {
@@ -81,6 +95,61 @@ function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredM
 		else delete merged.required;
 	}
 	return merged;
+}
+
+/** Fields the proxy accepts beside `anyOf`; anything else there is a 400. */
+const ANY_OF_SIBLING_KEYS: Record<string, true> = {
+	title: true,
+	description: true,
+	default: true,
+	example: true,
+};
+
+/** The proxy 400s on `required` names a schema's own `properties` lacks. */
+function withoutUndefinedRequired(branch: JsonObject): JsonObject {
+	if (!Array.isArray(branch.required)) return branch;
+	const properties = isJsonObject(branch.properties) ? branch.properties : {};
+	const required = (branch.required as unknown[]).filter(
+		name => typeof name === "string" && Object.hasOwn(properties, name),
+	);
+	const { required: _dropped, ...rest } = branch;
+	return required.length > 0 ? { ...rest, required } : rest;
+}
+
+function settleUnion(out: JsonObject, branches: JsonObject[], nullable: boolean): void {
+	let nonNull = branches;
+	const mixedTypes =
+		nonNull.every(branch => typeof branch.type === "string") && new Set(nonNull.map(branch => branch.type)).size > 1;
+	if (mixedTypes && Object.keys(out).every(key => key in ANY_OF_SIBLING_KEYS)) {
+		out.anyOf = nonNull.map(withoutUndefinedRequired);
+		if (nullable) out.nullable = true;
+		return;
+	}
+	if (mixedTypes) {
+		// `anyOf` must be the only structural field, and branches of
+		// different types never merge into one Schema: keep only the
+		// branches of the node's own type (none if no branch has it),
+		// else of the first branch's type.
+		const ownType = Array.isArray(out.type)
+			? (out.type as unknown[]).find(t => typeof t === "string" && t !== "null")
+			: (out.type ?? (isJsonObject(out.properties) ? "object" : undefined));
+		const kept = ownType ?? nonNull[0].type;
+		nonNull = nonNull.filter(branch => branch.type === kept);
+	}
+	let collapsed: JsonObject | undefined;
+	for (const branch of nonNull) {
+		collapsed = collapsed ? mergeFactoryDroidSchemas(collapsed, branch, "intersection") : { ...branch };
+	}
+	if (collapsed) {
+		collapsed.nullable = nullable;
+		Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
+		// Narrowing can drop the branch that defined a required property.
+		if (mixedTypes && Array.isArray(out.required)) {
+			const kept = withoutUndefinedRequired(out);
+			if (kept.required) out.required = kept.required;
+			else delete out.required;
+		}
+	}
 }
 
 function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
@@ -106,32 +175,28 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 		if (copied !== undefined) out.items = copied;
 	}
 
+	// allOf: merge every branch into this node's own copy first, so the union
+	// handling below sees every field that will sit beside it.
+	if (Array.isArray(node.allOf)) {
+		for (const branch of node.allOf) {
+			const copied = copyFactoryDroidSchema(branch);
+			if (copied) Object.assign(out, mergeFactoryDroidSchemas(out, copied, "union"));
+		}
+	}
+
 	// anyOf/oneOf unions: merge the non-null branches (a field stays required
 	// only when every branch requires it), marking the result nullable when a
 	// `type: "null"` branch is present, then fold that into this node so its
-	// own properties/required survive.
+	// own properties/required survive. Typed branches of different types cannot
+	// merge into one Schema (`string` gaining `items` is a 400), so they stay an
+	// `anyOf` when the node has nothing else the proxy forbids beside it.
 	const unionKey = Array.isArray(node.anyOf) ? "anyOf" : Array.isArray(node.oneOf) ? "oneOf" : undefined;
 	if (unionKey) {
 		const branches = (node[unionKey] as unknown[])
 			.map(copyFactoryDroidSchema)
 			.filter((branch): branch is JsonObject => branch !== undefined);
 		const nonNull = branches.filter(branch => !typeIncludesNull(branch));
-		let collapsed: JsonObject | undefined;
-		for (const branch of nonNull) {
-			collapsed = collapsed ? mergeFactoryDroidSchemas(collapsed, branch, "intersection") : { ...branch };
-		}
-		if (collapsed) {
-			collapsed.nullable = nonNull.length < branches.length;
-			Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
-		}
-	}
-
-	// allOf: merge every branch into this node's own copy.
-	if (Array.isArray(node.allOf)) {
-		for (const branch of node.allOf) {
-			const copied = copyFactoryDroidSchema(branch);
-			if (copied) Object.assign(out, mergeFactoryDroidSchemas(out, copied, "union"));
-		}
+		settleUnion(out, nonNull, nonNull.length < branches.length);
 	}
 
 	// The Schema proto takes a single string `type`: collapse draft-2020-12
@@ -153,8 +218,35 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 	return out;
 }
 
+/**
+ * A kept `anyOf` can gain structural siblings when an enclosing `allOf`
+ * merges into it (at any depth); settle those against the merged node.
+ */
+function settleMergedUnions(node: JsonObject): void {
+	if (isJsonObject(node.properties)) {
+		for (const schema of Object.values(node.properties)) {
+			if (isJsonObject(schema)) settleMergedUnions(schema);
+		}
+	}
+	if (isJsonObject(node.items)) settleMergedUnions(node.items);
+	if (!Array.isArray(node.anyOf)) return;
+	for (const branch of node.anyOf) {
+		if (isJsonObject(branch)) settleMergedUnions(branch);
+	}
+	const { anyOf, nullable, ...rest } = node;
+	if (Object.keys(rest).every(key => key in ANY_OF_SIBLING_KEYS)) return;
+	delete node.anyOf;
+	delete node.nullable;
+	settleUnion(node, anyOf as JsonObject[], nullable === true);
+	if (!("type" in node) && isJsonObject(node.properties)) node.type = "object";
+	// The collapse merges branches, which can leave new unions beside fields.
+	settleMergedUnions(node);
+}
+
 /** Project a dereferenced JSON Schema onto Factory Gemini's allowed fields. */
 export function normalizeSchemaForFactoryDroid(value: unknown): unknown {
 	if (!isJsonObject(value)) return value;
-	return copyFactoryDroidSchema(value) ?? {};
+	const out = copyFactoryDroidSchema(value) ?? {};
+	settleMergedUnions(out);
+	return out;
 }
