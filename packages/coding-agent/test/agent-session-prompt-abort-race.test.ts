@@ -40,7 +40,11 @@ describe("AgentSession prompt admission racing abort", () => {
 	async function createSession(
 		responses: Array<() => MockResponse | Promise<MockResponse>>,
 		textOnly = false,
-		options: { modelRegistry?: unknown; clientBridge?: unknown; extensionRunner?: unknown } = {},
+		options: {
+			modelRegistry?: Pick<ModelRegistry, "getApiKey">;
+			clientBridge?: unknown;
+			extensionRunner?: unknown;
+		} = {},
 	) {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -53,12 +57,12 @@ describe("AgentSession prompt admission racing abort", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
 		});
-		const modelRegistry = new ModelRegistry(authStorage);
+		const fallbackRegistry = new ModelRegistry(authStorage);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-			modelRegistry,
+			modelRegistry: (options.modelRegistry ?? fallbackRegistry) as never,
 			...(options.extensionRunner ? { extensionRunner: options.extensionRunner as never } : {}),
 		});
 		if (options.clientBridge) {
@@ -66,7 +70,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		}
 		const dropped: string[] = [];
 		session.setPromptDropped(prompt => dropped.push(prompt.text));
-		return { session, dropped, modelRegistry };
+		return { session, dropped, modelRegistry: options.modelRegistry ?? fallbackRegistry };
 	}
 
 	/** Holds image normalization for image-bearing calls until released. */
@@ -382,14 +386,14 @@ describe("AgentSession prompt admission racing abort", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("keeps a steer queued when the prompt that admitted it fails in setup, under an ACP client", async () => {
+	it("refuses a steer whose owning prompt fails in setup, under an ACP client", async () => {
 		let calls = 0;
 		let apiKeyCalls = 0;
 		const apiKeyGate = Promise.withResolvers<void>();
 		const secondKeyRequested = Promise.withResolvers<void>();
 		// First call validates turn one; the second gates turn two's fallible
-		// setup and then fails it — the exact window a steer can be admitted
-		// into (#promptInFlightCount > 0 with no agent loop owning it yet).
+		// setup and then fails it — the exact window a steer can arrive in
+		// (#promptInFlightCount > 0 with no agent loop owning it yet).
 		const modelRegistry = {
 			getApiKey: async () => {
 				apiKeyCalls++;
@@ -422,23 +426,24 @@ describe("AgentSession prompt admission racing abort", () => {
 		const failing = session.prompt("turn two");
 		void failing.catch(() => undefined);
 		await withTimeout(secondKeyRequested.promise, 2_000, "Second prompt never reached key validation");
-		// Admitted: the prompt turn is in flight, so the steer joins it.
-		expect(await session.joinActiveTurn("steer the failing turn")).toBe(true);
 
+		// The steer parks on the dispatching prompt; the setup failure wakes
+		// it with the run never gone live, so admission is refused and the
+		// caller keeps its content (the ACP bridge answers `promptRequired`
+		// and the host resubmits through session/prompt).
+		const admitted = session.joinActiveTurn("steer the failing turn");
 		apiKeyGate.resolve();
 		await expect(failing).rejects.toThrow("No API key found");
+		expect(await admitted).toBe(false);
 		await session.waitForIdle();
 
-		// The settled prompt's drain is blocked under the ACP client: the
-		// steer stays queued (visible via queue_update) instead of running
-		// as an autonomous continuation no client owns.
+		// Nothing ran as an ownerless continuation and nothing was stranded
+		// in the queue either: the refusal kept the content with its caller.
 		expect(calls).toBe(1);
-		const queued = session.getQueuedMessages();
-		expect(queued.steering.length).toBe(1);
-		expect(queued.steering[0]).toContain("steer the failing turn");
+		expect(session.getQueuedMessages().steering).toEqual([]);
 	});
 
-	it("still drains the same stranded steer without an ACP client", async () => {
+	it("refuses the same setup-window steer without an ACP client too", async () => {
 		let calls = 0;
 		let apiKeyCalls = 0;
 		const apiKeyGate = Promise.withResolvers<void>();
@@ -471,15 +476,18 @@ describe("AgentSession prompt admission racing abort", () => {
 		const failing = session.prompt("turn two");
 		void failing.catch(() => undefined);
 		await withTimeout(secondKeyRequested.promise, 2_000, "Second prompt never reached key validation");
-		expect(await session.joinActiveTurn("steer the failing turn")).toBe(true);
 
+		// The park-until-live contract is client-independent: without a
+		// bridge the setup-failing window refuses the steer exactly the
+		// same way (the TUI keeps the typed content for the next turn).
+		const admitted = session.joinActiveTurn("steer the failing turn");
 		apiKeyGate.resolve();
 		await expect(failing).rejects.toThrow("No API key found");
+		expect(await admitted).toBe(false);
 		await session.waitForIdle();
 
-		// No ACP bridge: the documented TUI drain resumes from the queued
-		// steer — the continuation runs and answers it.
-		expect(calls).toBe(2);
+		// Nothing ran and nothing drained: the refusal kept the content.
+		expect(calls).toBe(1);
 		expect(session.getQueuedMessages().steering).toEqual([]);
 	});
 

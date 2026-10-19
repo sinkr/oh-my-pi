@@ -133,12 +133,14 @@ async function createSessionWithMockModel(
 	tools: AgentTool[],
 	bridge: ClientBridge,
 	responses: NonNullable<MockModelOptions["responses"]>,
+	options?: { getApiKey?: () => Promise<string> | string },
 ): Promise<AgentSession> {
 	const mock = createMockModel({ responses });
 	const settings = Settings.isolated({ "compaction.enabled": false });
 	const sessionManager = SessionManager.inMemory(tempDir.path());
+	const getApiKey = options?.getApiKey ?? (() => "test-key");
 	const agent = new Agent({
-		getApiKey: () => "test-key",
+		getApiKey,
 		initialState: {
 			model: mock.model,
 			systemPrompt: ["Test"],
@@ -153,7 +155,7 @@ async function createSessionWithMockModel(
 		agent,
 		sessionManager,
 		settings,
-		modelRegistry: { getApiKey: () => "test-key" } as never,
+		modelRegistry: { getApiKey } as never,
 		toolRegistry: new Map(tools.map(t => [t.name, t])),
 	});
 	sess.setClientBridge(bridge);
@@ -1167,4 +1169,74 @@ it("delivers the user steer that supersedes a dialog ahead of an agent-authored 
 	expect(agentSteerIndex).toBeGreaterThan(userSteerIndex);
 
 	permissionPending.resolve({ outcome: "cancelled" });
+});
+
+it("parks a steer that lands mid-dispatch until the owning prompt goes live, then injects it", async () => {
+	// Park-until-live: a steer arriving while the owning prompt is reserved
+	// but still dispatching (`#promptInFlightCount` raised, the agent not yet
+	// streaming) must neither be refused back to the host (agent-shell would
+	// interrupt the very turn it targeted) nor injected mid-dispatch — it
+	// parks, then admits when the run goes live, and the loop's boundary
+	// poll delivers it into that run.
+	const keyGate = Promise.withResolvers<void>();
+	const dispatched = Promise.withResolvers<void>();
+	let keyCalls = 0;
+	const gatedApiKey = (): Promise<string> | string => {
+		keyCalls++;
+		if (keyCalls === 1) {
+			dispatched.resolve();
+			return keyGate.promise.then(() => "test-key");
+		}
+		return "test-key";
+	};
+	const bridge: ClientBridge = { capabilities: {} };
+	session = await createSessionWithMockModel(
+		[],
+		bridge,
+		[{ content: ["first answer"] }, { content: ["steer answer"] }],
+		{ getApiKey: gatedApiKey },
+	);
+
+	const promptDone = session.prompt("first");
+	// Hold open the pre-dispatch window: the prompt is in flight (its
+	// in-flight bracket raised — `isStreaming` true) while the agent has
+	// not started streaming.
+	await dispatched.promise;
+	expect(session.isStreaming).toBe(true);
+	expect(session.agent.state.isStreaming).toBe(false);
+
+	const admitted = session.joinActiveTurn("steer the dispatching turn");
+	// The steer parks rather than settling: give it a beat to prove it
+	// neither admitted early nor refused.
+	await Bun.sleep(20);
+	let settled = false;
+	void admitted.then(
+		() => {
+			settled = true;
+		},
+		() => {
+			settled = true;
+		},
+	);
+	await Bun.sleep(20);
+	expect(settled).toBe(false);
+
+	// The owning prompt goes live: the parked steer admits and injects into
+	// the now-running turn.
+	keyGate.resolve();
+	expect(await admitted).toBe(true);
+	await promptDone;
+	await session.waitForIdle();
+
+	// The run went live; the loop's boundary poll injected the parked steer
+	// after the first response, and the continuation answered it in turn.
+	const messages = session.agent.state.messages;
+	const steerIndex = messages.findIndex(
+		message => message.role === "user" && JSON.stringify(message.content).includes("steer the dispatching turn"),
+	);
+	const answerIndex = messages.findIndex(
+		message => message.role === "assistant" && JSON.stringify(message.content).includes("steer answer"),
+	);
+	expect(steerIndex).toBeGreaterThanOrEqual(0);
+	expect(answerIndex).toBeGreaterThan(steerIndex);
 });

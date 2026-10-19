@@ -1264,6 +1264,10 @@ export class AgentSession implements SettingsScope {
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
+		// The in-flight bracket drained: wake steers parked on a dispatch that
+		// settled without ever going live (setup failure, abort, disposal) —
+		// they re-check liveness and keep their content.
+		this.#wakeDispatchLiveWaiters();
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();
 			return;
@@ -1646,6 +1650,10 @@ export class AgentSession implements SettingsScope {
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
+		// The abort/disposal cleared every in-flight bracket: wake steers
+		// parked on a dispatch that will never go live — they re-check
+		// `#abortInProgress` and keep their content.
+		this.#wakeDispatchLiveWaiters();
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();
 			return;
@@ -8486,7 +8494,13 @@ export class AgentSession implements SettingsScope {
 				this.#planReferenceSent = true;
 			}
 			try {
-				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
+				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
+				// `#runLoop` raises agent streaming synchronously before its
+				// first await: wake steers parked on this dispatch so they
+				// admit into the now-live run (their park then re-checks and
+				// injects through the loop's boundary polls).
+				if (this.agent.state.isStreaming) this.#wakeDispatchLiveWaiters();
+				await run;
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
 			}
@@ -8779,11 +8793,32 @@ export class AgentSession implements SettingsScope {
 		// stranded-message drain, whose continuation has no owner on the
 		// client side (the ACP promptTurn has already settled and
 		// unsubscribed) — refuse instead so the caller keeps its content.
-		if (!this.isStreaming || this.#abortInProgress) {
-			return false;
-		}
+		if (this.#abortInProgress) return false;
+		// A client-owned prompt must own the run: `#promptInFlightCount` is
+		// raised synchronously at prompt() dispatch and held across setup
+		// (commands, normalization, vision description) and the live run.
+		// A run streaming with no prompt in flight is an autonomous IRC
+		// wake — its output has no client forwarder, so a steered answer
+		// would be invisible; refuse (the host keeps its content) instead
+		// of stranding it inside a wake.
+		if (this.#promptInFlightCount === 0) return false;
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
+		}
+		// Park-until-live: a steer that lands while the owning prompt is
+		// still dispatching (setup awaits; `agent.state.isStreaming` not
+		// yet raised) cannot inject mid-dispatch, and refusing it back to
+		// the host loses it — agent-shell answers `promptRequired` while
+		// busy by interrupting the very turn the steer targeted. Hold it
+		// until the owning prompt goes live, then admit: the steer injects
+		// at the first batch boundary of the run it was meant for, and the
+		// ACP bridge answers `injected`.
+		if (!this.agent.state.isStreaming) {
+			await this.#waitForPromptDispatchLive();
+			// The owning prompt settled without going live (setup failure,
+			// abort, disposal) or an abort took the window: keep the caller's
+			// content instead of injecting into a dead run.
+			if (this.#abortInProgress || !this.agent.state.isStreaming) return false;
 		}
 		const mode = options?.queue === "followUp" ? "followUp" : "steer";
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
@@ -8988,6 +9023,42 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Resolvers parked on reserved-but-dispatching prompts going live (or
+	 * settling without streaming): `joinActiveTurn` parks a mid-dispatch
+	 * steer here instead of refusing it, so the steer injects at the owning
+	 * run's first batch boundary. Fired when `agent.state.isStreaming` rises
+	 * while a prompt is in flight, and from `#endInFlight` when the count
+	 * drains without the agent ever streaming (setup failure, abort,
+	 * disposal).
+	 */
+	#dispatchLiveWaiters = new Set<() => void>();
+
+	/**
+	 * Park until the in-flight prompt goes live (the agent starts streaming)
+	 * or settles without streaming. No-op when the agent already streams or
+	 * nothing is in flight.
+	 */
+	async #waitForPromptDispatchLive(): Promise<void> {
+		if (this.agent.state.isStreaming || this.#promptInFlightCount === 0) return;
+		const gate = Promise.withResolvers<void>();
+		const wake = (): void => {
+			this.#dispatchLiveWaiters.delete(wake);
+			gate.resolve();
+		};
+		this.#dispatchLiveWaiters.add(wake);
+		// Double-checked after registration: the prompt may go live (or
+		// settle) between the caller's reads and this registration.
+		if (this.agent.state.isStreaming || this.#promptInFlightCount === 0) wake();
+		else await gate.promise;
+	}
+
+	/** Resolve every parked dispatch-live waiter (streaming rose, or drained). */
+	#wakeDispatchLiveWaiters(): void {
+		for (const wake of this.#dispatchLiveWaiters) wake();
+		this.#dispatchLiveWaiters.clear();
+	}
+
+	/**
 	 * Aborted (and replaced) once per user steering-message arrival. The ACP
 	 * permission gate (`SessionTools.#wrapToolForAcpPermission`) races a wait
 	 * on this signal against its elicit, so a steer sent while a permission
@@ -9066,23 +9137,25 @@ export class AgentSession implements SettingsScope {
 	 * Gate for idle-path queued-message auto-continue (see `#scheduleQueuedMessageDrain`).
 	 */
 	#canAutoContinueForFollowUp(): boolean {
-		if (this.isStreaming) return false;
 		if (this.isRetrying) return false;
 		// An ACP client that defers agent-initiated turns owns turn
-		// lifecycle: once its prompt settles (no in-flight prompt), a queued
-		// steer must not auto-continue as an autonomous run the client can
-		// neither see nor cancel. Leave it queued — it stays visible via
-		// queue_update and the next client-owned prompt delivers it. While a
-		// prompt is still in flight the end-of-turn continuation keeps
-		// running in-loop (client-observable), and explicit agent-initiated
-		// deliveries re-enable the drain via #allowAcpAgentInitiatedTurns.
-		if (
-			this.#promptInFlightCount === 0 &&
-			this.#clientBridge?.deferAgentInitiatedTurns === true &&
-			!this.#allowAcpAgentInitiatedTurns
-		) {
-			return false;
+		// lifecycle, and a queued steer/follow-up may only resume while a
+		// client prompt OWNS the turn: `#promptInFlightCount` is raised
+		// synchronously at prompt() dispatch, so a drain scheduled inside
+		// that bracket continues in-loop under the owning prompt — the
+		// client sees and can cancel it. Once no prompt owns the turn —
+		// idle after settle, or an autonomous wake streaming with no client
+		// forwarder — leave it queued for the next client-owned prompt: a
+		// continuation there would be an autonomous run the client can
+		// neither see nor cancel (and ACP maps no `queue_update`, so
+		// "waits behind the dialog" guidance would be a lie). Explicit
+		// agent-initiated deliveries re-enable the drain via
+		// #allowAcpAgentInitiatedTurns. Non-deferring hosts (TUI) keep the
+		// plain streaming gate: the running turn injects via its own polls.
+		if (this.#clientBridge?.deferAgentInitiatedTurns === true && !this.#allowAcpAgentInitiatedTurns) {
+			return this.#promptInFlightCount > 0;
 		}
+		if (this.isStreaming) return false;
 		// A queued steer resumes from ANY tail: Agent.continue() runs #runLoop(undefined),
 		// whose initial steering poll injects the steer before the first provider call, so the
 		// request tail becomes the steer (valid) regardless of any injected custom / bashExecution
@@ -9219,7 +9292,12 @@ export class AgentSession implements SettingsScope {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
-			await this.agent.prompt(message);
+			const run = this.agent.prompt(message);
+			// `agent.prompt`/`#runLoop` claim streaming synchronously before the
+			// first await: wake steers parked on this dispatch going live so they
+			// admit into the now-live run.
+			if (this.agent.state.isStreaming) this.#wakeDispatchLiveWaiters();
+			await run;
 			await this.#waitForPostPromptRecovery();
 			return true;
 		} finally {

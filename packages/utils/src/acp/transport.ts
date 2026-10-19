@@ -149,14 +149,7 @@ export class RpcConnection {
 	/** Sends a correlated JSON-RPC request. */
 	request<Response>(method: string, params?: unknown): Promise<Response> {
 		if (this.signal.aborted) return Promise.reject(new Error("Connection closed"));
-		const id = this.#nextId++;
-		const deferred = Promise.withResolvers<unknown>();
-		this.#pending.set(id, deferred);
-		void this.#write({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) }).catch(error => {
-			this.#pending.delete(id);
-			deferred.reject(error);
-		});
-		return deferred.promise as Promise<Response>;
+		return this.#beginRequest(method, params).deferred.promise as Promise<Response>;
 	}
 
 	/**
@@ -179,6 +172,25 @@ export class RpcConnection {
 				cancel: () => {},
 			};
 		}
+		const { id, deferred } = this.#beginRequest(method, params);
+		return {
+			promise: deferred.promise as Promise<Response>,
+			cancel: () => {
+				if (!this.#pending.delete(id)) return;
+				deferred.reject(RequestError.requestCancelled({ requestId: id, method }));
+				void this.notify("$/cancel_request", { requestId: id }).catch(() => undefined);
+			},
+		};
+	}
+
+	/** Shared request plumbing: allocate an id, register the pending entry, write the frame. */
+	#beginRequest(
+		method: string,
+		params: unknown,
+	): {
+		id: number;
+		deferred: { promise: Promise<unknown>; resolve: (value?: unknown) => void; reject: (reason?: unknown) => void };
+	} {
 		const id = this.#nextId++;
 		const deferred = Promise.withResolvers<unknown>();
 		this.#pending.set(id, deferred);
@@ -186,14 +198,7 @@ export class RpcConnection {
 			this.#pending.delete(id);
 			deferred.reject(error);
 		});
-		return {
-			promise: deferred.promise as Promise<Response>,
-			cancel: () => {
-				if (!this.#pending.delete(id)) return;
-				deferred.reject(RequestError.requestCancelled({ id, method }));
-				void this.notify("$/cancel_request", { id }).catch(() => undefined);
-			},
-		};
+		return { id, deferred };
 	}
 
 	/** Sends a JSON-RPC notification. */
@@ -280,11 +285,14 @@ export class RpcConnection {
 		}
 		if (!("method" in message)) return;
 		if (!("id" in message)) {
-			// A peer cancelling one of its own outstanding requests must end
-			// our side of that handler: abort the inbound canceller and drop
-			// the open-id entry so a late handler result writes no response.
+			// ACP v1 names the cancelled request `requestId`. A cancelled
+			// inbound request must still be answered (spec: result or
+			// `-32800`): the handler is aborted and the error response is
+			// written here, so a late-settling handler lands in `#respond`'s
+			// closed-id no-op instead of answering a request the peer gave
+			// up on.
 			if (message.method === "$/cancel_request") {
-				this.#cancelInbound((message.params as { id?: JsonRpcId } | undefined)?.id);
+				this.#cancelInbound((message.params as { requestId?: JsonRpcId } | undefined)?.requestId);
 			}
 			try {
 				await this.#dispatcher(message.method, message.params, true);
@@ -311,14 +319,18 @@ export class RpcConnection {
 
 	#cancelInbound(id: JsonRpcId | undefined): void {
 		if (id === undefined) return;
-		// Drop the response slot first: `#respond` no-ops for ids that are no
-		// longer open, so a handler that settles after its cancellation never
-		// answers a request the peer has given up on.
-		this.#openInboundIds.delete(id);
 		const canceller = this.#inboundCancellers.get(id);
 		if (canceller) {
 			this.#inboundCancellers.delete(id);
-			canceller.abort(RequestError.requestCancelled({ id }));
+			canceller.abort(RequestError.requestCancelled({ requestId: id }));
 		}
+		// Spec: a cancelled request still gets a response. Answer `-32800`
+		// here — synchronously with the notification — so the peer is never
+		// left waiting on a handler that may never settle. `#respond` closes
+		// the id, so a late handler result (a handler that ignored its abort
+		// signal) lands in the closed-id no-op instead of answering twice.
+		void this.#respond(id, { error: RequestError.requestCancelled({ requestId: id }).toErrorResponse() }).catch(
+			() => undefined,
+		);
 	}
 }

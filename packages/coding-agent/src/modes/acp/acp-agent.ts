@@ -159,19 +159,6 @@ type PromptTurnState = {
 	 */
 	errorTextDelivery: Promise<boolean> | undefined;
 	/**
-	 * Canonical content keys of `_session/steering` requests answered
-	 * `promptRequired` while this turn was reserved but still dispatching
-	 * (image preprocessing; `isStreaming` not yet raised). The client
-	 * resubmits each refused steer through `session/prompt`; a prompt whose
-	 * converted content matches one of these keys is that resubmission — it
-	 * consumes the matching key and queues behind this turn instead of
-	 * implicitly cancelling the run the steer was rejected in favor of.
-	 * Keys, not a count or flag: two steers refused in the same pre-dispatch
-	 * window produce two credits, and an unrelated prompt that shares no
-	 * content with either must not consume one.
-	 */
-	awaitingSteerResubmissions?: string[];
-	/**
 	 * `abort()` is in-flight (or its bounded-timeout race). `undefined` while the turn is
 	 * running normally and after cleanup completes. The turn occupies `record.promptTurn`
 	 * for as long as either `!settled` or `cleanup` is set — that combined window is the
@@ -280,10 +267,14 @@ function toSteeringPromptBlocks(prompt: unknown): PromptRequest["prompt"] {
 		}
 		if (record.type === "resource_link") {
 			for (const field of ["title", "name"] as const) {
-				if (record[field] !== undefined && typeof record[field] !== "string") {
+				// `null` is a legal value (the ACP schema types these
+				// `string | null`): treat it exactly like an absent field —
+				// the converter's `title ?? name ?? uri` fallback already
+				// does.
+				if (record[field] !== undefined && record[field] !== null && typeof record[field] !== "string") {
 					throw RequestError.invalidParams(
 						{ method: SESSION_STEERING_METHOD },
-						`resource_link ${field} must be a string when present`,
+						`resource_link ${field} must be a string or null when present`,
 					);
 				}
 			}
@@ -976,18 +967,15 @@ export class AcpAgent implements Agent {
 	async prompt(params: PromptRequest): Promise<PromptResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
 		const activeTurn = record.promptTurn;
-		// Resubmission credit: a `_session/steering` request this turn
-		// answered `promptRequired` while it was still dispatching left the
-		// refused steer's content key on the turn. A prompt whose converted
-		// content matches a pending key *is* that steer's resubmission: it
-		// consumes the key and must queue behind the turn (`#queuePrompt`
-		// below) instead of implicitly cancelling the run the steer was
-		// rejected in favor of. An unrelated prompt shares no content with
-		// any pending key, consumes nothing, and keeps the implicit-cancel
-		// semantics below — so it cannot steal a credit meant for the real
-		// resubmission.
-		const steerResubmission = this.#takeSteerResubmissionCredit(activeTurn, params.prompt);
-		if (!steerResubmission && activeTurn && !activeTurn.settled && record.session.isStreaming) {
+		// A `_session/steering` refusal (`promptRequired`) now only ever
+		// happens while no client prompt owns the turn (idle, or an
+		// autonomous wake with no client forwarder) or during abort: the
+		// mid-dispatch window parks instead (see #handleSessionSteering), so
+		// a steer resubmitted through `session/prompt` can only arrive as an
+		// idle new turn (queued normally) or inside the abort window — where
+		// the implicit cancel below matches the user's stop intent. No
+		// resubmission bookkeeping is needed here anymore.
+		if (activeTurn && !activeTurn.settled && record.session.isStreaming) {
 			// New prompt arrived while the previous turn is still in-flight (e.g. the
 			// client sent a message immediately after pressing stop, before or without
 			// a preceding session/cancel notification). Implicitly cancel the running
@@ -1441,25 +1429,15 @@ export class AcpAgent implements Agent {
 		try {
 			const admitted = await record.session.joinActiveTurn(converted.text, converted.images, { queue });
 			if (!admitted) {
-				// A turn reserved but still dispatching (image preprocessing,
-				// `isStreaming` not yet raised) refused the steer because it
-				// cannot inject mid-dispatch. The host resubmits this content
-				// through `session/prompt`; record the refused steer's content
-				// key so that resubmission queues behind the turn instead of
-				// implicitly cancelling the run — once dispatch completes —
-				// that the steer was rejected in favor of. Keyed per refusal:
-				// each refused steer earns exactly one matching resubmission,
-				// and an unrelated prompt cannot consume another steer's
-				// credit. A refusal while streaming is the abort window and
-				// deliberately takes no credit: a prompt then matches the
-				// user's stop intent.
-				const reserved = record.promptTurn;
-				if (reserved && !reserved.settled && !record.session.isStreaming) {
-					reserved.awaitingSteerResubmissions = [
-						...(reserved.awaitingSteerResubmissions ?? []),
-						JSON.stringify(converted),
-					];
-				}
+				// Not admitted only when no client prompt owns the turn:
+				// idle (nothing to inject into — the host resubmits
+				// through `session/prompt` as a fresh turn), an autonomous
+				// IRC wake streaming with no client forwarder (a steered
+				// answer would be invisible — the host keeps its content),
+				// or the abort window (a resubmitted prompt there matches
+				// the user's stop intent). A steer that lands mid-dispatch
+				// parks inside `joinActiveTurn` until the owning prompt
+				// goes live and admits it, so it is never refused back.
 				return { outcome: "promptRequired", queue };
 			}
 		} catch (error: unknown) {
@@ -1956,32 +1934,6 @@ export class AcpAgent implements Agent {
 		if (!path.isAbsolute(cwd)) {
 			throw new Error(`ACP cwd must be absolute: ${cwd}`);
 		}
-	}
-
-	/**
-	 * Consume the steering-resubmission credit matching this prompt, if any.
-	 * A credit is the converted content of a steer this turn refused while
-	 * still dispatching; a `session/prompt` whose converted content equals one
-	 * is that steer's resubmission and takes the queued (not cancelling)
-	 * path. Anything else — including an unrelated prompt arriving between
-	 * the refusal and the real resubmission — matches nothing and consumes
-	 * nothing, so the ordinary overlapping-prompt semantics still apply to it.
-	 */
-	#takeSteerResubmissionCredit(promptTurn: PromptTurnState | undefined, prompt: PromptRequest["prompt"]): boolean {
-		const credits = promptTurn?.awaitingSteerResubmissions;
-		if (!credits || credits.length === 0) return false;
-		let converted: { text: string; images: AgentImageContent[] };
-		try {
-			converted = this.#convertPromptBlocks(prompt);
-		} catch {
-			// Malformed blocks: no credit matches, and `#queuePrompt` below
-			// surfaces the same conversion error through its own call.
-			return false;
-		}
-		const index = credits.indexOf(JSON.stringify(converted));
-		if (index === -1) return false;
-		credits.splice(index, 1);
-		return true;
 	}
 
 	#convertPromptBlocks(blocks: PromptRequest["prompt"]): { text: string; images: AgentImageContent[] } {

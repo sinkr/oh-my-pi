@@ -217,7 +217,11 @@ describe("ACP JSON-RPC transport", () => {
 
 		// … the peer is told via $/cancel_request …
 		const cancelFrame = await reader.read();
-		expect(cancelFrame.value).toEqual({ jsonrpc: "2.0", method: "$/cancel_request", params: { id: requestId } });
+		expect(cancelFrame.value).toEqual({
+			jsonrpc: "2.0",
+			method: "$/cancel_request",
+			params: { requestId },
+		});
 
 		// … and a late response for the dropped entry is ignored rather than
 		// rejecting anything or throwing on an unknown id.
@@ -297,6 +301,42 @@ describe("ACP JSON-RPC transport", () => {
 		);
 		expect(error).toBeInstanceOf(RequestError);
 		expect((error as RequestError).code).toBe(-32800);
+	});
+
+	it("answers a peer $/cancel_request with -32800 on the wire", async () => {
+		// ACP v1 spec: a cancelled inbound request must still receive a
+		// response. The transport aborts the handler and writes the
+		// `-32800` error itself, so a client that cancels its elicit is
+		// never left waiting on a handler that may never settle.
+		const inbound = new TransformStream<AnyMessage, AnyMessage>();
+		const outbound = new TransformStream<AnyMessage, AnyMessage>();
+		const handlerAborted = Promise.withResolvers<void>();
+		const connection = new RpcConnection(
+			{ writable: outbound.writable, readable: inbound.readable },
+			async (_method: string, _params: unknown, _notification: boolean, signal?: AbortSignal) => {
+				// A handler that parks until its abort signal fires: only the
+				// transport's own response can settle the exchange.
+				signal?.addEventListener("abort", () => handlerAborted.resolve(), { once: true });
+				await handlerAborted.promise;
+				return {};
+			},
+		);
+		const writer = inbound.writable.getWriter();
+		const reader = outbound.readable.getReader();
+		await writer.write({ jsonrpc: "2.0", id: 41, method: "session/request_permission" });
+		await writer.write({
+			jsonrpc: "2.0",
+			method: "$/cancel_request",
+			params: { requestId: 41 },
+		});
+		const response = (await reader.read()).value as { id: number; error?: { code: number } };
+		expect(response.id).toBe(41);
+		expect(response.error?.code).toBe(-32800);
+		// The handler was aborted by the cancellation, not just answered around.
+		await handlerAborted.promise;
+		await connection.close();
+		writer.releaseLock();
+		reader.releaseLock();
 	});
 });
 
