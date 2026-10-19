@@ -67,7 +67,7 @@ function validateReferences(model: Model, request: ImageGenerationRequest, openA
 				`${model.provider} reference image ${index + 1} is ${bytes} bytes; the limit is ${FACTORY_DROID_MAX_REFERENCE_BYTES} (5 MiB)`,
 			);
 		}
-		if (openAIEdit && !FACTORY_DROID_EDIT_MEDIA_TYPES.includes(image.mimeType)) {
+		if (openAIEdit && !FACTORY_DROID_EDIT_MEDIA_TYPES.includes(image.mimeType.toLowerCase())) {
 			throw new AIError.ValidationError(
 				`${model.provider} image edits accept ${FACTORY_DROID_EDIT_MEDIA_TYPES.join(", ")} references; got ${image.mimeType}`,
 			);
@@ -184,7 +184,7 @@ export async function generateFactoryDroidImage(
 				n: request.count ?? 1,
 				instructions: route.identity,
 				...(inputImages.length > 0 && {
-					input_images: inputImages.map(image => ({ media_type: image.mimeType, data: image.data })),
+					input_images: inputImages.map(image => ({ media_type: image.mimeType.toLowerCase(), data: image.data })),
 				}),
 			};
 			const response = await fetchImpl(

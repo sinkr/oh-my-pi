@@ -217,6 +217,16 @@ describe("Factory Droid image generation", () => {
 		).rejects.toBeInstanceOf(AIError.ProviderResponseError);
 	});
 
+	it("accepts and normalizes an upper-case reference MIME type", async () => {
+		const captured: CapturedRequest[] = [];
+		await generateImage(
+			factoryModel("gpt-image-2.5-flare"),
+			{ prompt: "make it blue", inputImages: [{ data: IMAGE, mimeType: "image/PNG" }] },
+			{ apiKey: WORKOS_TOKEN, fetch: jsonFetch(captured, imagesResponse) },
+		);
+		expect(captured[0].body.input_images).toEqual([{ media_type: "image/png", data: IMAGE }]);
+	});
+
 	it("sends the model's configured headers beside Factory's identity", async () => {
 		const captured: CapturedRequest[] = [];
 		const model = { ...factoryModel("gpt-image-2.5-flare"), headers: { "x-gateway-key": "gw" } };

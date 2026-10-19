@@ -60,6 +60,8 @@ interface FactoryEndpoints {
 	settings?: Record<string, unknown>;
 	/** Managed-settings HTTP status; the flags endpoint always succeeds. */
 	settingsStatus?: number;
+	/** Raw managed-settings body, replacing the JSON one. */
+	settingsBody?: string;
 	routing?: Record<string, unknown>;
 	responseHeaders?: Record<string, string>;
 	onRequest?: (url: string, init: RequestInit | undefined) => void;
@@ -81,6 +83,9 @@ function factoryEndpoints(endpoints: FactoryEndpoints = {}): FetchImpl {
 					},
 				};
 		const status = String(url).includes("managed-settings") ? (endpoints.settingsStatus ?? 200) : 200;
+		if (String(url).includes("managed-settings") && endpoints.settingsBody !== undefined) {
+			return new Response(endpoints.settingsBody, { status, headers: endpoints.responseHeaders });
+		}
 		return Response.json(body, { status, headers: endpoints.responseHeaders });
 	};
 }
@@ -444,6 +449,9 @@ describe("Factory Droid discovery gates", () => {
 		it("keeps image models hidden until managed settings prove them enabled", async () => {
 			const offline = (factoryDroidModelManagerOptions().staticModels ?? []).map(model => model.id);
 			const unreadable = await discoverIds({ settingsStatus: 500 });
+			const unparsable = await discoverIds({ settingsBody: "{not json" });
+			expect(unparsable).toContain(PLAIN);
+			for (const id of imageIds) expect(unparsable).not.toContain(id);
 			for (const id of imageIds) {
 				expect(offline).not.toContain(id);
 				expect(unreadable).not.toContain(id);

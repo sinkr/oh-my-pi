@@ -210,11 +210,11 @@ export async function fetchFactoryDroidModels(
 		const raw = body.flags;
 		if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
 		flags = Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, value === true]));
-		if (settingsResponse?.ok) {
-			const settings: unknown = await settingsResponse.json();
-			policy = readModelPolicy(settings);
-			images = readImageSettings(settings);
-		}
+		// An unreadable settings body leaves policy and image settings unknown, so
+		// gated rows fail closed instead of the whole refresh keeping stale ones.
+		const settings: unknown = settingsResponse?.ok ? await settingsResponse.json().catch(() => null) : null;
+		policy = readModelPolicy(settings);
+		images = readImageSettings(settings);
 		routing = readProviderRouting(body as Record<string, unknown>);
 	} catch {
 		return null;
