@@ -32,6 +32,7 @@ import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-tui/tool
 import { isRawSelector, type ParsedSelector, resolveTailSelector, selToOffsetLimit } from "./read-selector";
 import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { TruncationMetaInput } from "./output-meta";
 import { toolResult } from "./tool-result";
 
 import { cfgReadRenderMarkdown } from "./settings";
@@ -456,12 +457,7 @@ export async function buildInMemoryTextResult(
 		});
 
 	let outputText: string;
-	let truncationInfo:
-		| {
-				result: TruncationResult;
-				options: { direction: "head"; startLine?: number; totalFileLines?: number; maxBytes?: number };
-		  }
-		| undefined;
+	let truncationInfo: { result: TruncationResult; options: TruncationMetaInput } | undefined;
 
 	if (truncation.firstLineExceedsLimit) {
 		const firstLine = allLines ? (allLines[startLine] ?? "") : selectedRange.split("\n", 1)[0];
