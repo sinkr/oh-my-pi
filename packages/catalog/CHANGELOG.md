@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- MiniMax `MiniMax-M3.1-Flash` now gets always-on thinking with `low` through `max` effort levels, replacing the `MiniMax-M3.1-Flash-Preview` rules
+
 ## [18.12.2] - 2026-10-18
 
 ### Changed

@@ -81,7 +81,7 @@ class "minimax" {
 			thinking-efforts "low" "medium" "high"
 		}
 	}
-	// MiniMax-M3.1-Flash-Preview always thinks (`thinking.type: "disabled"` and
+	// MiniMax-M3.1-Flash always thinks (`thinking.type: "disabled"` and
 	// effort `none` 400 with error 2013) and tunes depth through
 	// `output_config.effort` from `low` to `max` (the default when omitted).
 	// The identity map replaces the M3 family's adaptive-tag-only map so each
@@ -89,7 +89,7 @@ class "minimax" {
 	// `thinking-requires-effort` hides the off level and clamps forced-off
 	// requests to the lowest effort instead of sending `disabled`.
 	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
-		models "MiniMax-M3.1-Flash-Preview" {
+		models "MiniMax-M3.1-Flash" {
 			thinking-requires-effort #true
 			thinking-efforts "low" "medium" "high" "xhigh" "max"
 			thinking-effort-map {
