@@ -10,6 +10,7 @@
 
 - Fixed the output minimizer altering what `ssh` commands print in the bash tool: remote lines were cut to 120 characters and blank lines dropped; ssh's own login and connection notices are still stripped ([#16314](https://github.com/can1357/oh-my-pi/pull/16314) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 background shortcuts and typing reporting `Cancelled` when you stopped them right after the last key went down: the key releases now always go out and the call succeeds ([#16235](https://github.com/can1357/oh-my-pi/pull/16235) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `wrapTextWithAnsi` leaving rows half-empty in Chinese and Japanese text: CJK runs now break between characters to fill each row, closing punctuation such as `，。！」` never starts a row, and opening brackets never end one ([#16219](https://github.com/can1357/oh-my-pi/issues/16219))
 
 ## [18.12.2] - 2026-10-18
 
