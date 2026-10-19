@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed background fact extraction keeping only the first 5 lines of a plain-line extractor answer, which dropped the facts from the end of long memories; plain-line answers now keep up to 20 facts, the total a JSON answer already gets ([#16377](https://github.com/can1357/oh-my-pi/pull/16377) by [@alphastorm](https://github.com/alphastorm))
+- Fixed background fact extraction storing only the first 5 facts of a plain-line extractor answer; it now keeps up to 20, matching JSON answers ([#16377](https://github.com/can1357/oh-my-pi/pull/16377) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.11.2] - 2026-10-16
 
