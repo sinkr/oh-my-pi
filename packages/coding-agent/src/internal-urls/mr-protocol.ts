@@ -11,12 +11,7 @@
  */
 import mrDoc from "../prompts/internal-urls/mr.md" with { type: "text" };
 import { parsePositiveDecimalInt } from "../tools/gh";
-import {
-	assertGitlabHostTrustedForEnvToken,
-	GITLAB_PATH_SEGMENT_PATTERN,
-	getOrFetchMrDiff,
-	resolveDefaultGitlabProjectMemoized,
-} from "../tools/glab-mr";
+import { GITLAB_PATH_SEGMENT_PATTERN, getOrFetchMrDiff, resolveDefaultGitlabProjectMemoized } from "../tools/glab-mr";
 import { gitlab } from "../utils/gitlab";
 import { renderDiffFamilyResource, resolveCwd, splitInternalUrlSegments } from "./forge-diff";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
@@ -90,10 +85,7 @@ export class MrProtocolHandler implements ProtocolHandler {
 		try {
 			const cwd = resolveCwd(context);
 			let project = parsed.project;
-			if (project) {
-				// The host came from the URL, which the model may have chosen.
-				await assertGitlabHostTrustedForEnvToken(project.split("/")[0]!);
-			} else {
+			if (!project) {
 				try {
 					project = await resolveDefaultGitlabProjectMemoized(cwd, context?.signal);
 				} catch (err) {

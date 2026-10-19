@@ -36,11 +36,12 @@ export function parseGitlabProjectWebUrl(webUrl: string): string | undefined {
 /**
  * glab sends `GITLAB_TOKEN`/`GITLAB_ACCESS_TOKEN`/`OAUTH_TOKEN` to whatever
  * host it talks to, while stored config.yml tokens are per host. When an env
- * token is set, only let model-chosen URLs reach hosts the user already trusts
- * with credentials: gitlab.com, the configured default host, or a host in
- * glab's config.
+ * token is set, MR URLs (pasted, detected in conversation, or model-chosen)
+ * may only reach hosts the user already trusts with credentials: gitlab.com,
+ * the configured default host, a host in glab's config, or the host of the
+ * checkout's own GitLab remote.
  */
-export async function assertGitlabHostTrustedForEnvToken(host: string): Promise<void> {
+async function assertGitlabHostTrustedForEnvToken(host: string, cwd: string, signal?: AbortSignal): Promise<void> {
 	if (!GITLAB_TOKEN_ENV_VARS.some(name => process.env[name])) return;
 	const trusted = new Set(["gitlab.com"]);
 	for (const name of ["GITLAB_HOST", "GITLAB_URI", "GL_HOST"]) {
@@ -62,8 +63,15 @@ export async function assertGitlabHostTrustedForEnvToken(host: string): Promise<
 		if (!isEnoent(err)) logger.debug("glab: failed to read config hosts", { err: String(err) });
 	}
 	if (trusted.has(host)) return;
+	try {
+		// The checkout's remote is the user's own; `glab repo view` already talks to it.
+		const ownProject = await resolveDefaultGitlabProjectMemoized(cwd, signal);
+		if (ownProject.split("/")[0] === host) return;
+	} catch (err) {
+		logger.debug("glab: no GitLab project for cwd while checking host trust", { err: String(err) });
+	}
 	throw new ToolError(
-		`Refusing to send GitLab token environment variables to ${host}: it is not gitlab.com, GITLAB_HOST, or a host in glab's config. Run \`glab auth login --hostname ${host}\` or set GITLAB_HOST to trust it.`,
+		`Refusing to send GitLab token environment variables to ${host}: it is not gitlab.com, GITLAB_HOST, a host in glab's config, or this checkout's GitLab host. Run \`glab auth login --hostname ${host}\` or set GITLAB_HOST to trust it.`,
 	);
 }
 
@@ -156,10 +164,10 @@ export interface MrDiffLookupOptions {
  * full-diff, and per-file slice variants of `mr://…/diff`.
  */
 export async function getOrFetchMrDiff(options: MrDiffLookupOptions): Promise<ViewLookupResult<PrDiffPayload>> {
+	const host = options.project.split("/")[0]!;
+	await assertGitlabHostTrustedForEnvToken(host, options.cwd, options.signal);
 	const authKey =
-		options.cacheAuthKey === undefined
-			? (resolveGitlabCacheAuthKey(options.project.split("/")[0]!) ?? null)
-			: options.cacheAuthKey;
+		options.cacheAuthKey === undefined ? (resolveGitlabCacheAuthKey(host) ?? null) : options.cacheAuthKey;
 	const lookup = await getOrFetchView<PrDiffPayload>({
 		repo: options.project,
 		kind: "mr-diff",

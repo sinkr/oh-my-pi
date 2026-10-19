@@ -159,19 +159,24 @@ describe("mr:// diff family", () => {
 
 	it("keeps env tokens away from hosts the user has not configured", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
+		vi.spyOn(gitlab, "json").mockResolvedValue({ web_url: "https://git.own.example/team/app" });
 		const router = InternalUrlRouter.instance();
+		const context = { cwd: tempDir };
 
-		await expect(router.resolve("mr://attacker.example/a/b/1/diff")).rejects.toThrow(
+		await expect(router.resolve("mr://attacker.example/a/b/1/diff", context)).rejects.toThrow(
 			/Refusing to send GitLab token environment variables to attacker\.example/,
 		);
 		expect(textSpy).not.toHaveBeenCalled();
 
+		const ownCheckout = await router.resolve("mr://git.own.example/team/app/1/diff", context);
+		expect(ownCheckout.content).toContain("(2 files)");
+
 		await Bun.write(path.join(tempDir, "config.yml"), "hosts:\n    git.corp.example:\n        token: stored\n");
-		const configured = await router.resolve("mr://git.corp.example/a/b/1/diff");
+		const configured = await router.resolve("mr://git.corp.example/a/b/1/diff", context);
 		expect(configured.content).toContain("(2 files)");
 
 		delete process.env.GITLAB_TOKEN;
-		const withoutEnvToken = await router.resolve("mr://other.example/a/b/1/diff");
+		const withoutEnvToken = await router.resolve("mr://other.example/a/b/1/diff", context);
 		expect(withoutEnvToken.content).toContain("(2 files)");
 	});
 });
