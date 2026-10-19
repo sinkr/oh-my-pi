@@ -782,14 +782,11 @@ describe("RFC 9728 path-inserted protected resource", () => {
 		// Advertised via the 401 resource_metadata hint, and found by resource-server probing.
 		for (const resourceMetadataUrl of [rfc9728ProtectedResourceMetadataUrl(serverUrl), undefined]) {
 			const discovery = discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
+			await expect(discovery).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
 			await expect(discovery).rejects.toThrow(
-				new OAuthIssuerMismatchError([
-					{
-						authServer: `${gw}/slack`,
-						advertisedBy: `${gw}/.well-known/oauth-protected-resource/slack/mcp`,
-						issuer: gw,
-					},
-				]),
+				"Could not discover OAuth endpoints: authorization server https://gw.example/slack " +
+					"(advertised by https://gw.example/.well-known/oauth-protected-resource/slack/mcp) " +
+					"returned metadata with issuer https://gw.example (RFC 8414 §3.3 requires an exact match).",
 			);
 		}
 	});
