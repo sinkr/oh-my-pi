@@ -219,6 +219,8 @@ function settleMergedUnions(node: JsonObject): void {
 	delete node.nullable;
 	settleUnion(node, anyOf as JsonObject[], nullable === true);
 	if (!("type" in node) && isJsonObject(node.properties)) node.type = "object";
+	// The collapse merges branches, which can leave new unions beside fields.
+	settleMergedUnions(node);
 }
 
 /** Project a dereferenced JSON Schema onto Factory Gemini's allowed fields. */
