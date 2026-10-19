@@ -2146,8 +2146,7 @@ describe("Tool argument coercion", () => {
 			{ ...toolCall, arguments: special },
 			{ keepUnknownRootKeys: true },
 		) as Record<string, unknown>;
-		expect(Object.hasOwn(kept, "constructor")).toBe(true);
-		expect(kept.constructor).toBe("c");
+		expect(Object.getOwnPropertyDescriptor(kept, "constructor")?.value).toBe("c");
 		expect(Object.hasOwn(kept, "__proto__")).toBe(true);
 		expect(Object.getPrototypeOf(kept)).toBe(Object.prototype);
 		expect("polluted" in kept).toBe(false);
