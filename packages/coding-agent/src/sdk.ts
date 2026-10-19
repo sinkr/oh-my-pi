@@ -1413,16 +1413,11 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		deferrable: tool.deferrable,
 		readsSkillUris: tool.readsSkillUris,
 		approval: typeof tool.approval === "function" ? tool.approval.bind(tool) : tool.approval,
-		// The per-target grant hooks reach the resolver the same way, so an extension tool takes part
-		// in Ask-and-remember grants instead of prompting per call forever.
+		// Extension tools take part in Ask-and-remember grants through the same bridge.
 		approvalCacheTargets:
 			typeof tool.approvalCacheTargets === "function"
 				? tool.approvalCacheTargets.bind(tool)
 				: tool.approvalCacheTargets,
-		approvalCacheScopes:
-			typeof tool.approvalCacheScopes === "function"
-				? tool.approvalCacheScopes.bind(tool)
-				: tool.approvalCacheScopes,
 		// Preserved through RegisteredToolAdapter so MCP-backed tools' explicit
 		// `strict: false` (#4336/#4340) survives the custom-tool → definition bridge.
 		strict: tool.strict,

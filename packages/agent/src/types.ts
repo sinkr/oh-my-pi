@@ -1230,23 +1230,11 @@ export interface AgentTool<
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
 
 	/**
-	 * Resolved cache targets for `tools.approvalMode: always-ask-cached`: the
-	 * paths (or URL targets) this call needs to touch. When every returned key
-	 * is already approved, the call skips the cached-mode prompt; approving the
-	 * call records these keys. Return `undefined` (or an empty array) for tools
-	 * whose calls must always re-prompt.
+	 * Remembered-approval keys for `tools.approvalMode: always-ask-cached`: the files (or URL
+	 * targets) this call touches. When every key is already granted the call skips its prompt;
+	 * approving the call can record them. Omit it (or return `undefined`) and the call prompts by tier.
 	 */
 	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
-
-	/**
-	 * Directory scopes this call runs inside, for `tools.approvalMode:
-	 * always-ask-cached`: when every reported scope is covered by a folder grant,
-	 * the call skips its prompt (e.g. a shell command whose working directory was
-	 * approved). Scopes are only checked — a plain approval records
-	 * {@link approvalCacheTargets}, never a scope; only the mode's "remember this
-	 * folder" answer grants one.
-	 */
-	approvalCacheScopes?: (args: unknown) => readonly string[] | undefined;
 
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;

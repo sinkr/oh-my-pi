@@ -21,8 +21,8 @@ describe("issue #935 path equivalence", () => {
 		expect(realpathSpy).toHaveBeenCalledWith(inputPath);
 	});
 
-	it("resolves a symlinked ancestor for a path that does not exist yet", () => {
-		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-symlink-parent-"));
+	it("resolves a missing path through its deepest existing ancestor only when asked", () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-through-missing-"));
 		try {
 			const real = path.join(temp, "real");
 			const link = path.join(temp, "link");
@@ -30,17 +30,12 @@ describe("issue #935 path equivalence", () => {
 			try {
 				fs.symlinkSync(real, link, "junction");
 			} catch {
-				// Creating the link may need privileges; there is nothing to assert without one.
-				return;
+				return; // Symlinks unavailable on this host.
 			}
-			// The target does not exist yet, so the key has to resolve the symlinked parent itself.
-			expect(resolveEquivalentPath(path.join(link, "new.ts"))).toBe(
-				resolveEquivalentPath(path.join(real, "new.ts")),
-			);
-			fs.writeFileSync(path.join(real, "new.ts"), "x");
-			// Once the file exists, both spellings still agree.
-			expect(resolveEquivalentPath(path.join(link, "new.ts"))).toBe(
-				resolveEquivalentPath(path.join(real, "new.ts")),
+			const missing = path.join(link, "sub", "new.ts");
+			expect(resolveEquivalentPath(missing)).toBe(missing);
+			expect(resolveEquivalentPath(missing, { throughMissing: true })).toBe(
+				path.join(fs.realpathSync(real), "sub", "new.ts"),
 			);
 		} finally {
 			fs.rmSync(temp, { recursive: true, force: true });

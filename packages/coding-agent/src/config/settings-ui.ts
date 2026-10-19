@@ -6,8 +6,6 @@ import { orderedSettings } from "./all-settings";
 import { type AnySetting, lookup } from "./registry";
 
 import { cfgPlanAutosave, cfgPlanEnabled } from "../plan-mode/settings";
-import { clearApprovalGrants } from "../tools/approval-cache";
-import { cfgToolsForgetApprovals } from "../tools/settings";
 import {
 	cfgRetryUsageAwareFallback,
 	cfgDefaultThinkingLevel,
@@ -83,11 +81,6 @@ export function createSettingsHost(): SettingsHost {
 		get: path => lookup(path)?.layered(settings),
 		set: (path, value) => resolve(path).set(settings, value),
 		unset: path => resolve(path).unset(settings),
-		// Action rows (metadata `action: true`) do work instead of storing a value:
-		// the next read, write, or command asks again once the cache is forgotten.
-		run: path => {
-			if (path === cfgToolsForgetApprovals.id) clearApprovalGrants();
-		},
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,
 		validateProviderLimits: validateProviderMaxInFlightRequests,
 	};

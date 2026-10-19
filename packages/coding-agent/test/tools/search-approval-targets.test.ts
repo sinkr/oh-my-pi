@@ -7,19 +7,15 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { recordApprovalGrant, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import {
 	type ApprovalGrantStore,
-	approvalGrantKey,
-	recordApprovalCacheTargets,
-	resolveApproval,
-} from "@oh-my-pi/pi-coding-agent/tools/approval";
-import {
-	ApprovalCache,
-	ApprovalGrants,
 	approvalDirectoryKey,
-	SessionApprovals,
+	approvalGrantKey,
+	getApprovalGrants,
 } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
 import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
+import { AstGrepTool } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
 import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -39,12 +35,7 @@ function createToolSession(cwd: string): ToolSession {
 /** Check-only store for resolution tests: knows exactly the given keys, granted at `read` tier. */
 function readTierGrants(targets: readonly string[] = []): ApprovalGrantStore {
 	const grants = new Set(targets.map(target => approvalGrantKey("read", target)));
-	return { has: key => grants.has(key) };
-}
-
-/** A real two-tier store over a temp agent directory, for recording tests. */
-function recordingGrants(agentDir: string): ApprovalGrants {
-	return new ApprovalGrants(new SessionApprovals(), new ApprovalCache(agentDir));
+	return { present: keys => new Set(keys.filter(key => grants.has(key))) };
 }
 
 describe("search tool approval cache targets", () => {
@@ -179,15 +170,16 @@ describe("search tool approval cache targets", () => {
 	it("covers a later glob with the folder grant recorded from a grep", () => {
 		const agentDir = TempDir.createSync("@omp-search-approval-agent-");
 		try {
-			const store = recordingGrants(agentDir.path());
+			const store = getApprovalGrants(agentDir.path(), "s1");
 			const grep = new GrepTool(createToolSession(cwd));
 			const grepArgs = { pattern: "hello", path: "src" };
 			const folderKey = approvalDirectoryKey(srcDir);
 
-			recordApprovalCacheTargets(grep, grepArgs, store, "read");
+			recordApprovalGrant(grep, grepArgs, store, "read", { grant: "target", always: false });
 			// The answer that silences the recursive search, plus the folder grant it subsumes.
-			expect(store.session.has(approvalGrantKey("read", approvalTreeSearchKey(folderKey)))).toBe(true);
-			expect(store.session.has(approvalGrantKey("read", folderKey))).toBe(true);
+			const tree = approvalGrantKey("read", approvalTreeSearchKey(folderKey));
+			const folder = approvalGrantKey("read", folderKey);
+			expect([...store.present([tree, folder])].sort()).toEqual([folder, tree].sort());
 
 			const glob = new GlobTool(createToolSession(cwd));
 			expect(resolveApproval(glob, { path: "src/**/*.txt" }, "always-ask-cached", {}, store).policy).toBe("allow");
@@ -198,5 +190,15 @@ describe("search tool approval cache targets", () => {
 		} finally {
 			agentDir.removeSync();
 		}
+	});
+
+	it("keys ast_grep roots like grep, so it cannot read past a read prompt", () => {
+		const astGrep = new AstGrepTool(createToolSession(cwd));
+		expect(astGrep.approvalCacheTargets?.({ pat: "$X", path: "src" })).toEqual([
+			approvalTreeSearchKey(approvalDirectoryKey(srcDir)),
+		]);
+		expect(
+			resolveApproval(astGrep, { pat: "$X", path: "src" }, "always-ask-cached", {}, readTierGrants()).policy,
+		).toBe("prompt");
 	});
 });

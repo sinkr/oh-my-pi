@@ -956,8 +956,6 @@ export class SettingsSelectorComponent implements Component {
 				};
 			case "providerLimits":
 				return { k: "action", label: "Edit…", act: "edit" };
-			case "action":
-				return { k: "action", label: def.actionLabel ?? "Run…", act: "run" };
 			case "multiselect":
 				return {
 					k: "multi",
@@ -1017,8 +1015,6 @@ export class SettingsSelectorComponent implements Component {
 					else if (list?.openSubmenu?.id === event.value) list.handleInput(ESCAPE);
 				} else if (event.act === "edit" && event.value) {
 					list?.openSubmenuFor(event.value);
-				} else if (event.act === "run" && event.value) {
-					this.#runAction(event.value);
 				}
 				return;
 			case "select": {
@@ -1119,17 +1115,6 @@ export class SettingsSelectorComponent implements Component {
 			}
 			case "providerLimits":
 				return;
-			case "action": {
-				// The one-option menu reports `run`: run it through the menu when one is
-				// open (it closes itself), else directly. The row's value never changes.
-				const field = list.openSubmenuFor(id);
-				if (field instanceof SelectFormField) {
-					field.selectList.handleNativeEvent({ type: "activate", key: "", item: "run" });
-					return;
-				}
-				this.#runAction(def.path);
-				return;
-			}
 		}
 	}
 
@@ -1467,8 +1452,7 @@ export class SettingsSelectorComponent implements Component {
 			this.#context.settings.set(path, newValue);
 			this.#callbacks.onChange(path, newValue);
 		}
-		// Submenu/text types already persisted inside their own done callbacks;
-		// an action row's menu has already run its action by the time it closes.
+		// Submenu/text types already persisted inside their own done callbacks.
 		if (def.tab === "appearance") {
 			this.#triggerStatusLinePreview();
 		}
@@ -1524,13 +1508,6 @@ export class SettingsSelectorComponent implements Component {
 					...item,
 					currentValue: this.#formatProviderLimitsValue(currentValue),
 					submenu: (_cv, done) => this.#createProviderLimitsInput(done),
-				};
-
-			case "action":
-				return {
-					...item,
-					currentValue: def.actionLabel ?? "Run…",
-					submenu: (_cv, done) => this.#createActionMenu(def, done),
 				};
 
 			case "multiselect":
@@ -1730,35 +1707,6 @@ export class SettingsSelectorComponent implements Component {
 			() => done(),
 			this.#context.requestRender,
 		);
-	}
-
-	/**
-	 * The menu an action row opens: one entry, naming the row, that runs the
-	 * action and closes. Esc leaves without running it.
-	 */
-	#createActionMenu(def: SettingDef & { type: "action" }, done: (value?: string) => void): Component {
-		return createSettingsSelectField(
-			def.label,
-			def.description,
-			[{ value: "run", label: `Run ${def.label}` }],
-			"run",
-			() => {
-				this.#runAction(def.path);
-				// No value: the row keeps what it had, and SettingsList closes the menu.
-				done();
-			},
-			() => done(),
-			undefined,
-			undefined,
-			undefined,
-			this.#context.requestRender,
-		);
-	}
-
-	/** Run an action row through the host and refresh the rows (its effects may change conditions). */
-	#runAction(path: string): void {
-		this.#context.settings.run(path);
-		this.#refreshItems();
 	}
 
 	#formatProviderLimitsValue(value: unknown): string {
