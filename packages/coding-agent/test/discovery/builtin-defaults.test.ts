@@ -215,11 +215,20 @@ describe("builtin-defaults rule provider", () => {
 			"const pick = function (row: Row) { return row.id; };",
 			"\t#remaining(): number {\n\t\treturn this.#until - Date.now();\n\t}",
 			"\tprivate get label(): string { return this.name; }",
+			"\tget #label(): string { return this.name; }",
+			"class C {\n\tprivate readonly f = () => { return value; };\n}",
+			"const f = <T>(x: T) => { return x; };",
+			"function f(x = make(inside())) { return x; }",
+			"function f()\n{ return value; }",
+			"function f()\r\n{ return value; }\r\n",
+			"function f():\nnumber { return value; }",
+			"function f<T extends Record<string, Array<number>>>(x: T) {\n\treturn x;\n}",
+			"async function load(id: string): Promise<Row> {\n\treturn db.get(id);\n}",
 		];
 		for (const snippet of hits) {
 			manager.resetBuffer();
 			expect(
-				manager.checkDelta(snippet, ctx).map(m => m.name),
+				manager.checkDelta(snippet, ctx, { final: true }).map(m => m.name),
 				snippet,
 			).toEqual(["ts-no-tiny-functions"]);
 		}
@@ -231,17 +240,45 @@ describe("builtin-defaults rule provider", () => {
 			"const f = (v) => { const x = v.a; return x; };",
 			"export function isEmpty(value: string): boolean {\n\treturn value.length === 0;\n}",
 			"export const getName = (u: User) => u.profile.name;",
+			"export default function f() { return 1; }",
 			'function isAssistant(entry: Entry): entry is AssistantEntry {\n\treturn entry.role === "assistant";\n}',
 			"if (!response.ok) {\n\treturn null;\n}",
 			"try {\n\treturn JSON.parse(text);\n} catch {\n\treturn undefined;\n}",
 			"class Clock {\n\tnow(): number { return this.time; }\n\tget size(): number {\n\t\treturn this.#items.size;\n\t}\n}",
+			"class C {\n\tf = () => { return value; };\n\tprotected g(): number { return 1; }\n}",
 			"const fake = { async capabilities() { return undefined; }, get ready() { return true; } };",
 			"const ids = items.map(item => { return item.id; });",
 			"promise.then(function (value) { return value.id; });",
+			"\tasync #node(): Promise<AxNode> {\n\t\tconst node = await read(this.ref);\n\t\treturn node;\n\t}\n\tget ref() { return this.id; }",
 		];
 		for (const snippet of misses) {
 			manager.resetBuffer();
-			expect(manager.checkDelta(snippet, ctx), snippet).toEqual([]);
+			expect(manager.checkDelta(snippet, ctx, { final: true }), snippet).toEqual([]);
+		}
+	});
+
+	it("checks ts-no-tiny-functions and ts-promise-with-resolvers in linear time on long whitespace runs", async () => {
+		const rules = (await loadBuiltinRules()).filter(
+			r => r.name === "ts-no-tiny-functions" || r.name === "ts-promise-with-resolvers",
+		);
+		const manager = new TtsrManager();
+		for (const rule of rules) expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
+		const spaces = " ".repeat(32_000);
+		// Each of these is a quadratic backtrack (seconds) for a pattern with two adjacent
+		// whitespace runs; a stalled check blocks the stream that is being matched.
+		for (const snippet of [
+			`function ${spaces}!`,
+			`function f${spaces}<T>${spaces}(x) ${spaces}: T ${spaces}!`,
+			`function f(): ${spaces}`,
+			`const f = (x) =>${spaces}{`,
+			`\tprivate${spaces}f${spaces}=${spaces}(x)${spaces}:${spaces}!`,
+			`new Promise(${spaces}function${spaces}(${spaces}`,
+		]) {
+			manager.resetBuffer();
+			const start = performance.now();
+			expect(manager.checkDelta(snippet, ctx, { final: true })).toEqual([]);
+			expect(performance.now() - start, snippet.trim().slice(0, 20)).toBeLessThan(500);
 		}
 	});
 
@@ -264,7 +301,12 @@ describe("builtin-defaults rule provider", () => {
 			["new Promise((resolve, reject) => {"],
 			["new Promise(function (resolve) {"],
 			["new Promise(async (resolve) => {"],
+			["new Promise((...args) => args[0]());"],
+			["new Promise(/* resolver */ resolve => resolve());"],
+			["new Promise((/* resolver */ ", "resolve) => resolve());"],
 			["await new Promise(requestAnimationFrame);"],
+			["new Promise(executors[0]);"],
+			["new Promise(makeExecutor());"],
 			["await new Promise(", "r => setImmediate(r));"],
 		]) {
 			expect(fires(deltas), deltas.join("")).toEqual(["ts-promise-with-resolvers"]);
@@ -274,7 +316,10 @@ describe("builtin-defaults rule provider", () => {
 		for (const deltas of [
 			["await new Promise(() => {});"],
 			["new Promise(function hang() {});"],
+			["new Promise(async () => {});"],
+			["new Promise(/* never */ () => {});"],
 			["await new Promise(", "() => {});"],
+			["await new Promise(func", "tion () {});"],
 		]) {
 			expect(fires(deltas), deltas.join("")).toEqual([]);
 		}

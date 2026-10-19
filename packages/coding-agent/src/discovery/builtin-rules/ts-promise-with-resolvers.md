@@ -1,7 +1,8 @@
 ---
 description: Use Promise.withResolvers() instead of new Promise() constructor
-# an executor that takes a resolver: `new Promise(() => {})` has none for withResolvers to replace
-condition: "new Promise\\(\\s*(?:async\\s+)?(?:\\(\\s*[A-Za-z_$]|[A-Za-z_$][\\w$]*\\s*=>|function\\b[^(]*\\(\\s*[A-Za-z_$]|[A-Za-z_$][\\w$.]*\\s*\\))"
+# An executor that takes a resolver (a parameter, or a function reference): `new Promise(() => {})`
+# has none for withResolvers to replace. Waits for the token after `(` so a paused stream does not fire early.
+condition: "new Promise\\(\\s*(?:/\\*[^*]*\\*/\\s*)*(?:async\\s+(?:/\\*[^*]*\\*/\\s*)*)?(?:\\((?:\\s|/\\*[^*]*\\*/)*[^\\s)/]|function\\b[^(]*\\((?:\\s|/\\*[^*]*\\*/)*[^\\s)/]|(?!(?:function|async)(?![\\w$]))[A-Za-z_$][\\w$]*(?=[^\\w$]))"
 scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
 interruptMode: never
 ---
