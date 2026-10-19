@@ -6,6 +6,7 @@ import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi
 import { complete, completeSimple, stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import {
 	GEMINI_HEADER_RUNAWAY_THRESHOLD,
 	GeminiHeaderRunDetector,
@@ -573,34 +574,39 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 		expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
 		expect(isRetryableError(new Error(result.errorMessage))).toBe(true);
 	});
+});
+
+describe("thinking-loop error accounting", () => {
+	const model = {
+		api: "google-vertex",
+		provider: "google-vertex",
+		id: "gemini-2.5-pro",
+		identity: classifyModel("google-vertex", "gemini-2.5-pro"),
+	} as unknown as Model<Api>;
+	const usage = (input: number, output: number, total: number): AssistantMessage["usage"] => ({
+		input,
+		output,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: input + output,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total },
+	});
+	/** A provider's output for one attempt, as it streams before any final usage. */
+	const attempt = (responseId: string): AssistantMessage => ({
+		role: "assistant",
+		content: [],
+		api: "google-vertex",
+		provider: "google-vertex",
+		model: "gemini-2.5-pro",
+		responseId,
+		usage: usage(0, 0, 0),
+		stopReason: "stop",
+		timestamp: Date.now(),
+	});
 
 	test("keeps the aborted attempt's usage, start time, response id and timing", async () => {
-		const model = {
-			api: "google-vertex",
-			provider: "google-vertex",
-			id: "gemini-2.5-pro",
-			identity: classifyModel("google-vertex", "gemini-2.5-pro"),
-		} as unknown as Model<Api>;
-		// What a provider that reports usage while streaming (Gemini, Anthropic) holds when the guard trips.
-		const partial: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "google-vertex",
-			provider: "google-vertex",
-			model: "gemini-2.5-pro",
-			responseId: "resp-looping",
-			usage: {
-				input: 116_000,
-				output: 2_400,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 118_400,
-				cost: { input: 0.145, output: 0.024, cacheRead: 0, cacheWrite: 0, total: 0.169 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now() - 5_000,
-		};
-
+		// Usage reported mid-stream (Gemini, Anthropic) is on the partial when the guard trips.
+		const partial = { ...attempt("resp-looping"), usage: usage(116_000, 2_400, 0.169) };
 		const guarded = withThinkingLoopGuard(model, undefined, () => {
 			const inner = new AssistantMessageEventStream();
 			void (async () => {
@@ -610,8 +616,6 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Checking the module.\n\n", partial });
 				await scheduler.wait(30);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial });
-				inner.push({ type: "thinking_end", contentIndex: 0, content: "", partial });
-				inner.push({ type: "done", reason: "stop", message: partial });
 			})();
 			return inner;
 		});
@@ -622,13 +626,83 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
-		expect(result.usage.input).toBe(116_000);
-		expect(result.usage.output).toBe(2_400);
-		expect(result.usage.cost.total).toBe(0.169);
+		expect(result.usage).toEqual(usage(116_000, 2_400, 0.169));
 		expect(result.timestamp).toBe(partial.timestamp);
 		expect(result.responseId).toBe("resp-looping");
 		expect(result.ttft).toBeGreaterThanOrEqual(25);
-		expect(result.duration).toBeGreaterThanOrEqual((result.ttft ?? 0) + 25);
+		expect(result.duration).toBeGreaterThanOrEqual((result.ttft ?? 0) + 20);
+	});
+
+	test("reports the attempt that tripped, not the time spent on an earlier retried attempt", async () => {
+		const first = attempt("attempt-1");
+		let second: AssistantMessage | undefined;
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			void (async () => {
+				inner.push({ type: "start", partial: first });
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: first });
+				// A replay-safe provider retry: a fresh output after a backoff.
+				await scheduler.wait(80);
+				second = { ...attempt("attempt-2"), usage: usage(50_000, 100, 0.05) };
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: second });
+			})();
+			return inner;
+		});
+
+		const result = await guarded.result();
+		expect(result.responseId).toBe("attempt-2");
+		expect(result.timestamp).toBe(second?.timestamp ?? Number.NaN);
+		expect(result.usage.input).toBe(50_000);
+		expect(result.duration).toBeLessThan(60);
+		expect(result.ttft).toBeLessThan(60);
+	});
+
+	test("takes the final message when the loop only shows at the end-of-stream flush", async () => {
+		const partial = attempt("partial-id");
+		const final: AssistantMessage = {
+			...attempt("final-id"),
+			usage: usage(116_000, 2_400, 0.169),
+			timestamp: partial.timestamp,
+			duration: 1_234,
+			ttft: 56,
+		};
+		// Seven separated duplicates leave the cluster-completing eighth unterminated.
+		const block = `${nearDuplicateLoop(7)}\n\n\nI am now verifying the test module to guarantee there are no compile errors and the code is completely safe.`;
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			inner.push({ type: "start", partial });
+			inner.push({ type: "thinking_start", contentIndex: 0, partial });
+			inner.push({ type: "thinking_delta", contentIndex: 0, delta: block, partial });
+			inner.push({ type: "done", reason: "stop", message: final });
+			return inner;
+		});
+
+		const result = await guarded.result();
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+		expect(result.responseId).toBe("final-id");
+		expect(result.usage).toEqual(usage(116_000, 2_400, 0.169));
+		expect(result.duration).toBe(1_234);
+		expect(result.ttft).toBe(56);
+	});
+
+	test("sees usage a provider replaces mid-stream through leaked-thinking healing", async () => {
+		// Gemini assigns a fresh `usage` object per chunk; the healing wrapper sits between it and the guard.
+		const output = attempt("resp-gemini");
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			void (async () => {
+				inner.push({ type: "start", partial: output });
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
+				await scheduler.wait(10);
+				output.usage = usage(116_000, 2_500, 0.17);
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
+			})();
+			return wrapLeakedThinkingStream(inner);
+		});
+
+		const result = await guarded.result();
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+		expect(result.usage).toEqual(usage(116_000, 2_500, 0.17));
 	});
 });
 

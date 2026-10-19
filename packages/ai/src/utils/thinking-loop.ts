@@ -396,24 +396,28 @@ export function guardThinkingLoopStream(
 	const thinkingDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const textDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const checkAssistantContent = options?.loopGuard?.checkAssistantContent !== false;
-	// The provider's own timers die with the abort, so the guard keeps the
-	// clocks the aborted attempt would have reported.
-	const startTime = performance.now();
 
 	void (async () => {
 		let thinkingArmed = true;
 		let textArmed = checkAssistantContent;
 		let textStarted = false;
-		let firstTokenTime: number | undefined;
-		let partial: AssistantMessage | undefined;
+		// The provider's latest snapshot of this attempt, and when (wall clock,
+		// like its `timestamp`) its first delta arrived: the guard reports the
+		// attempt that tripped, not the wrapper's lifetime around retries.
+		let snapshot: AssistantMessage | undefined;
+		let firstDeltaAt: number | undefined;
 		try {
 			for await (const event of inner) {
-				if ("partial" in event) partial = event.partial;
+				const next = "partial" in event ? event.partial : event.type === "done" ? event.message : undefined;
+				if (next) {
+					if (next.timestamp !== snapshot?.timestamp) firstDeltaAt = undefined;
+					snapshot = next;
+				}
 				if (
-					firstTokenTime === undefined &&
+					firstDeltaAt === undefined &&
 					(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta")
 				) {
-					firstTokenTime = performance.now();
+					firstDeltaAt = Date.now();
 				}
 				let detail: string | null = null;
 				if (event.type === "thinking_delta") {
@@ -462,10 +466,7 @@ export function guardThinkingLoopStream(
 					outer.push({
 						type: "error",
 						reason: "error",
-						error: buildThinkingLoopError(model, detail, partial, {
-							duration: performance.now() - startTime,
-							ttft: firstTokenTime === undefined ? undefined : firstTokenTime - startTime,
-						}),
+						error: buildThinkingLoopError(model, detail, snapshot, firstDeltaAt),
 					});
 					return;
 				}
@@ -514,15 +515,22 @@ export function withThinkingLoopGuard<
 
 /**
  * The loop-abort error for one attempt. It keeps what the provider had
- * reported when the guard tripped (usage so far, start time, response id) and
- * the attempt's timing, so the failed attempt is accounted like any other.
+ * reported for that attempt when the guard tripped (usage so far, start time,
+ * response id, and timing a finished snapshot already carries); otherwise
+ * duration and time to first delta run from the attempt's own start, since
+ * the provider's timers stop with the abort.
  */
 function buildThinkingLoopError(
 	model: Model<Api>,
 	detail: string,
-	partial: AssistantMessage | undefined,
-	timing: { duration: number; ttft: number | undefined },
+	snapshot: AssistantMessage | undefined,
+	firstDeltaAt: number | undefined,
 ): AssistantMessage {
+	const now = Date.now();
+	const duration = snapshot ? (snapshot.duration ?? now - snapshot.timestamp) : undefined;
+	const ttft =
+		snapshot?.ttft ??
+		(snapshot && firstDeltaAt !== undefined ? Math.max(0, firstDeltaAt - snapshot.timestamp) : undefined);
 	return {
 		role: "assistant",
 		// Empty content is load-bearing: loop-guard output is replay garbage, even
@@ -533,8 +541,8 @@ function buildThinkingLoopError(
 		provider: model.provider,
 		model: model.id,
 		// Cloned: the provider keeps mutating its output while it tears down.
-		usage: partial?.usage
-			? structuredClone(partial.usage)
+		usage: snapshot?.usage
+			? structuredClone(snapshot.usage)
 			: {
 					input: 0,
 					output: 0,
@@ -548,10 +556,10 @@ function buildThinkingLoopError(
 		// as a transient (retryable) failure with no bespoke rule.
 		errorMessage: `${THINKING_LOOP_ERROR_MARKER}: the model repeated near-identical content (${detail}). Treating as a stream stall and retrying.`,
 		errorId: AIError.create(AIError.Flag.ThinkingLoop),
-		...(partial?.responseId && { responseId: partial.responseId }),
-		duration: timing.duration,
-		...(timing.ttft !== undefined && { ttft: timing.ttft }),
-		timestamp: partial?.timestamp ?? Date.now(),
+		...(snapshot?.responseId && { responseId: snapshot.responseId }),
+		...(duration !== undefined && { duration }),
+		...(ttft !== undefined && { ttft }),
+		timestamp: snapshot?.timestamp ?? now,
 	};
 }
 
