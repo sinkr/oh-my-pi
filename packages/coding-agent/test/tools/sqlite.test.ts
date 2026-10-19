@@ -223,6 +223,11 @@ describe("SQLite tool support", () => {
 			where: undefined,
 		});
 		expect(parseSqliteSelector("", "q=SELECT+1")).toEqual({ kind: "raw", sql: "SELECT 1" });
+		expect(parseSqliteSelector("", "q=SELECT+1&limit=5&offset=10")).toEqual({
+			kind: "raw",
+			sql: "SELECT 1",
+			page: { limit: 5, offset: 10 },
+		});
 	});
 
 	it("lists tables for a .sqlite database and excludes sqlite internal tables", async () => {
@@ -428,6 +433,31 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("val_1000_end");
 		expect(text).not.toContain("val_1001_end");
 		expect(text).toContain("Output capped at 1000 rows");
+	});
+
+	it("pages raw ?q= rows with limit and offset and names the next page", async () => {
+		const first = getText(
+			await readTool.execute("sqlite-raw-page", {
+				path: `${sqlitePath}?q=SELECT name FROM users ORDER BY id&limit=2&offset=1`,
+			}),
+		);
+		expect(first).toContain("Bob");
+		expect(first).toContain("Carol");
+		expect(first).not.toContain("Alice");
+		expect(first).not.toContain("Dave");
+		const next = /append \?(\S+) to the database path/.exec(first)?.[1];
+		expect(next).toBeDefined();
+
+		const second = getText(await readTool.execute("sqlite-raw-next", { path: `${sqlitePath}?${next}` }));
+		expect(second).toContain("Dave");
+		expect(second).toContain("Eve");
+		expect(second).not.toContain("Carol");
+		expect(second).not.toContain("Frank");
+	});
+
+	it("names the fix when raw ?q= queries carry a table selector or table-only parameters", () => {
+		expect(() => parseSqliteSelector("users", "q=SELECT+1")).toThrow("drop ':users' from the path");
+		expect(() => parseSqliteSelector("", "q=SELECT+1&where=id=1")).toThrow("put 'where' into the SQL");
 	});
 
 	it("rejects table names that do not exist instead of interpolating them", async () => {

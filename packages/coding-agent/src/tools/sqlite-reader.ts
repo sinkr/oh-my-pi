@@ -129,7 +129,8 @@ export type SqliteSelector =
 	| { kind: "schema"; table: string; sampleLimit: number }
 	| { kind: "row"; table: string; key: string }
 	| { kind: "query"; table: string; limit: number; offset: number; order?: string; where?: string }
-	| { kind: "raw"; sql: string };
+	/** `page` is set when `limit` or `offset` pages the query's rows, as they page a table. */
+	| { kind: "raw"; sql: string; page?: { limit: number; offset: number } };
 
 export type SqliteRowLookup = { kind: "pk"; column: string; type: string } | { kind: "rowid" };
 
@@ -568,14 +569,28 @@ export function parseSqliteSelector(subPath: string, queryString: string): Sqlit
 	const rawQuery = params.get("q");
 
 	if (rawQuery !== null) {
-		const otherKeys = [...params.keys()].filter(key => key !== "q");
-		if (normalizedSubPath || otherKeys.length > 0) {
-			throw new ToolError("SQLite raw queries cannot be combined with table selectors or pagination");
+		if (normalizedSubPath) {
+			throw new ToolError(
+				`SQLite ?q= queries run against the whole database; drop ':${normalizedSubPath}' from the path`,
+			);
+		}
+		for (const keyName of params.keys()) {
+			if (keyName !== "q" && keyName !== "limit" && keyName !== "offset") {
+				throw new ToolError(`SQLite ?q= queries take only limit and offset; put '${keyName}' into the SQL`);
+			}
 		}
 		if (!rawQuery.trim()) {
 			throw new ToolError("SQLite query parameter 'q' cannot be empty");
 		}
-		return { kind: "raw", sql: rawQuery };
+		if (!params.has("limit") && !params.has("offset")) return { kind: "raw", sql: rawQuery };
+		return {
+			kind: "raw",
+			sql: rawQuery,
+			page: {
+				limit: parseLimit(params.get("limit"), DEFAULT_QUERY_LIMIT),
+				offset: parseOffset(params.get("offset")),
+			},
+		};
 	}
 
 	if (!normalizedSubPath) {
@@ -777,19 +792,31 @@ export function getRowByRowId(db: Database, table: string, key: string): Record<
 		.get(binding);
 }
 
+/**
+ * Runs a read-only SQL query. Without `page`, rows are capped at
+ * {@link MAX_RAW_QUERY_ROWS}; with it, `offset` rows are skipped and at most
+ * `limit` kept. `truncated` says rows remain past the ones returned.
+ */
 export function executeReadQuery(
 	db: Database,
 	sql: string,
+	page?: { limit: number; offset: number },
 ): { columns: string[]; rows: Record<string, unknown>[]; truncated: boolean } {
 	const statement = db.query<SqliteRow, []>(sql);
 	if (statement.paramsCount > 0) {
 		throw new ToolError("SQLite raw queries do not support bound parameters");
 	}
 	const columns = [...statement.columnNames];
+	const limit = page?.limit ?? MAX_RAW_QUERY_ROWS;
+	let skip = page?.offset ?? 0;
 	const rows: SqliteRow[] = [];
 	let truncated = false;
 	for (const row of statement.iterate()) {
-		if (rows.length >= MAX_RAW_QUERY_ROWS) {
+		if (skip > 0) {
+			skip--;
+			continue;
+		}
+		if (rows.length >= limit) {
 			truncated = true;
 			break;
 		}
