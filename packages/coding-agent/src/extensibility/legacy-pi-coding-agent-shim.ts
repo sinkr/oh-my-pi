@@ -33,12 +33,15 @@ import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@o
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
 import {
+	escapeXmlText,
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
 	isCompiledBinary,
 	parseFrontmatter as parseOmpFrontmatter,
+	prompt,
 } from "@oh-my-pi/pi-utils";
+import legacyAvailableSkillsTemplate from "./legacy-pi-available-skills.md" with { type: "text" };
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -1725,15 +1728,6 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 	};
 }
 
-function escapeSkillXml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&apos;");
-}
-
 /**
  * Render the `<available_skills>` system-prompt block, ported from upstream
  * pi-coding-agent 1.x (`src/core/skills.ts`). omp renders skills through its
@@ -1749,24 +1743,15 @@ export function formatSkillsForPrompt(
 ): string {
 	const visibleSkills = skills.filter(skill => !skill.disableModelInvocation && !skill.hide);
 	if (visibleSkills.length === 0) return "";
-	const lines = [
-		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		fileReadTool === "read"
-			? "Use the read tool to load a skill's file when the task matches its description."
-			: fileReadTool === "bash"
-				? "Use bash to load a skill's file when the task matches its description."
-				: "Load a skill's file when the task matches its description.",
-		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
-		"",
-		"<available_skills>",
-	];
-	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeSkillXml(skill.name)}</name>`);
-		lines.push(`    <description>${escapeSkillXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeSkillXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
-	}
-	lines.push("</available_skills>");
-	return lines.join("\n");
+	const block = prompt.render(legacyAvailableSkillsTemplate, {
+		readTool: fileReadTool === "read",
+		bashTool: fileReadTool === "bash",
+		skills: visibleSkills.map(skill => ({
+			name: escapeXmlText(skill.name),
+			description: escapeXmlText(skill.description),
+			location: escapeXmlText(skill.filePath),
+		})),
+	});
+	// Upstream returns the block with two leading newlines to append to a system prompt.
+	return `\n\n${block.trimEnd()}`;
 }

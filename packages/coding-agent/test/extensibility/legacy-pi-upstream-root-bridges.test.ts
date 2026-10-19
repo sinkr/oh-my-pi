@@ -41,7 +41,7 @@ describe("legacy shim upstream-root bridges", () => {
 			...extra,
 		});
 		const skills = [skill("a&b"), skill("off", { disableModelInvocation: true }), skill("hidden", { hide: true })];
-		// Expected text is upstream pi-coding-agent 1.3.0's output for the same input.
+		// Upstream pi-coding-agent 1.3.0's layout; element text escapes `&`, `<` and `>` (quotes need none).
 		expect(caShim.formatSkillsForPrompt(skills)).toBe(
 			"\n\nThe following skills provide specialized instructions for specific tasks.\n" +
 				"Use the read tool to load a skill's file when the task matches its description.\n" +
@@ -50,7 +50,7 @@ describe("legacy shim upstream-root bridges", () => {
 				"<available_skills>\n" +
 				"  <skill>\n" +
 				"    <name>a&amp;b</name>\n" +
-				"    <description>uses &lt;tags&gt; and &quot;quotes&quot;</description>\n" +
+				'    <description>uses &lt;tags&gt; and "quotes"</description>\n' +
 				"    <location>/s/a&amp;b/SKILL.md</location>\n" +
 				"  </skill>\n" +
 				"</available_skills>",
