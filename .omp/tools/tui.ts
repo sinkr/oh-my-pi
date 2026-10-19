@@ -1017,8 +1017,11 @@ async function startWindowsPty(
 		.finally(() => {
 			running = false;
 		});
+	// `close` repeats `kill` during teardown; signal the native session once.
 	const kill = () => {
-		if (running) pty.kill();
+		if (!running) return;
+		running = false;
+		pty.kill();
 	};
 	try {
 		const pid = await Promise.race([
@@ -1142,9 +1145,10 @@ const factory = (omp: ToolHost) => {
 					},
 				};
 			}
-			// The native PTY layer already answers ConPTY's initial cursor handshake.
-			// Drop only that first duplicate CPR; keep subsequent cursor reports and
-			// any other replies sharing the same output buffer.
+			// ConPTY emits ESC[6n on startup and the native layer pre-answers it
+			// (crates/pi-natives/src/pty.rs, "ConPTY sends ESC[6n"). Drop only the
+			// screen's duplicate reply to that first query; keep later cursor
+			// reports and any other replies sharing the same output buffer.
 			let hostCursorHandshake = process.platform === "win32";
 			screen.onReply = (bytes) => {
 				if (hostCursorHandshake) {
@@ -1234,7 +1238,8 @@ const factory = (omp: ToolHost) => {
 			return text;
 		} catch (error) {
 			if (session) {
-				await stopSession(session);
+				// Cleanup failures must not mask the launch error being reported.
+				await stopSession(session).catch(() => {});
 			} else {
 				screen?.dispose();
 				rmSync(dir, { recursive: true, force: true });

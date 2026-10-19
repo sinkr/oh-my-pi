@@ -43,12 +43,8 @@ Use the UTF-8-compatible `\e[` CSI sequence instead. macOS/Linux preserve raw by
 Install the tool's dependencies with `bun install --cwd .omp/tools`.
 Native PTY API changes require rebuilding the addon with
 `bun --cwd=packages/natives run build` before running the tool.
-Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`.
-The suite also runs in the native/integration CI bucket (`bun run ci:test:ts:native`)
-and the root `bun run test:ts` / `bun run test` aggregates. CI installs
-`.omp/tools` dependencies before running the native/integration bucket.
-The CI path filters include `.omp/tools/**` and `.omp/tests/**` for both
-`push` and `pull_request` events.
+Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`. CI runs
+them on Linux only; the Windows-specific cases run only on a local Windows host.
 
 ## Core component contract (`@oh-my-pi/pi-tui`)
 
