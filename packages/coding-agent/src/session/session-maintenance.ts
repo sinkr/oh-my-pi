@@ -1340,12 +1340,11 @@ export class SessionMaintenance {
 			let snapcompactShape: snapcompact.Shape | undefined;
 			const snapcompactIncludeThinking = snapcompact.readerIncludesThinking(this.#model);
 			if (wantsSnapcompact && !sendsImageInputOnWire(this.#model)) {
-				this.#host.emitNotice(
-					"warning",
-					`snapcompact needs a vision-capable model (${this.#model.id} is text-only)`,
-					"compaction",
-				);
-				throw new Error(`snapcompact cannot run locally: ${this.#model.id} is text-only.`);
+				const reason = this.#model.input.includes("image")
+					? `${this.#model.id}'s provider strips image input`
+					: `${this.#model.id} is text-only`;
+				this.#host.emitNotice("warning", `snapcompact needs a vision-capable model (${reason})`, "compaction");
+				throw new Error(`snapcompact cannot run locally: ${reason}.`);
 			} else if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
