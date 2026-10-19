@@ -10,12 +10,14 @@ use super::{
 	apply::{ApplyOptions, EmptyPaste, apply_edits},
 	messages::{
 		RECOVERY_EXTERNAL_WARNING, RECOVERY_LINE_REMAP_WARNING, RECOVERY_SESSION_CHAIN_WARNING,
+		edit_broke_parse_warning,
 	},
 	syntax::node_chain,
 	types::{Anchor, Cursor, Edit, ParsedRange, PasteTarget},
 };
 use crate::{
 	error::EditError,
+	fuzzy::similarity,
 	store::{Clipboard, EditStore},
 };
 
@@ -363,7 +365,82 @@ fn context_preserved(
 	true
 }
 
+/// How much more of the current lines at its authored numbers a replacement
+/// body must keep, than of the lines the remap targets, before the remap is
+/// refused (see [`aimed_at_authored_lines`]).
+const AUTHORED_LINES_PREFERENCE: f64 = 0.1;
+
+/// Mean, over the non-blank lines of `window`, of each line's best
+/// similarity to a line of `body`: how much of `window` the body keeps.
+fn kept_share(window: &[&str], body: &[&str]) -> f64 {
+	let window = window
+		.iter()
+		.map(|line| line.trim())
+		.filter(|line| !line.is_empty())
+		.collect::<Vec<_>>();
+	if window.is_empty() || body.is_empty() {
+		return 0.0;
+	}
+	let total: f64 = window
+		.iter()
+		.map(|line| {
+			body
+				.iter()
+				.map(|row| similarity(line, row))
+				.fold(0.0, f64::max)
+		})
+		.sum();
+	total / window.len() as f64
+}
+
+/// Whether a remapped replacement was written for the current lines at its
+/// authored numbers rather than for the lines the remap moves it onto.
+///
+/// The remap is right when the line numbers came from the tagged read. Agents
+/// also pair an old tag with numbers taken from an untagged view of the
+/// current file (`grep -n`, `sed -n`, a `:raw` read, compiler output); the
+/// remap then shifts numbers that were already current, and the body replaces
+/// lines the agent never saw there. A replacement keeps much of what it
+/// replaces, so a body that keeps clearly more of the current lines at the
+/// authored numbers than of the remap target was aimed at the former.
+fn aimed_at_authored_lines(current: &str, authored: &[Edit], offset: i64) -> bool {
+	// A `PUT N.=M:` lowers to body inserts plus one delete per replaced line,
+	// all carrying the op's payload line.
+	let mut ops: HashMap<u32, (Vec<&str>, Vec<u32>)> = HashMap::new();
+	for edit in authored {
+		match edit {
+			Edit::Insert { line_num, text, replacement: true, .. } if !text.trim().is_empty() => {
+				ops.entry(*line_num).or_default().0.push(text.trim());
+			},
+			Edit::Delete { line_num, anchor, .. } => {
+				ops.entry(*line_num).or_default().1.push(anchor.line);
+			},
+			_ => {},
+		}
+	}
+	let lines = current.split('\n').collect::<Vec<_>>();
+	let window = |anchors: &[u32], shift: i64| {
+		anchors
+			.iter()
+			.filter_map(|&line| {
+				let index = usize::try_from(i64::from(line) + shift - 1).ok()?;
+				lines.get(index).copied()
+			})
+			.collect::<Vec<_>>()
+	};
+	ops.values().any(|(body, anchors)| {
+		!body.is_empty()
+			&& kept_share(&window(anchors, 0), body)
+				> kept_share(&window(anchors, offset), body) + AUTHORED_LINES_PREFERENCE
+	})
+}
+
 /// Attempt to rebase stale anchors from a retained snapshot onto current text.
+///
+/// A shifted remap is refused (falling through to the mismatch reject, which
+/// shows the current tag and lines) when a replacement reads as written for
+/// the current lines at its authored numbers, or when the remapped edit breaks
+/// a file that parsed: both mean the agent's numbers were already current.
 pub fn try_recover(
 	store: &EditStore,
 	mut args: RecoveryArgs<'_>,
@@ -385,6 +462,9 @@ pub fn try_recover(
 	if !context_preserved(&snapshot.text, args.current_text, args.path, args.edits, &edits) {
 		return Ok(None);
 	}
+	if offset != 0 && aimed_at_authored_lines(args.current_text, args.edits, offset) {
+		return Ok(None);
+	}
 	let Ok(applied) = apply_edits(args.current_text, &edits, ApplyOptions {
 		clipboard:      args.clipboard.take(),
 		path:           args.path.to_str(),
@@ -393,6 +473,13 @@ pub fn try_recover(
 		return Ok(None);
 	};
 	if applied.text == args.current_text {
+		return Ok(None);
+	}
+	if offset != 0
+		&& applied
+			.warnings
+			.contains(&edit_broke_parse_warning(applied.first_changed_line))
+	{
 		return Ok(None);
 	}
 	let mut warnings = vec![if offset == 0 {

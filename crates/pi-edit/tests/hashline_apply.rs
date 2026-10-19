@@ -573,6 +573,77 @@ fn recovery_remaps_a_uniform_line_shift() {
 }
 
 #[test]
+fn recovery_refuses_a_remap_of_a_body_written_for_the_current_line() {
+	// The agent read line 3 (`alpha`) from an untagged view of the current
+	// file and paired it with the old tag; remapping would replace `gamma`.
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-current-line.txt");
+	let tag = store.record(path, "alpha\nbeta\ngamma\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "h1\nh2\nalpha\nbeta\ngamma\n",
+		file_hash: &tag,
+		edits: &replacement(3, 3, &["alpha2"], 1),
+		clipboard: None,
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+}
+
+#[test]
+fn recovery_remaps_a_body_written_for_the_tagged_line() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-tagged-line.txt");
+	let tag = store.record(path, "alpha\nbeta\ngamma\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "h1\nh2\nalpha\nbeta\ngamma\n",
+		file_hash: &tag,
+		edits: &replacement(3, 3, &["gamma2"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "h1\nh2\nalpha\nbeta\ngamma2\n");
+}
+
+#[test]
+fn recovery_refuses_a_shifted_remap_that_breaks_the_parse() {
+	// Meant after the current `"z": 0,` (line 2); the remap lands the entry
+	// after `"a": 1`, which has no trailing comma.
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-breaks-parse.json");
+	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "{\n  \"z\": 0,\n  \"a\": 1\n}\n",
+		file_hash: &tag,
+		edits: &[insert_after(2, "  \"y\": 9,", 1)],
+		clipboard: None,
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+}
+
+#[test]
+fn recovery_remaps_a_shifted_insert_that_keeps_the_parse() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-keeps-parse.json");
+	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "{\n  \"z\": 0,\n  \"a\": 1\n}\n",
+		file_hash: &tag,
+		edits: &[insert_before(2, "  \"y\": 9,", 1)],
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "{\n  \"z\": 0,\n  \"y\": 9,\n  \"a\": 1\n}\n");
+	assert!(recovered.warnings[0].contains("remapping stale line anchors"));
+}
+
+#[test]
 fn recovery_rejects_a_changed_anchor() {
 	let store = EditStore::new();
 	let path = Path::new("/tmp/recovery-changed.rs");
