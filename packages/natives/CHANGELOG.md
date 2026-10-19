@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added `normalizePtyDimensions(cols, rows)` to size screen emulators with the same effective dimensions as native PTY sessions ([#16192](https://github.com/can1357/oh-my-pi/pull/16192) by [@C-W-Z](https://github.com/C-W-Z))
 - Added a `refuseMenu` option to `click`, `drag` and `holdMouse`: a macOS background left click on a menu button or popup button, or a drag or hold starting on one, throws `BackgroundUnavailable` before anything is sent ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a `returnFocus` option for window input with `takeover`: on macOS the takeover hands focus back to your app even if you clicked meanwhile, and only a third app you switched to keeps focus ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `DesktopSession.axSelectText` (macOS) to select text in an accessibility element's value by UTF-16 range, refusing missing or ambiguous matches and returning the selection read back ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
