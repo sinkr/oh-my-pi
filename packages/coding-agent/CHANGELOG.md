@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `brew install`/`brew upgrade omp` failing with a 403 on networks that block Cloudflare R2 storage: the Homebrew formula now falls back to the same binary on the GitHub release ([#16264](https://github.com/can1357/oh-my-pi/pull/16264) by [@debanjanbasu](https://github.com/debanjanbasu))
+- Fixed `brew install` and `brew upgrade` of omp failing with a 403 behind corporate proxies ([#16264](https://github.com/can1357/oh-my-pi/pull/16264) by [@debanjanbasu](https://github.com/debanjanbasu))
 
 ## [18.12.2] - 2026-10-18
 
