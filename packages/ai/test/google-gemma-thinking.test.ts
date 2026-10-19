@@ -3,6 +3,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
 const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
 
@@ -23,7 +24,7 @@ async function sentThinkingConfig(id: string, reasoning: Effort | undefined): Pr
 	});
 	let body: { generationConfig?: { thinkingConfig?: unknown } } | undefined;
 	const fetch: FetchImpl = async (_url, init) => {
-		body = JSON.parse(String(init?.body ?? "{}"));
+		body = JSON.parse(requestBodyText(init) ?? "{}");
 		const chunk = { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] };
 		return new Response(`data: ${JSON.stringify(chunk)}\n\n`, {
 			headers: { "content-type": "text/event-stream" },
