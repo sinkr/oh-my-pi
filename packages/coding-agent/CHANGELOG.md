@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the memory role ignoring its thinking suffix: Mnemopi's background completions now send each `modelRoles.memory` and `retry.fallbackChains.memory` candidate's own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
+- Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.12.3] - 2026-10-19
 
