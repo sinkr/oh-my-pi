@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added GitLab merge request support to `/review` and `/annotate code-review`: pass an MR URL, pick one mentioned in the conversation, or choose "Review a specific PR/MR" in a GitLab checkout to list open MRs (requires `glab`); large MRs link per-file diffs through the new `mr://<host>/<group>/<project>/<iid>/diff` URLs
+
 ### Fixed
 
 - Fixed `read` middle-eliding large file pages into an artifact; a page past the output spill threshold now stops at a line boundary with an exact `:N` continuation ([#16277](https://github.com/can1357/oh-my-pi/issues/16277))
