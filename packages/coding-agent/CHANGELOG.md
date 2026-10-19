@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed plugin settings marked `secret` being persisted in a group- and world-readable `omp-plugins.lock.json`; the lockfile is now written 0600, and an existing one is tightened on the next write, so only its owner can read the credentials it holds ([#16368](https://github.com/can1357/oh-my-pi/pull/16368) by [@jonasboos](https://github.com/jonasboos))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
