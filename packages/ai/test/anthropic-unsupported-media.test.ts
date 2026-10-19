@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { convertAnthropicMessages, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { AssistantMessage, Message, UserMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	DeveloperMessage,
+	Message,
+	ToolResultMessage,
+	UserMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 // Claude reads JPEG, PNG, GIF and WebP only. A video, PDF or HEIC attached to the
@@ -55,6 +61,36 @@ function answer(text: string): AssistantMessage {
 
 const followUp = (): UserMessage => ({ role: "user", content: "never mind, summarize the plan", timestamp: clock++ });
 
+/** A `/guided-goal` kickoff: a synthetic, agent-attributed prompt carrying the user's pasted images. */
+function kickoffWithAttachment(mimeType: string): DeveloperMessage {
+	return {
+		role: "developer",
+		content: [
+			{ type: "text", text: "interview the user about their goal" },
+			{ type: "image", data: "AAAAIGZ0eXBpc29t", mimeType },
+		],
+		attribution: "agent",
+		synthetic: true,
+		timestamp: clock++,
+	};
+}
+
+const reminder = (): DeveloperMessage => ({
+	role: "developer",
+	content: "<system-reminder>todo list updated</system-reminder>",
+	attribution: "agent",
+	timestamp: clock++,
+});
+
+function failedReply(): AssistantMessage {
+	return { ...answer(""), content: [], stopReason: "error", errorMessage: "Claude does not accept image/heic" };
+}
+
+const omitted = (mimeType: string) => ({
+	type: "text",
+	text: `[${mimeType} attachment omitted: not supported by this model]`,
+});
+
 describe("anthropic media Claude cannot read", () => {
 	it.each(["video/mp4", "application/pdf", "image/heic"])("fails the turn that attached %s", mimeType => {
 		expect(() => convertAnthropicMessages([withAttachment(mimeType)], MODEL, false)).toThrow(
@@ -80,6 +116,61 @@ describe("anthropic media Claude cannot read", () => {
 			type: "text",
 			text: "[video/mp4 attachment omitted: not supported by this model]",
 		});
+	});
+
+	it("fails a guided-goal kickoff that attached HEIC, first turn or later", () => {
+		expect(() => convertAnthropicMessages([kickoffWithAttachment("image/heic")], MODEL, false)).toThrow(
+			"Claude does not accept image/heic attachments",
+		);
+		expect(() =>
+			convertAnthropicMessages([followUp(), answer("ok"), kickoffWithAttachment("image/heic")], MODEL, false),
+		).toThrow("Claude does not accept image/heic attachments");
+	});
+
+	it("still fails the user's turn when a reminder follows it", () => {
+		expect(() => convertAnthropicMessages([withAttachment("image/heic"), reminder()], MODEL, false)).toThrow(
+			"Claude does not accept image/heic attachments",
+		);
+	});
+
+	it("lets the continue shortcut recover after the rejected turn", () => {
+		const resume: DeveloperMessage = {
+			role: "developer",
+			content: "continue",
+			attribution: "agent",
+			synthetic: true,
+			userInitiated: true,
+			timestamp: clock++,
+		};
+		const params = convertAnthropicMessages([withAttachment("image/heic"), failedReply(), resume], MODEL, false);
+		expect(params[0]?.content).toContainEqual(omitted("image/heic"));
+	});
+
+	it("never fails a compaction request on an attachment", () => {
+		const params = convertAnthropicMessages([withAttachment("video/mp4")], MODEL, false, {
+			compactionRequest: { filesDueBefore: 0 },
+		});
+		expect(params[0]?.content).toContainEqual(omitted("video/mp4"));
+	});
+
+	it("notes a tool result's attachment instead of failing the turn", () => {
+		const call: AssistantMessage = {
+			...answer(""),
+			content: [{ type: "toolCall", id: "toolu_1", name: "read", arguments: {} }],
+			stopReason: "toolUse",
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "toolu_1",
+			toolName: "read",
+			content: [{ type: "image", data: "AAAAIGZ0eXBpc29t", mimeType: "video/mp4" }],
+			isError: false,
+			timestamp: clock++,
+		};
+		const params = convertAnthropicMessages([followUp(), call, result], MODEL, false);
+		expect(params.at(-1)?.content).toContainEqual(
+			expect.objectContaining({ type: "tool_result", content: [omitted("video/mp4")] }),
+		);
 	});
 
 	it("reports the rejection as a stream error without sending a request", async () => {

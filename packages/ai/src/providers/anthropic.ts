@@ -5853,16 +5853,24 @@ export function convertAnthropicMessages(
 		undefined,
 		opts?.credentialId,
 	);
-	// The user turn this request answers: the last `user` message with no
-	// assistant reply after it. Media Claude cannot read fails the request there
-	// (see convertContentBlocks); a compaction request only summarizes, so it
+	// The turn this request answers: the last message that started a run (a
+	// `user` message, or a `developer` prompt such as a `/guided-goal` kickoff
+	// or the continue shortcut, which is `synthetic` or user-attributed) with no
+	// assistant reply after it. Developer reminders after it don't move it.
+	// Media Claude cannot read fails the request there (see
+	// convertContentBlocks). Only that turn is checked: once another prompt
+	// follows, the failed one is history and gets the omission note, so the
+	// session never stays stuck. A compaction request only summarizes, so it
 	// never fails on an attachment.
 	let unansweredUserIndex = -1;
 	if (!opts?.compactionRequest) {
 		for (let index = transformedMessages.length - 1; index >= 0; index--) {
-			const role = transformedMessages[index].role;
-			if (role === "assistant") break;
-			if (role === "user") {
+			const message = transformedMessages[index];
+			if (message.role === "assistant") break;
+			if (
+				message.role === "user" ||
+				(message.role === "developer" && (message.synthetic === true || message.attribution === "user"))
+			) {
 				unansweredUserIndex = index;
 				break;
 			}
