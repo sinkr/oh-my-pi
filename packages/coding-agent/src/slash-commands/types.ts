@@ -2,6 +2,7 @@ import type { Settings } from "../config/settings";
 import type { SlashCommandIconName } from "@oh-my-pi/pi-tui/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
 import type { MCPManager } from "../mcp/manager";
+import type { MCPServerConfig } from "../mcp/types";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";
 
@@ -108,9 +109,15 @@ export interface SlashCommandRuntime {
 	 * Ask the host to reconnect one live-manager MCP server by name after its
 	 * credentials changed (e.g. `/mcp reauth`), and report the post-reconnect
 	 * state. Returns `undefined` when this host keeps no live manager for the
-	 * server; callers then fall back to restart guidance.
+	 * server; callers then fall back to restart guidance. `selected` is the
+	 * definition the reauth refreshed; hosts match it against their manager
+	 * entry so a name collision never reconnects an unrelated server.
 	 */
-	reconnectMcpServer?: (name: string) => Promise<"connected" | "connecting" | "disconnected" | undefined>;
+	reconnectMcpServer?: (
+		name: string,
+		/** The server definition the reauth actually refreshed, for ownership matching. */
+		selected: MCPServerConfig,
+	) => Promise<"connected" | "connecting" | "disconnected" | undefined>;
 	/**
 	 * The host's live MCP manager when it keeps one. ACP sessions keep one for
 	 * client-declared servers (`session/new`/`load_session` `mcpServers`), whose

@@ -49,6 +49,8 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
 import { type AgentSession, SessionBusyError } from "../../session/agent-session";
+import type { MCPManager } from "../../mcp/manager";
+import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession } from "../../session/session-listing";
@@ -1333,6 +1335,8 @@ export interface RpcModeOptions {
 	input?: ReadableStream<Uint8Array>;
 	/** Builds `live_start` sessions; defaults to the real {@link LiveSessionController}. */
 	createLiveSession?: RpcLiveSessionFactory;
+	/** The session's MCP manager, so `/mcp` builtins resolve and reconnect live servers. */
+	mcpManager?: MCPManager;
 }
 
 /**
@@ -1811,6 +1815,19 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					output: commandOutput => output({ type: "command_output", text: commandOutput }),
 					refreshCommands: emitAvailableCommandsUpdate,
 					reloadPlugins: reloadPluginState,
+					mcpManager: options.mcpManager,
+					reconnectMcpServer: options.mcpManager
+						? async (mcpName, selected) => {
+								const manager = options.mcpManager!;
+								const state = await reconnectMcpManagerServer(manager, mcpName, selected);
+								if (state) {
+									// RPC mode wires no tools-changed callback; refresh the
+									// session binding so later prompts see the recovered tools.
+									await session.refreshMCPTools(manager.getTools());
+								}
+								return state;
+							}
+						: undefined,
 					signal: builtinAbort.signal,
 					runCommandInBackground: task => {
 						backgroundedBuiltin = true;

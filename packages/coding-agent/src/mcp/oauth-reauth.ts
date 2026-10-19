@@ -240,6 +240,54 @@ export function clearMcpClientAuthSurface(config: MCPServerConfig): MCPServerCon
 }
 
 /**
+ * The host manager's entry for `name`, but only when it is the same server
+ * definition a reauth just refreshed (`selected`). A name collision must not
+ * reconnect an unrelated manager entry: file/config lookups deliberately
+ * prefer user/project entries over the manager fallback, so an ACP client
+ * declaring `foo` at URL B while a config file carries a different `foo` at
+ * URL A would otherwise have its live entry torn down and reconnected with
+ * no matching credential. Definitions correspond when both are http/sse with
+ * the same URL (raw or env-expanded — the manager stores the expanded form).
+ */
+export function matchingManagerServerConfig(
+	manager: MCPManager | undefined,
+	name: string,
+	selected: MCPServerConfig,
+): MCPServerConfig | undefined {
+	if (selected.type !== "http" && selected.type !== "sse") return undefined;
+	const managerConfig = manager?.getServerConfig(name);
+	if (!managerConfig || managerConfig.type !== selected.type) return undefined;
+	const urls = [expandEnvVarsDeep(selected.url), selected.url];
+	return urls.includes(managerConfig.url) ? managerConfig : undefined;
+}
+
+/**
+ * Reconnect the host manager's entry for a reauthorized server and report the
+ * post-reconnect state: `undefined` when the manager does not own the
+ * selected definition (callers fall back to restart guidance).
+ *
+ * Clears the entry's client-supplied auth surface first (a preserved bearer
+ * header would keep the fresh url-keyed credential row out of the reconnect),
+ * awaits a pending automatic reconnect — it captured the old definition and
+ * aborts on the identity check, and joining it would report "disconnected,
+ * retries continue" with no retries left — then starts a fresh manual attempt
+ * against the updated definition.
+ */
+export async function reconnectMcpManagerServer(
+	manager: MCPManager | undefined,
+	name: string,
+	selected: MCPServerConfig,
+): Promise<"connected" | "connecting" | "disconnected" | undefined> {
+	if (!manager) return undefined;
+	const managerConfig = matchingManagerServerConfig(manager, name, selected);
+	if (!managerConfig) return undefined;
+	const pending = manager.updateServerConfig(name, clearMcpClientAuthSurface(managerConfig));
+	if (pending) await pending;
+	await manager.reconnectServer(name, { manual: true });
+	return manager.getConnectionStatus(name);
+}
+
+/**
  * Throwaway connection used to probe a server's auth requirements. Uses the
  * host's manager when available (its `prepareConfig` honors live state),
  * else a temporary manager bound to the caller's auth storage.

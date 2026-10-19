@@ -17,7 +17,7 @@ import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { executeAcpBuiltinSlashCommand } from "../slash-commands/acp-builtins";
 import type { SlashCommandRuntime } from "../slash-commands/types";
-import { clearMcpClientAuthSurface } from "../mcp/oauth-reauth";
+import { reconnectMcpManagerServer } from "../mcp/oauth-reauth";
 import {
 	formatPersistenceDurabilityFailure,
 	formatPersistenceFailure,
@@ -241,20 +241,14 @@ async function runPrintModeCore(
 		reloadPlugins: () => Promise.resolve(),
 		mcpManager,
 		reconnectMcpServer: mcpManager
-			? async name => {
-					const config = mcpManager.getServerConfig(name);
-					if (!config) return undefined;
-					if (config.type === "http" || config.type === "sse") {
-						// Same rationale as the ACP hook: a client-supplied
-						// Authorization header or stale auth block would keep the
-						// fresh url-keyed credential row out of the reconnect.
-						mcpManager.updateServerConfig(name, clearMcpClientAuthSurface(config));
+			? async (name, selected) => {
+					const state = await reconnectMcpManagerServer(mcpManager, name, selected);
+					if (state) {
+						// Print mode wires no tools-changed callback; refresh the
+						// session binding so later prompts see the recovered tools.
+						await session.refreshMCPTools(mcpManager.getTools());
 					}
-					await mcpManager.reconnectServer(name, { manual: true });
-					// Print mode wires no tools-changed callback; refresh the
-					// session binding so later prompts see the recovered tools.
-					await session.refreshMCPTools(mcpManager.getTools());
-					return mcpManager.getConnectionStatus(name);
+					return state;
 				}
 			: undefined,
 	});
@@ -323,12 +317,19 @@ async function runPrintModeCore(
 		wroteTextWorkingIndicator = true;
 	};
 
+	// Whether any input reached the model as a prompt this invocation. A run
+	// where every input was consumed locally (e.g. `omp -p '/mcp reauth foo'`)
+	// creates no assistant turn, so the persisted previous turn must not be
+	// reprinted or its old stop reason reused as this run's exit status.
+	let admittedAgentTurn = false;
+
 	// Send initial message with attachments
 	if (!strictMCPFailure && initialMessage !== undefined) {
 		const promptText = await promptTextFor(initialMessage);
 		if (promptText !== undefined) {
 			writeTextWorkingIndicator();
 			if (mode === "text") session.setTextOutputCommitted(false);
+			admittedAgentTurn = true;
 			await logger.time("print:prompt:initial", () => session.prompt(promptText, { images: initialImages }));
 		}
 	}
@@ -340,6 +341,7 @@ async function runPrintModeCore(
 			if (promptText === undefined) continue;
 			writeTextWorkingIndicator();
 			if (mode === "text") session.setTextOutputCommitted(false);
+			admittedAgentTurn = true;
 			await logger.time("print:prompt:next", () => session.prompt(promptText));
 		}
 	}
@@ -353,7 +355,7 @@ async function runPrintModeCore(
 	// refusal is pruned from active context at settle, and an aborted turn
 	// can trail synthetic tool results — both would hide the terminal
 	// assistant message (and its error) from a last-element read.
-	const assistantMsg = session.getLastAssistantMessage();
+	const assistantMsg = admittedAgentTurn ? session.getLastAssistantMessage() : undefined;
 	// The terminal stop reason decides the process exit code in every output
 	// mode: `--mode json` used to report success for the same turn-fatal error
 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction

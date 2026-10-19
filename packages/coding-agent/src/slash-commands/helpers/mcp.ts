@@ -518,7 +518,7 @@ async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): 
 			// Ask the host to pick the fresh credential up now when it keeps a
 			// live manager for this server (the ACP session manager does); RPC
 			// and print mode have none, so the guidance says what to do instead.
-			const state = await runtime.reconnectMcpServer?.(name);
+			const state = await runtime.reconnectMcpServer?.(name, found.config);
 			const suffix =
 				state === "connected"
 					? " Server reconnected."
