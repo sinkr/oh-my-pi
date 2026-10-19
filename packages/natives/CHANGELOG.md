@@ -2,15 +2,26 @@
 
 ## [Unreleased]
 
+## [18.12.3] - 2026-10-19
+
 ### Added
 
 - Added a `hiddenContent` option to `htmlToMarkdown`: `"drop"` (default) omits hidden content, `"reachable"` keeps content the page can reveal such as collapsed sections and inactive tab panels, and `"all"` also keeps `<template>` and `<noscript>` content; other values throw ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
+- Added `normalizePtyDimensions(cols, rows)` to size screen emulators with the same effective dimensions as native PTY sessions ([#16192](https://github.com/can1357/oh-my-pi/pull/16192) by [@C-W-Z](https://github.com/C-W-Z))
+- Added `LineMatcher`, a native multi-pattern line matcher: `matchLines` returns a batch's matches column-wise as typed arrays (line, pattern, and the UTF-16 span of each named group in `groupNames()` order)
+- Added `PipeStreams` and the `streams` option of `Shell.run`: every pipe the run opens keeps a readable copy of its newest megabyte, so a stage's output stays visible while a later stage (`| tail`) holds it back
+
+### Fixed
+
+- Fixed the output minimizer altering what `ssh` commands print in the bash tool: remote lines were cut to 120 characters and blank lines dropped; ssh's own login and connection notices are still stripped ([#16314](https://github.com/can1357/oh-my-pi/pull/16314) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 background shortcuts and typing reporting `Cancelled` when you stopped them right after the last key went down: the key releases now always go out and the call succeeds ([#16235](https://github.com/can1357/oh-my-pi/pull/16235) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `wrapTextWithAnsi` leaving rows half-empty in Chinese and Japanese text: CJK runs now break between characters to fill each row, closing punctuation such as `，。！」` never starts a row, and opening brackets never end one ([#16219](https://github.com/can1357/oh-my-pi/issues/16219))
+- Fixed a cancelled or timed-out macOS `computer` call finishing its lookup of a sheet, popover or menu window, up to 5,000 accessibility elements, before it stopped and let the next request run ([#16233](https://github.com/can1357/oh-my-pi/pull/16233) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
 ### Added
 
-- Added `normalizePtyDimensions(cols, rows)` to size screen emulators with the same effective dimensions as native PTY sessions ([#16192](https://github.com/can1357/oh-my-pi/pull/16192) by [@C-W-Z](https://github.com/C-W-Z))
 - Added a `refuseMenu` option to `click`, `drag` and `holdMouse`: a macOS background left click on a menu button or popup button, or a drag or hold starting on one, throws `BackgroundUnavailable` before anything is sent ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a `returnFocus` option for window input with `takeover`: on macOS the takeover hands focus back to your app even if you clicked meanwhile, and only a third app you switched to keeps focus ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `DesktopSession.axSelectText` (macOS) to select text in an accessibility element's value by UTF-16 range, refusing missing or ambiguous matches and returning the selection read back ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
