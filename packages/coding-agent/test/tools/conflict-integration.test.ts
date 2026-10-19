@@ -572,6 +572,23 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(await Bun.file(filePath).text()).toBe("line 1\ncleanline\nline N\n");
 	});
 
+	it("still strips copied hashline rows that run past the registered ids", async () => {
+		const filePath = path.join(tempDir, "directives-rows.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-rows", { path: "directives-rows.ts" });
+		// #1 and #2 are registered, but row 3 shows these are copied `LINE:` prefixes.
+		const result = await write.execute("write-directives-rows", {
+			path: "conflict://*",
+			content: "1:a\n2:b\n3:c",
+		});
+		expect(getText(result)).toContain("Resolved 2 conflicts");
+		expect(await Bun.file(filePath).text()).toBe("a\nb\nc\nmiddle\na\nb\nc\ntail\n");
+	});
+
 	it("still treats pure-literal content as a uniform bulk write (no false directive rejection)", async () => {
 		const filePath = path.join(tempDir, "directives-literal.ts");
 		await Bun.write(filePath, TWO_WAY);

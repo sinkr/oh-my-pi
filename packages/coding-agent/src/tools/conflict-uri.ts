@@ -235,17 +235,20 @@ function parseBulkDirectives(content: string, registeredIds: ReadonlySet<number>
 		map.set(id, match[2]);
 	}
 	// No `<id>: @side` line → uniform mode, unless the content opens with `<id>:`
-	// naming a registered conflict and either every line is such a head or at least
-	// two registered ids head lines: a per-id block with (possibly multi-line) literal values.
+	// naming a registered conflict, no line carries a head naming anything else
+	// (copied `LINE:` rows do), and either every line is such a head or at least two
+	// registered ids head lines: a per-id block with (possibly multi-line) literal values.
 	if (!sawDirective) {
-		const headIds = stray.map(line => {
+		const heads = stray.map(line => {
 			const head = line.match(BULK_DIRECTIVE_HEAD_RE);
-			const id = head ? Number.parseInt(head[1], 10) : undefined;
-			return id !== undefined && registeredIds.has(id) ? id : undefined;
+			return head ? Number.parseInt(head[1], 10) : undefined;
 		});
+		const registeredHeads = heads.filter(id => id !== undefined && registeredIds.has(id));
 		const literalPerIdBlock =
-			headIds[0] !== undefined &&
-			(headIds.every(id => id !== undefined) || new Set(headIds.filter(id => id !== undefined)).size >= 2);
+			heads[0] !== undefined &&
+			registeredIds.has(heads[0]) &&
+			heads.every(id => id === undefined || registeredIds.has(id)) &&
+			(registeredHeads.length === heads.length || new Set(registeredHeads).size >= 2);
 		if (!literalPerIdBlock) return null;
 	}
 	if (stray.length > 0) {
