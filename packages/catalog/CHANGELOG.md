@@ -6,6 +6,10 @@
 
 - MiniMax `MiniMax-M3.1-Flash` now gets always-on thinking with `low` through `max` effort levels and no sampling params (`temperature`, `top_p`, `top_k`), replacing the `MiniMax-M3.1-Flash-Preview` rules ([#16315](https://github.com/can1357/oh-my-pi/pull/16315) by [@SaladDay](https://github.com/SaladDay))
 
+### Fixed
+
+- Gemma 4 models on Google AI Studio (`google/gemma-4-31b-it`, `google/gemma-4-26b-a4b-it`, …) no longer fail every request with `Thinking budget is not supported for this model`; thinking is now toggled with `thinkingLevel` (on = `high`, off = `minimal`) ([#16350](https://github.com/can1357/oh-my-pi/issues/16350))
+
 ## [18.12.2] - 2026-10-18
 
 ### Changed
