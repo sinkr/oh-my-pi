@@ -2378,6 +2378,12 @@ export interface HtmlToMarkdownOptions {
   cleanContent?: boolean
   /** Skip images during conversion. */
   skipImages?: boolean
+  /**
+   * Hidden content to keep: "drop" (default) omits it, "reachable" keeps
+   * content the page can reveal (collapsed sections, inactive tab panels),
+   * "all" also keeps `<template>` and `<noscript>` content.
+   */
+  hiddenContent?: string
 }
 
 /** One stray sloppy payload region inside prose (UTF-16 offsets). */
