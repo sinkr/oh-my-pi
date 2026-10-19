@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Eligible Amazon Bedrock Claude Converse models now use Runtime `InvokeModel` for native compaction while regular turns remain on Converse; signed summaries are replayed only by the model and API that produced them.
+- Eligible Amazon Bedrock Claude Converse models now use Runtime `InvokeModel` for native compaction while regular turns remain on Converse; signed summaries are replayed only by the model and API that produced them ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
 ## [18.12.2] - 2026-10-18
 
