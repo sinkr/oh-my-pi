@@ -257,6 +257,26 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).not.toContain("INFO");
 	});
 
+	it("searches every artifact named in a semicolon-delimited artifact:// list (issue #14091)", async () => {
+		await Bun.write(path.join(artifactsDir, "44.python.log"), "alpha needle\n");
+		await Bun.write(path.join(artifactsDir, "43.python.log"), "beta needle\n");
+
+		const session = createSession();
+		const tool = new GrepTool(session);
+
+		const result = await tool.execute("artifact-list", {
+			pattern: "needle",
+			path: "artifact://44;artifact://43",
+		});
+
+		const text = getResultText(result);
+		// Both artifacts are searched — the list is two resources, not one URI.
+		expect(text).toContain("artifact://44");
+		expect(text).toContain("artifact://43");
+		expect(text).toContain("alpha needle");
+		expect(text).toContain("beta needle");
+	});
+
 	it("searches virtual internal URL content without a backing file", async () => {
 		registerVirtualDocs(new Map([["doc.md", "alpha line\nneedle in virtual content\ngamma line\n"]]));
 
