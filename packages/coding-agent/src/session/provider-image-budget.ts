@@ -145,11 +145,12 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 /**
  * Messages whose inline images a host with a `request-body-byte-limit` keeps past the byte budget: the newest user
  * message (summary archives excluded) and the newest tool result carrying inline image bytes, newest first, each only
- * while the kept images still fit the limit. The clamp evicts everything else oldest-first, as on other hosts.
+ * while the kept images still fit `imageRoom`, the limit less the request's other serialized bytes. The clamp evicts
+ * everything else oldest-first, as on other hosts.
  */
-function newestImageMessages(context: Context, model: Model, bodyLimit: number | undefined): Set<Message> {
+function newestImageMessages(context: Context, model: Model, imageRoom: number | undefined): Set<Message> {
 	const kept = new Set<Message>();
-	if (bodyLimit === undefined) return kept;
+	if (imageRoom === undefined || imageRoom <= 0) return kept;
 	let user: Message | undefined;
 	let toolResult: Message | undefined;
 	let bytes = 0;
@@ -165,7 +166,7 @@ function newestImageMessages(context: Context, model: Model, bodyLimit: number |
 		if (isUser) user = message;
 		else if (messageBytes > 0) toolResult = message;
 		else continue;
-		if (messageBytes === 0 || bytes + messageBytes > bodyLimit) continue;
+		if (messageBytes === 0 || bytes + messageBytes > imageRoom) continue;
 		bytes += messageBytes;
 		kept.add(message);
 	}
@@ -190,7 +191,10 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 		}
 	}
 	if (inlineBytes <= byteBudget) return context;
-	const kept = newestImageMessages(context, model, resolveRequestBodyByteLimit(model, budgetedHost));
+	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
+	// Text, tools and the system prompt ride in the same body: only what they leave may hold protected images.
+	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - (JSON.stringify(context).length - inlineBytes);
+	const kept = newestImageMessages(context, model, imageRoom);
 	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, kept });
 }
 

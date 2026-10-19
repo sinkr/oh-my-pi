@@ -495,6 +495,22 @@ describe("provider context image budgets", () => {
 		expect(textData(clamped)).toEqual(["shot", "look at this"]);
 	});
 
+	it("does not protect a fresh Factory image that the request's text leaves no room for", () => {
+		const fresh = "C".repeat(3_800_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("x".repeat(800_000))], timestamp: 0 },
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 1 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		const clamped = clampProviderContextImageBytes(context, hosted);
+		expect(imageData(clamped)).toEqual([]);
+		expect(JSON.stringify(clamped).length).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
 	it("removes an oversized single tool image but keeps its tool result meaningful", () => {
 		const context: Context = {
 			systemPrompt: [],
