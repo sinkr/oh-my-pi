@@ -374,9 +374,10 @@ const AUTHORED_LINES_FLOOR: f64 = 0.5;
 /// How much more of those lines than of the remap target the body must keep.
 const AUTHORED_LINES_MARGIN: f64 = 0.3;
 
-/// Largest `window chars × body chars` product [`kept_share`] scores; past it
-/// the comparison abstains rather than run quadratic work on a large rewrite.
-const KEPT_SHARE_BUDGET: usize = 1 << 22;
+/// `window chars × body chars` products [`kept_share`] may spend across one
+/// recovery; past it the check abstains rather than run quadratic work on a
+/// large or many-hunk rewrite.
+const KEPT_SHARE_BUDGET: usize = 1 << 23;
 
 /// Minimum trimmed length, in chars, for a line to count as content evidence.
 /// Blank lines, closers and one-word rows resemble short bodies by chance.
@@ -388,14 +389,21 @@ fn identifies(line: &str) -> bool {
 
 /// How much of `window` a replacement `body` keeps: each identifying window
 /// line scores its best similarity to a body line, any other line scores
-/// zero, and the sum is divided by the window length. `None` past
-/// [`KEPT_SHARE_BUDGET`].
-fn kept_share(window: &[&str], body: &[&str], verbatim: &HashSet<&str>) -> Option<f64> {
+/// zero, and the sum is divided by the window length. `None`, leaving
+/// `budget` untouched, when the comparison would cost more than is left.
+fn kept_share(
+	window: &[&str],
+	body: &[&str],
+	verbatim: &HashSet<&str>,
+	budget: &mut usize,
+) -> Option<f64> {
 	let window_chars: usize = window.iter().map(|line| line.trim().chars().count()).sum();
 	let body_chars: usize = body.iter().map(|row| row.chars().count()).sum();
-	if window.is_empty() || window_chars.saturating_mul(body_chars) > KEPT_SHARE_BUDGET {
+	let cost = window_chars.saturating_mul(body_chars);
+	if window.is_empty() || cost > *budget {
 		return None;
 	}
+	*budget -= cost;
 	let total: f64 = window
 		.iter()
 		.map(|line| {
@@ -456,7 +464,8 @@ fn aimed_at_authored_lines(current: &str, authored: &[Edit], offset: i64) -> boo
 			})
 			.collect::<Vec<_>>()
 	};
-	groups.iter().any(|(payload, range)| {
+	let mut budget = KEPT_SHARE_BUDGET;
+	for (payload, range) in &groups {
 		let body = payload
 			.iter()
 			.map(|row| row.trim())
@@ -466,16 +475,23 @@ fn aimed_at_authored_lines(current: &str, authored: &[Edit], offset: i64) -> boo
 		// A target with no identifying line gives nothing to tell the two
 		// readings apart.
 		if !target.iter().any(|line| identifies(line)) {
-			return false;
+			continue;
 		}
 		let verbatim = body.iter().copied().collect::<HashSet<_>>();
-		let Some(kept) = kept_share(&window(range, 0), &body, &verbatim) else {
+		let Some(kept) = kept_share(&window(range, 0), &body, &verbatim, &mut budget) else {
 			return false;
 		};
-		kept >= AUTHORED_LINES_FLOOR
-			&& kept_share(&target, &body, &verbatim)
-				.is_some_and(|target_kept| kept > target_kept + AUTHORED_LINES_MARGIN)
-	})
+		if kept < AUTHORED_LINES_FLOOR {
+			continue;
+		}
+		let Some(target_kept) = kept_share(&target, &body, &verbatim, &mut budget) else {
+			return false;
+		};
+		if kept > target_kept + AUTHORED_LINES_MARGIN {
+			return true;
+		}
+	}
+	false
 }
 
 /// Attempt to rebase stale anchors from a retained snapshot onto current text.

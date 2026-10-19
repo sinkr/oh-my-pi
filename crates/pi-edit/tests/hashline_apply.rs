@@ -679,6 +679,51 @@ fn recovery_budgets_the_body_check_in_chars_not_bytes() {
 }
 
 #[test]
+fn recovery_shares_one_comparison_budget_across_hunks() {
+	// Two 48-row hunks: the first (written for its tagged rows) spends part of
+	// the budget, so the second, which alone would be refused, is not scored.
+	let rows = |letter: &str| {
+		(0..48)
+			.map(|i| format!("{}{i:03}", letter.repeat(37)))
+			.collect::<Vec<_>>()
+	};
+	let (header, first, second) = (rows("h"), rows("a"), rows("b"));
+	let tagged = format!("{}\n{}\nend\n", first.join("\n"), second.join("\n"));
+	let current = format!("{}\n{tagged}", header.join("\n"));
+	let first_body = first
+		.iter()
+		.map(|row| format!("{row}!"))
+		.collect::<Vec<_>>();
+	let second_body = first
+		.iter()
+		.map(|row| format!("{row}?"))
+		.collect::<Vec<_>>();
+	let first_body = first_body.iter().map(String::as_str).collect::<Vec<_>>();
+	let second_body = second_body.iter().map(String::as_str).collect::<Vec<_>>();
+	let mut edits = replacement(1, 48, &first_body, 1);
+	edits.extend(replacement(49, 96, &second_body, 2));
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-shared-budget.txt");
+	let tag = store.record(path, &tagged, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: &current,
+		file_hash: &tag,
+		edits: &edits,
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	let expected = format!(
+		"{}\n{}\n{}\nend\n",
+		header.join("\n"),
+		first_body.join("\n"),
+		second_body.join("\n")
+	);
+	assert_eq!(recovered.text, expected);
+}
+
+#[test]
 fn recovery_remaps_a_shifted_range_that_overlaps_its_kept_line() {
 	// Shifted by one, the authored window (blank, `alpha line`) shares
 	// `alpha line` with the tagged range; the blank must not tip it.
