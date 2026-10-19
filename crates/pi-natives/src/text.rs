@@ -1043,8 +1043,8 @@ const fn is_kinsoku_no_start(cp: u32) -> bool {
 		0x21 | 0x29 | 0x2c | 0x2e | 0x3a | 0x3b | 0x3f | 0x5d | 0x7d
 		// ’ ” ‥ …
 		| 0x2019 | 0x201d | 0x2025 | 0x2026
-		// 、 。 々 〻
-		| 0x3001 | 0x3002 | 0x3005 | 0x303b
+		// 、 。 々 〻 〜 ゠
+		| 0x3001 | 0x3002 | 0x3005 | 0x303b | 0x301c | 0x30a0
 		// 〉 》 」 』 】 〕 〗 〙 〛 〞 〟
 		| 0x3009 | 0x300b | 0x300d | 0x300f | 0x3011 | 0x3015 | 0x3017 | 0x3019 | 0x301b | 0x301e | 0x301f
 		// ゝ ゞ ・ ヽ ヾ
@@ -2288,6 +2288,11 @@ mod tests {
 	fn test_wrap_text_with_ansi_small_kana_and_prolonged_mark_never_start_row() {
 		assert_eq!(wrap("一コード", 4), ["一", "コー", "ド"]);
 		assert_eq!(wrap("一二ちょ", 6), ["一二", "ちょ"]);
+	}
+
+	#[test]
+	fn test_wrap_text_with_ansi_wave_dash_never_starts_row() {
+		assert_eq!(wrap("一二〜三", 4), ["一", "二〜", "三"]);
 	}
 
 	#[test]
