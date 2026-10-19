@@ -24,8 +24,14 @@ import { TempDir } from "@oh-my-pi/pi-utils";
  * An *explicit* `/compact snapcompact` (mode override) is a deliberate no-LLM
  * archive request, so it MUST keep failing locally instead of silently
  * shipping the transcript to a provider.
+ *
+ * A model whose wire strips images (`compat.stripImageInput`) declares image
+ * input but is text-only on the wire, so it takes the same path.
  */
-describe("AgentSession manual snapcompact text-only fallback", () => {
+describe.each([
+	{ label: "text-only", provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
+	{ label: "wire-stripped", provider: "venice", id: "deepseek-v4-1-flash" },
+] as const)("AgentSession manual snapcompact $label fallback", ({ provider, id }) => {
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage | undefined;
 	let tempDir: TempDir | undefined;
@@ -49,13 +55,12 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		activeModel: Model;
 		notices: string[];
 	}> {
-		const activeModel = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
-		if (!activeModel) throw new Error("Expected bundled text-only model");
-		expect(activeModel.input).not.toContain("image");
+		const activeModel = getBundledModel(provider, id);
+		if (!activeModel) throw new Error(`Expected bundled model ${provider}/${id}`);
 
 		tempDir = TempDir.createSync("@pi-manual-snapcompact-text-only-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.keys.setRuntime("aimlapi", "test-key");
+		authStorage.keys.setRuntime(provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		const agent = new Agent({
