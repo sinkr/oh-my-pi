@@ -548,7 +548,7 @@ describe("Factory Droid organization lookup", () => {
 		const backend = factoryBackend(["org_workos"]);
 		// Deadlines handed out so far, in order; the test expires them by hand.
 		const deadlines: Array<{ controller: AbortController }> = [];
-		vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
 			const controller = new AbortController();
 			deadlines.push({ controller });
 			return controller.signal;
@@ -569,7 +569,11 @@ describe("Factory Droid organization lookup", () => {
 			}
 			return backend.fetchImpl(input, init);
 		};
-		await withGlobalFetch(fetchImpl, () => loginViaRegistry({ fetch: fetchImpl })).catch(() => {});
+		try {
+			await withGlobalFetch(fetchImpl, () => loginViaRegistry({ fetch: fetchImpl })).catch(() => {});
+		} finally {
+			timeoutSpy.mockRestore();
+		}
 		// The lookup got a deadline of its own after whoami's.
 		expect(deadlinesAtLookup).toBeGreaterThan(deadlinesAtWhoami);
 		expect(lookupAbortedByEarlierDeadline).toBe(false);
