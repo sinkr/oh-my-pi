@@ -2043,6 +2043,28 @@ describe("RelayBridge auto-attach gating", () => {
 		expect(ext.rpcs("attach")).toHaveLength(0);
 	});
 
+	it("announces to discovering clients the tabs a browser brings in its hello", async () => {
+		const bridge = new RelayBridge();
+		connectInstance(bridge, new FakeExtSocket(), "first", [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }),
+		);
+		await flush();
+		// A second browser connects with a tab the client has never seen, as one does whose extension says
+		// hello after its tabs already exist.
+		connectInstance(bridge, new FakeExtSocket(), "second", [tab({ tabId: 5, title: "First" })]);
+		await flush();
+		const second = `PAGE${instanceCode("second")}.5`;
+		expect(bridge.listTargets().map(target => target.id)).toContain(second);
+		const created = cdp.messages.filter(
+			m => m.method === "Target.targetCreated" && JSON.stringify(m.params).includes(`"${second}"`),
+		);
+		expect(created).toHaveLength(1);
+	});
+
 	it("reannounces a held tab on revival without attaching it while discarded", async () => {
 		const bridge = new RelayBridge();
 		const ext = new FakeExtSocket();
