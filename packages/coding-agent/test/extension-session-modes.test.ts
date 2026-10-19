@@ -254,6 +254,45 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		]);
 	});
 
+	it("refuses transitions from session_start until saved modes are restored", async () => {
+		const codes: string[] = [];
+		const { modes } = await tui(pi => {
+			pi.on("session_start", async (_event, ctx) => {
+				const result = await ctx.sessionModes!.set({ mode: "plan", action: "enter" });
+				codes.push(result.ok ? "ok" : result.code);
+			});
+		});
+		expect(codes).toEqual(["busy"]);
+		expect(changed(await modes.set({ mode: "plan", action: "enter" }))).toBe(true);
+	});
+
+	it("reports automatic goal completion only once the goal tool is gone", async () => {
+		const seen: Array<[string, boolean]> = [];
+		const live: { session?: AgentSession } = {};
+		const completed = Promise.withResolvers<void>();
+		const { session, provider, modes } = await tui(pi => {
+			pi.on("mode_changed", event => {
+				seen.push([event.state.goal.status, live.session!.getEnabledToolNames().includes("goal")]);
+				if (event.state.goal.status === "inactive") completed.resolve();
+			});
+		});
+		live.session = session;
+		let calls = 0;
+		provider.fallback = () =>
+			calls++ === 0
+				? { content: [{ type: "toolCall", name: "goal", arguments: { op: "complete" } }] }
+				: { content: ["done"] };
+		changed(await modes.set({ mode: "goal", action: "enter", objective: "Finish quickly" }));
+		await session.prompt("finish");
+		// Teardown runs from agent_end, after the turn settles.
+		await completed.promise;
+		expect(modes.getState().goal).toEqual({ status: "inactive" });
+		expect(seen).toEqual([
+			["active", true],
+			["inactive", false],
+		]);
+	});
+
 	it("does not report goal accounting as a mode change", async () => {
 		const { session, provider, modes, events } = await tui();
 		provider.fallback = () => ({ content: ["progress"], usage: { input: 1200, output: 300 } });

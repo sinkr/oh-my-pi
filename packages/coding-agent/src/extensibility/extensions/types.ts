@@ -1356,7 +1356,8 @@ export interface SessionModeState {
 }
 
 /**
- * Outcome of `ctx.sessionModes.set()`. `busy`: a turn, compaction, or another `set()` is running —
+ * Outcome of `ctx.sessionModes.set()`. `busy`: a turn, compaction, or another `set()` is running, the
+ * session is still restoring its saved modes at startup, or a completed goal is still being torn down —
  * retry once idle. `conflict`: another mode blocks this one (exit it first). `disabled`: a setting
  * gates the mode (`plan.enabled` / `goal.enabled`). `invalid_request`: malformed or not applicable now.
  */
