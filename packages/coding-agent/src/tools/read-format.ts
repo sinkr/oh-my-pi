@@ -343,9 +343,8 @@ export async function buildInMemoryTextResult(
 		!rawDisplay && offset !== undefined && offset > 1,
 		!rawDisplay && limit !== undefined,
 	);
-	const startLine = expanded.startLine;
-	const endLineExpanded = expanded.endLine;
-	const startLineDisplay = startLine + 1;
+	let startLine = expanded.startLine;
+	const endLine = expanded.endLine;
 
 	const resultBuilder = toolResult(details);
 	if (options.sourcePath) {
@@ -370,11 +369,10 @@ export async function buildInMemoryTextResult(
 			.done();
 	}
 
-	const endLine = endLineExpanded;
 	// Measure the range as a substring of `text` (equal to joining it) so a large range isn't
 	// copied only for `truncateHead` to keep its head. Branches that emit the whole range
 	// re-join it so the result never pins `text` through a substring.
-	const selectedRange = allLines
+	let selectedRange = allLines
 		? sliceLineRange(text, allLines, startLine, endLine)
 		: sliceRawLineRange(
 				text,
@@ -382,10 +380,24 @@ export async function buildInMemoryTextResult(
 				endLine,
 				limit === undefined && endLine === totalLines && text.endsWith("\n"),
 			);
+	let truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
+	// The leading context line must not cost the requested start line: when the byte budget
+	// stops at or inside it, `:<start>` would widen to the same context and repeat this page.
+	// The whole text is in memory, so drop the context and page from the requested line.
+	if (
+		allLines &&
+		startLine < requestedStart &&
+		(truncation.firstLineExceedsLimit ||
+			(truncation.truncated && (truncation.outputLines ?? 0) <= requestedStart - startLine))
+	) {
+		startLine = requestedStart;
+		selectedRange = sliceLineRange(text, allLines, startLine, endLine);
+		truncation = truncateHead(selectedRange);
+	}
+	const startLineDisplay = startLine + 1;
 	const joinSelectedLines = (): string =>
 		(allLines ? allLines.slice(startLine, endLine) : selectedRange.split("\n")).join("\n");
 	const userLimitedLines = limit !== undefined ? endLine - startLine : undefined;
-	const truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
 	// Any display short of the whole text shows block context around it.
 	if (
 		!rawDisplay &&
@@ -445,7 +457,10 @@ export async function buildInMemoryTextResult(
 
 	let outputText: string;
 	let truncationInfo:
-		| { result: TruncationResult; options: { direction: "head"; startLine?: number; totalFileLines?: number } }
+		| {
+				result: TruncationResult;
+				options: { direction: "head"; startLine?: number; totalFileLines?: number; maxBytes?: number };
+		  }
 		| undefined;
 
 	if (truncation.firstLineExceedsLimit) {
@@ -484,7 +499,13 @@ export async function buildInMemoryTextResult(
 		details.truncation = toReadTruncationStats(truncation);
 		truncationInfo = {
 			result: truncation,
-			options: { direction: "head", startLine: startLineDisplay, totalFileLines: totalLines },
+			// Without `maxBytes` the notice reports the bytes shown as the limit.
+			options: {
+				direction: "head",
+				startLine: startLineDisplay,
+				totalFileLines: totalLines,
+				maxBytes: DEFAULT_MAX_BYTES,
+			},
 		};
 	} else if (!rawDisplay && userLimitedLines !== undefined && startLine + userLimitedLines < totalLines) {
 		const remaining = totalLines - (startLine + userLimitedLines);
