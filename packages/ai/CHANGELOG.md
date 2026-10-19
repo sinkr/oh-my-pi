@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Claude requests answering a turn whose attachment is a video, PDF, HEIC or other format Claude cannot read as if nothing were attached; the turn now fails with an error naming the format, and such an attachment in an earlier turn is noted as omitted
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
