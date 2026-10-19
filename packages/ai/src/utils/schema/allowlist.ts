@@ -78,6 +78,11 @@ function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredM
 			merged[key] = typeof current === "number" ? STRICTER_BOUND[key](current, value) : value;
 		} else if (key === "enum" && Array.isArray(left.enum) && Array.isArray(value)) {
 			merged.enum = dedupe([...(left.enum as unknown[]), ...(value as unknown[])]);
+		} else if (requiredMerge === "union" && key === "anyOf" && Array.isArray(merged.anyOf) && Array.isArray(value)) {
+			// Two retained unions in one conjunction: keep every pairing of compatible
+			// branches instead of dropping the right-hand constraint.
+			const pairs = intersectUnionBranches(merged.anyOf as JsonObject[], value as JsonObject[]);
+			if (pairs.length > 0) merged.anyOf = pairs;
 		} else if (!(key in merged)) {
 			merged[key] = value;
 		}
@@ -95,6 +100,18 @@ function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredM
 		else delete merged.required;
 	}
 	return merged;
+}
+
+/** Branch-wise conjunction of two unions: each same-typed (or untyped) pair merged. */
+function intersectUnionBranches(left: JsonObject[], right: JsonObject[]): JsonObject[] {
+	const pairs: JsonObject[] = [];
+	for (const a of left) {
+		for (const b of right) {
+			if (a.type !== undefined && b.type !== undefined && a.type !== b.type) continue;
+			pairs.push(mergeFactoryDroidSchemas(a, b, "union"));
+		}
+	}
+	return pairs;
 }
 
 /** Fields the proxy accepts beside `anyOf`; anything else there is a 400. */
@@ -233,8 +250,10 @@ function settleMergedUnions(node: JsonObject): void {
 	for (const branch of node.anyOf) {
 		if (isJsonObject(branch)) settleMergedUnions(branch);
 	}
+	// A union left with one branch (an allOf intersection) is that branch.
+	const single = node.anyOf.length === 1;
 	const { anyOf, nullable, ...rest } = node;
-	if (Object.keys(rest).every(key => key in ANY_OF_SIBLING_KEYS)) return;
+	if (!single && Object.keys(rest).every(key => key in ANY_OF_SIBLING_KEYS)) return;
 	delete node.anyOf;
 	delete node.nullable;
 	settleUnion(node, anyOf as JsonObject[], nullable === true);

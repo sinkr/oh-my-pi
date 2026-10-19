@@ -1594,6 +1594,24 @@ describe("normalizeSchemaForFactoryDroid", () => {
 		expect(collapsedBranches.properties.y).toEqual({ type: "string", nullable: false });
 	});
 
+	it("intersects two mixed unions joined by allOf instead of dropping the second", () => {
+		const narrowed = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ anyOf: [{ type: "string" }, { type: "number" }] },
+				{ anyOf: [{ type: "string", pattern: "^x$" }, { type: "boolean" }] },
+			],
+		});
+		expect(narrowed).toEqual({ type: "string", pattern: "^x$", nullable: false });
+
+		const both = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ anyOf: [{ type: "string" }, { type: "number" }] },
+				{ anyOf: [{ type: "string" }, { type: "number", minimum: 3 }] },
+			],
+		});
+		expect(both).toEqual({ anyOf: [{ type: "string" }, { type: "number", minimum: 3 }] });
+	});
+
 	it("drops required names a mixed-union branch does not define", () => {
 		const normalized = normalizeSchemaForFactoryDroid({
 			anyOf: [{ type: "object", required: ["a"] }, { type: "string" }],
