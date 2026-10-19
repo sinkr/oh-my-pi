@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { executeSend } from "@oh-my-pi/pi-coding-agent/irc/messaging";
@@ -504,13 +505,16 @@ describe("IRC", () => {
 		 * An idle subagent wired like a real one: deliveries go through the real
 		 * IrcBridge, a wake runs the executor's wake-turn monitor, and every turn
 		 * ends with the stop text "Not for me." (after a `yield` when `yields`).
+		 * Children share their parent's job manager, as spawned subagents do.
 		 */
-		function registerIdleSubagent(id: string, opts: { parentId?: string; yields?: boolean } = {}) {
+		function registerIdleSubagent(
+			id: string,
+			opts: { parentId?: string; yields?: boolean; jobManager?: AsyncJobManager } = {},
+		) {
 			let observer: IrcWakeObserver | undefined;
 			const listeners: ((event: AgentSessionEvent) => void)[] = [];
 			const turns: Promise<void>[] = [];
 			const relays: Promise<void>[] = [];
-			const jobs: string[] = [];
 			const wake = (records: AgentMessage[]): void => {
 				const finish = observer?.(records);
 				if (opts.yields) {
@@ -553,21 +557,17 @@ describe("IRC", () => {
 					stopReason: "stop",
 				}),
 				deliverIrcMessage: (msg: IrcMessage) => bridge.deliver(msg),
-				asyncJobManager: {
-					register: (_kind: string, jobId: string) => {
-						jobs.push(jobId);
-						return jobId;
-					},
-				},
+				asyncJobManager: opts.jobManager,
 			} as unknown as AgentSession;
 			registry.register({ id, displayName: "task", kind: "sub", status: "idle", session, parentId: opts.parentId });
 			attachIrcWakeTurnMonitor(session, { id, agent: wakeAgent });
 			return {
-				jobs,
 				wake,
 				settled: async () => {
 					await Promise.all(turns);
 					await Promise.all(relays);
+					await opts.jobManager?.waitForAll();
+					await opts.jobManager?.drainDeliveries({ timeoutMs: 1000 });
 				},
 			};
 		}
@@ -581,6 +581,16 @@ describe("IRC", () => {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
+
+		/** The parent's job manager plus every result text delivered to `Main`. */
+		function parentJobs() {
+			const jobManager = new AsyncJobManager({});
+			const delivered: string[] = [];
+			jobManager.registerDeliverySink("Main", (_jobId, text) => {
+				delivered.push(text);
+			});
+			return { jobManager, delivered };
+		}
 
 		it("does not relay woken peers' turns back to a subagent broadcaster", async () => {
 			const broadcaster = makeFakeSession();
@@ -611,30 +621,36 @@ describe("IRC", () => {
 		it("does not deliver woken children's turns to a main-agent broadcaster", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "Main", displayName: "main", kind: "main", status: "idle", session: main.session });
-			const a = registerIdleSubagent("0-A", { parentId: "Main" });
-			const b = registerIdleSubagent("0-B", { parentId: "Main" });
+			const { jobManager, delivered } = parentJobs();
+			const a = registerIdleSubagent("0-A", { parentId: "Main", jobManager });
+			const b = registerIdleSubagent("0-B", { parentId: "Main", jobManager });
 
 			await executeSend({ registry, senderId: "Main" }, { to: "all", message: "everyone: status" });
 			await a.settled();
 			await b.settled();
 			expect(main.delivered).toEqual([]);
-			expect([...a.jobs, ...b.jobs]).toEqual([]);
+			expect(delivered).toEqual([]);
 
-			// The parent's direct message still makes the woken turn a job the parent receives.
+			// The parent's direct message still delivers the woken turn to the parent.
 			await executeSend({ registry, senderId: "Main" }, { to: "0-A", message: "status?" });
 			await a.settled();
-			expect(a.jobs).toEqual(["0-A"]);
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("Not for me.");
+			await jobManager.dispose();
 		});
 
 		it("still delivers a child's own yield from a broadcast-woken turn to its parent", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "Main", displayName: "main", kind: "main", status: "idle", session: main.session });
-			const child = registerIdleSubagent("0-A", { parentId: "Main", yields: true });
+			const { jobManager, delivered } = parentJobs();
+			const child = registerIdleSubagent("0-A", { parentId: "Main", yields: true, jobManager });
 
 			await executeSend({ registry, senderId: "Main" }, { to: "all", message: "everyone: status" });
 			await child.settled();
-			expect(child.jobs).toEqual(["0-A"]);
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("Not for me.");
 			expect(main.delivered).toEqual([]);
+			await jobManager.dispose();
 		});
 
 		it("relays once to a sender whose direct message shares the wake with its broadcast", async () => {
