@@ -1,8 +1,10 @@
 /**
- * Custom tool loader - loads TypeScript tool modules using native Bun import.
+ * Custom tool loader - loads TypeScript tool modules through the same loader
+ * as extensions, so `@oh-my-pi/*` imports resolve to the host's bundled copy
+ * (in the compiled binary there is no other copy to resolve).
  *
- * Dependencies are injected through CustomToolAPI so tools loaded from user
- * directories do not depend on workspace module resolution.
+ * Dependencies are also injected through CustomToolAPI so tools loaded from
+ * user directories need no workspace module resolution.
  */
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -15,6 +17,7 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
+import { loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import * as typebox from "../legacy-typebox";
@@ -75,7 +78,7 @@ async function loadTool(
 	}
 
 	try {
-		const module = await withHostGuard(() => import(resolvedPath));
+		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as { default?: unknown };
 		const factory = (module.default ?? module) as CustomToolFactory;
 
 		if (typeof factory !== "function") {

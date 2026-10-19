@@ -301,3 +301,31 @@ describe("custom tool loader", () => {
 		}
 	});
 });
+
+describe("custom tool host package imports", () => {
+	// Tools live outside any workspace (here a temp dir; in the shipped binary,
+	// anywhere), so `@oh-my-pi/*` and the legacy pi scopes have no node_modules
+	// to resolve from. They must resolve to the host's own copy, as extensions do.
+	it.each(["@oh-my-pi/pi-utils", "@mariozechner/pi-utils"])("resolves %s to the host copy", async specifier => {
+		const toolPath = await writeTool(
+			"host_import.ts",
+			[
+				`import { logger } from "${specifier}";`,
+				"export default api => ({",
+				'\tname: "host_import_tool",',
+				'\tlabel: "Host Import Tool",',
+				"\tdescription: `logger is ${typeof logger.warn}`,",
+				"\tparameters: api.arktype({}),",
+				"\tasync execute() {",
+				'\t\treturn { content: [{ type: "text", text: "ok" }] };',
+				"\t},",
+				"});",
+			].join("\n"),
+		);
+
+		const result = await loadCustomTools([{ path: toolPath }], requireTempRoot(), []);
+
+		expect(result.errors).toEqual([]);
+		expect(result.tools[0]?.tool.description).toBe("logger is function");
+	});
+});
