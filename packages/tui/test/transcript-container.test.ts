@@ -8,7 +8,7 @@ import {
 	trimBlankEdges,
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 class Block implements Component {
 	#rows: string[];
@@ -199,6 +199,63 @@ describe("TranscriptContainer row split", () => {
 		transcript.acknowledgeFinalizedBatch(batch.id);
 		expect(transcript.renderViewport(40, 10, frame)).toEqual([...rows.slice(rows.length - 8), "", "tail"]);
 		expect(transcript.blockStates()).toEqual(["settled", "settled"]);
+	});
+
+	// An inline image: three reserved rows, then the row that draws it upward over them.
+	const imageBlock = (): Block =>
+		new Block(
+			[
+				"above 1",
+				"above 2",
+				"\x1b[0m",
+				"\x1b[0m",
+				"\x1b[0m",
+				"\x1b7\x1b[3A\x1b]1337;File=inline=1;width=10;height=4:AAAA\x07\x1b8",
+				"below 1",
+				"below 2",
+			],
+			true,
+		);
+
+	for (const [protocol, committed] of [
+		// iTerm2 cannot draw part of an image, so it goes to scrollback whole.
+		[ImageProtocol.Iterm2, 6],
+		// Kitty draws the visible part, so the cut stays where the screen ends.
+		[ImageProtocol.Kitty, 3],
+	] as const) {
+		it(`moves a split that would cut an inline image below it only where the terminal cannot draw part of it (${protocol})`, () => {
+			const previous = TERMINAL.imageProtocol;
+			setTerminalImageProtocol(protocol);
+			try {
+				const transcript = new TranscriptContainer();
+				transcript.addChild(imageBlock());
+				transcript.addChild(new Block(["tail"], true));
+				// Room 7: the tail and its separator leave 5 rows of the block live, a cut after row 3.
+				const batch = transcript.peekFinalizedBatch(40, 7)!;
+				expect(batch.rows.length).toBe(committed);
+			} finally {
+				setTerminalImageProtocol(previous);
+			}
+		});
+	}
+
+	it("retires a block in full, with its separator, when keeping its last-row image whole reaches the block's end", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const rows = imageBlock().render().slice(0, 6);
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new Block([...rows], true));
+			transcript.addChild(new Block(["tail"], true));
+			// Room 5: the tail and its separator leave 3 rows live, a cut inside the image.
+			const batch = transcript.peekFinalizedBatch(40, 5)!;
+			// The next block in scrollback stays one blank row below the image.
+			expect(batch.rows).toEqual([...rows, ""]);
+			transcript.acknowledgeFinalizedBatch(batch.id);
+			expect(transcript.blockStates()).toEqual(["committed", "settled"]);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
 	});
 
 	it("resumes a split block at the same content after a width change, repeating at most one row", () => {
