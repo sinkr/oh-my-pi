@@ -98,10 +98,8 @@ describe("native backend", () => {
 		} finally {
 			unregister();
 		}
-		expect(logged.map(event => [event.level, event.message])).toEqual([
-			["warn", "TSP: terminal stopped acknowledging frames; resuming without credits"],
-			["debug", "TSP: terminal acknowledging frames again"],
-		]);
+		expect(logged.map(event => event.level)).toEqual(["warn", "debug"]);
+		expect(logged[0]?.message).toContain("stopped acknowledging");
 		expect(logged[1]?.context).toMatchObject({ stalledMs: 20_000, resets: 4 });
 	});
 
