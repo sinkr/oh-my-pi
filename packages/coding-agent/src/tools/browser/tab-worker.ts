@@ -330,6 +330,8 @@ const HANDLE_ACTION_INVALIDATION_TIMEOUT_MS = 500;
 const FRAME_SNAPSHOT_TIMEOUT_MS = 5_000;
 /** Bound on Puppeteer exposing a page Chromium still has; the supervisor's init budget caps the whole attach anyway. */
 const ATTACHED_TARGET_EXPOSE_TIMEOUT_MS = 5_000;
+/** Bound on counting a timed-out selector's matches for its error message. */
+const MATCH_COUNT_PROBE_TIMEOUT_MS = 1_000;
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
 export async function dispatchScroll(
@@ -2214,7 +2216,8 @@ export class WorkerCore {
 							? `selector matches ${probe.count} element(s)`
 							: `could not count matches: ${probe.failure}`;
 				let hint = "";
-				if (refusal) hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
+				if (refusal)
+					hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
 				else if (probe && "count" in probe) hint = formatSelectorMatchHint(probe.count);
 				else if (countNote) hint = `; ${countNote}`;
 				throw markBrowserRunRejection(
@@ -2273,13 +2276,14 @@ export class WorkerCore {
 		try {
 			const handles = await Promise.race([
 				this.#requirePage().$$(normalizeSelector(selector)),
-				Bun.sleep(1_000).then(() => null),
+				Bun.sleep(MATCH_COUNT_PROBE_TIMEOUT_MS).then(() => null),
 			]);
-			if (!handles) return { failure: "no answer within 1000ms" };
+			if (!handles) return { failure: `no answer within ${MATCH_COUNT_PROBE_TIMEOUT_MS}ms` };
 			for (const handle of handles) void handle.dispose().catch(() => undefined);
 			return { count: handles.length };
 		} catch (err) {
-			return { failure: (err instanceof Error ? err.message : String(err)).split("\n", 1)[0] };
+			const message = (err instanceof Error ? err.message : String(err)).split("\n", 1)[0];
+			return { failure: message || (err instanceof Error ? err.name : "unknown error") };
 		}
 	}
 

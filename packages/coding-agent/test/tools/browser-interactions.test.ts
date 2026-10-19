@@ -158,26 +158,28 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
 		const context = { session, toolCallId: "browser-uncountable" };
 		const tabName = `uncountable-${crypto.randomUUID()}`;
 		await prelude.invoke(
-			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent("<!doctype html><p>Nothing here</p>")}` },
+			{
+				action: "open",
+				name: tabName,
+				url: `data:text/html,${encodeURIComponent("<!doctype html><p>Nothing here</p>")}`,
+			},
 			context,
 		);
 		try {
 			// The match-count probe and the zero-match watchdog both query through `page.$$`;
 			// replacing it on the tab's page makes every probe fail the way the endpoint's did.
+			// The replacement stays until the tab closes below.
 			const attempt = async (probe: string, timeout: number) => {
 				const result = await prelude.invoke(
 					{
 						action: "run",
 						name: tabName,
-						code: `const original = page.$$;
-page.$$ = ${probe};
+						code: `page.$$ = ${probe};
 try {
 	await tab.click("#missing");
 	return "clicked";
 } catch (error) {
 	return error instanceof Error ? error.message : String(error);
-} finally {
-	page.$$ = original;
 }`,
 						timeout,
 					},
@@ -187,7 +189,9 @@ try {
 			};
 			// A probe that throws never counts toward the 2 s fail-fast, so the click runs to its deadline.
 			const thrown = await attempt(`async () => { throw new Error("probe refused"); }`, 3);
-			expect(thrown).toMatch(/^tab\.click\("#missing"\) timed out after \d+ms; could not count matches: probe refused$/);
+			expect(thrown).toMatch(
+				/^tab\.click\("#missing"\) timed out after \d+ms; could not count matches: probe refused$/,
+			);
 			// A 10 s cell leaves the 8 s action deadline room for the 1 s probe wait.
 			const stalled = await attempt(`() => Promise.withResolvers().promise`, 10);
 			expect(stalled).toMatch(/; could not count matches: no answer within 1000ms$/);
