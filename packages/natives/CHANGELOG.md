@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `index.d.ts` drifting from the generated bindings, so building the natives no longer leaves the checkout modified
+- Fixed `index.d.ts` drifting from the generated bindings, so building the natives no longer leaves the checkout modified ([#16306](https://github.com/can1357/oh-my-pi/pull/16306) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
