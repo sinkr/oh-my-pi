@@ -2,12 +2,13 @@
 
 use std::{
 	collections::{HashMap, HashSet},
+	ops::RangeInclusive,
 	path::Path,
 	sync::Arc,
 };
 
 use super::{
-	apply::{ApplyOptions, EmptyPaste, apply_edits},
+	apply::{ApplyOptions, EmptyPaste, apply_edits, replacement_group},
 	clipboard::has_clipboard_edit,
 	messages::{
 		RECOVERY_EXTERNAL_WARNING, RECOVERY_LINE_REMAP_WARNING, RECOVERY_SESSION_CHAIN_WARNING,
@@ -390,8 +391,8 @@ fn identifies(line: &str) -> bool {
 /// zero, and the sum is divided by the window length. `None` past
 /// [`KEPT_SHARE_BUDGET`].
 fn kept_share(window: &[&str], body: &[&str], verbatim: &HashSet<&str>) -> Option<f64> {
-	let window_chars: usize = window.iter().map(|line| line.trim().len()).sum();
-	let body_chars: usize = body.iter().map(|row| row.len()).sum();
+	let window_chars: usize = window.iter().map(|line| line.trim().chars().count()).sum();
+	let body_chars: usize = body.iter().map(|row| row.chars().count()).sum();
 	if window.is_empty() || window_chars.saturating_mul(body_chars) > KEPT_SHARE_BUDGET {
 		return None;
 	}
@@ -427,25 +428,27 @@ fn kept_share(window: &[&str], body: &[&str], verbatim: &HashSet<&str>) -> Optio
 /// lines `offset` away is refused too, at the cost of one retry under the
 /// current tag the mismatch reject prints.
 fn aimed_at_authored_lines(current: &str, authored: &[Edit], offset: i64) -> bool {
-	// A `PUT N.=M:` lowers to body inserts plus one delete per replaced line,
-	// all carrying the op's payload line.
-	let mut ops: HashMap<u32, (Vec<&str>, Vec<u32>)> = HashMap::new();
-	for edit in authored {
-		match edit {
-			Edit::Insert { line_num, text, replacement: true, .. } if !text.trim().is_empty() => {
-				ops.entry(*line_num).or_default().0.push(text.trim());
-			},
-			Edit::Delete { line_num, anchor, .. } => {
-				ops.entry(*line_num).or_default().1.push(anchor.line);
-			},
-			_ => {},
+	let mut groups = Vec::new();
+	let mut start = 0;
+	while start < authored.len() {
+		let Some(group) = replacement_group(authored, start) else {
+			start += 1;
+			continue;
+		};
+		start = group.delete_indices.last().copied().unwrap_or(start) + 1;
+		if group.payload.iter().any(|row| !row.trim().is_empty()) {
+			groups.push((group.payload, group.start..=group.end));
 		}
 	}
+	// Shifted inserts and cuts carry no body: skip the file split for them.
+	if groups.is_empty() {
+		return false;
+	}
 	let lines = current.split('\n').collect::<Vec<_>>();
-	let window = |anchors: &[u32], shift: i64| {
-		anchors
-			.iter()
-			.map(|&line| {
+	let window = |range: &RangeInclusive<u32>, shift: i64| {
+		range
+			.clone()
+			.map(|line| {
 				usize::try_from(i64::from(line) + shift - 1)
 					.ok()
 					.and_then(|index| lines.get(index).copied())
@@ -453,19 +456,24 @@ fn aimed_at_authored_lines(current: &str, authored: &[Edit], offset: i64) -> boo
 			})
 			.collect::<Vec<_>>()
 	};
-	ops.values().any(|(body, anchors)| {
-		let target = window(anchors, offset);
+	groups.iter().any(|(payload, range)| {
+		let body = payload
+			.iter()
+			.map(|row| row.trim())
+			.filter(|row| !row.is_empty())
+			.collect::<Vec<_>>();
+		let target = window(range, offset);
 		// A target with no identifying line gives nothing to tell the two
 		// readings apart.
-		if body.is_empty() || !target.iter().any(|line| identifies(line)) {
+		if !target.iter().any(|line| identifies(line)) {
 			return false;
 		}
 		let verbatim = body.iter().copied().collect::<HashSet<_>>();
-		let Some(kept) = kept_share(&window(anchors, 0), body, &verbatim) else {
+		let Some(kept) = kept_share(&window(range, 0), &body, &verbatim) else {
 			return false;
 		};
 		kept >= AUTHORED_LINES_FLOOR
-			&& kept_share(&target, body, &verbatim)
+			&& kept_share(&target, &body, &verbatim)
 				.is_some_and(|target_kept| kept > target_kept + AUTHORED_LINES_MARGIN)
 	})
 }

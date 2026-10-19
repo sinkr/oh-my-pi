@@ -649,6 +649,36 @@ fn recovery_skips_the_body_check_past_its_comparison_budget() {
 }
 
 #[test]
+fn recovery_budgets_the_body_check_in_chars_not_bytes() {
+	// 40 rows of 40 CJK chars: within the comparison budget counted in chars,
+	// nine times over it counted in UTF-8 bytes.
+	let tagged_rows = (0..40)
+		.map(|i| format!("{}{i:03}", "タ".repeat(37)))
+		.collect::<Vec<_>>();
+	let tagged = format!("{}\nend\n", tagged_rows.join("\n"));
+	let current_rows = (0..40)
+		.map(|i| format!("{}{i:03}", "中".repeat(37)))
+		.collect::<Vec<_>>();
+	let body = current_rows
+		.iter()
+		.map(|row| format!("{row}！"))
+		.collect::<Vec<_>>();
+	let body = body.iter().map(String::as_str).collect::<Vec<_>>();
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-budget-chars.txt");
+	let tag = store.record(path, &tagged, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: &format!("{}\n{tagged}", current_rows.join("\n")),
+		file_hash: &tag,
+		edits: &replacement(1, 40, &body, 1),
+		clipboard: None,
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+}
+
+#[test]
 fn recovery_remaps_a_shifted_range_that_overlaps_its_kept_line() {
 	// Shifted by one, the authored window (blank, `alpha line`) shares
 	// `alpha line` with the tagged range; the blank must not tip it.
