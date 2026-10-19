@@ -108,4 +108,19 @@ class "deepseek" {
 	revision ">=4" {
 		portable-reasoning #true
 	}
+	// V4.1 Flash's vision config (patch 14, 3x3 merge, 1024-token cap, 544²
+	// floor). verified: OpenRouter billing matched it exactly on Fireworks and
+	// DeepInfra and within one token on Together, 256px to 4000px.
+	family "flash" {
+		revision ">=4.1" {
+			image-tokenization {
+				regime "deepseek-patch"
+				verified #true
+				patch-size 14
+				downsample 3
+				max-tokens 1024
+				min-pixels 295936
+			}
+		}
+	}
 }

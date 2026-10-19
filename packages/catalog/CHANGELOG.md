@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- DeepSeek V4.1 Flash images are now priced by DeepSeek's own billing (994 tokens for a snapcompact frame) instead of a GPT or Claude rate (2,882 to 3,136), so a 25-frame archive no longer counts about 50k tokens the provider never bills and triggers compaction early
+
 ## [18.12.3] - 2026-10-19
 
 ### Changed
