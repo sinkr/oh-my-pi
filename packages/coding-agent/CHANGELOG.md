@@ -5,6 +5,10 @@
 ### Added
 
 - Added `_session/steering` ACP extension method (advertised as `_meta.steering.supported`) so clients like agent-shell steer running turns through omp's native steer/follow-up queues: idle, autonomous-wake, and abort-window steers answer `promptRequired` so the host keeps owning new turns, a steer that lands mid-dispatch parks until the owning prompt goes live and then injects into that run, a steer that supersedes an open permission dialog rides the agent loop's own steering signal (honouring `interruptMode`) and ends only the client's dialog, `_meta.steering.queue: "followUp"` targets the follow-up queue, and `$`-level `$/cancel_request` carries the ACP v1 `requestId` parameter and always answers a cancelled request with `-32800` on the wire ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
+### Fixed
+
+- Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
+- Fixed `/move` path completion jumping into a subfolder on Tab: `..`, `.`, and `~` now complete to `../`, `./`, and `~/` before listing their children, a trailing `\` lists a folder on Windows, absolute Windows paths (`C:/…`) are no longer rewritten as relative paths, and the project directory is offered as `./` instead of `/`
 
 ## [18.12.3] - 2026-10-19
 
