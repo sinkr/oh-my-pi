@@ -236,6 +236,68 @@ describe("ACP JSON-RPC transport", () => {
 		reader.releaseLock();
 		writer.releaseLock();
 	});
+
+	it("requestPermissionWithCancel ends the client's inbound handler via its abort signal", async () => {
+		// The receiving half of a cancelled elicit: `cancel()` used to only
+		// drop the sender's pending entry and send `$/cancel_request` — the
+		// client-side handler (a dialog) never learned about it and held the
+		// clean-EOF drain until the 30 s timeout. The handler now receives the
+		// request's abort signal, ends on it, and its late response is
+		// suppressed on the agent side.
+		const pair = transportPair();
+		const handlerStarted = Promise.withResolvers<void>();
+		const handlerEnded = Promise.withResolvers<void>();
+		let handlerSignal: AbortSignal | undefined;
+		const client: Client = {
+			requestPermission(_params, options) {
+				handlerSignal = options?.signal;
+				handlerStarted.resolve();
+				const gate = Promise.withResolvers<void>();
+				if (options?.signal?.aborted) gate.resolve();
+				else options?.signal?.addEventListener("abort", () => gate.resolve(), { once: true });
+				return gate.promise.then(() => {
+					handlerEnded.resolve();
+					return { outcome: { outcome: "cancelled" as const } };
+				});
+			},
+			sessionUpdate: async () => {},
+		};
+		const _clientConnection = new ClientSideConnection(() => client, pair.left);
+		const agentConnection = new AgentSideConnection(
+			connection => ({
+				initialize: params => ({ protocolVersion: params.protocolVersion }),
+				newSession: async () => ({ sessionId: "session-1" }),
+				prompt: async () => {
+					void connection;
+					return { stopReason: "end_turn" };
+				},
+				cancel: async () => {},
+			}),
+			pair.right,
+		);
+
+		const { promise, cancel } = agentConnection.requestPermissionWithCancel({
+			sessionId: "session-1",
+			toolCall: { toolCallId: "tool-1" },
+			options: [],
+		});
+		await handlerStarted.promise;
+		expect(handlerSignal).toBeDefined();
+
+		// Agent-side cancellation must reach the handler through its signal…
+		cancel();
+		await handlerEnded.promise;
+
+		// …and reject the elicit as request-cancelled; the handler's late
+		// response for the dropped id is ignored (covered by the sender-side
+		// test above), so nothing throws on either side.
+		const error = await promise.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).toBeInstanceOf(RequestError);
+		expect((error as RequestError).code).toBe(-32800);
+	});
 });
 
 describe("ACP runtime schemas", () => {

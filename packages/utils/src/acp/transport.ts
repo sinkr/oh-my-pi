@@ -105,7 +105,13 @@ function createStandardError(
 	return new RequestError(code, additionalMessage ? `${message}: ${additionalMessage}` : message, data);
 }
 
-type Dispatcher = (method: string, params: unknown, notification: boolean) => MaybePromise<unknown>;
+type Dispatcher = (
+	method: string,
+	params: unknown,
+	notification: boolean,
+	/** Abort signal for an inbound *request*: fires when the peer cancels it via `$/cancel_request`. */
+	signal?: AbortSignal,
+) => MaybePromise<unknown>;
 type Pending = { resolve(value: unknown): void; reject(reason: unknown): void };
 
 /** Bound on clean-EOF inbound drain so `closed` cannot hang if a handler never settles. */
@@ -117,6 +123,8 @@ export class RpcConnection {
 	#pending = new Map<JsonRpcId, Pending>();
 	#inbound = new Set<Promise<void>>();
 	#openInboundIds = new Set<JsonRpcId>();
+	/** Abort controller per inbound request, fired by a peer `$/cancel_request`. */
+	#inboundCancellers = new Map<JsonRpcId, AbortController>();
 	#writable: WritableStream<AnyMessage>;
 	#writeTail: Promise<void> = Promise.resolve();
 	#abort = new AbortController();
@@ -272,6 +280,12 @@ export class RpcConnection {
 		}
 		if (!("method" in message)) return;
 		if (!("id" in message)) {
+			// A peer cancelling one of its own outstanding requests must end
+			// our side of that handler: abort the inbound canceller and drop
+			// the open-id entry so a late handler result writes no response.
+			if (message.method === "$/cancel_request") {
+				this.#cancelInbound((message.params as { id?: JsonRpcId } | undefined)?.id);
+			}
 			try {
 				await this.#dispatcher(message.method, message.params, true);
 			} catch {
@@ -279,8 +293,10 @@ export class RpcConnection {
 			}
 			return;
 		}
+		const canceller = new AbortController();
+		this.#inboundCancellers.set(message.id, canceller);
 		try {
-			const result = await this.#dispatcher(message.method, message.params, false);
+			const result = await this.#dispatcher(message.method, message.params, false, canceller.signal);
 			await this.#respond(message.id, { result: result ?? {} });
 		} catch (error) {
 			const protocolError =
@@ -288,6 +304,21 @@ export class RpcConnection {
 					? error
 					: RequestError.internalError({ details: error instanceof Error ? error.message : String(error) });
 			await this.#respond(message.id, { error: protocolError.toErrorResponse() });
+		} finally {
+			this.#inboundCancellers.delete(message.id);
+		}
+	}
+
+	#cancelInbound(id: JsonRpcId | undefined): void {
+		if (id === undefined) return;
+		// Drop the response slot first: `#respond` no-ops for ids that are no
+		// longer open, so a handler that settles after its cancellation never
+		// answers a request the peer has given up on.
+		this.#openInboundIds.delete(id);
+		const canceller = this.#inboundCancellers.get(id);
+		if (canceller) {
+			this.#inboundCancellers.delete(id);
+			canceller.abort(RequestError.requestCancelled({ id }));
 		}
 	}
 }

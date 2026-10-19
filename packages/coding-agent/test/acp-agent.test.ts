@@ -1687,6 +1687,90 @@ describe("ACP agent", () => {
 		}
 	});
 
+	it("queues two steering resubmissions refused in the same pre-dispatch window", async () => {
+		// Regression: the resubmission allowance was a one-shot flag, so the
+		// second of two steers refused while the owning prompt was still
+		// preprocessing lost its credit to the first resubmission — once the
+		// turn went live, that valid resubmission was treated as an unrelated
+		// overlapping prompt and cancelled the run both steers targeted.
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		expectAcpStructure(zNewSessionResponse, created);
+		const session = harness.findSession(created.sessionId)!;
+
+		const dispatchStarted = Promise.withResolvers<void>();
+		const preprocessingDone = Promise.withResolvers<void>();
+		const streamingStarted = Promise.withResolvers<void>();
+		const turnFinished = Promise.withResolvers<void>();
+		const emitAgentEnd = (text: string) => {
+			const assistant = makeAssistantMessage(text);
+			session.sessionManager.appendMessage(assistant);
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [assistant] } as AgentSessionEvent);
+			}
+		};
+		session.prompt = async (text: string) => {
+			session.promptCalls.push(text);
+			if (text === "first") {
+				dispatchStarted.resolve();
+				await preprocessingDone.promise;
+				session.isStreaming = true;
+				streamingStarted.resolve();
+				await turnFinished.promise;
+				session.isStreaming = false;
+				emitAgentEnd("first answer");
+				return true;
+			}
+			emitAgentEnd(`answer to ${text}`);
+			return true;
+		};
+		const abortSpy = spyOn(session, "abort");
+
+		try {
+			const firstPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "first" }],
+			});
+			await dispatchStarted.promise;
+
+			// Two steers land inside the same pre-dispatch window; both are
+			// refused and each earns one resubmission.
+			for (const text of ["steer one", "steer two"]) {
+				const steer = await harness.agent.extMethod("_session/steering", {
+					sessionId: created.sessionId,
+					prompt: [{ type: "text", text }],
+				});
+				expect(steer).toEqual({ outcome: "promptRequired", queue: "steering" });
+			}
+
+			preprocessingDone.resolve();
+			await streamingStarted.promise;
+			// Both resubmissions arrive while the turn streams; neither may
+			// cancel it. `session/prompt` reads the busy state synchronously,
+			// so no settling wait is needed before the assertions.
+			const resubmissionOne = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "steer one" }],
+			});
+			const resubmissionTwo = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "steer two" }],
+			});
+
+			turnFinished.resolve();
+			const responses = await Promise.all([firstPrompt, resubmissionOne, resubmissionTwo]);
+			expect(abortSpy).not.toHaveBeenCalled();
+			for (const response of responses) {
+				expect(response.stopReason).toBe("end_turn");
+			}
+			expect(session.promptCalls).toEqual(["first", "steer one", "steer two"]);
+		} finally {
+			abortSpy.mockRestore();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
 	it("replays messageIds and returns turn usage for prompts", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);

@@ -47,7 +47,16 @@ export interface CreateTerminalResponse {
 }
 /** Client callbacks handled by a client-side connection. */
 export interface Client {
-	requestPermission(params: RequestPermissionRequest): MaybePromise<RequestPermissionResponse>;
+	/**
+	 * Serve a permission elicit. `options.signal` aborts when the agent
+	 * cancels the request (`$/cancel_request`) — e.g. user steering superseded
+	 * the dialog — so a held handler can end instead of stranding the
+	 * connection's clean-EOF drain.
+	 */
+	requestPermission(
+		params: RequestPermissionRequest,
+		options?: { signal?: AbortSignal },
+	): MaybePromise<RequestPermissionResponse>;
 	sessionUpdate(params: SessionNotification): MaybePromise<void>;
 	readTextFile?(params: ReadTextFileRequest): MaybePromise<ReadTextFileResponse>;
 	writeTextFile?(params: WriteTextFileRequest): MaybePromise<WriteTextFileResponse | void>;
@@ -179,9 +188,9 @@ export class ClientSideConnection {
 	#connection: RpcConnection;
 
 	constructor(toClient: (connection: ClientSideConnection) => Client, stream: Stream) {
-		this.#connection = new RpcConnection(stream, async (method, params, notification) => {
+		this.#connection = new RpcConnection(stream, async (method, params, notification, signal) => {
 			if (!client) throw RequestError.internalError(undefined, "Client is not initialized");
-			return dispatchClient(client, method, params, notification);
+			return dispatchClient(client, method, params, notification, signal);
 		});
 		const client = toClient(this);
 	}
@@ -283,10 +292,11 @@ async function dispatchClient(
 	method: string,
 	params: unknown,
 	notification: boolean,
+	signal?: AbortSignal,
 ): Promise<unknown> {
 	switch (method) {
 		case "session/request_permission":
-			return client.requestPermission(params as RequestPermissionRequest);
+			return client.requestPermission(params as RequestPermissionRequest, { signal });
 		case "session/update":
 			return client.sessionUpdate(params as SessionNotification);
 		case "fs/read_text_file":
@@ -333,6 +343,9 @@ async function dispatchClient(
 				params as CompleteElicitationNotification,
 			);
 		default:
+			// The transport already aborted the matching inbound handler;
+			// like the agent side, the notification itself carries no work.
+			if (method === "$/cancel_request") return;
 			if (notification && client.extNotification)
 				return client.extNotification(method, params as Record<string, unknown>);
 			if (!notification && client.extMethod) return client.extMethod(method, params as Record<string, unknown>);

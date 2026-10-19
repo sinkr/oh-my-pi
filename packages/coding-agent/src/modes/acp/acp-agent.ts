@@ -159,14 +159,16 @@ type PromptTurnState = {
 	 */
 	errorTextDelivery: Promise<boolean> | undefined;
 	/**
-	 * A `_session/steering` request answered `promptRequired` while this turn
-	 * was reserved but still dispatching (image preprocessing; `isStreaming`
-	 * not yet raised). The client resubmits the steer content through
-	 * `session/prompt`; that resubmission queues behind this turn instead of
-	 * implicitly cancelling the run the steer was rejected in favor of.
-	 * One-shot: consumed by the next `prompt()` on this turn.
+	 * Count of `_session/steering` requests answered `promptRequired` while this
+	 * turn was reserved but still dispatching (image preprocessing;
+	 * `isStreaming` not yet raised). The client resubmits each refused steer
+	 * through `session/prompt`; each resubmission consumes one credit and
+	 * queues behind this turn instead of implicitly cancelling the run the
+	 * steer was rejected in favor of. A count, not a flag: two steers refused
+	 * in the same pre-dispatch window produce two resubmissions, and the
+	 * second must not be mistaken for an unrelated overlapping prompt.
 	 */
-	awaitingSteerResubmission?: boolean;
+	awaitingSteerResubmissions?: number;
 	/**
 	 * `abort()` is in-flight (or its bounded-timeout race). `undefined` while the turn is
 	 * running normally and after cleanup completes. The turn occupies `record.promptTurn`
@@ -972,13 +974,17 @@ export class AcpAgent implements Agent {
 	async prompt(params: PromptRequest): Promise<PromptResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
 		const activeTurn = record.promptTurn;
-		// One-shot resubmission marker: a `_session/steering` request this turn
-		// answered `promptRequired` while it was still dispatching flags the
-		// turn, and the client resubmits the steer content as this prompt. It
-		// must queue behind the turn (`#queuePrompt` below) instead of
-		// implicitly cancelling the run the steer was rejected in favor of.
-		const steerResubmission = activeTurn?.awaitingSteerResubmission === true;
-		if (activeTurn) activeTurn.awaitingSteerResubmission = false;
+		// Resubmission credits: each `_session/steering` request this turn
+		// answered `promptRequired` while it was still dispatching adds one,
+		// and the client resubmits that steer content as a prompt. Each
+		// resubmission consumes one credit and must queue behind the turn
+		// (`#queuePrompt` below) instead of implicitly cancelling the run the
+		// steer was rejected in favor of — including the second resubmission
+		// of two steers refused in the same pre-dispatch window.
+		const steerResubmission = (activeTurn?.awaitingSteerResubmissions ?? 0) > 0;
+		if (steerResubmission && activeTurn?.awaitingSteerResubmissions !== undefined) {
+			activeTurn.awaitingSteerResubmissions -= 1;
+		}
 		if (!steerResubmission && activeTurn && !activeTurn.settled && record.session.isStreaming) {
 			// New prompt arrived while the previous turn is still in-flight (e.g. the
 			// client sent a message immediately after pressing stop, before or without
@@ -1436,15 +1442,16 @@ export class AcpAgent implements Agent {
 				// A turn reserved but still dispatching (image preprocessing,
 				// `isStreaming` not yet raised) refused the steer because it
 				// cannot inject mid-dispatch. The host resubmits this content
-				// through `session/prompt`; flag the turn so that resubmission
+				// through `session/prompt`; credit the turn so that resubmission
 				// queues behind it instead of implicitly cancelling the run —
 				// once dispatch completes — that the steer was rejected in
-				// favor of. A refusal while streaming is the abort window and
-				// deliberately takes no flag: a prompt then matches the user's
-				// stop intent.
+				// favor of. A count, not a flag: each refusal in the window earns
+				// exactly one queued resubmission. A refusal while streaming is
+				// the abort window and deliberately takes no credit: a prompt
+				// then matches the user's stop intent.
 				const reserved = record.promptTurn;
 				if (reserved && !reserved.settled && !record.session.isStreaming) {
-					reserved.awaitingSteerResubmission = true;
+					reserved.awaitingSteerResubmissions = (reserved.awaitingSteerResubmissions ?? 0) + 1;
 				}
 				return { outcome: "promptRequired", queue };
 			}
