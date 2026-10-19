@@ -745,6 +745,45 @@ describe("RFC 9728 path-inserted protected resource", () => {
 		expect(calls).toContain(tenantOidc);
 		expect(calls).not.toContain(originAs);
 	});
+
+	it("does not fall back to an unadvertised origin-root AS when the advertised AS fails issuer validation", async () => {
+		// LiteLLM-style gateway: `/slack/mcp` advertises `https://gw.example/slack`,
+		// whose AS metadata wrongly claims the origin as issuer. The origin-root
+		// protected-resource metadata advertises the gateway's generic AS, which
+		// validates but was never listed for this resource.
+		const gw = "https://gw.example";
+		const slackAs = {
+			issuer: gw,
+			authorization_endpoint: `${gw}/slack/authorize`,
+			token_endpoint: `${gw}/slack/token`,
+		};
+		const rootAs = {
+			issuer: gw,
+			authorization_endpoint: `${gw}/v1/mcp/oauth/authorize`,
+			token_endpoint: `${gw}/v1/mcp/oauth/token`,
+		};
+		const routes: Record<string, unknown> = {
+			[`${gw}/.well-known/oauth-protected-resource/slack/mcp`]: { authorization_servers: [`${gw}/slack`] },
+			[`${gw}/.well-known/oauth-authorization-server/slack`]: slackAs,
+			[`${gw}/slack/.well-known/oauth-authorization-server`]: slackAs,
+			[`${gw}/.well-known/oauth-protected-resource`]: { resource: gw, authorization_servers: [gw] },
+			[`${gw}/.well-known/oauth-authorization-server`]: rootAs,
+			[`${gw}/.well-known/openid-configuration`]: rootAs,
+		};
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const body = routes[String(input)];
+			return body
+				? new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })
+				: new Response("not found", { status: 404 });
+		});
+		const serverUrl = `${gw}/slack/mcp`;
+
+		// Advertised via the 401 resource_metadata hint, and found by resource-server probing.
+		for (const resourceMetadataUrl of [rfc9728ProtectedResourceMetadataUrl(serverUrl), undefined]) {
+			const oauth = await discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
+			expect(oauth).toBeNull();
+		}
+	});
 });
 
 describe("RFC 8414 §3.3 issuer validation", () => {
