@@ -214,3 +214,48 @@ describe("Google GenerateContent parallel function response order", () => {
 		]);
 	});
 });
+
+describe("Google GenerateContent Gemini < 3 tool-result image order", () => {
+	it("sends buffered tool-result images in call order", () => {
+		const image = (data: string) => ({ type: "image" as const, mimeType: "image/png", data });
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Screenshot both", timestamp: 1000 },
+				{
+					role: "assistant",
+					provider: "google",
+					api: "google-generative-ai",
+					model: "gemini-2.5-flash",
+					content: [
+						{ type: "toolCall", id: "call_a", name: "shot", arguments: { target: "a" } },
+						{ type: "toolCall", id: "call_b", name: "shot", arguments: { target: "b" } },
+					],
+					usage: ZERO_USAGE,
+					stopReason: "toolUse",
+					timestamp: 2000,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_b",
+					toolName: "shot",
+					isError: false,
+					content: [image("image-b")],
+					timestamp: 3000,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_a",
+					toolName: "shot",
+					isError: false,
+					content: [image("image-a")],
+					timestamp: 3001,
+				},
+			],
+		};
+		const contents = convertMessages(createGoogleModel("gemini-2.5-flash"), context);
+		const images = contents
+			.flatMap(c => c.parts ?? [])
+			.flatMap(part => (part.inlineData ? [part.inlineData.data] : []));
+		expect(images).toEqual(["image-a", "image-b"]);
+	});
+});

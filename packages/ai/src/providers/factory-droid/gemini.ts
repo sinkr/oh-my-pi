@@ -15,12 +15,12 @@ import { notifyProviderResponse } from "../../utils/provider-response";
 import { dereferenceJsonSchema, normalizeSchemaForFactoryDroid, toolWireSchema } from "../../utils/schema";
 import {
 	extractGoogleErrorMessage,
+	FunctionCallOrder,
 	googleStreamChunkError,
 	GoogleTextBlocks,
 	mapGoogleUsage,
 	mapStopReasonString,
 	nextToolCallId,
-	orderFunctionResponsesByCall,
 	SKIP_THOUGHT_SIGNATURE,
 } from "../google-shared";
 import type { GenerateContentResponse, Part } from "../google-types";
@@ -185,9 +185,7 @@ function toGeminiContents(
 	systemInstruction?: { parts: Part[] };
 } {
 	const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [];
-	const callOrdinals = new Map<string, number>();
-	let nextCallOrdinal = 0;
-	const responseCallOrdinals = new Map<Part, number>();
+	const callOrder = new FunctionCallOrder();
 	const messages = transformMessages(
 		context.messages.map(message => adoptFactoryReplay(message, model)),
 		model,
@@ -215,7 +213,7 @@ function toGeminiContents(
 				} else if (block.type === "thinking" && block.thinkingSignature) {
 					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
 				} else if (block.type === "toolCall") {
-					callOrdinals.set(block.id, nextCallOrdinal++);
+					callOrder.call(block.id);
 					parts.push({
 						functionCall: { name: block.name, args: block.arguments },
 						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
@@ -246,8 +244,7 @@ function toGeminiContents(
 				...(binaryParts.length > 0 ? { parts: binaryParts } : {}),
 			},
 		};
-		const callOrdinal = callOrdinals.get(message.toolCallId);
-		if (callOrdinal !== undefined) responseCallOrdinals.set(part, callOrdinal);
+		callOrder.response(part, message.toolCallId);
 		const last = contents[contents.length - 1];
 		if (last && last.role === "user" && last.parts.every(p => p.functionResponse)) {
 			last.parts.push(part);
@@ -255,7 +252,7 @@ function toGeminiContents(
 			contents.push({ role: "user", parts: [part] });
 		}
 	}
-	orderFunctionResponsesByCall(contents, responseCallOrdinals);
+	callOrder.apply(contents);
 	// Sentinel injection: scope to model turns at/after the latest user turn
 	// with a non-response part (the validator only checks the current tail).
 	let lastUserText = 0;
