@@ -72,6 +72,95 @@ async fn identical_noop_escalates_on_third_attempt() {
 	);
 }
 
+fn numbered_lines(count: u32) -> String {
+	(1..=count)
+		.map(|n| format!("line {n}\n"))
+		.collect::<Vec<_>>()
+		.concat()
+}
+
+/// Send `input`, expect a mismatch reply, and return the current tag it names.
+async fn mismatch_tag(workspace: &common::Workspace, input: &str) -> String {
+	let error = workspace
+		.apply_json(&json!({ "input": input }), &common::DiskWriter::default())
+		.await
+		.expect_err("unknown tag must be rejected")
+		.to_string();
+	let at = error
+		.find("current file hashes to #")
+		.expect("reply names the current tag")
+		+ 24;
+	error[at..at + 4].to_owned()
+}
+
+#[tokio::test]
+async fn tag_from_a_mismatch_reply_covers_only_the_rows_it_displayed() {
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let text = numbered_lines(30);
+	workspace.write("a.txt", &text);
+	let tag = mismatch_tag(&workspace, "[a.txt#0000]\nPUT 5.=5:\n+X\n").await;
+
+	let writer = common::DiskWriter::default();
+	let error = workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 20.=20:\n+Y\n") }), &writer)
+		.await
+		.expect_err("line 20 was never displayed")
+		.to_string();
+	assert!(error.contains("never displayed"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.txt").as_deref(), Some(text.as_str()));
+
+	// Rows the reply displayed (anchor 5 ± 2) are seen.
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 7.=7:\n+Z\n") }), &writer)
+		.await
+		.expect("line 7 was displayed");
+	assert!(
+		workspace
+			.read("a.txt")
+			.unwrap()
+			.contains("line 6\nZ\nline 8\n")
+	);
+}
+
+#[tokio::test]
+async fn mismatch_reply_keeps_the_provenance_of_recorded_content() {
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let text = numbered_lines(30);
+	workspace.write("a.txt", &text);
+	let read: Vec<u32> = (1..=30).collect();
+	let tag = workspace.snapshot("a.txt", &text, Some(&read));
+	assert_eq!(mismatch_tag(&workspace, "[a.txt#0000]\nPUT 5.=5:\n+X\n").await, tag);
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{tag}]\nPUT 20.=20:\n+Y\n") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("the earlier read displayed line 20");
+}
+
+#[tokio::test]
+async fn wide_row_in_a_mismatch_reply_stays_unseen() {
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let text = format!("one\ntwo\n{}\nfour\n", "x".repeat(600));
+	workspace.write("a.txt", &text);
+	let tag = mismatch_tag(&workspace, "[a.txt#0000]\nPUT 3.=3:\n+y\n").await;
+	let writer = common::DiskWriter::default();
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 3.=3:\n+y\n") }), &writer)
+		.await
+		.expect_err("a row the reply may have shown cut is not seen");
+	assert!(writer.requests.lock().is_empty());
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 2.=2:\n+TWO\n") }), &writer)
+		.await
+		.expect("line 2 was displayed whole");
+}
+
 #[test]
 fn streaming_preview_keeps_completed_section_when_trailing_header_arrives() {
 	let workspace = common::Workspace::new(EditMode::Hashline);

@@ -103,7 +103,27 @@ fn mismatch(
 	store: &EditStore,
 ) -> EditError {
 	let actual = file_hash(normalized);
-	store.record(canonical, normalized, None);
+	let file_lines: Vec<String> = normalized.split('\n').map(str::to_owned).collect();
+	let anchor_lines = section.collect_anchor_lines().unwrap_or_default();
+	// The reply hands back the current tag. Content no read has recorded gets
+	// the rows the reply displays as its seen set, so a resend under that tag
+	// passes the seen-line guard only on lines the model was shown; with no
+	// seen set the guard would accept every line. Rows past the reveal cap
+	// stay unseen, and line 0 (never an anchor) keeps the set non-empty when
+	// every displayed row is that wide. Recorded content keeps its provenance.
+	let seen: Option<Vec<u32>> =
+		(!anchor_lines.is_empty() && store.by_content(canonical, normalized).is_none()).then(|| {
+			std::iter::once(0)
+				.chain(
+					super::messages::anchored_context_lines(&anchor_lines, file_lines.len())
+						.into_iter()
+						.filter(|&line| {
+							file_lines[(line - 1) as usize].chars().count() <= SEEN_LINE_REVEAL_MAX_COLUMNS
+						}),
+				)
+				.collect()
+		});
+	store.record(canonical, normalized, seen.as_deref());
 	// When the tag isn't from this exact path, list the other paths in this
 	// session that *did* issue the same tag — so the rejection can name the
 	// file the tag was actually for and the model doesn't follow a wrong-tree
@@ -118,8 +138,8 @@ fn mismatch(
 		path: Some(section.path.clone()),
 		expected_file_hash: expected.to_owned(),
 		actual_file_hash: actual,
-		file_lines: normalized.split('\n').map(str::to_owned).collect(),
-		anchor_lines: section.collect_anchor_lines().unwrap_or_default(),
+		file_lines,
+		anchor_lines,
 		hash_recognized: store.has_hash(canonical, expected),
 		tag_origin_paths,
 	})

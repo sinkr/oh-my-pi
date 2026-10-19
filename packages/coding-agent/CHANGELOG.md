@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed `edit` accepting changes to lines it never showed after a stale or unknown tag: resending under the current tag from the rejection now passes the seen-line check only on the rows that rejection displayed, so a line seen only through `bash` is no longer overwritten blind
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `/move` path completion jumping into a subfolder on Tab: `..`, `.`, and `~` now complete to `../`, `./`, and `~/` before listing their children, a trailing `\` lists a folder on Windows, absolute Windows paths (`C:/…`) are no longer rewritten as relative paths, and the project directory is offered as `./` instead of `/`
 
