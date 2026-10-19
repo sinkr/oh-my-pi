@@ -143,22 +143,51 @@ async fn mismatch_reply_keeps_the_provenance_of_recorded_content() {
 }
 
 #[tokio::test]
-async fn wide_row_in_a_mismatch_reply_stays_unseen() {
+async fn each_mismatch_reply_adds_the_rows_it_displayed() {
 	let mut workspace = common::Workspace::new(EditMode::Hashline);
 	workspace.config.enforce_seen_lines = true;
-	let text = format!("one\ntwo\n{}\nfour\n", "x".repeat(600));
+	let text = numbered_lines(30);
 	workspace.write("a.txt", &text);
-	let tag = mismatch_tag(&workspace, "[a.txt#0000]\nPUT 3.=3:\n+y\n").await;
+	mismatch_tag(&workspace, "[a.txt#0000]\nPUT 5.=5:\n+X\n").await;
+	let tag = mismatch_tag(&workspace, "[a.txt#0000]\nPUT 20.=20:\n+X\n").await;
 	let writer = common::DiskWriter::default();
 	workspace
-		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 3.=3:\n+y\n") }), &writer)
+		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 12.=12:\n+Y\n") }), &writer)
 		.await
-		.expect_err("a row the reply may have shown cut is not seen");
-	assert!(writer.requests.lock().is_empty());
+		.expect_err("neither reply displayed line 12");
 	workspace
-		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 2.=2:\n+TWO\n") }), &writer)
+		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 20.=20:\n+Y\n") }), &writer)
 		.await
-		.expect("line 2 was displayed whole");
+		.expect("the second reply displayed line 20");
+}
+
+#[tokio::test]
+async fn wide_row_a_mismatch_reply_prints_whole_counts_as_seen() {
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let wide = format!("{}TAIL", "x".repeat(600));
+	let text = format!("{}{wide}\n{}", numbered_lines(10), numbered_lines(10));
+	workspace.write("a.txt", &text);
+	let error = workspace
+		.apply_json(
+			&json!({ "input": "[a.txt#0000]\nPUT 11.=11:\n+y\n" }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect_err("unknown tag must be rejected")
+		.to_string();
+	assert!(error.contains(&format!("*11:{wide}")), "the reply prints the whole row");
+	let at = error.find("current file hashes to #").unwrap() + 24;
+	let tag = &error[at..at + 4];
+	let writer = common::DiskWriter::default();
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 18.=18:\n+z\n") }), &writer)
+		.await
+		.expect_err("line 18 was not displayed");
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{tag}]\nPUT 11.=11:\n+y\n") }), &writer)
+		.await
+		.expect("line 11 was printed whole");
 }
 
 #[test]
