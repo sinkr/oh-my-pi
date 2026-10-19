@@ -64,7 +64,7 @@ await tab.close();
 | `user_agent` | Per-tab user-agent override. |
 | `ignore_https_errors` | Ignore invalid HTTPS certificates for the tab. |
 | `allow_file_access` | Launch flag permitting local file pages to read local files; cannot change an already-running shared Chromium. |
-| `headed` | Override `browser.headless` for this open. `headed: false` also opts out of automatic Tern selection. |
+| `headed` | Override `browser.headless` for this open. It does not choose between Tern and Chromium: inside a Tern pane, use `app.tern: false` to opt out of Tern. |
 | `persist` | Default `false`; opt out of settle-freeze and idle-close management. Explicit reuse by the owning session can change it. |
 | `timeout` | Seconds; default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. First-use Chromium installation is outside the open deadline. An open that runs out names the step it stalled in: launching or connecting to the browser, closing a tab to reopen it, or opening the tab. |
 
@@ -136,7 +136,7 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 
 ## Browser modes
 
-`browser.open` prefers explicit `app.cdp_url`, `app.path`, `app.relay: true`, then `app.tern: true`. Otherwise it considers configured relay (`browser.relay`), configured CDP (`browser.cdpUrl`), automatic Tern, cmux, then project-shared managed Chromium. `app.relay: false` skips the configured relay and `app.tern: false` skips Tern, each only its own mode: with `browser.relay` on, `app.tern: false` alone still opens the relay, and `app: { relay: false, tern: false }` falls through to configured CDP, cmux, then managed Chromium. Relay and Tern environment kill switches can disable those modes.
+`browser.open` prefers explicit `app.cdp_url`, `app.path`, `app.relay: true`, then `app.tern: true`. Otherwise it considers configured relay (`browser.relay`, overridden either way by `PI_BROWSER_RELAY=1|0`), configured CDP (`browser.cdpUrl`), automatic Tern, cmux, then project-shared managed Chromium. `app.relay: false` skips the relay however it is enabled and `app.tern: false` skips Tern, each only its own mode: with the relay on, `app.tern: false` alone still opens the relay, and `app: { relay: false, tern: false }` falls through to configured CDP, cmux, then managed Chromium. Relay and Tern environment kill switches can disable those modes.
 
 - **Managed Chromium:** creates an omp-owned page in project-shared Chromium and applies stealth patches. Installation happens automatically on first use. `headed` overrides the default hidden mode.
 - **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here; Chromium-family processes use an omp-owned profile unless args specify `--user-data-dir`.
