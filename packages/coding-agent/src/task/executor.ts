@@ -1299,6 +1299,8 @@ interface SubagentRunMonitor {
 	 * further work started. Source for `yield`'s data-less finalize.
 	 */
 	lastReportTurnText(): string | undefined;
+	/** Whether any assistant message ended while this monitor was attached. */
+	sawAssistantMessage(): boolean;
 	/** Final raw output: end-of-run assistant text when available, else accumulated chunks. */
 	rawOutput(): string;
 	scheduleProgress(flush?: boolean): void;
@@ -1408,6 +1410,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// following the last such call qualifies. A text-less yield turn may still
 	// finalize the preceding report.
 	let lastReportTurnText: string | undefined;
+	let sawAssistantMessage = false;
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
 	const abortActiveSession = (): Promise<void> => {
@@ -2040,6 +2043,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const role = event.message?.role;
 				if (role === "assistant") {
 					assistantStreaming = false;
+					sawAssistantMessage = true;
 					progress.requests += 1;
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
 					const messageContent = getMessageContent(event.message) || eventContent;
@@ -2330,6 +2334,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		captureSalvage,
 		lastAssistantSalvageText: () => lastAssistantSalvageText,
 		lastReportTurnText: () => lastReportTurnText,
+		sawAssistantMessage: () => sawAssistantMessage,
 		rawOutput: () => (finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("")),
 		scheduleProgress,
 		finish: () => {
@@ -3325,7 +3330,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// monitor saw no assistant message, never for narration it set aside.
 			const turnText =
 				turnMonitor.lastReportTurnText() ??
-				(turnMonitor.progress.requests === 0 ? turnMonitor.lastAssistantSalvageText() : undefined) ??
+				(turnMonitor.sawAssistantMessage() ? undefined : turnMonitor.lastAssistantSalvageText()) ??
 				"";
 			const abortReason = aborted ? turnMonitor.resolveAbortReasonText() : undefined;
 			let result: SingleResult | undefined;
