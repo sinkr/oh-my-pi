@@ -507,7 +507,7 @@ const contentText = (el, skip, visibility = "visible") => {
 			else if (child.localName === "input" || child.localName === "select" || child.localName === "textarea") {
 				// A checkbox's or radio's value ("on" by default) is not text it shows.
 				const valueIsText = child.localName !== "input" || !["checkbox", "radio", "file", "hidden"].includes(inputType(child));
-				if (shown && valueIsText) out += child.localName === "select" ? (child.selectedOptions[0] ? child.selectedOptions[0].text : "") : child.value || "";
+				if (shown && valueIsText) out += child.localName === "select" ? Array.from(child.selectedOptions, option => option.text).join(" ") : child.value || "";
 			} else if (child.shadowRoot) walk(child.shadowRoot, inner);
 			else walk(child, inner);
 			if (block) out += " ";

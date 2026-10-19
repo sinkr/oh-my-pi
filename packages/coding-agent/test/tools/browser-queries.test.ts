@@ -80,7 +80,7 @@ beforeAll(async () => {
 		<button>Pick <select><option>Red</option><option selected>Blue</option></select></button>
 		<label for="quantity">Size <input value="10"></label><input id="quantity">
 		<button aria-labelledby="draft-label"></button><span id="draft-label" style="visibility:hidden"><b>Save draft</b></span>
-		<ul role="tree"><li role="treeitem"><input type="checkbox">Node</li></ul>`;
+		<ul role="tree"><li role="treeitem"><input type="checkbox">Node</li><li role="treeitem"><select multiple><option selected>Red</option><option selected>Blue</option></select></li></ul>`;
 	await invoke({ action: "open", name: namesTab, url: `data:text/html,${encodeURIComponent(namesHtml)}` });
 });
 
@@ -120,6 +120,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		["a label contributes another field's value", "textbox", "Size 10"],
 		["aria-labelledby points at hidden text", "button", "Save draft"],
 		["a checkbox's value is not its text", "treeitem", "Node"],
+		["a multi-select contributes every selected option", "treeitem", "Red Blue"],
 	])("matches role/ exact names to the name observe() shows when %s", async (_, role, elementName) => {
 		const result = (await invoke({
 			action: "run",

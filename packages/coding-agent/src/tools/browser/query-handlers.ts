@@ -182,8 +182,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				text += gap;
 				if (label) text += shown ? label : "";
 				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
-				else if (tag === "select") text += shown ? (control.selectedOptions?.[0]?.text ?? "") : "";
-				else if (tag === "input" || tag === "textarea") text += shown && valueIsText ? (control.value ?? "") : "";
+				else if (tag === "select") {
+					text += shown ? Array.from(control.selectedOptions ?? [], option => option.text).join(" ") : "";
+				} else if (tag === "input" || tag === "textarea") text += shown && valueIsText ? (control.value ?? "") : "";
 				else walk(childElement, visibility === "any" ? "any" : style.visibility);
 				text += gap;
 			}
