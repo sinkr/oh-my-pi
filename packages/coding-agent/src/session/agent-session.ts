@@ -11450,6 +11450,11 @@ export class AgentSession implements SettingsScope {
 		return this.#irc.deliver(msg);
 	}
 
+	/** Recognizes parent IRC steering at message consumption, without promoting queued requests. */
+	isParentIrcSteer(message: AgentMessage): boolean {
+		return this.#irc.isParentSteer(message);
+	}
+
 	/** Waits for any in-flight IRC wake-turn relays. */
 	waitForIrcReplies(): Promise<void> {
 		return this.#irc.waitForReplies();
