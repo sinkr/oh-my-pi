@@ -46,10 +46,10 @@ describe("ssh:// tools require exec-tier approval", () => {
 		const tool = new GrepTool(createTestToolSession(os.tmpdir()));
 		// The delimited string is one entry at approval time (expansion happens
 		// later), so an anchored check would miss it — the substring scan must not.
-		expect(callApproval(tool, { paths: "src,ssh://icaro/etc/hosts" })).toBe("exec");
-		expect(callApproval(tool, { paths: ["src", "ssh://icaro/etc/hosts"] })).toBe("exec");
-		expect(callApproval(tool, { paths: ["src", "lib"] })).toBe("read");
-		expect(callApproval(tool, { paths: "src" })).toBe("read");
+		expect(callApproval(tool, { path: "src,ssh://icaro/etc/hosts" })).toBe("exec");
+		expect(callApproval(tool, { path: "src;ssh://icaro/etc/hosts" })).toBe("exec");
+		expect(callApproval(tool, { path: "src,lib" })).toBe("read");
+		expect(callApproval(tool, { path: "src" })).toBe("read");
 		expect(callApproval(tool, {})).toBe("read");
 	});
 

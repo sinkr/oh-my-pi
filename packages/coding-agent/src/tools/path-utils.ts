@@ -11,6 +11,7 @@ import {
 	hasFsCode,
 	isEnoent,
 	isEnotdir,
+	isRecord,
 	isWsl,
 	stripWindowsExtendedLengthPathPrefix,
 	windowsPathToWslMount,
@@ -19,7 +20,6 @@ import { InternalUrlRouter } from "../internal-urls";
 import { type InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
@@ -1398,11 +1398,11 @@ export interface ToolScopeResolution {
 	immutableSourcePaths: Set<string>;
 }
 
-/** Approval tier for a search tool's raw `path`/`paths` input: the highest scheme read tier named anywhere in it. */
+/** Approval tier for a search tool's raw `path` input: the highest scheme read tier named anywhere in it. */
 export function searchPathTier(args: unknown): ToolTier {
-	const a = args as { path?: string | string[]; paths?: string | string[] };
-	// Substring scan over the raw entries: delimited lists are only split after approval.
-	return InternalUrlRouter.instance().readTier(toPathList(a.path ?? a.paths).join("\n"));
+	const raw = isRecord(args) ? args.path : undefined;
+	// Substring scan over the raw entry: delimited lists are only split after approval.
+	return InternalUrlRouter.instance().readTier(typeof raw === "string" ? raw : "");
 }
 
 /**

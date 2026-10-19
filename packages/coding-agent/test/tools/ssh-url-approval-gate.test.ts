@@ -87,11 +87,11 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 	});
 
 	it("grep: a delimited ssh:// entry requires approval before path expansion", async () => {
-		// The wrapper sees `paths` verbatim (pre-expansion), so the substring scan must trip exec here.
+		// The wrapper sees `path` verbatim (pre-expansion), so the substring scan must trip exec here.
 		await expect(
 			tool("grep").execute(
 				"s-ssh",
-				{ pattern: "x", paths: "local.txt,ssh://localhost/etc/hosts" },
+				{ pattern: "x", path: "local.txt,ssh://localhost/etc/hosts" },
 				undefined,
 				undefined,
 				ctx("always-ask"),
