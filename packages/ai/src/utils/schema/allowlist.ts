@@ -78,6 +78,11 @@ function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredM
 			merged[key] = typeof current === "number" ? STRICTER_BOUND[key](current, value) : value;
 		} else if (key === "enum" && Array.isArray(left.enum) && Array.isArray(value)) {
 			merged.enum = dedupe([...(left.enum as unknown[]), ...(value as unknown[])]);
+		} else if (requiredMerge === "union" && key === "anyOf" && Array.isArray(merged.anyOf) && Array.isArray(value)) {
+			// Two retained unions in one conjunction: keep every pairing of compatible
+			// branches instead of dropping the right-hand constraint.
+			const pairs = intersectUnionBranches(merged.anyOf as JsonObject[], value as JsonObject[]);
+			if (pairs.length > 0) merged.anyOf = pairs;
 		} else if (!(key in merged)) {
 			merged[key] = value;
 		}
@@ -95,6 +100,25 @@ function mergeFactoryDroidSchemas(left: JsonObject, right: JsonObject, requiredM
 		else delete merged.required;
 	}
 	return merged;
+}
+
+/** Branch-wise conjunction of two unions: each same-typed (or untyped) pair merged, enums intersected. */
+function intersectUnionBranches(left: JsonObject[], right: JsonObject[]): JsonObject[] {
+	const pairs: JsonObject[] = [];
+	for (const a of left) {
+		for (const b of right) {
+			if (a.type !== undefined && b.type !== undefined && a.type !== b.type) continue;
+			const pair = mergeFactoryDroidSchemas(a, b, "union");
+			if (Array.isArray(a.enum) && Array.isArray(b.enum)) {
+				// The merge unions enums; a conjunction admits only values both allow.
+				const allowed = (a.enum as unknown[]).filter(value => (b.enum as unknown[]).includes(value));
+				if (allowed.length === 0) continue;
+				pair.enum = allowed;
+			}
+			pairs.push(pair);
+		}
+	}
+	return pairs;
 }
 
 /** Fields the proxy accepts beside `anyOf`; anything else there is a 400. */
@@ -135,6 +159,11 @@ function settleUnion(out: JsonObject, branches: JsonObject[], nullable: boolean)
 			: (out.type ?? (isJsonObject(out.properties) ? "object" : undefined));
 		const kept = ownType ?? nonNull[0].type;
 		nonNull = nonNull.filter(branch => branch.type === kept);
+	} else if (typeof out.type === "string") {
+		// An untyped branch keeps the union from counting as mixed, but a typed branch of another type
+		// still must not lend its fields (`items` on a string) to this node.
+		const compatible = nonNull.filter(branch => branch.type === undefined || branch.type === out.type);
+		if (compatible.length > 0) nonNull = compatible;
 	}
 	let collapsed: JsonObject | undefined;
 	for (const branch of nonNull) {
@@ -143,6 +172,9 @@ function settleUnion(out: JsonObject, branches: JsonObject[], nullable: boolean)
 	if (collapsed) {
 		collapsed.nullable = nullable;
 		Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
+		// A pattern cannot be conjoined into one regex the proxy accepts; the union's own,
+		// narrower one wins over one an `allOf` merged in first.
+		if (typeof collapsed.pattern === "string") out.pattern = collapsed.pattern;
 		// Narrowing can drop the branch that defined a required property.
 		if (mixedTypes && Array.isArray(out.required)) {
 			const kept = withoutUndefinedRequired(out);
@@ -233,8 +265,10 @@ function settleMergedUnions(node: JsonObject): void {
 	for (const branch of node.anyOf) {
 		if (isJsonObject(branch)) settleMergedUnions(branch);
 	}
+	// A union left with one branch (an allOf intersection) is that branch.
+	const single = node.anyOf.length === 1;
 	const { anyOf, nullable, ...rest } = node;
-	if (Object.keys(rest).every(key => key in ANY_OF_SIBLING_KEYS)) return;
+	if (!single && Object.keys(rest).every(key => key in ANY_OF_SIBLING_KEYS)) return;
 	delete node.anyOf;
 	delete node.nullable;
 	settleUnion(node, anyOf as JsonObject[], nullable === true);

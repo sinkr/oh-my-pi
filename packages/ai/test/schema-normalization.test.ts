@@ -1594,6 +1594,49 @@ describe("normalizeSchemaForFactoryDroid", () => {
 		expect(collapsedBranches.properties.y).toEqual({ type: "string", nullable: false });
 	});
 
+	it("intersects two mixed unions joined by allOf instead of dropping the second", () => {
+		const narrowed = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ anyOf: [{ type: "string" }, { type: "number" }] },
+				{ anyOf: [{ type: "string", pattern: "^x$" }, { type: "boolean" }] },
+			],
+		});
+		expect(narrowed).toEqual({ type: "string", pattern: "^x$", nullable: false });
+
+		const both = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ anyOf: [{ type: "string" }, { type: "number" }] },
+				{ anyOf: [{ type: "string" }, { type: "number", minimum: 3 }] },
+			],
+		});
+		expect(both).toEqual({ anyOf: [{ type: "string" }, { type: "number", minimum: 3 }] });
+	});
+
+	it("keeps intersected enums, untyped-branch narrowing and union patterns faithful to the source", () => {
+		// Enum conjunction admits only values both sides allow; an empty pairing drops out.
+		const enums = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ anyOf: [{ type: "string", enum: ["a", "b"] }, { type: "number" }] },
+				{ anyOf: [{ type: "string", enum: ["b", "c"] }, { type: "boolean" }] },
+			],
+		});
+		expect(enums).toEqual({ type: "string", enum: ["b"], nullable: false });
+
+		// A typed branch of another type does not lend `items` to a string through an untyped sibling.
+		const untyped = normalizeSchemaForFactoryDroid({
+			anyOf: [{}, { type: "array", items: { type: "string" } }],
+			allOf: [{ type: "string" }],
+		});
+		expect(untyped).toEqual({ type: "string", nullable: false });
+
+		// The union's pattern is narrower than a match-all an allOf merged in first.
+		const patterned = normalizeSchemaForFactoryDroid({
+			anyOf: [{ type: "string", pattern: "^a$" }],
+			allOf: [{ type: "string", pattern: ".*" }],
+		});
+		expect(patterned).toEqual({ type: "string", pattern: "^a$", nullable: false });
+	});
+
 	it("drops required names a mixed-union branch does not define", () => {
 		const normalized = normalizeSchemaForFactoryDroid({
 			anyOf: [{ type: "object", required: ["a"] }, { type: "string" }],

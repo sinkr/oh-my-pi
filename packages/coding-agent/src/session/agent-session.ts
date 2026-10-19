@@ -3864,19 +3864,31 @@ export class AgentSession implements SettingsScope {
 	 * `await abort()`, so the result the abort gives a running tool reaches no
 	 * persisting handler. Record it before the transition rewrites or leaves the
 	 * session; otherwise its call is left without a result and replay fills in a
-	 * synthetic one. Its call was persisted when the assistant turn ended, before
-	 * the tool started.
+	 * synthetic one. Only results of calls the last assistant turn before the
+	 * disconnect made qualify: that turn was persisted at its `message_end`. A turn
+	 * the abort cut short mid-stream was never persisted, so its synthetic results
+	 * would be orphans. A successful `rewind` result is the exception too: the
+	 * aborted turn never applies it, so recording "rewind requested" would claim
+	 * a branch cut that never happened.
 	 */
 	#persistToolResultsEndedWhileDisconnected(): void {
 		const start = this.#disconnectedMessageCount;
 		if (start === undefined) return;
-		const messages = this.agent.state.messages;
-		for (let index = start; index < messages.length; index++) {
-			const message = messages[index];
-			if (message.role === "toolResult") this.#persistSessionMessageIfMissing(message);
-		}
 		// Once per disconnect: the transition may replace the agent's messages next (compaction, reset).
 		this.#disconnectedMessageCount = undefined;
+		const messages = this.agent.state.messages;
+		let lastAssistant: AgentMessage | undefined;
+		for (let index = Math.min(start, messages.length) - 1; index >= 0 && !lastAssistant; index--) {
+			if (messages[index].role === "assistant") lastAssistant = messages[index];
+		}
+		if (lastAssistant?.role !== "assistant") return;
+		const knownCalls = new Set(lastAssistant.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])));
+		for (let index = start; index < messages.length; index++) {
+			const message = messages[index];
+			if (message.role !== "toolResult" || !knownCalls.has(message.toolCallId)) continue;
+			if (!message.isError && semanticToolResult(message.toolName, message)?.toolName === "rewind") continue;
+			this.#persistSessionMessageIfMissing(message);
+		}
 	}
 
 	/**
@@ -9302,6 +9314,15 @@ export class AgentSession implements SettingsScope {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
+			// The generation check suspends after the isStreaming check above, so a concurrent
+			// send (two asides in one tick) can start its turn in between. Re-check and queue
+			// behind that turn like the streaming branch, instead of losing the prompt race to
+			// AgentBusyError; no await sits between this check and #beginInFlight below.
+			if (this.isStreaming) {
+				outcome.sessionClaimed = this.agent.state.isStreaming;
+				this.#irc.queueAside([normalizedAppMessage]);
+				return false;
+			}
 			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 				acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
 			});
@@ -11535,6 +11556,11 @@ export class AgentSession implements SettingsScope {
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
 		return this.#irc.deliver(msg);
+	}
+
+	/** Recognizes parent IRC steering at message consumption, without promoting queued requests. */
+	isParentIrcSteer(message: AgentMessage): boolean {
+		return this.#irc.isParentSteer(message);
 	}
 
 	/** Waits for any in-flight IRC wake-turn relays. */
