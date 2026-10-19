@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { Database } from "bun:sqlite";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -11,6 +13,7 @@ import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import * as oauthFlowModule from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
@@ -151,6 +154,8 @@ class FakeAgentSession {
 	usageFallbackConfirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined;
 	retryResult = false;
 	retryCalls = 0;
+	/** Backs `modelRegistry.authStorage` for `/mcp reauth` credential round-trips. */
+	authStorage?: AuthStorage;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(
@@ -172,9 +177,10 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string> } {
+	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			...(this.authStorage ? { authStorage: this.authStorage } : {}),
 		};
 	}
 
@@ -497,6 +503,8 @@ async function createHarness(
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
 		/** Gives each session the factory creates a real extension runner with no extensions. */
 		extensionRunners?: boolean;
+		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
+		authStorage?: AuthStorage;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -533,6 +541,7 @@ async function createHarness(
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		if (options.authStorage) session.authStorage = options.authStorage;
 		if (options.extensionRunners) {
 			session.extensionRunner = new ExtensionRunner(
 				[],
@@ -3739,4 +3748,115 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			await server.stop(true);
 		}
 	}, 15_000);
+
+	it("binds recovered MCP tools before the reauth prompt completes", async () => {
+		// Regression: the reconnect hook resolved as soon as
+		// `reconnectMcpManagerServer` did, but the tools-changed callback
+		// fired during the reconnect only *enqueued* the session refresh on
+		// `record.mcpRefreshChain`. The reauth prompt could complete — and
+		// the client's immediately following prompt start — while the
+		// recovered tools were still unbound. The hook must await the chain.
+		//
+		// Real wire flow: the fixture answers 401 with OAuth metadata until
+		// the fresh url-keyed bearer arrives, then serves initialize and a
+		// tools/list entry the reauth reconnect registers.
+		const challenge = JSON.stringify({
+			authorization_url: "https://auth.example.com/authorize",
+			token_url: "https://auth.example.com/token",
+		});
+		const serveRpc = async (request: Request): Promise<Response> => {
+			// The transport's optional SSE listener GETs first; answer 405 so it
+			// treats server-initiated messages as unsupported and moves on.
+			if (request.method !== "POST") return new Response(null, { status: 405 });
+			if (request.headers.get("authorization") !== "Bearer fresh-access") {
+				return new Response(challenge, { status: 401 });
+			}
+			const body = (await request.json()) as { id?: number; method?: string };
+			if (body.method === "initialize") {
+				return Response.json({
+					jsonrpc: "2.0",
+					id: body.id,
+					result: {
+						protocolVersion: "2025-03-26",
+						capabilities: { tools: {} },
+						serverInfo: { name: "fixture", version: "0.0.0" },
+					},
+				});
+			}
+			if (body.method === "tools/list") {
+				return Response.json({
+					jsonrpc: "2.0",
+					id: body.id,
+					result: { tools: [{ name: "recovered_tool", inputSchema: { type: "object" } }] },
+				});
+			}
+			return Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32601, message: "no method" } });
+		};
+		const server = Bun.serve({ port: 0, fetch: serveRpc });
+		const database = new Database(":memory:");
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(database));
+		// No browser in CI: the flow's token exchange is stubbed at the login
+		// boundary, exactly like the dispatcher-level reauth tests.
+		const loginSpy = spyOn(oauthFlowModule.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		try {
+			const harness = await createHarness({ authStorage });
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "expired", type: "http", url: `http://127.0.0.1:${server.port}/mcp`, headers: [] }],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+			const session = harness.findSession(created.sessionId)!;
+
+			// Gate non-empty refreshes so the completion order is observable:
+			// with the fix, the reauth prompt cannot settle while the
+			// (enqueued) refresh is still in flight.
+			const refreshGate = Promise.withResolvers<void>();
+			const events: string[] = [];
+			session.refreshMCPTools = async (tools: Array<{ name: string }>) => {
+				const names = tools.map(tool => tool.name);
+				if (names.length === 0) return;
+				events.push(`refresh:start:${names.join(",")}`);
+				await refreshGate.promise;
+				events.push("refresh:done");
+			};
+
+			let reauthSettled = false;
+			const reauth = harness.agent
+				.prompt({
+					sessionId: created.sessionId,
+					prompt: [{ type: "text", text: "/mcp reauth expired" }],
+				})
+				.then(response => {
+					reauthSettled = true;
+					return response;
+				});
+
+			// Wait for the recovered tool's refresh to start, then let pending
+			// work settle: the prompt must still be pending — the hook is
+			// holding it on the gated refresh chain.
+			await pollUntil(() => events.some(event => event.includes("mcp__expired_recovered_tool")));
+			await Bun.sleep(25);
+			expect(reauthSettled).toBe(false);
+			expect(events.some(event => event.includes("mcp__expired_recovered_tool"))).toBe(true);
+
+			refreshGate.resolve();
+			const response = await reauth;
+			events.push("prompt:done");
+			expect(response.stopReason).toBe("end_turn");
+			// The refresh completed before the prompt resolved.
+			expect(events.indexOf("refresh:done")).toBeLessThan(events.indexOf("prompt:done"));
+			// And the reauth truly reconnected the server through the manager.
+			expect(
+				authStorage.credentials.get(oauthFlowModule.mcpOAuthCredentialId(`http://127.0.0.1:${server.port}/mcp`)),
+			).toMatchObject({ access: "fresh-access" });
+		} finally {
+			loginSpy.mockRestore();
+			await server.stop(true);
+			database.close();
+		}
+	}, 20_000);
 });

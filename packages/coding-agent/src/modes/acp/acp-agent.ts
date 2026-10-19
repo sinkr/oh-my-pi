@@ -990,7 +990,18 @@ export class AcpAgent implements Agent {
 			// manager's entry (with its client-supplied auth surface cleared, a
 			// pending automatic attempt superseded, and a name-collision with a
 			// config file entry left alone) via the shared engine helper.
-			reconnectMcpServer: (name, selected) => reconnectMcpManagerServer(record.mcpManager, name, selected),
+			reconnectMcpServer: async (name, selected) => {
+				const state = await reconnectMcpManagerServer(record.mcpManager, name, selected);
+				// The tools-changed callback that fired during the reconnect only
+				// *enqueued* the session refresh onto `record.mcpRefreshChain` —
+				// resolving here without awaiting it would let the reauth prompt
+				// report success (and the client's next prompt start) while the
+				// recovered tools are still unbound, and a refresh failure would
+				// surface only in the log behind the success message. The chain's
+				// own catch logs such a failure; here it just orders completion.
+				if (state) await record.mcpRefreshChain;
+				return state;
+			},
 			// ACP-declared servers (`session/new` `mcpServers`) live in this
 			// manager, in no writable config file; `/mcp` lookups must consult it.
 			mcpManager: record.mcpManager,

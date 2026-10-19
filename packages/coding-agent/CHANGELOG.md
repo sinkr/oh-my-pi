@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `/mcp reauth <name>` in ACP, RPC, and print mode: it opens the browser and stores credentials through the same engine as the TUI flow, prints the authorization URL as a fallback, reconnects the live server when the host keeps one, keeps multi-word server names intact, resolves the ACP session's own server on name collisions, reports failed `/compact`, `/handoff`, and `/stats` runs with a nonzero print-mode exit code, and never writes a client-declared server's definition or bearer header into the global user config ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
+- Added `/mcp reauth <name>` in ACP, RPC, and print mode: it opens the browser and stores credentials through the same engine as the TUI flow, prints the authorization URL as a fallback, reconnects the live server when the host keeps one (binding its recovered tools before the command completes), keeps multi-word server names intact, resolves the ACP session's own server on name collisions, still dispatches ahead of the strict `OMP_MCP_REQUIRE_READY` gate so it can repair the server that gate failed, reports failed `/compact`, `/handoff`, and `/stats` runs with a nonzero print-mode exit code, and never writes a client-declared server's definition or bearer header into the global user config ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ## [18.12.3] - 2026-10-19
 
