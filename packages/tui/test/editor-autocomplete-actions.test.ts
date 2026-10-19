@@ -596,6 +596,39 @@ describe("Editor slash autocomplete acceptance", () => {
 		});
 	});
 
+	it("applies a matching alias on Enter even when the description ranks higher", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "x", aliases: ["abcd"], description: "ace" }], "/tmp"),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.setText("/ac");
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/x");
+	});
+
+	it("applies a matching alias from the slash popup on Enter", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "x", aliases: ["abcd"], description: "ace" }], "/tmp"),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/ac");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/x");
+	});
+
 	it("never completes Enter to the bare skill namespace row", () => {
 		const editor = new Editor(defaultEditorTheme);
 		editor.setAutocompleteProvider(

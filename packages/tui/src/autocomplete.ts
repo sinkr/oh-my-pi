@@ -451,7 +451,11 @@ function buildSlashCommandCompletions(
 					for (const alias of getCommandAliases(cmd)) {
 						if (alias === name) continue;
 						const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
-						if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
+						if (aliasScore === 0) continue;
+						// An alias can match even when the description outranks it; Enter
+						// must still accept the command rather than submit the raw query.
+						if (best?.descriptionMatch) delete best.descriptionMatch;
+						if (best && aliasScore <= best.score) continue;
 						const fullDesc = resolveFullDesc();
 						best = {
 							value: alias,
