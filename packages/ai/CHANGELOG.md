@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed finalized signed reasoning disappearing from displayed thinking when no deltas streamed ([#16227](https://github.com/can1357/oh-my-pi/issues/16227))
+- Fixed supported Bedrock Anthropic models skipping native remote compaction: explicit requests now use Bedrock Runtime `InvokeModel`, ordinary turns remain on Converse, and signed compaction summaries replay only on their producing model and API with opaque signed `tool_changes` preserved unchanged.
 
 ## [18.12.2] - 2026-10-18
 

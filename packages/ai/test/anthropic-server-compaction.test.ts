@@ -24,6 +24,18 @@ const spec: ModelSpec<"anthropic-messages"> = {
 const model = buildModel(spec);
 const SUMMARY = "## Goal\nAudit the handlers.\n\n## Next Steps\nContinue with chunk 11.";
 const SIGNATURE = "sig_opaque_on_demand";
+const SIGNED_TOOL_CHANGES: Record<string, unknown>[] = [
+	{
+		type: "tool_addition",
+		tool: { type: "tool_reference", name: "search" },
+		opaque: { key: "signed-add", details: ["opaque", { revision: 4, exact: "\ud800" }] },
+	},
+	{
+		type: "tool_removal",
+		tool: { type: "tool_reference", name: "legacy_search" },
+		opaque: { key: "signed-remove", details: ["opaque", { revision: 9 }] },
+	},
+];
 const ENCRYPTED = "enc_opaque_legacy";
 const vertexUrl =
 	"https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-fable-5:rawPredict";
@@ -42,11 +54,21 @@ function summaryMessage(
 	},
 	provider = "anthropic",
 	timestamp = 1,
+	producer: Model<"anthropic-messages"> = model,
 ): UserMessage {
 	return {
 		role: "user",
 		content: `<summary>${SUMMARY}</summary>`,
-		providerPayload: { type: "anthropicCompaction", provider, content: SUMMARY, exactTail: true, ...state },
+		providerPayload: {
+			type: "anthropicCompaction",
+			provider,
+			model: producer.id,
+			api: producer.api,
+			content: SUMMARY,
+			exactTail: true,
+			...state,
+		},
+
 		timestamp,
 	};
 }
@@ -136,7 +158,7 @@ async function captureInjected(
 	return { beta, payload };
 }
 
-function mockEvents(stopReason: string, modelId = model.id): Record<string, unknown>[] {
+function mockEvents(stopReason: string, modelId = model.id, toolChanges?: unknown): Record<string, unknown>[] {
 	return [
 		{
 			type: "message_start",
@@ -145,7 +167,12 @@ function mockEvents(stopReason: string, modelId = model.id): Record<string, unkn
 		{
 			type: "content_block_start",
 			index: 0,
-			content_block: { type: "compaction", content: SUMMARY, signature: SIGNATURE },
+			content_block: {
+				type: "compaction",
+				content: SUMMARY,
+				signature: SIGNATURE,
+				...(toolChanges !== undefined ? { tool_changes: toolChanges } : {}),
+			},
 		},
 		{ type: "content_block_stop", index: 0 },
 		{
@@ -325,9 +352,12 @@ describe("Anthropic on-demand compaction response", () => {
 		expect(result.providerPayload).toEqual({
 			type: "anthropicCompaction",
 			provider: "anthropic",
+			model: model.id,
+			api: model.api,
 			content: SUMMARY,
 			signature: SIGNATURE,
 		});
+
 		expect(result.stopDetails).toEqual({ type: "compaction" });
 		expect(result.content).toEqual([]);
 		expect(result.usage.input).toBe(64);
@@ -335,6 +365,67 @@ describe("Anthropic on-demand compaction response", () => {
 		expect(result.usage.cacheWrite).toBe(80_082);
 		expect(result.usage.totalTokens).toBe(82_148);
 		expect(requests).toBe(1);
+	});
+
+	it("replays signed tool_changes from the SSE response without changing opaque records", async () => {
+		const fetchMock: typeof fetch = Object.assign(
+			async () => sseResponse(mockEvents("compaction", model.id, SIGNED_TOOL_CHANGES)),
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			anthropicCompaction: {},
+			fetch: fetchMock,
+		}).result();
+		expect(result.providerPayload).toEqual({
+			type: "anthropicCompaction",
+			provider: "anthropic",
+			model: model.id,
+			api: model.api,
+			content: SUMMARY,
+			signature: SIGNATURE,
+			toolChanges: SIGNED_TOOL_CHANGES,
+		});
+
+		const next = await captureRequest(model, {}, [result, { role: "user", content: "Continue", timestamp: 2 }]);
+		const wireMessages = next.payload.messages;
+		if (!Array.isArray(wireMessages)) throw new Error("Expected Anthropic replay messages");
+		const firstMessage = wireMessages[0];
+		if (
+			typeof firstMessage !== "object" ||
+			firstMessage === null ||
+			!("content" in firstMessage) ||
+			!Array.isArray(firstMessage.content)
+		) {
+			throw new Error("Expected compaction block in first replay message");
+		}
+		expect(firstMessage.content[0]).toMatchObject({
+			type: "compaction",
+			content: SUMMARY,
+			signature: SIGNATURE,
+			tool_changes: SIGNED_TOOL_CHANGES,
+		});
+		expect(firstMessage.content[0].tool_changes).toEqual(SIGNED_TOOL_CHANGES);
+		expect(
+			wireMessages.some(
+				message =>
+					typeof message === "object" && message !== null && "role" in message && message.role === "system",
+			),
+		).toBe(false);
+	});
+
+	it("rejects a signed compaction block with malformed tool_changes", async () => {
+		const fetchMock: typeof fetch = Object.assign(
+			async () => sseResponse(mockEvents("compaction", model.id, [SIGNED_TOOL_CHANGES[0], null])),
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			anthropicCompaction: {},
+			fetch: fetchMock,
+		}).result();
+		expect(result.stopDetails).toEqual({ type: "compaction" });
+		expect(result.providerPayload).toBeUndefined();
 	});
 
 	it("does not publish a block if the response stopped for another reason", async () => {
@@ -497,7 +588,7 @@ describe("Anthropic compaction replay", () => {
 		});
 
 		it("keeps a developer message ending the retained tail a user turn ahead of trailing file metadata", () => {
-			const summary = summaryMessage({ signature: SIGNATURE, filesText: files }, "anthropic", 20);
+			const summary = preservedSummaryMessage({ signature: SIGNATURE, filesText: files }, "anthropic", 20);
 			const reminder: Context["messages"][number] = {
 				role: "developer",
 				content: "<system-reminder>budget</system-reminder>",
@@ -606,12 +697,23 @@ describe("Anthropic compaction replay", () => {
 
 	it("keeps readable summary text if model, provider or endpoint cannot replay the block", async () => {
 		const foreign = summaryMessage({ signature: SIGNATURE }, "different-provider");
+		const wrongModel = summaryMessage({ signature: SIGNATURE });
+		const wrongApi = summaryMessage({ signature: SIGNATURE });
+		if (wrongModel.providerPayload?.type !== "anthropicCompaction") throw new Error("expected compaction payload");
+		if (wrongApi.providerPayload?.type !== "anthropicCompaction") throw new Error("expected compaction payload");
+		wrongModel.providerPayload.model = "claude-fable-5-1";
+		wrongApi.providerPayload.api = "bedrock-converse-stream";
 		const unsupported = buildModel({ ...spec, id: "claude-sonnet-4-5" });
 		const cases: Array<{ requestModel: Model<"anthropic-messages">; messages: Context["messages"] }> = [
 			{ requestModel: model, messages: [foreign, { role: "user", content: "next", timestamp: 2 }] },
+			{ requestModel: model, messages: [wrongModel, { role: "user", content: "next", timestamp: 2 }] },
+			{ requestModel: model, messages: [wrongApi, { role: "user", content: "next", timestamp: 2 }] },
 			{
 				requestModel: unsupported,
-				messages: [summaryMessage({ signature: SIGNATURE }), { role: "user", content: "next", timestamp: 2 }],
+				messages: [
+					summaryMessage({ signature: SIGNATURE }, "anthropic", 1, unsupported),
+					{ role: "user", content: "next", timestamp: 2 },
+				],
 			},
 		];
 		for (const { requestModel, messages } of cases) {
@@ -622,6 +724,13 @@ describe("Anthropic compaction replay", () => {
 	});
 
 	const preserved = buildModel({ ...spec, id: "claude-fable-5-1" });
+	function preservedSummaryMessage(
+		state: Parameters<typeof summaryMessage>[0],
+		provider = "anthropic",
+		timestamp = 1,
+	): UserMessage {
+		return summaryMessage(state, provider, timestamp, preserved);
+	}
 	const readTool: NonNullable<Context["tools"]>[number] = {
 		name: "read",
 		description: "Read a file",
@@ -683,7 +792,7 @@ describe("Anthropic compaction replay", () => {
 		const swapped = await captureRequest(
 			preserved,
 			options,
-			[summaryMessage({ signature: SIGNATURE }), kept, { role: "user", content: "next", timestamp: 4 }],
+			[preservedSummaryMessage({ signature: SIGNATURE }), kept, { role: "user", content: "next", timestamp: 4 }],
 			tools,
 			[removedTool],
 		);
@@ -715,7 +824,11 @@ describe("Anthropic compaction replay", () => {
 		const swapped = await captureRequest(
 			preserved,
 			options,
-			[summaryMessage({ signature: SIGNATURE }), keptFrom(changed), { role: "user", content: "next", timestamp: 4 }],
+			[
+				preservedSummaryMessage({ signature: SIGNATURE }),
+				keptFrom(changed),
+				{ role: "user", content: "next", timestamp: 4 },
+			],
 			tools,
 			[removedTool],
 		);
@@ -739,7 +852,7 @@ describe("Anthropic compaction replay", () => {
 	it("places a new tool addition after compaction file metadata, not before a user turn", async () => {
 		const first = await captureRequest(preserved, options, context.messages, [readTool]);
 		const opened = keptFrom(first);
-		const summary = summaryMessage(
+		const summary = preservedSummaryMessage(
 			{ signature: SIGNATURE, filesText: "<files>handlers.ts (Read)</files>" },
 			"anthropic",
 			3,
@@ -792,7 +905,11 @@ describe("Anthropic compaction replay", () => {
 		const next = await captureRequest(
 			preserved,
 			{ ...options, thinkingEnabled: true, effort: "low" },
-			[summaryMessage({ signature: SIGNATURE }), keptFrom(kept), { role: "user", content: "next", timestamp: 4 }],
+			[
+				preservedSummaryMessage({ signature: SIGNATURE }),
+				keptFrom(kept),
+				{ role: "user", content: "next", timestamp: 4 },
+			],
 			[readTool],
 			[removedTool],
 		);
@@ -818,7 +935,7 @@ describe("Anthropic compaction replay", () => {
 			requestControls: { messageIndex: 1, effort: { topLevel: "high", tail: "low" } },
 		};
 		const request = await captureRequest(preserved, { ...options, thinkingEnabled: true, effort: "low" }, [
-			summaryMessage({ signature: SIGNATURE }),
+			preservedSummaryMessage({ signature: SIGNATURE }),
 			opened,
 			{ role: "user", content: "next", timestamp: 3 },
 		]);
@@ -837,7 +954,7 @@ describe("Anthropic compaction replay", () => {
 			requestControls: { messageIndex: 1, effort: { topLevel: "high", tail: "low" } },
 		};
 		const request = await captureRequest(preserved, { ...options, thinkingEnabled: true, effort: "low" }, [
-			summaryMessage({ signature: SIGNATURE }, "different-provider"),
+			preservedSummaryMessage({ signature: SIGNATURE }, "different-provider"),
 			opened,
 			{ role: "user", content: "next", timestamp: 3 },
 		]);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bundled Bedrock Converse Claude models now advertise side compaction only when AWS model cards document the `compact-2026-09-04` Bedrock Runtime beta; normal turns remain on Converse.
+
 ## [18.12.2] - 2026-10-18
 
 ### Changed

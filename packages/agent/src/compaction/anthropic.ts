@@ -31,6 +31,8 @@ export const ANTHROPIC_COMPACTION_PRESERVE_KEY = "anthropicCompaction";
 export interface AnthropicCompactionPreserveData {
 	provider: string;
 	content: string;
+	/** Opaque signed tool-change records; replayed without normalization. */
+	toolChanges?: Record<string, unknown>[];
 	/** Signature attached to an on-demand block; replayed verbatim. */
 	signature?: string;
 	/** Legacy threshold block state; replay-only. */
@@ -43,6 +45,8 @@ export interface AnthropicCompactionPreserveData {
 	exactTail?: true;
 	/** Model that wrote the summary. */
 	model?: string;
+	/** API that wrote the signature. */
+	api?: Model["api"];
 	/** Prompt tokens the compaction request processed, for display. */
 	usedTokens?: number;
 }
@@ -51,17 +55,27 @@ function isAnthropicMessagesModel(model: Model): model is Model<"anthropic-messa
 	return model.api === "anthropic-messages";
 }
 
+function isBedrockConverseModel(model: Model): model is Model<"bedrock-converse-stream"> {
+	return model.api === "bedrock-converse-stream";
+}
+
 /**
  * Whether a model compacts through the Anthropic compaction beta. Model
  * eligibility is catalog policy (`compat.supportsServerCompaction`, the
- * lineage the beta documents); endpoint eligibility is resolved the way the
- * provider routes requests, so a Foundry or `ANTHROPIC_BASE_URL` reroute of a
- * first-party model is excluded unless the route opted in with
- * `remoteCompaction.enabled`.
+ * lineage the beta documents); endpoint eligibility for Anthropic Messages is
+ * resolved the way that provider routes requests. Bedrock Converse has a
+ * compaction-only Runtime InvokeModel lane, gated by catalog capability and
+ * the per-model remote-compaction opt-out; normal turns still use Converse.
  */
-export function shouldUseAnthropicNativeCompaction(model: Model): model is Model<"anthropic-messages"> {
-	return isAnthropicMessagesModel(model) && supportsAnthropicCompaction(model);
+export function shouldUseAnthropicNativeCompaction(
+	model: Model,
+): model is Model<"anthropic-messages" | "bedrock-converse-stream"> {
+	if (isAnthropicMessagesModel(model)) return supportsAnthropicCompaction(model);
+	if (!isBedrockConverseModel(model)) return false;
+	return model.compat?.supportsServerCompaction === true && model.remoteCompaction?.enabled !== false;
 }
+
+type AnthropicNativeCompactionModel = Model<"anthropic-messages" | "bedrock-converse-stream">;
 
 export function getPreservedAnthropicCompactionData(
 	preserveData: Record<string, unknown> | undefined,
@@ -70,6 +84,19 @@ export function getPreservedAnthropicCompactionData(
 	if (!isRecord(candidate)) return undefined;
 	if (typeof candidate.provider !== "string" || candidate.provider.length === 0) return undefined;
 	if (typeof candidate.content !== "string" || candidate.content.length === 0) return undefined;
+	const api =
+		candidate.api === "anthropic-messages" || candidate.api === "bedrock-converse-stream"
+			? candidate.api
+			: candidate.api === undefined &&
+				  typeof candidate.model === "string" &&
+				  candidate.model.length > 0 &&
+				  typeof candidate.signature === "string" &&
+				  candidate.signature.length > 0
+				? "anthropic-messages"
+				: undefined;
+	const hasToolChanges = Object.prototype.hasOwnProperty.call(candidate, "toolChanges");
+	const toolChanges = candidate.toolChanges;
+	if (hasToolChanges && (!Array.isArray(toolChanges) || !toolChanges.every(isRecord))) return undefined;
 	return {
 		provider: candidate.provider,
 		content: candidate.content,
@@ -90,8 +117,10 @@ export function getPreservedAnthropicCompactionData(
 					),
 				}
 			: {}),
+		...(hasToolChanges ? { toolChanges: toolChanges as Record<string, unknown>[] } : {}),
 		...(candidate.exactTail === true ? { exactTail: true as const } : {}),
 		...(typeof candidate.model === "string" ? { model: candidate.model } : {}),
+		...(api ? { api } : {}),
 		...(typeof candidate.usedTokens === "number" ? { usedTokens: candidate.usedTokens } : {}),
 	};
 }
@@ -124,8 +153,13 @@ export function getAnthropicCompactionPayload(
 		...(preserved.signature ? { signature: preserved.signature } : {}),
 		...(preserved.encryptedContent ? { encryptedContent: preserved.encryptedContent } : {}),
 		...(preserved.filesText ? { filesText: preserved.filesText } : {}),
+		...(preserved.toolChanges ? { toolChanges: preserved.toolChanges } : {}),
 		...(preserved.retainedFiles?.length ? { retainedFiles: preserved.retainedFiles } : {}),
 		...(preserved.exactTail ? { exactTail: true as const } : {}),
+		...(preserved.model ? { model: preserved.model } : {}),
+		...(preserved.api === "anthropic-messages" || preserved.api === "bedrock-converse-stream"
+			? { api: preserved.api }
+			: {}),
 	};
 }
 
@@ -196,6 +230,7 @@ export interface AnthropicNativeCompactionRequest {
 export interface AnthropicNativeCompactionResponse {
 	content: string;
 	signature: string;
+	toolChanges?: Record<string, unknown>[];
 	usage: Usage;
 	model: string;
 }
@@ -224,7 +259,7 @@ export interface AnthropicNativeCompactionOptions
  * output limits; the configured method order can then choose a fallback.
  */
 export async function requestAnthropicNativeCompaction(
-	model: Model<"anthropic-messages">,
+	model: AnthropicNativeCompactionModel,
 	apiKey: ApiKey,
 	request: AnthropicNativeCompactionRequest,
 	signal: AbortSignal | undefined,
@@ -237,7 +272,9 @@ export async function requestAnthropicNativeCompaction(
 			apiKey,
 			signal,
 			maxTokens: request.maxTokens,
-			reasoning: resolveAnthropicCompactionEffort(model, request.context.messages, request.reasoning),
+			reasoning: isAnthropicMessagesModel(model)
+				? resolveAnthropicCompactionEffort(model, request.context.messages, request.reasoning)
+				: request.reasoning,
 			initiatorOverride: options.initiatorOverride,
 			metadata: options.metadata,
 			fetch: options.fetch,
@@ -279,6 +316,7 @@ export async function requestAnthropicNativeCompaction(
 	return {
 		content: payload.content,
 		signature: payload.signature,
+		...(payload.toolChanges ? { toolChanges: payload.toolChanges } : {}),
 		usage: response.usage,
 		model: response.model,
 	};
