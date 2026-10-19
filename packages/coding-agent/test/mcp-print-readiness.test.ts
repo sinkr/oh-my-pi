@@ -278,7 +278,10 @@ describe("headless MCP readiness", () => {
 		try {
 			const code = await runPrintMode(capture.session, {
 				mode: "text",
-				initialMessage: "/mcp reauth broken",
+				// CLI-authored positional input (`-p`) — the path an automation
+				// recovery actually takes; the merged stdin/@file message is
+				// never dispatched.
+				messages: ["/mcp reauth broken"],
 				mcpManager: manager,
 			});
 			// The reauth itself fails (stdio transport), so the run still

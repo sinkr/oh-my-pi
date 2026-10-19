@@ -451,10 +451,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const result = await launchSessionStatsDashboard(parsed, runtime);
 				await runtime.output(result.message);
 			} catch (error) {
-				// Print mode turns a failed dashboard launch into a nonzero exit
-				// so `omp -p '/stats'` automation does not report success.
 				await runtime.output(`Stats dashboard failed: ${errorMessage(error)}`);
-				return commandConsumed({ failed: true });
 			}
 			return commandConsumed();
 		},

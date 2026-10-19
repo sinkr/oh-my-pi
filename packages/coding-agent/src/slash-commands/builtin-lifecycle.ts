@@ -226,10 +226,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
 			if ("error" in parsed) return usage(parsed.error, runtime);
-			// Print mode turns a failed compaction into a nonzero exit; the
-			// flag is closure state because the background-dispatch branch
-			// (RPC) returns before `runCompact` settles.
-			let compactFailed = false;
 			const runCompact = async (): Promise<void> => {
 				const before = runtime.session.getContextUsage?.();
 				const beforeTokens = before?.tokens;
@@ -245,7 +241,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					// Compaction precondition failures (no model, already compacted, too
 					// small) and provider errors propagate as plain Errors; surface them
 					// via runtime.output so they don't fail the ACP prompt turn.
-					compactFailed = true;
 					await runtime.output(`Compaction failed: ${errorMessage(err)}`);
 					return;
 				}
@@ -266,7 +261,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return commandConsumed();
 			}
 			await runCompact();
-			return commandConsumed({ failed: compactFailed });
+			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
@@ -321,10 +316,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			if (runtime.session.isGeneratingHandoff) {
 				return usage("Handoff generation is already in progress.", runtime);
 			}
-			// Print mode turns a failed handoff into a nonzero exit; closure
-			// state because the background-dispatch branch (RPC) returns before
-			// `runHandoff` settles.
-			let handoffFailed = false;
 			const runHandoff = async (): Promise<void> => {
 				let result: HandoffResult | undefined;
 				try {
@@ -353,7 +344,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					// Persist the real failure so it stays debuggable after the client
 					// message scrolls away (same rationale as the TUI path, #7993).
 					logger.error("Handoff failed", { error: message });
-					handoffFailed = true;
 					await runtime.output(`Handoff failed: ${message}`);
 					return;
 				}
@@ -371,7 +361,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return commandConsumed();
 			}
 			await runHandoff();
-			return commandConsumed({ failed: handoffFailed });
+			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
 			const customInstructions = command.args || undefined;

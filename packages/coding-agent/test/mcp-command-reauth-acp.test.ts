@@ -20,6 +20,7 @@ import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import * as openUtil from "@oh-my-pi/pi-coding-agent/utils/open";
 import { handleMcpAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/mcp";
 import type { ParsedSlashCommand, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { cfgMcpEnableProjectConfig } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import {
 	getConfigRootDir,
 	getMCPConfigPath,
@@ -579,5 +580,43 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 			.json()
 			.catch(() => ({ mcpServers: {} }));
 		expect((userConfig as { mcpServers?: Record<string, unknown> }).mcpServers?.["client-server"]).toBeUndefined();
+	});
+
+	test("respects mcp.enableProjectConfig: an opted-out project entry never wins the lookup", async () => {
+		// Project and user files both define `envserver`. With
+		// `mcp.enableProjectConfig: false` the project tree is opted out of
+		// project-scoped config at startup, so reauth must resolve — and bind
+		// credentials for — the user entry, never resurrect the opted-out
+		// project shadow.
+		const userConfigPath = getMCPConfigPath("user", projectDir);
+		await Bun.write(
+			userConfigPath,
+			`${JSON.stringify(
+				{ mcpServers: { envserver: { type: "http", url: "https://user.example.com/mcp" } } },
+				null,
+				2,
+			)}\n`,
+		);
+		await writeServerConfig();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const authStorage = freshAuthStorage();
+		const runtime = makeRuntime(authStorage);
+		cfgMcpEnableProjectConfig.set(runtime.settings, false);
+		try {
+			await handleMcpAcp({ args: "reauth envserver" } as ParsedSlashCommand, runtime);
+			// The credential is keyed by the user entry's URL…
+			expect(
+				authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId("https://user.example.com/mcp")),
+			).toMatchObject({ access: "fresh-access" });
+			// …and nothing was keyed for the opted-out project shadow.
+			expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
+		} finally {
+			cfgMcpEnableProjectConfig.unset(runtime.settings);
+		}
 	});
 });

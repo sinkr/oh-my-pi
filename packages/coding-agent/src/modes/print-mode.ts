@@ -252,30 +252,39 @@ async function runPrintModeCore(
 				}
 			: undefined,
 	});
-	// Whether a builtin consumed an input but failed (usage error, unknown
-	// server, refused operation). Print mode is automation surface: a failed
-	// builtin must not exit 0, or scripts treat a failed reauthorization as
-	// success.
+	// Whether a dispatched command consumed an input but failed (usage error,
+	// unknown server, refused operation). Print mode is automation surface: a
+	// failed `/mcp reauth` must not exit 0, or scripts treat a failed
+	// reauthorization as success.
 	let builtinFailed = false;
-	// Whether any local builtin consumed or rewrote an input this run. A
-	// recovery builtin (`/mcp reauth`) can repair a server the strict
-	// readiness gate failed, so the gate re-evaluates after one ran.
-	let builtinConsumed = false;
-	// Whether any input reached the model as a prompt this invocation —
-	// directly, or through a builtin that scheduled a real turn (e.g. `/retry`
-	// returns `agentInvoked`). A run where every input was consumed locally
-	// creates no assistant turn, so the persisted previous turn must not be
-	// reprinted or its old stop reason reused as this run's exit status.
+	// Whether any input reached the model as a prompt this invocation. A run
+	// where every input was consumed locally creates no assistant turn, so the
+	// persisted previous turn must not be reprinted or its old stop reason
+	// reused as this run's exit status.
 	let admittedAgentTurn = false;
-	const promptTextFor = async (message: string): Promise<string | undefined> => {
-		if (!message.startsWith("/")) return message;
+	// The one locally-dispatched print-mode command (this feature's scope).
+	const PRINT_REAUTH_COMMAND = /^\/mcp\s+reauth(?:\s|$)/;
+	/**
+	 * Dispatch a CLI-authored message as a local command, if it is one.
+	 *
+	 * Only CLI-authored input (`messages`, the positional/-p args) is ever
+	 * dispatched. The merged stdin/@file `initialMessage` is attacker-shaped
+	 * end to end — `curl … | omp "summarize"` must never run a slash payload
+	 * from the pipe as a command — so it always prompts the model as text.
+	 * `/mcp reauth` is the only dispatched command here; every other slash
+	 * input keeps the historic behavior of prompting the model literally.
+	 * Returns whether the message was consumed locally.
+	 */
+	const dispatchCliMessage = async (message: string): Promise<boolean> => {
+		if (!PRINT_REAUTH_COMMAND.test(message)) return false;
 		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
-		if (result === false) return message;
-		builtinConsumed = true;
-		if ("prompt" in result) return result.prompt;
+		// The allow-list only matches a registered command, so `false` (not a
+		// command) and a `{ prompt }` residual cannot occur; stay defensive.
+		if (result === false || "prompt" in result) return false;
 		if (result.failed) builtinFailed = true;
-		if (result.agentInvoked) admittedAgentTurn = true;
-		return undefined; // consumed
+		// A recovery command may have repaired a server the strict gate
+		// failed on, so the gate re-evaluates before the next model turn.
+		return true;
 	};
 
 	// Discriminates a store failure from any other dispose rejection below.
@@ -301,7 +310,12 @@ async function runPrintModeCore(
 	});
 
 	const timeoutMs = resolveMCPTimeoutMs();
+	const strict = $flag("OMP_MCP_REQUIRE_READY");
 	let strictMCPFailure = false;
+	// Warn once per unavailable server across evaluations: readiness is
+	// re-evaluated after a dispatched recovery command, and a still-broken
+	// server must not repeat its warning on every pass.
+	const warnedUnavailable = new Set<string>();
 	/** Await manager startup and bind its current tool set; report unavailable server names. */
 	const evaluateReadiness = async (): Promise<string[]> => {
 		if (!options.mcpManager) return [];
@@ -314,36 +328,38 @@ async function runPrintModeCore(
 		for (const name of readiness.pending) {
 			const server = singleLine(name);
 			unavailable.push(server);
+			if (warnedUnavailable.has(server)) continue;
+			warnedUnavailable.add(server);
 			const after = timeoutMs > 0 ? ` after ${timeoutMs}ms` : "";
 			writeStderrLine(`Warning: MCP server "${server}" not ready${after}; its tools are unavailable for this run.`);
 		}
 		for (const { name, error } of readiness.failed) {
 			const server = singleLine(name);
 			unavailable.push(server);
+			if (warnedUnavailable.has(server)) continue;
+			warnedUnavailable.add(server);
 			writeStderrLine(
 				`Warning: MCP server "${server}" failed to connect: ${singleLine(error)}; its tools are unavailable for this run.`,
 			);
 		}
 		return unavailable;
 	};
-	let unavailable = await evaluateReadiness();
-	// Dispatch the initial input before the strict model-turn gate: a
-	// recovery builtin (`/mcp reauth <name>`) must reach its server even
-	// when the readiness pass above just failed it — repairing the
-	// credential is the only way strict automation can proceed instead of
-	// exiting with the tools still missing. `messages` keep their per-turn
-	// dispatch below, so multi-input runs keep builtin/turn interleaving.
-	const initialPromptText = initialMessage !== undefined ? await promptTextFor(initialMessage) : undefined;
-	// A local builtin ran and strict would fail the run: the builtin may
-	// have repaired a server (reauth reconnects live), so re-evaluate
-	// before deciding the model turns are unsafe to start.
-	if (builtinConsumed && unavailable.length > 0 && $flag("OMP_MCP_REQUIRE_READY")) {
+	// Readiness is evaluated lazily — before the first model turn, and again
+	// after a dispatched recovery command — never up front: `/mcp reauth` must
+	// run before the strict gate decides, or strict automation could never
+	// repair the very server the gate failed on.
+	let unavailable: string[] = [];
+	let readinessDirty = true;
+	const ensureReadiness = async (): Promise<void> => {
+		if (!readinessDirty) return;
 		unavailable = await evaluateReadiness();
-	}
-	if (unavailable.length > 0 && $flag("OMP_MCP_REQUIRE_READY")) {
+		readinessDirty = false;
+	};
+	const reportStrictFailure = (): void => {
+		if (strictMCPFailure) return;
 		writeStderrLine(`Error: MCP servers not ready: ${unavailable.join(", ")}`);
 		strictMCPFailure = true;
-	}
+	};
 
 	let wroteTextWorkingIndicator = false;
 	const writeTextWorkingIndicator = (): void => {
@@ -351,25 +367,43 @@ async function runPrintModeCore(
 		process.stderr.write("Working...\n");
 		wroteTextWorkingIndicator = true;
 	};
-
-	// Send initial message with attachments (dispatched above, pre-gate)
-	if (!strictMCPFailure && initialPromptText !== undefined) {
+	/** Prompt the model with one input, gated on strict MCP readiness. */
+	const promptTurn = async (text: string, images?: PrintModeOptions["initialImages"]): Promise<void> => {
+		await ensureReadiness();
+		if (strict && unavailable.length > 0) {
+			reportStrictFailure();
+			return;
+		}
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
 		admittedAgentTurn = true;
-		await logger.time("print:prompt:initial", () => session.prompt(initialPromptText, { images: initialImages }));
-	}
+		await logger.time("print:prompt", () =>
+			images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
+		);
+	};
 
-	// Send remaining messages
-	if (!strictMCPFailure) {
-		for (const message of messages) {
-			const promptText = await promptTextFor(message);
-			if (promptText === undefined) continue;
-			writeTextWorkingIndicator();
-			if (mode === "text") session.setTextOutputCommitted(false);
-			admittedAgentTurn = true;
-			await logger.time("print:prompt:next", () => session.prompt(promptText));
+	// Inputs run in order. The merged stdin/@file message is never dispatched
+	// (see dispatchCliMessage): it always prompts the model with its text.
+	if (initialMessage !== undefined) {
+		await promptTurn(initialMessage, initialImages);
+	}
+	// Remaining messages are CLI-authored: dispatch the recovery command as
+	// reached, prompt everything else.
+	for (const message of messages) {
+		if (strictMCPFailure) break;
+		if (await dispatchCliMessage(message)) {
+			readinessDirty = true;
+			continue;
 		}
+		await promptTurn(message);
+	}
+	// A run with no model turn (every input consumed locally, or none) still
+	// reports strict unreadiness: `OMP_MCP_REQUIRE_READY=1 omp -p '/mcp reauth
+	// foo'` that failed to repair its server exits with the strict error, not
+	// only the builtin's own failure.
+	if (strict && !admittedAgentTurn && !strictMCPFailure) {
+		await ensureReadiness();
+		if (unavailable.length > 0) reportStrictFailure();
 	}
 
 	// From this point onward a late blocker must be recorded without starting a

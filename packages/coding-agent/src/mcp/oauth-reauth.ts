@@ -196,7 +196,7 @@ export async function findMcpServerForAuth(
 	name: string,
 	cwd: string = getProjectDir(),
 	mcpManager?: MCPManager,
-	options?: { preferManager?: boolean },
+	options?: { preferManager?: boolean; enableProjectConfig?: boolean },
 ): Promise<FoundMcpServer | null> {
 	if (options?.preferManager) {
 		const managerConfig = mcpManager?.getServerConfig(name);
@@ -214,14 +214,21 @@ export async function findMcpServerForAuth(
 	const userPath = getMCPConfigPath("user", cwd);
 	const projectPath = getMCPConfigPath("project", cwd);
 
-	const [userConfig, projectConfig] = await Promise.all([readMCPConfigFile(userPath), readMCPConfigFile(projectPath)]);
+	// `mcp.enableProjectConfig: false` opts the project out of project-scoped
+	// config at startup; the lookup must not resurrect an opted-out entry here
+	// (a reauth would write a credential binding for a server that never loads).
+	const enableProjectConfig = options?.enableProjectConfig ?? true;
+	const [userConfig, projectConfig] = await Promise.all([
+		readMCPConfigFile(userPath),
+		enableProjectConfig ? readMCPConfigFile(projectPath) : Promise.resolve(null),
+	]);
 
 	// Project wins over user on a name collision: runtime discovery enumerates
 	// project paths first and deduplicates first-wins, so the project entry is
 	// the server users actually invoke. Refreshing the user shadow instead
 	// would report success while the active project server keeps its stale
 	// credential after the next reload.
-	if (projectConfig.mcpServers?.[name]) {
+	if (enableProjectConfig && projectConfig?.mcpServers?.[name]) {
 		return { filePath: projectPath, scope: "project", config: projectConfig.mcpServers[name], discovered: false };
 	}
 	if (userConfig.mcpServers?.[name]) {
@@ -229,8 +236,9 @@ export async function findMcpServerForAuth(
 	}
 
 	// Standalone fallback files match the discovery paths used by the
-	// mcp-json provider; precedence is preserved by iteration order.
-	const standalonePaths = [path.join(cwd, "mcp.json"), path.join(cwd, ".mcp.json")];
+	// mcp-json provider; precedence is preserved by iteration order. Both are
+	// project-level sources, so the same `enableProjectConfig` opt-out applies.
+	const standalonePaths = enableProjectConfig ? [path.join(cwd, "mcp.json"), path.join(cwd, ".mcp.json")] : [];
 	const fallbackConfigs = await Promise.all(
 		standalonePaths.map(async fallbackPath => {
 			try {
@@ -474,6 +482,14 @@ export interface McpOAuthFlowRunOptions extends McpOAuthFlowPresentation {
 	flowOwner?: object;
 	/** Busy manual-input provider name, to fail fast before starting the flow. */
 	pendingInput?: () => string | undefined;
+	/**
+	 * Fires once the flow's single-flight claim resolves, before any browser
+	 * work starts. Hosts that install UI around the flow (the TUI's Esc hook)
+	 * do it here, not before the claim: a flow superseded while queued must
+	 * install — and later restore — nothing, or it resurrects a dead
+	 * predecessor's UI over the live default.
+	 */
+	onClaimed?: () => void;
 }
 
 /**
@@ -506,6 +522,9 @@ export async function runMcpOAuthFlow(opts: McpOAuthFlowRunOptions): Promise<OAu
 		if (!oauthTimeout.signal.aborted) oauthTimeout.abort(reason);
 	};
 	const flowClaim = await claimMCPOAuthFlow(opts.flowOwner ?? defaultMcpOAuthFlowOwner, requestCancellation);
+	// Host UI installs here (TUI Esc): after the claim resolved, so a flow
+	// superseded while queued installs — and restores — nothing.
+	opts.onClaimed?.();
 	const externalSignal = opts.signal;
 	const onExternalAbort = (): void => {
 		const reason = externalSignal?.reason;
@@ -677,6 +696,12 @@ export interface McpReauthOptions extends McpOAuthFlowPresentation {
 	onReauthorizing?: () => void;
 	flowOwner?: object;
 	pendingInput?: () => string | undefined;
+	/**
+	 * Fires once the flow's single-flight claim resolves (see
+	 * {@link McpOAuthFlowRunOptions.onClaimed}); hosts install flow UI here so
+	 * a superseded flow installs — and restores — nothing.
+	 */
+	onClaimed?: () => void;
 }
 
 export interface McpReauthOutcome {
@@ -794,6 +819,7 @@ export async function reauthorizeMcpServer(
 		signal: opts.signal,
 		flowOwner: opts.flowOwner,
 		pendingInput: opts.pendingInput,
+		onClaimed: opts.onClaimed,
 		onAuth: opts.onAuth,
 		onProgress: opts.onProgress,
 		onManualCodeInput: opts.onManualCodeInput,

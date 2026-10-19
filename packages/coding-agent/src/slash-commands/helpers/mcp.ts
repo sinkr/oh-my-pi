@@ -9,6 +9,7 @@ import {
 	setServerDisabled,
 	updateMCPServer,
 } from "../../mcp/config-writer";
+import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 import { MCPManager } from "../../mcp/manager";
 import {
 	findMcpServerForAuth,
@@ -493,7 +494,13 @@ async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): 
 	// un-quoting) would truncate "MaaS Slack" to "MaaS".
 	const name = rest.trim();
 	if (!name) return usage("Usage: /mcp reauth <name>", runtime);
-	const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager, { preferManager: true });
+	const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager, {
+		preferManager: true,
+		// `mcp.enableProjectConfig: false` opts the project out of project-scoped
+		// config; the lookup must not resurrect (or write bindings for) an
+		// opted-out entry.
+		enableProjectConfig: cfgMcpEnableProjectConfig.get(runtime.settings),
+	});
 	if (!found) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
 
 	const emit = (text: string): void => {

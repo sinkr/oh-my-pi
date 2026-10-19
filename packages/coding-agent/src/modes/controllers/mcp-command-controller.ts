@@ -787,7 +787,7 @@ export class MCPCommandController {
 	): Promise<OAuthFlowResult> {
 		const { callbacks, release } = this.#oauthFlowCallbacks();
 		try {
-			return await this.#withOAuthEscape(escapeSignal =>
+			return await this.#withOAuthEscape((escapeSignal, onClaimed) =>
 				runMcpOAuthFlow({
 					authUrl,
 					tokenUrl,
@@ -810,6 +810,7 @@ export class MCPCommandController {
 						this.ctx.oauthManualInput.hasPending()
 							? (this.ctx.oauthManualInput.pendingProviderId ?? "another provider")
 							: undefined,
+					onClaimed,
 					...callbacks,
 				}),
 			);
@@ -919,18 +920,41 @@ export class MCPCommandController {
 	 * Install the editor Esc hook for the duration of an MCP OAuth flow: Esc
 	 * aborts the supplied signal, which the shared engine races and reclassifies
 	 * as a neutral {@link MCPOAuthCancelledError}.
+	 *
+	 * The hook installs when the flow's single-flight claim resolves (via the
+	 * engine's `onClaimed`), not when the flow starts: a flow superseded while
+	 * queued never claims, so it installs — and later restores — nothing.
+	 * Restoration resolves through any OAuth handler chain to the live default:
+	 * when a replacement flow installs while this one unwinds, the replacement
+	 * captures the session default underneath the chain rather than this flow's
+	 * already-dead handler, so unwinding either order leaves the default
+	 * (interrupt, cancel compaction) installed for the session.
 	 */
-	#withOAuthEscape<T>(run: (escapeSignal: AbortSignal) => Promise<T>): Promise<T> {
-		const originalOnEscape = this.ctx.editor.onEscape;
+	#withOAuthEscape<T>(run: (escapeSignal: AbortSignal, onClaimed: () => void) => Promise<T>): Promise<T> {
 		const escape = new AbortController();
-		const installed = (): void => escape.abort(MCP_OAUTH_USER_CANCEL_REASON);
-		this.ctx.editor.onEscape = installed;
-		return run(escape.signal).finally(() => {
+		const installed = (): void => {
+			escape.abort(MCP_OAUTH_USER_CANCEL_REASON);
+		};
+		const escapeHandler = installed as unknown as {
+			__mcpOAuthEscapeOriginal?: (() => void) | undefined;
+			__isMcpOAuthEscape?: boolean;
+		};
+		const current = this.ctx.editor.onEscape;
+		const currentIsOurs =
+			current !== undefined && (current as { __isMcpOAuthEscape?: boolean }).__isMcpOAuthEscape === true;
+		escapeHandler.__mcpOAuthEscapeOriginal = currentIsOurs
+			? (current as { __mcpOAuthEscapeOriginal?: () => void }).__mcpOAuthEscapeOriginal
+			: current;
+		escapeHandler.__isMcpOAuthEscape = true;
+		const onClaimed = (): void => {
+			this.ctx.editor.onEscape = installed;
+		};
+		return run(escape.signal, onClaimed).finally(() => {
 			// Restore only while still owning the hook: a replacement flow
-			// installs its Esc handler while waiting for this flow's
-			// single-flight claim, and its handler must survive this teardown.
+			// installs its own handler after this one unwinds, and that
+			// handler (and the default it would restore) must survive here.
 			if (this.ctx.editor.onEscape === installed) {
-				this.ctx.editor.onEscape = originalOnEscape;
+				this.ctx.editor.onEscape = escapeHandler.__mcpOAuthEscapeOriginal;
 			}
 		});
 	}
@@ -1321,7 +1345,9 @@ export class MCPCommandController {
 			// (e.g. config on a network FS) must surface cancellation immediately
 			// via the catch branch below, not stay suspended until the read settles.
 			const found = await raceAbortSignal(
-				findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager),
+				findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
+					enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+				}),
 				abortController.signal,
 				() => new DOMException("Aborted", "AbortError"),
 			);
@@ -1463,7 +1489,9 @@ export class MCPCommandController {
 		}
 
 		try {
-			const found = await findMcpServerForAuth(name);
+			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+			});
 			if (!found) {
 				// Check if this is a discovered server from a third-party config
 				const userConfigPath = getMCPConfigPath("user", getProjectDir());
@@ -1564,7 +1592,9 @@ export class MCPCommandController {
 		}
 
 		try {
-			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager);
+			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+			});
 			if (!found) {
 				this.ctx.showError(`Server "${name}" not found.`);
 				return;
@@ -1628,7 +1658,9 @@ export class MCPCommandController {
 		}
 
 		try {
-			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager);
+			const found = await findMcpServerForAuth(name, getProjectDir(), this.ctx.mcpManager, {
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+			});
 			if (!found) {
 				if (!options.silent) this.ctx.showError(`Server "${name}" not found.`);
 				return;
@@ -1640,7 +1672,7 @@ export class MCPCommandController {
 
 			const { callbacks, release } = this.#oauthFlowCallbacks();
 			try {
-				const outcome = await this.#withOAuthEscape(signal =>
+				const outcome = await this.#withOAuthEscape((signal, onClaimed) =>
 					reauthorizeMcpServer(name, found, {
 						authStorage: this.ctx.session.modelRegistry.authStorage,
 						authChallenge: options.authChallenge,
@@ -1660,6 +1692,9 @@ export class MCPCommandController {
 						onReauthorizing: () => {
 							this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
 						},
+						// Install the Esc hook once the flow's claim resolves, so a
+						// superseded flow restores nothing (see #withOAuthEscape).
+						onClaimed,
 						...callbacks,
 					}),
 				);
