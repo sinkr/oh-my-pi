@@ -7,6 +7,7 @@ import { getAgentDir, VERSION } from "@oh-my-pi/pi-utils";
 import * as launchClient from "../src/launch/client";
 import { closeTextPrediction, requestTextPrediction } from "../src/predict/client";
 import { type TextPredictRequest, type TextPredictResponse, textPredictDaemon } from "../src/predict/protocol";
+import { rejectionOf } from "./helpers/rejection";
 
 const cleanups: (() => Promise<void>)[] = [];
 
@@ -78,9 +79,8 @@ describe("text-predict client against a daemon from another omp version", () => 
 	it("shuts down a daemon from an older omp so this version's can start", async () => {
 		const received = await serveDaemon("0.0.1");
 
-		await expect(requestTextPrediction("ngram", "please ", "re")).rejects.toThrow(
-			"text-predict daemon did not start",
-		);
+		const error = await rejectionOf(requestTextPrediction("ngram", "please ", "re"));
+		expect(error).toMatchObject({ message: "text-predict daemon did not start" });
 		expect(received).toContain("shutdown");
 		expect(received).not.toContain("complete");
 	});
