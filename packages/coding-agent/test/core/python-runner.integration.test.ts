@@ -258,7 +258,12 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					},
 				});
 
-				// uv has no `pip --version`; that needs pip itself.
+				// A general option's value is not the subcommand.
+				await executePythonWithKernel(kernel, "%pip --cache-dir /tmp/omp-pip-cache install six");
+				const [cacheArgs] = (await Bun.file(uvLog).text()).split("\n");
+				expect(cacheArgs).toBe("pip --cache-dir /tmp/omp-pip-cache install six");
+
+				// uv has no `pip --version`; that needs pip itself (and may bootstrap it).
 				await fs.rm(uvLog);
 				await executePythonWithKernel(kernel, "%pip --version");
 				expect(await Bun.file(uvLog).exists()).toBe(false);
@@ -300,7 +305,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				path.join(fakeDir, "__main__.py"),
 				[
 					"import os, subprocess",
-					'child = subprocess.Popen(["sleep", "30"])',
+					`child = subprocess.Popen([${JSON.stringify(Bun.which("sleep"))}, "30"])`,
 					'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
 					"child.wait()",
 				].join("\n"),
@@ -308,7 +313,8 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const kernel = await PythonKernel.start({
 				cwd: tempDir.path(),
 				interpreter: python,
-				env: { PATH: "/usr/bin:/bin", PYTHONPATH: path.dirname(fakeDir) },
+				// A PATH with no uv on it, so a system uv cannot take the uv route.
+				env: { PATH: tempDir.path(), PYTHONPATH: path.dirname(fakeDir) },
 			});
 			try {
 				const pids = await cancelInstall(kernel, "%pip install six");
@@ -328,7 +334,8 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const kernel = await PythonKernel.start({
 				cwd: tempDir.path(),
 				interpreter: python,
-				env: { PATH: "/usr/bin:/bin" },
+				// A PATH with no uv on it, so a system uv cannot take the uv route.
+				env: { PATH: tempDir.path() },
 			});
 			try {
 				const result = await executePythonWithKernel(kernel, "%pip --version");

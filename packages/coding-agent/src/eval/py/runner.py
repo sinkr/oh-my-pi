@@ -1338,10 +1338,37 @@ _UV_PIP_SUBCOMMANDS = frozenset(
 _PIP_ONLY_NOOP_FLAGS = frozenset(
     {"--disable-pip-version-check", "--no-input", "--no-warn-script-location"}
 )
+# pip's general options that take a separate value (`--cache-dir DIR`), which
+# may come before the subcommand.
+_PIP_VALUE_OPTIONS = frozenset(
+    {
+        "--cache-dir",
+        "--cert",
+        "--client-cert",
+        "--exists-action",
+        "--keyring-provider",
+        "--log",
+        "--proxy",
+        "--python",
+        "--resume-retries",
+        "--retries",
+        "--timeout",
+        "--trusted-host",
+        "--use-deprecated",
+        "--use-feature",
+    }
+)
 
 
 def _uv_pip_argv(argv: list[str]) -> list[str] | None:
-    subcommand = next((arg for arg in argv if not arg.startswith("-")), None)
+    subcommand = None
+    args = iter(argv)
+    for arg in args:
+        if arg in _PIP_VALUE_OPTIONS:
+            next(args, None)
+        elif not arg.startswith("-"):
+            subcommand = arg
+            break
     if subcommand not in _UV_PIP_SUBCOMMANDS:
         return None
     return [arg for arg in argv if arg not in _PIP_ONLY_NOOP_FLAGS]
@@ -1363,7 +1390,8 @@ def _child_pids() -> dict[int, list[int]]:
         return children
     try:
         listing = subprocess.run(
-            ["ps", "-A", "-o", "pid=,ppid="],
+            # /bin/ps first: the kernel's PATH is the user's and may not hold it.
+            ["/bin/ps" if os.path.exists("/bin/ps") else "ps", "-A", "-o", "pid=,ppid="],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
