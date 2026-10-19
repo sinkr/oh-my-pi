@@ -1398,11 +1398,13 @@ export interface ToolScopeResolution {
 	immutableSourcePaths: Set<string>;
 }
 
-/** Approval tier for a search tool's raw `path` input: the highest scheme read tier named anywhere in it. */
+/** Approval tier for a search tool's raw `path` (or legacy `paths`) input: the highest scheme read tier named anywhere in it. */
 export function searchPathTier(args: unknown): ToolTier {
-	const raw = isRecord(args) ? args.path : undefined;
-	// Substring scan over the raw entry: delimited lists are only split after approval.
-	return InternalUrlRouter.instance().readTier(typeof raw === "string" ? raw : "");
+	const raw = isRecord(args) ? (args.path ?? args.paths) : undefined;
+	const entries =
+		typeof raw === "string" ? [raw] : Array.isArray(raw) ? raw.filter(entry => typeof entry === "string") : [];
+	// Substring scan over the raw entries: delimited lists are only split after approval.
+	return InternalUrlRouter.instance().readTier(entries.join("\n"));
 }
 
 /**

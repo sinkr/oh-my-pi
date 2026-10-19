@@ -22,6 +22,7 @@ import {
 	resolveSearchResultPath,
 	searchPathTier,
 } from "../path-utils";
+import { searchApprovalCacheTargets } from "../search-approval-targets";
 import { toolResult } from "../tool-result";
 import { type CascadeResult, runCascade } from "./cascade";
 import { rankedHeat } from "./passages";
@@ -59,6 +60,11 @@ export function isFindEnabled(session: ToolSession): boolean {
 export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	readonly name = "find";
 	readonly approval = searchPathTier;
+	/** `always-ask-cached` keys: the tree (or file) it searches, as `grep` reports one. */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const root = (args as { path?: string } | null | undefined)?.path;
+		return searchApprovalCacheTargets(root ? [root] : [], this.session.cwd, entry => entry);
+	};
 	readonly loadMode = "essential";
 	readonly label = "Find";
 	readonly summary = "Semantic grep: find files and line ranges by describing what they do";
