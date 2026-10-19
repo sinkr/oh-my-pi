@@ -489,7 +489,7 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
 async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const name = rest.split(/\s+/)[0]?.trim() ?? "";
 	if (!name) return usage("Usage: /mcp reauth <name>", runtime);
-	const found = await findMcpServerForAuth(name, runtime.cwd);
+	const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager);
 	if (!found) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
 
 	const emit = (text: string): void => {

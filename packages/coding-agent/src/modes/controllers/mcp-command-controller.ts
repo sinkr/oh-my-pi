@@ -913,9 +913,15 @@ export class MCPCommandController {
 	#withOAuthEscape<T>(run: (escapeSignal: AbortSignal) => Promise<T>): Promise<T> {
 		const originalOnEscape = this.ctx.editor.onEscape;
 		const escape = new AbortController();
-		this.ctx.editor.onEscape = () => escape.abort(MCP_OAUTH_USER_CANCEL_REASON);
+		const installed = (): void => escape.abort(MCP_OAUTH_USER_CANCEL_REASON);
+		this.ctx.editor.onEscape = installed;
 		return run(escape.signal).finally(() => {
-			this.ctx.editor.onEscape = originalOnEscape;
+			// Restore only while still owning the hook: a replacement flow
+			// installs its Esc handler while waiting for this flow's
+			// single-flight claim, and its handler must survive this teardown.
+			if (this.ctx.editor.onEscape === installed) {
+				this.ctx.editor.onEscape = originalOnEscape;
+			}
 		});
 	}
 

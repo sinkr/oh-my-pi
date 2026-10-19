@@ -990,6 +990,9 @@ export class AcpAgent implements Agent {
 				await manager.reconnectServer(name, { manual: true });
 				return manager.getConnectionStatus(name);
 			},
+			// ACP-declared servers (`session/new` `mcpServers`) live in this
+			// manager, in no writable config file; `/mcp` lookups must consult it.
+			mcpManager: record.mcpManager,
 			keepTurnOpenUntilIdle: async () => {
 				await record.session.waitForIdle();
 				// `AgentSession.#emit()` does not await listeners, so the retried
@@ -2691,6 +2694,10 @@ export class AcpAgent implements Agent {
 		}
 
 		const manager = new MCPManager(record.session.sessionManager.getCwd());
+		// `/mcp reauth` writes url-keyed credential rows; without the session's
+		// auth storage the manager cannot resolve them on reconnect and a
+		// successful reauthorization would leave the live server disconnected.
+		manager.setAuthStorage(record.session.modelRegistry.authStorage);
 		// MCP servers connect and reconnect independently, so `onToolsChanged` can fire
 		// several times back to back. Each firing is chained onto `record.mcpRefreshChain`
 		// so refreshes apply in order, and each one re-reads `manager.getTools()` at the

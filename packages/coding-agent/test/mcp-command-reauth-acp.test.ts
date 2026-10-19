@@ -84,13 +84,18 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 		return waiter.promise;
 	}
 
-	function makeRuntime(authStorage: AuthStorage, signal?: AbortSignal): SlashCommandRuntime {
+	function makeRuntime(
+		authStorage: AuthStorage,
+		signal?: AbortSignal,
+		mcpManager?: SlashCommandRuntime["mcpManager"],
+	): SlashCommandRuntime {
 		return {
 			session: { modelRegistry: { authStorage } },
 			sessionManager: {},
 			settings: Settings.isolated(),
 			cwd: projectDir,
 			signal,
+			mcpManager,
 			output: (text: string) => {
 				outputs.push(text);
 				for (let index = outputWaiters.length - 1; index >= 0; index--) {
@@ -134,8 +139,16 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 		return saved.mcpServers?.envserver ?? {};
 	}
 
-	async function runReauth(name: string, authStorage: AuthStorage, signal?: AbortSignal): Promise<void> {
-		await handleMcpAcp({ args: `reauth ${name}` } as ParsedSlashCommand, makeRuntime(authStorage, signal));
+	async function runReauth(
+		name: string,
+		authStorage: AuthStorage,
+		signal?: AbortSignal,
+		mcpManager?: SlashCommandRuntime["mcpManager"],
+	): Promise<void> {
+		await handleMcpAcp(
+			{ args: `reauth ${name}` } as ParsedSlashCommand,
+			makeRuntime(authStorage, signal, mcpManager),
+		);
 	}
 
 	beforeEach(async () => {
@@ -348,6 +361,43 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 
 		expect(outputs.join("\n")).toContain("Reauthorization cancelled");
 		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
+		const saved = await readSavedServer();
+		expect(saved.auth).toBeUndefined();
+	});
+
+	test("reauthorizes an ACP client-declared server that lives in no config file", async () => {
+		// ACP sessions declare servers at session/new; the definition exists
+		// only in the session's live manager. Without consulting
+		// runtime.mcpManager the lookup answers "not found" for the very
+		// servers the ACP path exists to serve.
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(
+			new Error(
+				'HTTP 401: {"authorization_url":"https://auth.example.com/authorize","token_url":"https://auth.example.com/token"}',
+			),
+		);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const authStorage = freshAuthStorage();
+		const acpManager = {
+			getServerConfig: (name: string) =>
+				name === "client-server" ? { type: "http", url: "https://acp.example.com/mcp" } : undefined,
+			getSource: (name: string) =>
+				name === "client-server" ? { provider: "acp", providerName: "ACP Client" } : undefined,
+		} as unknown as NonNullable<SlashCommandRuntime["mcpManager"]>;
+
+		await runReauth("client-server", authStorage, undefined, acpManager);
+
+		const joined = outputs.join("\n");
+		expect(joined).toContain('Reauthorized "client-server"');
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId("https://acp.example.com/mcp"))).toMatchObject({
+			access: "fresh-access",
+			tokenUrl: "https://auth.example.com/token",
+		});
+		// Discovered definitions stay out of config files; the url-keyed
+		// credential row is the only persistence.
 		const saved = await readSavedServer();
 		expect(saved.auth).toBeUndefined();
 	});

@@ -1,6 +1,7 @@
 import type { Settings } from "../config/settings";
 import type { SlashCommandIconName } from "@oh-my-pi/pi-tui/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
+import type { MCPManager } from "../mcp/manager";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";
 
@@ -110,6 +111,13 @@ export interface SlashCommandRuntime {
 	 * server; callers then fall back to restart guidance.
 	 */
 	reconnectMcpServer?: (name: string) => Promise<"connected" | "connecting" | "disconnected" | undefined>;
+	/**
+	 * The host's live MCP manager when it keeps one. ACP sessions keep one for
+	 * client-declared servers (`session/new`/`load_session` `mcpServers`), whose
+	 * definitions live in no writable config file; `/mcp` lookups consult it so
+	 * those servers resolve like configured ones.
+	 */
+	mcpManager?: MCPManager | undefined;
 	notifyTitleChanged?: () => Promise<void> | void;
 	/**
 	 * Push the host's view of the session config (model, thinking level, mode).

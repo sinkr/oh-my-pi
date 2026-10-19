@@ -15,6 +15,8 @@ import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
+import { executeAcpBuiltinSlashCommand } from "../slash-commands/acp-builtins";
+import type { SlashCommandRuntime } from "../slash-commands/types";
 import {
 	formatPersistenceDurabilityFailure,
 	formatPersistenceFailure,
@@ -219,6 +221,30 @@ async function runPrintModeCore(
 			// every later diagnostic and reject the awaited tail below.
 			.catch(() => {});
 	};
+	// Route slash input through the shared dispatcher so builtins run locally
+	// (e.g. `/mcp reauth <name>` opens the browser) instead of prompting the
+	// model with the literal text. Unknown or non-slash input falls through to
+	// the model; a `{ prompt }` residual is forwarded. Diagnostics go to stderr
+	// so stdout stays pure model output (critical in JSON mode).
+	// Built lazily on the first slash message: session fixtures in tests (and
+	// early signal-teardown paths) never build one.
+	let builtinRuntime: SlashCommandRuntime | undefined;
+	const promptTextFor = async (message: string): Promise<string | undefined> => {
+		if (!message.startsWith("/")) return message;
+		builtinRuntime ??= {
+			session,
+			sessionManager: session.sessionManager,
+			settings: session.settings,
+			cwd: session.sessionManager.getCwd(),
+			output: writeStderrLine,
+			refreshCommands: () => {},
+			reloadPlugins: () => Promise.resolve(),
+		};
+		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntime);
+		if (result === false) return message;
+		if ("prompt" in result) return result.prompt;
+		return undefined; // consumed
+	};
 
 	// Discriminates a store failure from any other dispose rejection below.
 	let persistenceFailure: Error | undefined;
@@ -279,17 +305,22 @@ async function runPrintModeCore(
 
 	// Send initial message with attachments
 	if (!strictMCPFailure && initialMessage !== undefined) {
-		writeTextWorkingIndicator();
-		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
+		const promptText = await promptTextFor(initialMessage);
+		if (promptText !== undefined) {
+			writeTextWorkingIndicator();
+			if (mode === "text") session.setTextOutputCommitted(false);
+			await logger.time("print:prompt:initial", () => session.prompt(promptText, { images: initialImages }));
+		}
 	}
 
 	// Send remaining messages
 	if (!strictMCPFailure) {
 		for (const message of messages) {
+			const promptText = await promptTextFor(message);
+			if (promptText === undefined) continue;
 			writeTextWorkingIndicator();
 			if (mode === "text") session.setTextOutputCommitted(false);
-			await logger.time("print:prompt:next", () => session.prompt(message));
+			await logger.time("print:prompt:next", () => session.prompt(promptText));
 		}
 	}
 
