@@ -115,7 +115,19 @@ class DaemonConnection {
 	}
 }
 
-/** Connect and confirm the daemon speaks this omp version; `undefined` when nothing usable listens. */
+/** Whether a daemon reporting `version` comes from a newer omp; an unparseable version is not provably newer. */
+function isNewerVersion(version: string): boolean {
+	try {
+		return Bun.semver.order(version, VERSION) > 0;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Connect and confirm the daemon speaks this omp version or a newer one;
+ * `undefined` when nothing usable listens.
+ */
 async function connectDaemon(endpoint: string): Promise<DaemonConnection | undefined> {
 	let ipc: IpcConnection;
 	try {
@@ -126,8 +138,12 @@ async function connectDaemon(endpoint: string): Promise<DaemonConnection | undef
 	const connection = new DaemonConnection(ipc);
 	try {
 		const pong = await connection.request(id => ({ id, op: "ping" }), REQUEST_TIMEOUT_MS);
-		if (pong.ok && pong.op === "ping" && pong.version === VERSION) return connection;
-		// A daemon from another omp version: retire it so this version's starts.
+		if (pong.ok && pong.op === "ping" && (pong.version === VERSION || isNewerVersion(pong.version))) {
+			return connection;
+		}
+		// A daemon from an older omp version: retire it so this version's starts. A newer
+		// one keeps serving: after an in-place upgrade this process would start that same
+		// newer build again, and retiring it cuts off every process already on it.
 		await connection.request(id => ({ id, op: "shutdown" }), REQUEST_TIMEOUT_MS).catch(() => undefined);
 	} catch (error) {
 		logger.debug("text-predict: daemon ping failed", { endpoint, error: String(error) });
