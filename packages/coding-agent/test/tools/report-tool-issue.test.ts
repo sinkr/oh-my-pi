@@ -463,7 +463,13 @@ describe("flushGrievances", () => {
 });
 
 describe("dispatchReportIssueDevice", () => {
+	beforeEach(() => {
+		// Fixture words (`read`, `glob`, …) must not depend on the host's login name.
+		stubIdentity("/home/omp-test-user", "omp-test-user");
+	});
+
 	afterEach(() => {
+		vi.restoreAllMocks();
 		__resetAutoQaConsentForTests();
 	});
 
@@ -542,26 +548,33 @@ describe("dispatchReportIssueDevice", () => {
 		}
 	});
 
-	it("stores the home directory as ~ and identifier uses of the login name as <user>", async () => {
+	it.each([
+		[
+			"launchctl print gui/501/com.will.agent failed in /Users/will/code (not /Users/willa)",
+			"launchctl print gui/501/com.<user>.agent failed in ~/code (not /Users/willa)",
+		],
+		["see /Users/will. Then ssh will@build-host", "see ~. Then ssh <user>@build-host"],
+		[
+			"transcript -Users-will-codebases-app/x.jsonl and /c/Users/will/AppData",
+			"transcript -Users-<user>-codebases-app/x.jsonl and /c/Users/<user>/AppData",
+		],
+		[
+			"Ask will. It will-do: will/max under ./will_modules/x and /srv/will/test",
+			"Ask will. It will-do: will/max under ./will_modules/x and /srv/will/test",
+		],
+	])("redacts the user's identity from %p", async (report, expected) => {
 		Bun.env.PI_AUTO_QA = "1";
 		stubIdentity("/Users/will", "will");
 		const db = openTempDb();
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(
-				session,
-				"bash: launchctl print gui/501/com.will.agent failed in /Users/will/code (not /Users/willa); it will retry",
-			);
+			await dispatchReportIssueDevice(session, `bash: ${report}`);
 			await settlePipeline();
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
-			expect(row).toEqual({
-				tool: "bash",
-				report: "launchctl print gui/501/com.<user>.agent failed in ~/code (not /Users/willa); it will retry",
-			});
+			expect(row).toEqual({ tool: "bash", report: expected });
 		} finally {
 			openSpy.mockRestore();
-			vi.restoreAllMocks();
 			db.close();
 		}
 	});

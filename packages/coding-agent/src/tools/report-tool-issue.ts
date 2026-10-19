@@ -72,17 +72,20 @@ const MAX_TOOL_BYTES = 128;
 /**
  * Remove the user's identity from grievance text. Reports quote paths and
  * commands verbatim and leave the machine, so the home directory becomes `~`,
- * and the login name becomes `<user>` where it is part of an identifier (a
- * launchd label `com.<user>.app`, an encoded session dir `-Users-<user>-`,
- * `<user>@host`). Bare words are left alone: a login name like `will` or `max`
- * is also prose. `root` names no one, so only its home is rewritten.
+ * and the login name becomes `<user>` in the forms that name the user: a home
+ * path the first rewrite missed (`/c/Users/<user>`, an encoded session dir
+ * `-Users-<user>-`, `~<user>`), a reverse-DNS label (`com.<user>.app`) and
+ * `<user>@host`. Elsewhere the name is left alone: logins such as `will`,
+ * `node`, `bin` or `test` are also words and directory names. `root` names no
+ * one, so only its home is rewritten.
  */
 function redactUserIdentity(text: string): string {
 	let redacted = text;
 	const home = os.homedir();
 	if (home.length > 1) {
 		for (const form of new Set([home, home.replaceAll("\\", "/")])) {
-			redacted = redacted.replace(new RegExp(`${RegExp.escape(form)}(?![\\w.-])`, "g"), "~");
+			const pattern = `(?<![\\p{L}\\p{N}_.-])${RegExp.escape(form)}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`;
+			redacted = redacted.replace(new RegExp(pattern, "gu"), "~");
 		}
 	}
 	let user: string | undefined;
@@ -94,7 +97,7 @@ function redactUserIdentity(text: string): string {
 	if (user && user !== "root") {
 		const name = RegExp.escape(user);
 		const pattern = new RegExp(
-			`(?<=[./\\\\@_-])${name}(?![\\p{L}\\p{N}])|(?<![\\p{L}\\p{N}])${name}(?=[./\\\\@_-])`,
+			`(?<=(?<![\\p{L}\\p{N}])(?:Users|home)[/\\\\-]|~|(?<![\\p{L}\\p{N}])(?:com|org|net|io|dev)\\.)${name}(?![\\p{L}\\p{N}])|(?<![\\p{L}\\p{N}])${name}(?=@)`,
 			"gu",
 		);
 		redacted = redacted.replace(pattern, "<user>");
