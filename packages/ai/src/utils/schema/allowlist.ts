@@ -156,20 +156,11 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 	}
 
 	// allOf: merge every branch into this node's own copy first, so the union
-	// handling below sees every field that will sit beside it. A union a
-	// branch kept as `anyOf` is held back and settled against the merged node.
-	const heldUnions: Array<{ branches: JsonObject[]; nullable: boolean }> = [];
+	// handling below sees every field that will sit beside it.
 	if (Array.isArray(node.allOf)) {
 		for (const branch of node.allOf) {
 			const copied = copyFactoryDroidSchema(branch);
-			if (!copied) continue;
-			if (Array.isArray(copied.anyOf)) {
-				const { anyOf, nullable, ...rest } = copied;
-				heldUnions.push({ branches: anyOf as JsonObject[], nullable: nullable === true });
-				Object.assign(out, mergeFactoryDroidSchemas(out, rest, "union"));
-			} else {
-				Object.assign(out, mergeFactoryDroidSchemas(out, copied, "union"));
-			}
+			if (copied) Object.assign(out, mergeFactoryDroidSchemas(out, copied, "union"));
 		}
 	}
 
@@ -187,7 +178,6 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 		const nonNull = branches.filter(branch => !typeIncludesNull(branch));
 		settleUnion(out, nonNull, nonNull.length < branches.length);
 	}
-	for (const held of heldUnions) settleUnion(out, held.branches, held.nullable);
 
 	// The Schema proto takes a single string `type`: collapse draft-2020-12
 	// type unions the way the shared normalizer does — a null branch becomes
@@ -208,8 +198,33 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 	return out;
 }
 
+/**
+ * A kept `anyOf` can gain structural siblings when an enclosing `allOf`
+ * merges into it (at any depth); settle those against the merged node.
+ */
+function settleMergedUnions(node: JsonObject): void {
+	if (isJsonObject(node.properties)) {
+		for (const schema of Object.values(node.properties)) {
+			if (isJsonObject(schema)) settleMergedUnions(schema);
+		}
+	}
+	if (isJsonObject(node.items)) settleMergedUnions(node.items);
+	if (!Array.isArray(node.anyOf)) return;
+	for (const branch of node.anyOf) {
+		if (isJsonObject(branch)) settleMergedUnions(branch);
+	}
+	const { anyOf, nullable, ...rest } = node;
+	if (Object.keys(rest).every(key => key in ANY_OF_SIBLING_KEYS)) return;
+	delete node.anyOf;
+	delete node.nullable;
+	settleUnion(node, anyOf as JsonObject[], nullable === true);
+	if (!("type" in node) && isJsonObject(node.properties)) node.type = "object";
+}
+
 /** Project a dereferenced JSON Schema onto Factory Gemini's allowed fields. */
 export function normalizeSchemaForFactoryDroid(value: unknown): unknown {
 	if (!isJsonObject(value)) return value;
-	return copyFactoryDroidSchema(value) ?? {};
+	const out = copyFactoryDroidSchema(value) ?? {};
+	settleMergedUnions(out);
+	return out;
 }

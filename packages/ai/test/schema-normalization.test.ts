@@ -1550,6 +1550,14 @@ describe("normalizeSchemaForFactoryDroid", () => {
 			allOf: [{ anyOf: [{ type: "string" }, { type: "number" }] }, { type: "string" }],
 		});
 		expect(nested).toEqual({ type: "string", nullable: false });
+
+		const property = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ type: "object", properties: { x: { anyOf: [{ type: "string" }, { type: "number" }] } } },
+				{ type: "object", properties: { x: { type: "string" } } },
+			],
+		});
+		expect(property).toEqual({ type: "object", properties: { x: { type: "string", nullable: false } } });
 	});
 
 	it("drops required names a mixed-union branch does not define", () => {
