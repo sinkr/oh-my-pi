@@ -544,16 +544,51 @@ describe("Factory Droid organization lookup", () => {
 		expect(credentials).toMatchObject({ access: scoped, orgId: "factory-org", activeOrganizationId: "org_workos" });
 	});
 
-	it("gives each Factory request its own deadline", async () => {
+	it("gives each Factory request its own 15 s deadline", async () => {
 		const backend = factoryBackend(["org_workos"]);
-		const signals: AbortSignal[] = [];
+		// Deadlines handed out so far, in order; the test expires them by hand.
+		const deadlines: Array<{ controller: AbortController }> = [];
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+			const controller = new AbortController();
+			deadlines.push({ controller });
+			return controller.signal;
+		});
+		let lookupAbortedByEarlierDeadline: boolean | undefined;
+		let lookupAbortedByOwnDeadline: boolean | undefined;
+		let deadlinesAtWhoami = 0;
+		let deadlinesAtLookup = 0;
 		const fetchImpl: FetchImpl = async (input, init) => {
-			if (/\/api\/cli\/(org|whoami)$/.test(String(input)) && init?.signal) signals.push(init.signal);
+			if (String(input).endsWith("/api/cli/whoami") && !deadlinesAtWhoami) deadlinesAtWhoami = deadlines.length;
+			if (String(input).endsWith("/api/cli/org") && lookupAbortedByOwnDeadline === undefined) {
+				// whoami already answered; its deadline expiring must not cut the lookup short.
+				for (const deadline of deadlines.slice(0, -1)) deadline.controller.abort();
+				deadlinesAtLookup = deadlines.length;
+				lookupAbortedByEarlierDeadline = init?.signal?.aborted;
+				deadlines.at(-1)?.controller.abort();
+				lookupAbortedByOwnDeadline = init?.signal?.aborted;
+			}
 			return backend.fetchImpl(input, init);
 		};
-		await withGlobalFetch(fetchImpl, () => loginViaRegistry({ fetch: fetchImpl }));
-		expect(signals.length).toBeGreaterThanOrEqual(3);
-		expect(new Set(signals).size).toBe(signals.length);
+		await withGlobalFetch(fetchImpl, () => loginViaRegistry({ fetch: fetchImpl })).catch(() => {});
+		// The lookup got a deadline of its own after whoami's.
+		expect(deadlinesAtLookup).toBeGreaterThan(deadlinesAtWhoami);
+		expect(lookupAbortedByEarlierDeadline).toBe(false);
+		expect(lookupAbortedByOwnDeadline).toBe(true);
+	});
+
+	it("keeps the login email when the scoped refresh omits the user", async () => {
+		const backend = factoryBackend(["org_workos"]);
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const response = await backend.fetchImpl(input, init);
+			const body = String(init?.body ?? "");
+			if (String(input).endsWith("/authenticate") && !new URLSearchParams(body).has("organization_id")) {
+				const tokens = (await response.json()) as Record<string, unknown>;
+				return jsonResponse(200, { ...tokens, user: { id: "user_1", email: "dev@example.com" } });
+			}
+			return response;
+		};
+		const credentials = await withGlobalFetch(fetchImpl, () => loginViaRegistry({ fetch: fetchImpl }));
+		expect(credentials).toMatchObject({ access: scoped, orgId: "factory-org", email: "dev@example.com" });
 	});
 
 	it("rejects a login whose scoped bearer Factory still refuses", async () => {

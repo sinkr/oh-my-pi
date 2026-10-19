@@ -144,7 +144,12 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 				// The nested refresh checked whoami leniently; a login must see Factory accept the bearer.
 				const confirmed = await readWhoami(scoped, context, requestSignal());
 				if (confirmed.failure) throw confirmed.failure;
-				return confirmed.identity;
+				// The scoped grant may omit the user; keep the identity the login captured.
+				return {
+					...confirmed.identity,
+					email: confirmed.identity.email ?? credentials.email,
+					accountId: confirmed.identity.accountId ?? credentials.accountId,
+				};
 			}
 		}
 	}
