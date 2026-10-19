@@ -183,17 +183,22 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	const byteBudget = resolveInlineImageByteBudget(model, budgetedHost);
 	if (byteBudget === undefined) return context;
 	let inlineBytes = 0;
+	// Assistant images are model outputs no serializer replays (see countImages): never charged or reserved.
+	let unsentBytes = 0;
 	for (const message of context.messages) {
-		// Assistant images are model outputs no serializer replays (see countImages).
-		if (message.role === "assistant" || !Array.isArray(message.content)) continue;
+		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
-			if (part.type === "image") inlineBytes += inlineImageBytes(part, model);
+			if (part.type !== "image") continue;
+			if (message.role === "assistant") unsentBytes += part.data.length;
+			else inlineBytes += inlineImageBytes(part, model);
 		}
 	}
 	if (inlineBytes <= byteBudget) return context;
 	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
-	// Text, tools and the system prompt ride in the same body: only what they leave may hold protected images.
-	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - (JSON.stringify(context).length - inlineBytes);
+	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
+	// images. Base64 is ASCII, so its characters are its bytes.
+	const otherBytes = Buffer.byteLength(JSON.stringify(context)) - inlineBytes - unsentBytes;
+	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - otherBytes;
 	const kept = newestImageMessages(context, model, imageRoom);
 	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, kept });
 }

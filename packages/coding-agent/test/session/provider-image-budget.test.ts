@@ -511,6 +511,50 @@ describe("provider context image budgets", () => {
 		expect(JSON.stringify(clamped).length).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 	});
 
+	it("reserves a Factory request's text in UTF-8 bytes, not characters", () => {
+		const fresh = "C".repeat(3_800_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("界".repeat(300_000))], timestamp: 0 },
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 1 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual([]);
+	});
+
+	it("does not reserve room for assistant images no request replays", () => {
+		const fresh = "C".repeat(3_800_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "assistant",
+					content: [text("generated"), image("G".repeat(2_000_000))],
+					api: "anthropic-messages",
+					provider: "factory-droid",
+					model: "claude-haiku-4-5-20251001",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 0,
+				},
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 1 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, hosted))).toContain(fresh);
+	});
+
 	it("removes an oversized single tool image but keeps its tool result meaningful", () => {
 		const context: Context = {
 			systemPrompt: [],
