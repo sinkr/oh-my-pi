@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a hashline edit under an older tag replacing the wrong line, or breaking the file's syntax, when its line numbers came from `grep -n`, `sed -n` or a `:raw` read of the current file; it is now rejected with the current tag and lines
+- Fixed hashline edits under an older tag overwriting the wrong line when their line numbers came from `grep -n`, `sed -n` or a `:raw` read: a shifted edit whose body matches the current line at those numbers, or that breaks the file's syntax, is now rejected with the current tag and lines
 
 ## [18.12.3] - 2026-10-19
 

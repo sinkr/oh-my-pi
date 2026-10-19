@@ -572,18 +572,23 @@ fn recovery_remaps_a_uniform_line_shift() {
 	assert!(recovered.warnings[0].contains("remapping stale line anchors"));
 }
 
+const ERRANDS: &str = "start the engine\ncheck the oil\ndrive home\n";
+const SHIFTED_ERRANDS: &str =
+	"header one\nheader two\nstart the engine\ncheck the oil\ndrive home\n";
+
 #[test]
 fn recovery_refuses_a_remap_of_a_body_written_for_the_current_line() {
-	// The agent read line 3 (`alpha`) from an untagged view of the current
-	// file and paired it with the old tag; remapping would replace `gamma`.
+	// The agent read line 3 (`start the engine`) from an untagged view of the
+	// current file and paired it with the old tag; remapping would replace
+	// `drive home`.
 	let store = EditStore::new();
 	let path = Path::new("/tmp/recovery-current-line.txt");
-	let tag = store.record(path, "alpha\nbeta\ngamma\n", None);
+	let tag = store.record(path, ERRANDS, None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
-		current_text: "h1\nh2\nalpha\nbeta\ngamma\n",
+		current_text: SHIFTED_ERRANDS,
 		file_hash: &tag,
-		edits: &replacement(3, 3, &["alpha2"], 1),
+		edits: &replacement(3, 3, &["start the engine twice"], 1),
 		clipboard: None,
 	})
 	.unwrap();
@@ -594,17 +599,127 @@ fn recovery_refuses_a_remap_of_a_body_written_for_the_current_line() {
 fn recovery_remaps_a_body_written_for_the_tagged_line() {
 	let store = EditStore::new();
 	let path = Path::new("/tmp/recovery-tagged-line.txt");
-	let tag = store.record(path, "alpha\nbeta\ngamma\n", None);
+	let tag = store.record(path, ERRANDS, None);
 	let recovered = try_recover(&store, RecoveryArgs {
 		path,
-		current_text: "h1\nh2\nalpha\nbeta\ngamma\n",
+		current_text: SHIFTED_ERRANDS,
 		file_hash: &tag,
-		edits: &replacement(3, 3, &["gamma2"], 1),
+		edits: &replacement(3, 3, &["drive home slowly"], 1),
 		clipboard: None,
 	})
 	.unwrap()
 	.unwrap();
-	assert_eq!(recovered.text, "h1\nh2\nalpha\nbeta\ngamma2\n");
+	assert_eq!(
+		recovered.text,
+		"header one\nheader two\nstart the engine\ncheck the oil\ndrive home slowly\n"
+	);
+}
+
+#[test]
+fn recovery_skips_the_body_check_past_its_comparison_budget() {
+	// The refused shape above at 400 lines: scoring it would be quadratic, so
+	// the check abstains and the remap stands.
+	let tagged_rows = (0..400)
+		.map(|i| format!("tagged {i:04}"))
+		.collect::<Vec<_>>();
+	let tagged = format!("{}\nend\n", tagged_rows.join("\n"));
+	let current_rows = (0..400)
+		.map(|i| format!("current row {i} with some ordinary width to it"))
+		.collect::<Vec<_>>();
+	let body = current_rows
+		.iter()
+		.map(|row| format!("{row}!"))
+		.collect::<Vec<_>>();
+	let body = body.iter().map(String::as_str).collect::<Vec<_>>();
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-budget.txt");
+	let tag = store.record(path, &tagged, None);
+	let current = format!("{}\n{tagged}", current_rows.join("\n"));
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: &current,
+		file_hash: &tag,
+		edits: &replacement(1, 400, &body, 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	let expected = format!("{}\n{}\nend\n", current_rows.join("\n"), body.join("\n"));
+	assert_eq!(recovered.text, expected);
+}
+
+#[test]
+fn recovery_remaps_a_shifted_range_that_overlaps_its_kept_line() {
+	// Shifted by one, the authored window (blank, `alpha line`) shares
+	// `alpha line` with the tagged range; the blank must not tip it.
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-overlap.txt");
+	let tag = store.record(path, "intro text\n\nalpha line\nobsolete line\nend text\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "header\nintro text\n\nalpha line\nobsolete line\nend text\n",
+		file_hash: &tag,
+		edits: &replacement(3, 4, &["alpha line 2"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "header\nintro text\n\nalpha line 2\nend text\n");
+}
+
+#[test]
+fn recovery_remaps_a_filled_blank_line_next_to_a_similar_line() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-blank-fill.txt");
+	let tag = store.record(path, "first line here\n\nthird line here\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "a header\nfirst line here\n\nthird line here\n",
+		file_hash: &tag,
+		edits: &replacement(2, 2, &["first line here too"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "a header\nfirst line here\nfirst line here too\nthird line here\n");
+}
+
+#[test]
+fn recovery_remaps_a_short_body_next_to_a_short_line() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-short.txt");
+	let tag = store.record(path, "header\nx\nlong legacy line\ntail\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "prefix\nheader\nx\nlong legacy line\ntail\n",
+		file_hash: &tag,
+		edits: &replacement(3, 3, &["x2"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "prefix\nheader\nx\nx2\ntail\n");
+}
+
+#[test]
+fn recovery_remaps_a_rewrite_loosely_like_the_neighboring_line() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-rewrite.rs");
+	let previous = "fn f() -> u32 {\n\tlet computed = 1;\n\tpanic!(\"not implemented\");\n}\n";
+	let tag = store.record(path, previous, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: &format!("// header\n{previous}"),
+		file_hash: &tag,
+		edits: &replacement(3, 3, &["\treturn computed;"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(
+		recovered.text,
+		"// header\nfn f() -> u32 {\n\tlet computed = 1;\n\treturn computed;\n}\n"
+	);
 }
 
 #[test]
@@ -641,6 +756,60 @@ fn recovery_remaps_a_shifted_insert_that_keeps_the_parse() {
 	.unwrap();
 	assert_eq!(recovered.text, "{\n  \"z\": 0,\n  \"y\": 9,\n  \"a\": 1\n}\n");
 	assert!(recovered.warnings[0].contains("remapping stale line anchors"));
+}
+
+#[test]
+fn recovery_parse_refusal_leaves_the_clipboard_untouched() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-refused-cut.json");
+	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
+	let cut = Edit::Cut {
+		range:    ParsedRange { start: Anchor { line: 2 }, end: Anchor { line: 2 } },
+		register: Some("reg".into()),
+		line_num: 1,
+		index:    0,
+	};
+	let mut clipboard = Clipboard {
+		named: Some(HashMap::from([("reg".to_owned(), vec!["SAVED".to_owned()])])),
+		..Clipboard::default()
+	};
+	let before = clipboard.clone();
+	// Cutting the remapped `"a": 1` leaves `"z": 0,` with a trailing comma.
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "{\n  \"z\": 0,\n  \"a\": 1\n}\n",
+		file_hash: &tag,
+		edits: &[cut, delete(2, 1)],
+		clipboard: Some(&mut clipboard),
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+	assert_eq!(clipboard, before);
+}
+
+#[test]
+fn recovery_publishes_the_registers_of_an_accepted_remap() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-accepted-cut.txt");
+	let tag = store.record(path, "a\nb\nc\n", None);
+	let cut = Edit::Cut {
+		range:    ParsedRange { start: Anchor { line: 2 }, end: Anchor { line: 2 } },
+		register: Some("reg".into()),
+		line_num: 1,
+		index:    0,
+	};
+	let mut clipboard = Clipboard::default();
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "h\na\nb\nc\n",
+		file_hash: &tag,
+		edits: &[cut, delete(2, 1)],
+		clipboard: Some(&mut clipboard),
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "h\na\nc\n");
+	assert_eq!(clipboard.named.unwrap()["reg"], vec!["b".to_owned()]);
 }
 
 #[test]
