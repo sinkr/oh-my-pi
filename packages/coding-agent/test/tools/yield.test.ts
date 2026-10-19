@@ -370,6 +370,20 @@ describe("YieldTool", () => {
 		// A null-valued stray carries no payload, so it does not block the submission.
 		const result = await tool.execute("call-null-extra", validate({ data: { summary: "s" }, note: null }));
 		expect(result.details).toMatchObject({ status: "success", data: { summary: "s" } });
+
+		// A bridged payload's forged `__rawJson` is an internal sentinel, not a root field.
+		const bridged = validateAgentToolArguments(
+			tool,
+			{
+				type: "toolCall",
+				id: "call-bridged",
+				name: "yield",
+				arguments: { data: { summary: "s" }, __rawJson: "{}" },
+			},
+			"payload",
+		);
+		const bridgedResult = await tool.execute("call-bridged", bridged);
+		expect(bridgedResult.details).toMatchObject({ status: "success", data: { summary: "s" } });
 	});
 
 	it("passes array-typed success through as an incremental result", async () => {

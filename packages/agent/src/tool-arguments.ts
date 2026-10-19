@@ -25,7 +25,9 @@ export function validateAgentToolArguments(
 	source: ToolArgumentSource = "parsed",
 ): ToolCall["arguments"] {
 	try {
-		return validateToolArguments(tool, toolCall, { keepUnknownRootKeys: tool.lenientArgValidation });
+		const validated = validateToolArguments(tool, toolCall, { keepUnknownRootKeys: tool.lenientArgValidation });
+		// Kept unknown root keys must not smuggle the internal sentinels past validation.
+		return tool.lenientArgValidation ? withoutSentinels(validated) : validated;
 	} catch (error) {
 		const args: unknown = toolCall.arguments;
 		if (!tool.lenientArgValidation) throw error;
@@ -36,4 +38,13 @@ export function validateAgentToolArguments(
 		delete fallback.__rawJson;
 		return fallback;
 	}
+}
+
+function withoutSentinels(args: ToolCall["arguments"]): ToolCall["arguments"] {
+	if (args === null || typeof args !== "object" || Array.isArray(args)) return args;
+	if (!Object.hasOwn(args, "__parseError") && !Object.hasOwn(args, "__rawJson")) return args;
+	const stripped = { ...(args as Record<string, unknown>) };
+	delete stripped.__parseError;
+	delete stripped.__rawJson;
+	return stripped;
 }
