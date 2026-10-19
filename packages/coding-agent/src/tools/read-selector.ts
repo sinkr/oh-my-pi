@@ -47,17 +47,18 @@ export function resolveTailSelector(parsed: ParsedSelector, totalLines: number):
 	const startLine = Math.max(1, totalLines - parsed.count + 1);
 	const endLine = Math.max(startLine, totalLines);
 	if (!parsed.ranges) return { kind: "lines", ranges: [{ startLine, endLine }], raw: parsed.raw };
-	// Listed ranges come sorted and merged: the first one reaching the tail absorbs it.
-	const before = parsed.ranges.filter(range => range.endLine !== undefined && range.endLine + 1 < startLine);
-	const reaching = parsed.ranges[before.length];
-	const tail: LineRange = reaching
-		? {
-				startLine: Math.min(reaching.startLine, startLine),
-				endLine: reaching.endLine === undefined ? undefined : Math.max(reaching.endLine, endLine),
-			}
-		: { startLine, endLine };
-	const ranges: LineRange[] = [...before, tail];
-	return { kind: "lines", ranges: ranges as [LineRange, ...LineRange[]], raw: parsed.raw };
+	const sorted = [...parsed.ranges, { startLine, endLine }].sort((a, b) => a.startLine - b.startLine);
+	const merged: LineRange[] = [sorted[0]];
+	for (const range of sorted.slice(1)) {
+		const last = merged[merged.length - 1];
+		// An open-ended range already reaches EOF and absorbs every later one.
+		if (last.endLine === undefined) break;
+		if (range.startLine > last.endLine + 1) merged.push(range);
+		else if (range.endLine === undefined || range.endLine > last.endLine) {
+			merged[merged.length - 1] = { startLine: last.startLine, endLine: range.endLine };
+		}
+	}
+	return { kind: "lines", ranges: merged as [LineRange, ...LineRange[]], raw: parsed.raw };
 }
 
 function selectorChunkLooksReadLike(chunk: string): boolean {
