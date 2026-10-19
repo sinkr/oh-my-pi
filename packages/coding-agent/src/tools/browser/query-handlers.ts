@@ -146,11 +146,18 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			wantedRole,
 		);
 	// Text as the accessibility tree reads it (as the Tern kit's `contentText`): hidden subtrees and
-	// `visibility: hidden` text skipped, block children spaced apart, a child's `aria-label`, an image's `alt`
-	// or a text field's value in place of its content. `skip` is the element being named, so a label around a
-	// field does not repeat the field's own value. `visibility` "any" reads a hidden `aria-labelledby` target
-	// whole, as the accessibility tree does.
-	const contentText = (start: Pick<Element, "childNodes">, skip: Element | null, visibility: unknown): string => {
+	// `visibility: hidden` text skipped, block children spaced apart, a child's `aria-labelledby` text,
+	// `aria-label`, an image's `alt` or an embedded control's value in place of its content. `skip` is the
+	// element being named, so a label around a field does not repeat the field's own value. `visibility`
+	// "any" reads a hidden `aria-labelledby` target or native label whole, `display: none` descendants
+	// included, as the accessibility tree does. `followRefs` is off inside a referenced subtree, so
+	// `aria-labelledby` chains are not followed (and cannot cycle).
+	const contentText = (
+		start: Pick<Element, "childNodes">,
+		skip: Element | null,
+		visibility: unknown,
+		followRefs = true,
+	): string => {
 		let text = "";
 		const walk = (element: Pick<Element, "childNodes">, visibility: unknown): void => {
 			for (const child of Array.from(element.childNodes)) {
@@ -164,10 +171,11 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				if (["script", "style", "template", "noscript"].includes(tag)) continue;
 				if (childElement.getAttribute("aria-hidden") === "true") continue;
 				const style = getComputedStyle(childElement);
-				if (style.display === "none") continue;
+				if (style.display === "none" && visibility !== "any") continue;
 				const gap = style.display === "inline" || style.display === "contents" ? "" : " ";
 				const shown = visibility === "any" || style.visibility === "visible";
 				const label = normalizeSpace(childElement.getAttribute("aria-label") ?? "");
+				const labelledBy = followRefs ? idrefText(childElement) : "";
 				// Form controls expose `type`, `value` and `selectedOptions`, which the element type here does not declare.
 				const control = childElement as unknown as {
 					type?: string;
@@ -176,6 +184,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				};
 				const inputType = tag === "input" ? (control.type ?? "").toLocaleLowerCase() : "";
 				const inputButton = ["button", "submit", "reset"].includes(inputType);
+				const childRole = childElement.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
+				// A range reads its ARIA value text, then value, before the DOM value.
+				const range = inputType === "range" || childRole === "slider" || childRole === "spinbutton";
 				// A text field's value stands in for it; a checkbox's or radio's `value` ("on" by default) is not
 				// text it shows, and an input button is named by its label before its value.
 				const valueIsText =
@@ -185,9 +196,16 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 						!["checkbox", "radio", "file", "hidden", "image"].includes(inputType));
 				text += gap;
 				// A nested field contributes its value, not its own label.
-				if (tag === "select") {
+				if (range) {
+					text += shown
+						? childElement.getAttribute("aria-valuetext") ||
+							childElement.getAttribute("aria-valuenow") ||
+							(control.value ?? "")
+						: "";
+				} else if (tag === "select") {
 					text += shown ? Array.from(control.selectedOptions ?? [], option => option.text).join(" ") : "";
 				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
+				else if (labelledBy) text += shown ? labelledBy : "";
 				else if (label) text += shown ? label : "";
 				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
 				else if (inputButton) text += shown ? (control.value ?? "") : "";
@@ -198,30 +216,36 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		walk(start, visibility);
 		return text;
 	};
+	/** Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own references. */
+	const idrefText = (element: Element): string => {
+		const labelledBy = element.getAttribute("aria-labelledby");
+		if (!labelledBy) return "";
+		return normalizeSpace(
+			labelledBy
+				.split(/\s+/)
+				.map(id => {
+					const target = element.ownerDocument?.getElementById(id);
+					if (!target) return "";
+					return contentText(
+						target,
+						null,
+						getComputedStyle(target).visibility === "visible" ? "visible" : "any",
+						false,
+					);
+				})
+				.join(" "),
+		);
+	};
 	const accessibleName = (element: Element): string => {
 		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
 		if (ariaLabel) return ariaLabel;
-		const labelledBy = element.getAttribute("aria-labelledby");
-		if (labelledBy) {
-			const value = normalizeSpace(
-				labelledBy
-					.split(/\s+/)
-					.map(id => {
-						const target = element.ownerDocument?.getElementById(id);
-						if (!target) return "";
-						return contentText(
-							target,
-							null,
-							getComputedStyle(target).visibility === "visible" ? "visible" : "any",
-						);
-					})
-					.join(" "),
-			);
-			if (value) return value;
-		}
+		const labelledBy = idrefText(element);
+		if (labelledBy) return labelledBy;
 		if (element.id) {
 			for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
-				if (label.getAttribute("for") === element.id) return normalizeSpace(contentText(label, element, "visible"));
+				if (label.getAttribute("for") === element.id) {
+					return normalizeSpace(contentText(label, element, "visible"));
+				}
 			}
 		}
 		const wrappingLabel = element.closest("label");

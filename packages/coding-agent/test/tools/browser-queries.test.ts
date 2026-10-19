@@ -80,7 +80,9 @@ beforeAll(async () => {
 		<button>Pick <select><option>Red</option><option selected>Blue</option></select></button>
 		<label for="quantity">Size <input value="10"></label><input id="quantity">
 		<button aria-labelledby="draft-label"></button><span id="draft-label" style="visibility:hidden"><b>Save draft</b></span>
-		<ul role="tree"><li role="treeitem"><input type="checkbox">Node</li><li role="treeitem"><select multiple><option selected>Red</option><option selected>Blue</option></select></li><li role="treeitem"><select aria-label="Palette"><option selected>Green</option></select></li><li role="treeitem"><input type="button" value="Delete" aria-label="Remove"></li></ul>`;
+		<button aria-labelledby="discard-label"></button><span id="discard-label" style="visibility:hidden">Discard<span style="display:none"> draft</span></span>
+		<span id="trash-label">Trash</span>
+		<ul role="tree"><li role="treeitem"><input type="checkbox">Node</li><li role="treeitem"><select multiple><option selected>Red</option><option selected>Blue</option></select></li><li role="treeitem"><select aria-label="Palette"><option selected>Green</option></select></li><li role="treeitem"><input type="button" value="Delete" aria-label="Remove"></li><li role="treeitem"><input type="range" aria-valuetext="Medium" value="50"></li><li role="treeitem"><img alt="Delete" aria-labelledby="trash-label" src="data:,"></li></ul>`;
 	await invoke({ action: "open", name: namesTab, url: `data:text/html,${encodeURIComponent(namesHtml)}` });
 });
 
@@ -123,6 +125,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		["a multi-select contributes every selected option", "treeitem", "Red Blue"],
 		["a nested select contributes its value, not its label", "treeitem", "Green"],
 		["a nested input button contributes its label", "treeitem", "Remove"],
+		["a hidden aria-labelledby target keeps its display: none text", "button", "Discard draft"],
+		["a nested range contributes its ARIA value text", "treeitem", "Medium"],
+		["a nested image's aria-labelledby wins over its alt", "treeitem", "Trash"],
 	])("matches role/ exact names to the name observe() shows when %s", async (_, role, elementName) => {
 		const result = (await invoke({
 			action: "run",

@@ -470,8 +470,9 @@ const idrefText = (el, attribute) => {
 	return normalizeSpace(ids.map(id => {
 		const target = lookup(id);
 		if (!target) return "";
-		// A hidden target is read whole, as the accessibility tree reads one aria-labelledby names.
-		return contentText(target, null, getComputedStyle(target).visibility === "visible" ? "visible" : "any");
+		// A hidden target is read whole, as the accessibility tree reads one aria-labelledby names;
+		// its own aria-labelledby is not followed (no chains, no cycles).
+		return contentText(target, null, getComputedStyle(target).visibility === "visible" ? "visible" : "any", false);
 	}).join(" "));
 };
 const hiddenForA11y = el => {
@@ -482,10 +483,11 @@ const hiddenForA11y = el => {
 	const style = getComputedStyle(el);
 	return style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse";
 };
-// Text an element contributes as name-from-content: text nodes, embedded image alts, nested labels.
-// Text under visibility: hidden is left out, as Chromium's accessibility tree leaves it out, unless
-// visibility is "any".
-const contentText = (el, skip, visibility = "visible") => {
+// Text an element contributes as name-from-content: text nodes, embedded control values, a child's
+// aria-labelledby text, aria-label or image alt. Text under visibility: hidden is left out, as
+// Chromium's accessibility tree leaves it out, unless visibility is "any" (a hidden referenced root,
+// read whole, display: none descendants included).
+const contentText = (el, skip, visibility = "visible", followRefs = true) => {
 	let out = "";
 	const walk = (node, visibility) => {
 		for (let child = node.firstChild; child; child = child.nextSibling) {
@@ -496,21 +498,28 @@ const contentText = (el, skip, visibility = "visible") => {
 			if (child.nodeType !== Node.ELEMENT_NODE || child === skip || SKIP_TAGS.has(child.localName)) continue;
 			if (child.getAttribute("aria-hidden") === "true") continue;
 			const style = getComputedStyle(child);
-			if (style.display === "none") continue;
+			if (style.display === "none" && visibility !== "any") continue;
 			const block = style.display !== "inline" && style.display !== "contents";
 			if (block) out += " ";
 			const shown = visibility === "any" || style.visibility === "visible";
 			const inner = visibility === "any" ? "any" : style.visibility;
 			const label = child.getAttribute("aria-label");
+			const labelledBy = followRefs ? idrefText(child, "aria-labelledby") : "";
 			const field = child.localName === "input" || child.localName === "select" || child.localName === "textarea";
 			const inputButton = child.localName === "input" && ["button", "submit", "reset"].includes(inputType(child));
+			const childRole = (child.getAttribute("role") || "").trim().split(/\s+/)[0].toLowerCase();
+			// A range reads its ARIA value text, then value, before the DOM value.
+			const range = (child.localName === "input" && inputType(child) === "range") || childRole === "slider" || childRole === "spinbutton";
 			// A text field's value stands in for it; a checkbox's or radio's value ("on" by default) is not
 			// text it shows, and an input button is named by its label before its value.
 			const valueIsText = field && !inputButton && (child.localName !== "input" || !["checkbox", "radio", "file", "hidden", "image"].includes(inputType(child)));
 			// A nested field contributes its value, not its own label.
-			if (valueIsText) {
+			if (range) {
+				if (shown) out += child.getAttribute("aria-valuetext") || child.getAttribute("aria-valuenow") || child.value || "";
+			} else if (valueIsText) {
 				if (shown) out += child.localName === "select" ? Array.from(child.selectedOptions, option => option.text).join(" ") : child.value || "";
-			} else if (label) out += shown ? label : "";
+			} else if (labelledBy) out += shown ? labelledBy : "";
+			else if (label) out += shown ? label : "";
 			else if (child.localName === "img") out += shown ? child.getAttribute("alt") || "" : "";
 			else if (inputButton) out += shown ? child.value || "" : "";
 			else if (!field && child.shadowRoot) walk(child.shadowRoot, inner);
