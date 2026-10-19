@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `wait` failing with "Skipped due to a queued background completion" when the job it was waiting for had just finished; it now returns that job's result, and a steer, peer message or aside arriving at the same moment no longer turns a settled job or waiting peer message into that skip
+- Fixed `wait` failing with "Skipped due to a queued background completion" when the job it was waiting for had just finished; it now returns that job's result, and a steer, peer message or aside arriving at the same moment no longer turns a settled job or waiting peer message into that skip ([#16301](https://github.com/can1357/oh-my-pi/pull/16301) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
