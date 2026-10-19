@@ -144,8 +144,8 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 
 /**
  * Messages whose inline images a host with a `request-body-byte-limit` keeps past the byte budget: the newest user
- * message (summary archives excluded) and the newest tool result carrying inline image bytes, provided their images
- * alone fit the limit. Empty otherwise, so the clamp evicts oldest-first as on other hosts.
+ * message (summary archives excluded) and the newest tool result carrying inline image bytes, newest first, each only
+ * while the kept images still fit the limit. The clamp evicts everything else oldest-first, as on other hosts.
  */
 function newestImageMessages(context: Context, model: Model, bodyLimit: number | undefined): Set<Message> {
 	const kept = new Set<Message>();
@@ -165,10 +165,11 @@ function newestImageMessages(context: Context, model: Model, bodyLimit: number |
 		if (isUser) user = message;
 		else if (messageBytes > 0) toolResult = message;
 		else continue;
+		if (messageBytes === 0 || bytes + messageBytes > bodyLimit) continue;
 		bytes += messageBytes;
-		if (messageBytes > 0) kept.add(message);
+		kept.add(message);
 	}
-	return bytes <= bodyLimit ? kept : new Set();
+	return kept;
 }
 
 /**

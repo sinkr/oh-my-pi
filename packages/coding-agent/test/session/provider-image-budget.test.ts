@@ -471,6 +471,30 @@ describe("provider context image budgets", () => {
 		expect(imageData(clampProviderContextImageBytes(oversized, hosted))).toEqual([]);
 	});
 
+	it("keeps the fresh Factory image when it and the newest tool result's image do not fit together", () => {
+		const toolImage = "B".repeat(1_000_000);
+		const fresh = "C".repeat(3_800_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call-0",
+					toolName: "screenshot",
+					content: [text("shot"), image(toolImage)],
+					isError: false,
+					timestamp: 0,
+				},
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 1 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		const clamped = clampProviderContextImageBytes(context, hosted);
+		expect(imageData(clamped)).toEqual([fresh]);
+		expect(textData(clamped)).toEqual(["shot", "look at this"]);
+	});
+
 	it("removes an oversized single tool image but keeps its tool result meaningful", () => {
 		const context: Context = {
 			systemPrompt: [],

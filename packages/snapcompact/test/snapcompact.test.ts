@@ -1404,14 +1404,21 @@ describe("frame data budget", () => {
 		expect(snapcompact.frameDataBytesBudget(getBundledModel("openrouter", "anthropic/claude-opus-5.5"))).toBe(budget);
 		expect(snapcompact.frameDataBytesBudget(undefined)).toBe(budget);
 		// Factory Droid's own hosts carry a smaller budget; a custom gateway in front of Factory keeps the default.
-		const factory = (baseUrl: string) =>
-			buildModel({
-				...toModelSpec(opus),
+		const factory = (baseUrl: string) => {
+			const spec: ModelSpec<"factory-droid-agent"> = {
+				id: "claude-haiku-4-5-20251001",
+				name: "Haiku 4.5",
 				api: "factory-droid-agent",
 				provider: "factory-droid",
-				id: "claude-haiku-4-5-20251001",
 				baseUrl,
-			} as ModelSpec<"factory-droid-agent">);
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			};
+			return buildModel(spec);
+		};
 		expect(snapcompact.frameDataBytesBudget(factory("https://api.factory.ai/api/llm/a"))).toBeLessThan(budget);
 		expect(snapcompact.frameDataBytesBudget(factory("https://factory-gateway.example/api/llm/a"))).toBe(budget);
 		// Opus's 1932px frames: 17 under the default, 70 under Anthropic's share.

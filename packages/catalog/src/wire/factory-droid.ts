@@ -86,16 +86,6 @@ export function factoryDroidWireBaseUrl(wire: FactoryDroidWire, region: string |
 }
 
 /**
- * Whether `baseUrl` addresses Factory's own hosted API (unset, or on the global or EU host) rather than a custom
- * gateway, which keeps its own request limits.
- */
-export function isFactoryDroidHostedBaseUrl(baseUrl: string | undefined): boolean {
-	if (!baseUrl) return true;
-	const origin = URL.parse(baseUrl)?.origin;
-	return origin === factoryDroidApiBaseUrl("global") || origin === factoryDroidApiBaseUrl("eu");
-}
-
-/**
  * Client identity headers shared by discovery, usage and inference requests.
  * Callers add their own auth, `Accept`, routing and SDK headers.
  */

@@ -5,24 +5,25 @@ import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-refere
 import { reachesBudgetedHost, reachesOfficialEndpoint } from "../src/providers/anthropic-state";
 import type { Model, ModelSpec } from "../src/types";
 
-function factoryModel(baseUrl: string | undefined): Model {
-	return buildModel({
+function factoryModel(baseUrl: string): Model {
+	const spec: ModelSpec<"factory-droid-agent"> = {
 		id: "claude-haiku-4-5-20251001",
 		name: "Haiku 4.5",
 		api: "factory-droid-agent",
 		provider: "factory-droid",
-		baseUrl: baseUrl as string,
+		baseUrl,
 		reasoning: true,
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 64_000,
-	} as ModelSpec<"factory-droid-agent">);
+	};
+	return buildModel(spec);
 }
 
 describe("reachesBudgetedHost", () => {
 	it.each([
-		["unset baseUrl", undefined, true],
+		["unset baseUrl", "", true],
 		["global Messages route", "https://api.factory.ai/api/llm/a", true],
 		["EU Responses route", "https://api.eu.factory.ai/api/llm/o/v1", true],
 		["bare global host", "https://api.factory.ai", true],
