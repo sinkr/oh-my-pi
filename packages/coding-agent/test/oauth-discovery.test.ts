@@ -747,6 +747,34 @@ describe("RFC 9728 path-inserted protected resource", () => {
 		expect(calls).not.toContain(originAs);
 	});
 
+	it("uses an authorization server advertised at the resource's own URL", async () => {
+		const serverUrl = "https://host.example";
+		const metadataUrl = `${serverUrl}/.well-known/oauth-protected-resource`;
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			if (String(input) === metadataUrl) {
+				return Response.json({ resource: serverUrl, authorization_servers: [serverUrl] });
+			}
+			if (String(input) === `${serverUrl}/.well-known/oauth-authorization-server`) {
+				return Response.json({
+					issuer: serverUrl,
+					authorization_endpoint: `${serverUrl}/authorize`,
+					token_endpoint: `${serverUrl}/token`,
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		for (const resourceMetadataUrl of [undefined, metadataUrl]) {
+			const oauth = await discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
+			expect(oauth).toMatchObject({
+				authorizationUrl: `${serverUrl}/authorize`,
+				tokenUrl: `${serverUrl}/token`,
+				issuerUrl: serverUrl,
+				resource: serverUrl,
+			});
+		}
+	});
+
 	it("reports the advertised AS issuer mismatch instead of falling back to an unadvertised origin-root AS", async () => {
 		// LiteLLM-style gateway: `/slack/mcp` advertises `https://gw.example/slack`,
 		// whose AS metadata wrongly claims the origin as issuer. The origin-root

@@ -500,15 +500,18 @@ export async function discoverOAuthEndpoints(
 	];
 	const urlsToQuery: Array<{ url: string; issuerCandidate: boolean; advertisedBy?: string }> = [];
 	const visitedAuthServers = new Set<string>();
+	const visitedResources = new Set<string>();
 	// Advertised authorization servers whose metadata failed issuer validation, keyed by server URL.
 	const issuerRejections = new Map<string, OAuthIssuerRejection>();
 
 	let protectedResource: string | undefined;
 	let protectedScopes = opts?.protectedScopes;
 	const addDiscoveryBase = (url: string | undefined, issuerCandidate: boolean, advertisedBy?: string): void => {
-		if (!url || visitedAuthServers.has(url)) return;
+		if (!url) return;
+		const visited = issuerCandidate ? visitedAuthServers : visitedResources;
+		if (visited.has(url)) return;
 		urlsToQuery.push({ url, issuerCandidate, advertisedBy });
-		visitedAuthServers.add(url);
+		visited.add(url);
 	};
 	/**
 	 * Adopt protected-resource metadata's resource/scopes and queue its
@@ -529,8 +532,7 @@ export async function discoverOAuthEndpoints(
 
 	// Step 1: If a resource_metadata URL was provided, fetch it to discover auth servers.
 	// This follows the RFC 9728 chain: resource_metadata → authorization_servers.
-	if (resourceMetadataUrl && !visitedAuthServers.has(resourceMetadataUrl)) {
-		visitedAuthServers.add(resourceMetadataUrl);
+	if (resourceMetadataUrl) {
 		try {
 			const metaResp = await fetchImpl(resourceMetadataUrl, {
 				method: "GET",
