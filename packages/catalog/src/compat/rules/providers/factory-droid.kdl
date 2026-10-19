@@ -1143,11 +1143,9 @@ provider "factory-droid" {
 		"claude-opus-4-8-fast" "claude-opus-5" "claude-opus-5-fast" "claude-haiku-5-5" {
 		disabled-thinking "disabled"
 	}
-	models "claude-*" "atlas-07-21" "aster-07-15" {
-		anthropic-thinking "adaptive-summarized"
-	}
 	// Cache entry lifetimes per retention tier, in seconds, for the cache warmer.
 	models "claude-*" "atlas-07-21" "aster-07-15" {
+		anthropic-thinking "adaptive-summarized"
 		prompt-cache {
 			short 300
 			long 3600

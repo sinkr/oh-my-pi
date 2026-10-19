@@ -14,10 +14,14 @@ import {
 } from "./helpers/factory-droid";
 
 /** The `ttl` of every cache breakpoint in a request body, `5m` where none is set. */
-function breakpointTtls(body: Record<string, unknown>): string[] {
-	return [...JSON.stringify(body).matchAll(/"cache_control":\{"type":"ephemeral"(?:,"ttl":"(\w+)")?\}/g)].map(
-		match => match[1] ?? "5m",
-	);
+function breakpointTtls(body: unknown): string[] {
+	if (Array.isArray(body)) return body.flatMap(breakpointTtls);
+	if (typeof body !== "object" || body === null) return [];
+	return Object.entries(body).flatMap(([key, value]) => {
+		if (key !== "cache_control") return breakpointTtls(value);
+		if (typeof value !== "object" || value === null) return [];
+		return "ttl" in value && typeof value.ttl === "string" ? [value.ttl] : ["5m"];
+	});
 }
 
 describe("Factory Droid anthropic wire (Claude)", () => {
