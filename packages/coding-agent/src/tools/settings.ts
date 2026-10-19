@@ -305,25 +305,33 @@ export const cfgToolsApproval = register({
 });
 
 // Default tool approval mode (interaction tab, but governs the tool wrapper).
-//   "always-ask" — auto-approves read-tier tools only; prompts for write/exec.
-//   "write"      — auto-approves read and write-tier tools; prompts for exec.
-//   "yolo"       — auto-approves every tier.
+//   "always-ask"        — auto-approves read-tier tools only; prompts for write/exec.
+//   "always-ask-cached" — like always-ask, but file reads and writes can be approved
+//                         for a file or folder, this session or across sessions.
+//   "write"             — auto-approves read and write-tier tools; prompts for exec.
+//   "yolo"              — auto-approves every tier.
 export const cfgToolsApprovalMode = register({
 	id: "tools.approvalMode",
 	type: "enum",
-	values: ["always-ask", "write", "yolo"] as const,
+	values: ["always-ask", "always-ask-cached", "write", "yolo"] as const,
 	default: "yolo",
 	ui: {
 		tab: "interaction",
 		group: "Approvals",
 		label: "Tool Approval",
 		description:
-			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
+			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Ask and remember' also asks before file reads, and can remember a file or folder. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
 		options: [
 			{
 				value: "always-ask",
 				label: "Always ask",
 				description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
+			},
+			{
+				value: "always-ask-cached",
+				label: "Ask and remember",
+				description:
+					"Ask before reading or writing a file, with answers that remember the file or its folder for this session or every session; require confirmation for exec tools.",
 			},
 			{
 				value: "write",

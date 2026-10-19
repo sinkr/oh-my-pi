@@ -1421,6 +1421,11 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		deferrable: tool.deferrable,
 		readsSkillUris: tool.readsSkillUris,
 		approval: typeof tool.approval === "function" ? tool.approval.bind(tool) : tool.approval,
+		// Extension tools take part in Ask-and-remember grants through the same bridge.
+		approvalCacheTargets:
+			typeof tool.approvalCacheTargets === "function"
+				? tool.approvalCacheTargets.bind(tool)
+				: tool.approvalCacheTargets,
 		// Preserved through RegisteredToolAdapter so MCP-backed tools' explicit
 		// `strict: false` (#4336/#4340) survives the custom-tool → definition bridge.
 		strict: tool.strict,
