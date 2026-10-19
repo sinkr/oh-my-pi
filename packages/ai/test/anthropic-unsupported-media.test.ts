@@ -87,7 +87,7 @@ function failedReply(): AssistantMessage {
 }
 
 const omitted = (mimeType: string) => ({
-	type: "text",
+	type: "text" as const,
 	text: `[${mimeType} attachment omitted: not supported by this model]`,
 });
 
