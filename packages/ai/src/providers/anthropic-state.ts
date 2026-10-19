@@ -1,5 +1,6 @@
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { isCatalogEndpointUrl } from "@oh-my-pi/pi-catalog/compat/catalog-endpoint";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Api, Model, ProviderSessionState } from "../types";
 import { isFoundryEnabled } from "../utils/foundry";
@@ -42,12 +43,14 @@ export function reachesOfficialEndpoint(model: Model<Api>): boolean {
 
 /**
  * Whether the catalog's host request budgets (inline image bytes, official image count) apply to a request to
- * `model`: it reaches the official endpoint ({@link reachesOfficialEndpoint}), or it is a Factory Droid model
- * served by Factory's own hosted API (unset `baseUrl`, or a catalog endpoint host), whose limits the
- * `factory-droid` rules describe. A custom gateway keeps its own.
+ * `model`: it reaches the official endpoint ({@link reachesOfficialEndpoint}), or its rules set
+ * `catalog-endpoint-budgets` (Factory Droid's hosted API) and it reaches the provider's own catalog endpoint
+ * (unset `baseUrl`, or an `endpoint-hosts` host). A custom gateway keeps its own limits.
  */
 export function reachesBudgetedHost(model: Model<Api>): boolean {
-	if (model.api === "factory-droid-agent") return !model.baseUrl || isCatalogEndpointUrl(model, model.baseUrl);
+	if (resolveCatalogPolicy(model).catalogEndpointBudgets === true) {
+		return !model.baseUrl || isCatalogEndpointUrl(model, model.baseUrl);
+	}
 	return reachesOfficialEndpoint(model);
 }
 

@@ -499,6 +499,17 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"request-body-byte-limit": { key: "requestBodyByteLimit", set: "catalog", shape: "scalar" },
 	/**
+	 * Opt-in: the host budgets above apply whenever the request reaches the provider's own catalog endpoint
+	 * (`endpoint-hosts`, or an unset `baseUrl`), for a hosted gateway whose compat names no official endpoint.
+	 * Unassigned: they apply only on the official endpoint (pi-ai `reachesOfficialEndpoint`).
+	 */
+	"catalog-endpoint-budgets": {
+		key: "catalogEndpointBudgets",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
+	/**
 	 * Supported formats and size bounds for judgment-request images; `mime-types`
 	 * is comma-separated because object payloads have no array shape.
 	 */

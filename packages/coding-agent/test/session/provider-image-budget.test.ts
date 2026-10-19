@@ -555,6 +555,28 @@ describe("provider context image budgets", () => {
 		expect(imageData(clampProviderContextImageBytes(context, hosted))).toContain(fresh);
 	});
 
+	it("does not reserve room for UI-only tool-result details", () => {
+		const fresh = "C".repeat(3_800_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call-0",
+					toolName: "eval",
+					content: [text("done")],
+					details: { log: "d".repeat(800_000) },
+					isError: false,
+					timestamp: 0,
+				},
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 1 },
+			],
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual([fresh]);
+	});
+
 	it("removes an oversized single tool image but keeps its tool result meaningful", () => {
 		const context: Context = {
 			systemPrompt: [],

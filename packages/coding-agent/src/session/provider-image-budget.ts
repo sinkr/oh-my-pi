@@ -196,8 +196,11 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	if (inlineBytes <= byteBudget) return context;
 	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
 	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
-	// images. Base64 is ASCII, so its characters are its bytes.
-	const otherBytes = Buffer.byteLength(JSON.stringify(context)) - inlineBytes - unsentBytes;
+	// images. Base64 is ASCII, so its characters are its bytes. Tool-result `details` are UI-only and never sent.
+	const wire = context.messages.map(message =>
+		message.role === "toolResult" ? { ...message, details: undefined } : message,
+	);
+	const otherBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: wire })) - inlineBytes - unsentBytes;
 	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - otherBytes;
 	const kept = newestImageMessages(context, model, imageRoom);
 	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, kept });

@@ -20,8 +20,10 @@ provider "factory-droid" {
 	inline-image-byte-budget 3500000
 	request-body-byte-limit 4500000
 	// Factory's own hosts per residency (wire/factory-droid.ts factoryDroidApiBaseUrl);
-	// seed rows are never bundled, so they are listed here for isCatalogEndpointUrl.
+	// seed rows are never bundled, so they are listed here for isCatalogEndpointUrl,
+	// which gates the budgets above (Factory's compat names no official endpoint).
 	endpoint-hosts "api.factory.ai" "api.eu.factory.ai"
+	catalog-endpoint-budgets #true
 
 	// The registry roster. Factory has no model-listing endpoint, so first-party
 	// clients ship this list and narrow it per account with feature flags, org
