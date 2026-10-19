@@ -52,6 +52,8 @@ struct RawSection {
 	file_hash:   Option<String>,
 	diff:        String,
 	interleaved: bool,
+	/// Some authored header for this path held a placeholder instead of a tag.
+	placeholder: bool,
 }
 
 /// One target file section with a lazily memoized parsed body.
@@ -202,6 +204,7 @@ pub fn contains_recognizable_hashline_operations(input: &str) -> bool {
 /// Path of the first section header, for input whose headers carry no ops
 /// (so [`Patch::parse`] yields no sections).
 pub fn first_header_path(input: &str, options: &SplitOptions<'_>) -> Option<String> {
+	let input = input.strip_prefix('\u{feff}').unwrap_or(input);
 	input.lines().find_map(|line| {
 		let clean = unbracket_envelope_markers(line.trim_end());
 		Some(parse_header_line(clean, options.cwd).ok()??.path)
@@ -269,7 +272,13 @@ fn parse_header_line(line: &str, cwd: Option<&Path>) -> Result<Option<RawSection
 		if path.is_empty() {
 			return Err(EditError::parse("Input header \"[]\" is empty; provide a file path."));
 		}
-		return Ok(Some(RawSection { path, file_hash, diff: String::new(), interleaved: false }));
+		return Ok(Some(RawSection {
+			path,
+			file_hash,
+			diff: String::new(),
+			interleaved: false,
+			placeholder: false,
+		}));
 	}
 	if let Some(recovered) = recover_header(trimmed, cwd) {
 		return Ok(Some(recovered));
@@ -286,15 +295,16 @@ fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
 	if body.is_empty() {
 		return None;
 	}
-	let (path_text, file_hash) = if let Some(captures) = RECOVERY_TAG_RE.captures(&body) {
+	let (path_text, file_hash, placeholder) = if let Some(captures) = RECOVERY_TAG_RE.captures(&body)
+	{
 		let whole = captures.get(0)?;
-		(&body[..whole.start()], Some(captures[1].to_ascii_uppercase()))
+		(&body[..whole.start()], Some(captures[1].to_ascii_uppercase()), false)
 	} else if let Some(placeholder) = PLACEHOLDER_TAG_RE.find(&body) {
 		// A placeholder is no tag: the section parses untagged, and staging
 		// answers it with the file's current tag, as for an unknown hex tag.
-		(&body[..placeholder.start()], None)
+		(&body[..placeholder.start()], None, true)
 	} else {
-		(body.trim_end(), None)
+		(body.trim_end(), None, false)
 	};
 	// Only a recovered tag disambiguates a `#` inside the path; untagged, it is
 	// a malformed tag (`a.ts#1A2B copied`), not part of a file name.
@@ -308,6 +318,7 @@ fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
 		file_hash,
 		diff: String::new(),
 		interleaved: false,
+		placeholder,
 	})
 }
 
@@ -457,6 +468,12 @@ fn merge_same_path_sections(sections: Vec<RawSection>) -> Result<Vec<RawSection>
 			}
 			if existing.file_hash.is_none() {
 				existing.file_hash = section.file_hash;
+			}
+			// A placeholder never borrows another header's tag: the merged
+			// section stays untagged, so it gets the current-tag reply.
+			if section.placeholder || existing.placeholder {
+				existing.placeholder = true;
+				existing.file_hash = None;
 			}
 			if previous.as_deref() != Some(&section.path) {
 				existing.interleaved = true;

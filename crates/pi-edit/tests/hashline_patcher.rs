@@ -223,12 +223,19 @@ async fn untagged_head_and_tail_inserts_do_not_apply() {
 #[tokio::test]
 async fn header_only_input_gets_the_current_tag() {
 	let current = pi_edit::store::file_hash(UNTAGGED_TEXT);
-	for header in ["a.txt#AUTO", "a.txt#0000", "a.txt", &format!("a.txt#{current}")] {
+	for header in [
+		"[a.txt#AUTO]",
+		"[a.txt#0000]",
+		"[a.txt]",
+		&format!("[a.txt#{current}]"),
+		"\u{feff}[a.txt#AUTO]",
+		&format!("\u{feff}[a.txt#{current}]"),
+	] {
 		let workspace = common::Workspace::new(EditMode::Hashline);
 		workspace.write("a.txt", UNTAGGED_TEXT);
 		let writer = common::DiskWriter::default();
 		let error = workspace
-			.apply_json(&json!({ "input": format!("[{header}]\n") }), &writer)
+			.apply_json(&json!({ "input": format!("{header}\n") }), &writer)
 			.await
 			.expect_err("a header with no ops must not apply")
 			.to_string();
@@ -244,6 +251,32 @@ async fn header_only_input_gets_the_current_tag() {
 			"{header}: {error}"
 		);
 		assert!(writer.requests.lock().is_empty(), "{header}");
+	}
+}
+
+#[tokio::test]
+async fn placeholder_section_does_not_borrow_a_same_path_tag() {
+	let current = pi_edit::store::file_hash(UNTAGGED_TEXT);
+	for placeholder in ["AUTO", "????", ""] {
+		for input in [
+			format!("[a.txt#{placeholder}]\nPUT 1.=1:\n+A\n[a.txt#{current}]\nPUT 2.=2:\n+B\n"),
+			format!("[a.txt#{current}]\nPUT 1.=1:\n+A\n[a.txt#{placeholder}]\nPUT 2.=2:\n+B\n"),
+		] {
+			let workspace = common::Workspace::new(EditMode::Hashline);
+			workspace.write("a.txt", UNTAGGED_TEXT);
+			let writer = common::DiskWriter::default();
+			let error = workspace
+				.apply_json(&json!({ "input": input }), &writer)
+				.await
+				.expect_err("a placeholder section must not apply under another header's tag")
+				.to_string();
+			assert!(
+				error.contains(&format!("the header needs this file's current tag, #{current}.")),
+				"{input}: {error}"
+			);
+			assert!(writer.requests.lock().is_empty(), "{input}");
+			assert_eq!(workspace.read("a.txt").as_deref(), Some(UNTAGGED_TEXT), "{input}");
+		}
 	}
 }
 
