@@ -186,7 +186,7 @@ describe("Factory Droid image generation", () => {
 	it("sends a rotated sibling's request to that account's region host", async () => {
 		const captured: CapturedRequest[] = [];
 		const euToken = workosJwt({ external_org_id: "org-eu" });
-		const fetchImpl: FetchImpl = async (url, init) => {
+		const fetchImpl: FetchImpl = async url => {
 			captured.push({ url: String(url), headers: {}, body: {} });
 			return String(url).startsWith("https://api.factory.ai")
 				? Response.json({ detail: "usage limit reached" }, { status: 429 })
