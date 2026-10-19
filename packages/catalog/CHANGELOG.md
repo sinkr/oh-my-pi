@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Gemma 4 models on Google AI Studio (`google/gemma-4-31b-it`, `google/gemma-4-26b-a4b-it`, …) no longer fail every request with `Thinking budget is not supported for this model`; thinking is now toggled with `thinkingLevel` (on = `high`, off = `minimal`) ([#16350](https://github.com/can1357/oh-my-pi/issues/16350))
+
+## [18.12.2] - 2026-10-18
+
 ### Changed
 
 - Seeded TypeSafe `jev-1.14.0` and OpenRouter `typesafe/jev-1.14`, and made them the `judge` role defaults and TypeSafe's default model; TypeSafe discovery keeps seeded ids its alias-only `/v1/models` listing omits

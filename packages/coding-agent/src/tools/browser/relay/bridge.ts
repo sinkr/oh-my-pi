@@ -615,6 +615,9 @@ export class RelayBridge {
 					if (!ok) this.#onTabDetached(tab.tabKey, "reattach_failed", false);
 				});
 			}
+			// A tab the hello brings that no client was told about, such as one a browser opened before its
+			// extension connected, is announced now: no later change has to happen for Puppeteer to see it.
+			if (!tab.announced && this.#eligible(tab)) this.#announceTab(tab);
 		}
 		this.#syncGrouping();
 		this.#log("extension connected", {
