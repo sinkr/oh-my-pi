@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `splitPathAndSel` and `splitInternalUrlSel` peel comma line lists that include a tail chunk (`:1-12,-15`) or repeat the colon after a comma (`:1-30,:-30`)
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

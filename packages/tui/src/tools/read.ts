@@ -104,11 +104,15 @@ export interface ReadToolDetails {
 // Parsing also recognizes incomplete counts to explain their errors; path splitting
 // only peels complete selectors (not a trailing `+` or `L`).
 const RANGE_SELECTOR_CHUNK = `${LINE_RANGE_CHUNK_SOURCE}(?<=[\\d.-])`;
-const RANGE_LIST_SRC = `${RANGE_SELECTOR_CHUNK}(?:,${RANGE_SELECTOR_CHUNK})*`;
 // A tail selector: `-N` reads the last N lines. Keep in sync with TAIL_SELECTOR_RE.
 const TAIL_CHUNK_SRC = String.raw`-\d+`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC}|raw|conflicts|img)$`, "i");
-const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC})$`, "i");
+// A comma list may mix ranges and tails (`1-12,-15`); a lone tail is a one-chunk list.
+const LIST_CHUNK_SRC = `(?:${RANGE_SELECTOR_CHUNK}|${TAIL_CHUNK_SRC})`;
+const RANGE_LIST_SRC = `${LIST_CHUNK_SRC}(?:,${LIST_CHUNK_SRC})*`;
+// `1-30,:-30` repeats the selector colon inside a list; it reads as `1-30,-30`.
+const COLON_REPEATED_LIST_RE = new RegExp(`:(${LIST_CHUNK_SRC}(?:,:?${LIST_CHUNK_SRC})*,:${RANGE_LIST_SRC})$`, "i");
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts|img)$`, "i");
+const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC})$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
 // plus common malformed shapes (e.g. `:-N-M`) so the read tool peels the entire
@@ -117,13 +121,20 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
+
+/** Drop the colons repeated after commas in a trailing line list (`a:1-30,:-30` → `a:1-30,-30`). */
+function collapseRepeatedListColons(rawPath: string): string {
+	return rawPath.replace(COLON_REPEATED_LIST_RE, (_match, list: string) => `:${list.replaceAll(",:", ",")}`);
+}
+
 /** Split a filesystem path from its trailing read selector. */
-export function splitPathAndSel(rawPath: string): { path: string; sel?: string } {
+export function splitPathAndSel(input: string): { path: string; sel?: string } {
+	const rawPath = collapseRepeatedListColons(input);
 	const colon = rawPath.lastIndexOf(":");
-	if (colon <= 0) return { path: rawPath };
+	if (colon <= 0) return { path: input };
 
 	const candidate = rawPath.slice(colon + 1);
-	if (!FILE_LINE_RANGE_RE.test(candidate)) return { path: rawPath };
+	if (!FILE_LINE_RANGE_RE.test(candidate)) return { path: input };
 
 	let basePath = rawPath.slice(0, colon);
 	let sel = candidate;
@@ -182,7 +193,7 @@ export function splitInternalUrlSel(
 	if (spec.portAuthority && !url.rest.includes("/")) return { path: rawPath };
 
 	const schemeEnd = rawPath.length - url.rest.length;
-	let path = rawPath;
+	let path = collapseRepeatedListColons(rawPath);
 	const chunks: string[] = [];
 	while (true) {
 		const colon = path.lastIndexOf(":");

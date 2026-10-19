@@ -45,7 +45,7 @@ For normal file-like reads, `splitPathAndSel()` in `packages/tui/src/tools/read.
 | `:A-B` / `:LA-LB` / `:A..B`   | Inclusive 1-indexed line range (`..` is a forgiving alias normalized to `-`).                                                                  |
 | `:A+C` / `:LA+LC`             | `C` lines starting at `A`; tool converts this to end line `A + C - 1`.                                                                         |
 | `:-N`                        | Last `N` lines; `N` must be positive. Also combines with `:raw`. |
-| `:R1,R2,...`                  | Multiple ranges, sorted and merged before reading (for example `:5-16,960-973`).                                                               |
+| `:R1,R2,...`                  | Multiple ranges, sorted and merged before reading (for example `:5-16,960-973`). A `-N` chunk adds the last `N` lines (`:1-12,-15`); a colon repeated after a comma is dropped (`:1-30,:-30`). |
 | `:range:raw` or `:raw:range`  | Same line selection, but raw output.                                                                                                           |
 
 Validation in `parseLineRangeChunk()`:
