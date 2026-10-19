@@ -180,12 +180,13 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 					(tag === "input" &&
 						!["checkbox", "radio", "file", "hidden"].includes((control.type ?? "").toLocaleLowerCase()));
 				text += gap;
-				if (label) text += shown ? label : "";
-				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
-				else if (tag === "select") {
+				// A nested field contributes its value, not its own label.
+				if (tag === "select") {
 					text += shown ? Array.from(control.selectedOptions ?? [], option => option.text).join(" ") : "";
-				} else if (tag === "input" || tag === "textarea") text += shown && valueIsText ? (control.value ?? "") : "";
-				else walk(childElement, visibility === "any" ? "any" : style.visibility);
+				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
+				else if (label) text += shown ? label : "";
+				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
+				else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
 				text += gap;
 			}
 		};

@@ -502,14 +502,16 @@ const contentText = (el, skip, visibility = "visible") => {
 			const shown = visibility === "any" || style.visibility === "visible";
 			const inner = visibility === "any" ? "any" : style.visibility;
 			const label = child.getAttribute("aria-label");
-			if (label) out += shown ? label : "";
+			const field = child.localName === "input" || child.localName === "select" || child.localName === "textarea";
+			// A checkbox's or radio's value ("on" by default) is not text it shows.
+			const valueIsText = field && (child.localName !== "input" || !["checkbox", "radio", "file", "hidden"].includes(inputType(child)));
+			// A nested field contributes its value, not its own label.
+			if (valueIsText) {
+				if (shown) out += child.localName === "select" ? Array.from(child.selectedOptions, option => option.text).join(" ") : child.value || "";
+			} else if (label) out += shown ? label : "";
 			else if (child.localName === "img") out += shown ? child.getAttribute("alt") || "" : "";
-			else if (child.localName === "input" || child.localName === "select" || child.localName === "textarea") {
-				// A checkbox's or radio's value ("on" by default) is not text it shows.
-				const valueIsText = child.localName !== "input" || !["checkbox", "radio", "file", "hidden"].includes(inputType(child));
-				if (shown && valueIsText) out += child.localName === "select" ? Array.from(child.selectedOptions, option => option.text).join(" ") : child.value || "";
-			} else if (child.shadowRoot) walk(child.shadowRoot, inner);
-			else walk(child, inner);
+			else if (!field && child.shadowRoot) walk(child.shadowRoot, inner);
+			else if (!field) walk(child, inner);
 			if (block) out += " ";
 		}
 	};
