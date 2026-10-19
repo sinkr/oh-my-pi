@@ -102,6 +102,36 @@ function withoutUndefinedRequired(branch: JsonObject): JsonObject {
 	return required.length > 0 ? { ...rest, required } : rest;
 }
 
+function settleUnion(out: JsonObject, branches: JsonObject[], nullable: boolean): void {
+	let nonNull = branches;
+	const mixedTypes =
+		nonNull.every(branch => typeof branch.type === "string") && new Set(nonNull.map(branch => branch.type)).size > 1;
+	if (mixedTypes && Object.keys(out).every(key => key in ANY_OF_SIBLING_KEYS)) {
+		out.anyOf = nonNull.map(withoutUndefinedRequired);
+		if (nullable) out.nullable = true;
+		return;
+	}
+	if (mixedTypes) {
+		// `anyOf` must be the only structural field, and branches of
+		// different types never merge into one Schema: keep only the
+		// branches of the node's own type (none if no branch has it),
+		// else of the first branch's type.
+		const ownType = Array.isArray(out.type)
+			? (out.type as unknown[]).find(t => typeof t === "string" && t !== "null")
+			: (out.type ?? (isJsonObject(out.properties) ? "object" : undefined));
+		const kept = ownType ?? nonNull[0].type;
+		nonNull = nonNull.filter(branch => branch.type === kept);
+	}
+	let collapsed: JsonObject | undefined;
+	for (const branch of nonNull) {
+		collapsed = collapsed ? mergeFactoryDroidSchemas(collapsed, branch, "intersection") : { ...branch };
+	}
+	if (collapsed) {
+		collapsed.nullable = nullable;
+		Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
+	}
+}
+
 function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 	if (!isJsonObject(node)) return undefined;
 
@@ -126,11 +156,20 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 	}
 
 	// allOf: merge every branch into this node's own copy first, so the union
-	// handling below sees every field that will sit beside it.
+	// handling below sees every field that will sit beside it. A union a
+	// branch kept as `anyOf` is held back and settled against the merged node.
+	const heldUnions: Array<{ branches: JsonObject[]; nullable: boolean }> = [];
 	if (Array.isArray(node.allOf)) {
 		for (const branch of node.allOf) {
 			const copied = copyFactoryDroidSchema(branch);
-			if (copied) Object.assign(out, mergeFactoryDroidSchemas(out, copied, "union"));
+			if (!copied) continue;
+			if (Array.isArray(copied.anyOf)) {
+				const { anyOf, nullable, ...rest } = copied;
+				heldUnions.push({ branches: anyOf as JsonObject[], nullable: nullable === true });
+				Object.assign(out, mergeFactoryDroidSchemas(out, rest, "union"));
+			} else {
+				Object.assign(out, mergeFactoryDroidSchemas(out, copied, "union"));
+			}
 		}
 	}
 
@@ -145,36 +184,10 @@ function copyFactoryDroidSchema(node: unknown): JsonObject | undefined {
 		const branches = (node[unionKey] as unknown[])
 			.map(copyFactoryDroidSchema)
 			.filter((branch): branch is JsonObject => branch !== undefined);
-		let nonNull = branches.filter(branch => !typeIncludesNull(branch));
-		const nullable = nonNull.length < branches.length;
-		const mixedTypes =
-			nonNull.every(branch => typeof branch.type === "string") &&
-			new Set(nonNull.map(branch => branch.type)).size > 1;
-		if (mixedTypes && Object.keys(out).every(key => key in ANY_OF_SIBLING_KEYS)) {
-			out.anyOf = nonNull.map(withoutUndefinedRequired);
-			if (nullable) out.nullable = true;
-		} else {
-			if (mixedTypes) {
-				// `anyOf` must be the only structural field, and branches of
-				// different types never merge into one Schema: keep only the
-				// branches of the node's own type (none if no branch has it),
-				// else of the first branch's type.
-				const ownType = Array.isArray(out.type)
-					? (out.type as unknown[]).find(t => typeof t === "string" && t !== "null")
-					: (out.type ?? (isJsonObject(out.properties) ? "object" : undefined));
-				const kept = ownType ?? nonNull[0].type;
-				nonNull = nonNull.filter(branch => branch.type === kept);
-			}
-			let collapsed: JsonObject | undefined;
-			for (const branch of nonNull) {
-				collapsed = collapsed ? mergeFactoryDroidSchemas(collapsed, branch, "intersection") : { ...branch };
-			}
-			if (collapsed) {
-				collapsed.nullable = nullable;
-				Object.assign(out, mergeFactoryDroidSchemas(out, collapsed, "union"));
-			}
-		}
+		const nonNull = branches.filter(branch => !typeIncludesNull(branch));
+		settleUnion(out, nonNull, nonNull.length < branches.length);
 	}
+	for (const held of heldUnions) settleUnion(out, held.branches, held.nullable);
 
 	// The Schema proto takes a single string `type`: collapse draft-2020-12
 	// type unions the way the shared normalizer does — a null branch becomes

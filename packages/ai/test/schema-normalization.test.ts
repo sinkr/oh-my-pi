@@ -1545,6 +1545,11 @@ describe("normalizeSchemaForFactoryDroid", () => {
 			allOf: [{ type: "string" }],
 		});
 		expect(normalized).toEqual({ type: "string", nullable: false });
+
+		const nested = normalizeSchemaForFactoryDroid({
+			allOf: [{ anyOf: [{ type: "string" }, { type: "number" }] }, { type: "string" }],
+		});
+		expect(nested).toEqual({ type: "string", nullable: false });
 	});
 
 	it("drops required names a mixed-union branch does not define", () => {
