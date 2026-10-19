@@ -107,4 +107,64 @@ describe("print mode builtin exit codes", () => {
 			await removeWithRetries(cwd);
 		}
 	});
+
+	test("counts a builtin-started turn (/retry) as admitted and prints its answer", async () => {
+		// `/retry` consumes the input but schedules a real agent turn
+		// (`agentInvoked`); that turn's answer belongs to this run, so it is
+		// printed — not suppressed as a stale persisted turn — and its stop
+		// reason decides the exit status.
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-print-retry-"));
+		const stdoutLines: string[] = [];
+		const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+			chunk: unknown,
+			callback?: (err?: Error | null) => void,
+		) => {
+			stdoutLines.push(String(chunk));
+			callback?.(null);
+			return true;
+		}) as never);
+		const retriedAnswer = {
+			role: "assistant",
+			content: [{ type: "text", text: "retried answer" }],
+			stopReason: "stop",
+			timestamp: Date.now(),
+		} as never;
+		const prompts: string[] = [];
+		const session = {
+			extensionRunner: undefined,
+			subscribe: () => () => {},
+			settings: Settings.isolated(),
+			sessionManager: {
+				buildSessionContext: () => ({ messages: [] }),
+				getEntries: () => [],
+				getCwd: () => cwd,
+				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
+			},
+			disableStopTimeTodoReminders: () => {},
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForIdle: async () => {},
+			setTextOutputCommitted: () => {},
+			waitForAdvisorCatchup: async () => true,
+			prompt: async (text: string) => {
+				prompts.push(text);
+			},
+			retry: async () => true,
+			getLastAssistantMessage: () => retriedAnswer,
+			dispose: async () => {},
+		} as unknown as AgentSession;
+
+		try {
+			const exit = await runPrintMode(session, { mode: "text", messages: ["/retry"] });
+			expect(exit).toBe(0);
+			// The input was consumed locally (no new prompt)…
+			expect(prompts).toEqual([]);
+			// …and the retried turn's answer was printed as this run's answer.
+			expect(stdoutLines.join("")).toContain("retried answer");
+		} finally {
+			stdoutSpy.mockRestore();
+			vi.restoreAllMocks();
+			await removeWithRetries(cwd);
+		}
+	});
 });

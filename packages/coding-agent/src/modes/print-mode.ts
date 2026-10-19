@@ -262,8 +262,18 @@ async function runPrintModeCore(
 	// persisted previous turn must not be reprinted or its old stop reason
 	// reused as this run's exit status.
 	let admittedAgentTurn = false;
-	// The one locally-dispatched print-mode command (this feature's scope).
-	const PRINT_REAUTH_COMMAND = /^\/mcp\s+reauth(?:\s|$)/;
+	// The print-mode-dispatched commands. Only commands whose runtime hooks
+	// are real in the headless runtime belong here: each runs a session API
+	// (`/mcp reauth` engine, `session.compact`, `session.handoff`,
+	// `session.retry`, the stats dashboard launcher). Commands whose hooks
+	// would be stubs (`/reload-plugins` and friends) stay undispatched.
+	const PRINT_DISPATCHED_COMMANDS = [
+		/^\/mcp\s+reauth(?:\s|$)/,
+		/^\/compact(?:\s|$)/,
+		/^\/handoff(?:\s|$)/,
+		/^\/stats(?:\s|$)/,
+		/^\/retry(?:\s|$)/,
+	] as const;
 	/**
 	 * Dispatch a CLI-authored message as a local command, if it is one.
 	 *
@@ -271,17 +281,20 @@ async function runPrintModeCore(
 	 * dispatched. The merged stdin/@file `initialMessage` is attacker-shaped
 	 * end to end — `curl … | omp "summarize"` must never run a slash payload
 	 * from the pipe as a command — so it always prompts the model as text.
-	 * `/mcp reauth` is the only dispatched command here; every other slash
-	 * input keeps the historic behavior of prompting the model literally.
-	 * Returns whether the message was consumed locally.
+	 * Commands outside the dispatched list keep the historic behavior of
+	 * prompting the model with the literal text. Returns whether the message
+	 * was consumed locally.
 	 */
 	const dispatchCliMessage = async (message: string): Promise<boolean> => {
-		if (!PRINT_REAUTH_COMMAND.test(message)) return false;
+		if (!PRINT_DISPATCHED_COMMANDS.some(pattern => pattern.test(message))) return false;
 		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
-		// The allow-list only matches a registered command, so `false` (not a
+		// The allow-list only matches registered commands, so `false` (not a
 		// command) and a `{ prompt }` residual cannot occur; stay defensive.
 		if (result === false || "prompt" in result) return false;
 		if (result.failed) builtinFailed = true;
+		// A builtin that scheduled a real agent turn (`/retry`) admitted that
+		// turn: its answer (and stop reason) belong to this run.
+		if (result.agentInvoked) admittedAgentTurn = true;
 		// A recovery command may have repaired a server the strict gate
 		// failed on, so the gate re-evaluates before the next model turn.
 		return true;
