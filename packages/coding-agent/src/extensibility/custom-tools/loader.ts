@@ -53,7 +53,22 @@ function invalidToolError(path: string, index: number, source: ToolLoadError["so
 }
 
 /**
- * Load a single tool module using native Bun import.
+ * The factory a tool module exports. A CommonJS module's namespace `default` is
+ * its whole `module.exports`, so transpiled output (`exports.default = factory`
+ * with `__esModule`) carries the factory one level down.
+ */
+function customToolFactoryOf(module: { default?: unknown }): CustomToolFactory | undefined {
+	const candidate = module.default ?? module;
+	if (typeof candidate === "function") return candidate as CustomToolFactory;
+	if (typeof candidate === "object" && candidate !== null && "default" in candidate) {
+		const nested = candidate.default;
+		if (typeof nested === "function") return nested as CustomToolFactory;
+	}
+	return undefined;
+}
+
+/**
+ * Load a single tool module through the host-package loader.
  */
 async function loadTool(
 	toolPath: string,
@@ -78,8 +93,13 @@ async function loadTool(
 	}
 
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as { default?: unknown };
-		const factory = (module.default ?? module) as CustomToolFactory;
+		// `reload: false`: a tool module and its helpers are evaluated once per
+		// process and shared, as with a native import; each session still calls
+		// the factory with its own API.
+		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath, { reload: false }))) as {
+			default?: unknown;
+		};
+		const factory = customToolFactoryOf(module);
 
 		if (typeof factory !== "function") {
 			return { tools: [], errors: [{ path: toolPath, error: "Tool must export a default function", source }] };
