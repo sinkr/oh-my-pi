@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -148,7 +149,7 @@ describe("read tool .sample.txt dispatch", () => {
 			getSessionSpawns: () => "*",
 			getArtifactsDir: () => path.join(cwd, "artifacts"),
 			allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
-			settings: Settings.isolated(),
+			settings: Settings.isolated({ "edit.mode": "hashline" }),
 		};
 	}
 
@@ -168,10 +169,32 @@ describe("read tool .sample.txt dispatch", () => {
 		expect(summary).toContain("macOS sample profile: demo (pid 42)");
 		expect(summary).toContain("slab_kernel::layout::box_measure");
 		expect(summary).not.toContain(BOX_MEASURE);
+		// The summary is not the file's text, so it must not carry the file's snapshot header.
+		expect(summary).not.toMatch(/#[0-9A-F]{4}\]/);
 
 		const raw = textOutput(await tool.execute("read-sample-raw", { path: `${filePath}:raw` }));
 		expect(raw).toContain("Call graph:");
 		expect(raw).toContain(BOX_MEASURE);
+	});
+
+	it("reads line ranges and tails from the report itself, with a snapshot tag edits accept", async () => {
+		const filePath = path.join(tmpDir, "demo-42.sample.txt");
+		await fs.writeFile(filePath, FIXTURE);
+		const session = createSession(tmpDir);
+		const tool = new ReadTool(session);
+
+		const range = textOutput(await tool.execute("read-sample-range", { path: "demo-42.sample.txt:9-11" }));
+		expect(range).toContain("9:    100 Thread_1: main");
+		expect(range).not.toContain("macOS sample profile");
+		const tail = textOutput(await tool.execute("read-sample-tail", { path: "demo-42.sample.txt:-3" }));
+		expect(tail).toContain("Binary Images:");
+
+		const tag = /^\[demo-42\.sample\.txt#([0-9A-F]{4})\]/.exec(range)?.[1];
+		expect(tag).toBeDefined();
+		await new EditTool(session).execute("edit-sample-range", {
+			input: `[demo-42.sample.txt#${tag}]\nPUT 9.=9:\n+    100 Thread_1: renamed\n`,
+		});
+		expect((await fs.readFile(filePath, "utf8")).split("\n")[8]).toBe("    100 Thread_1: renamed");
 	});
 
 	it("falls back to plain text when a .sample.txt file is not a sample report", async () => {
