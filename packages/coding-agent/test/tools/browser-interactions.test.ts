@@ -192,8 +192,9 @@ try {
 			expect(thrown).toMatch(
 				/^tab\.click\("#missing"\) timed out after \d+ms; could not count matches: probe refused$/,
 			);
-			// A 10 s cell leaves the 8 s action deadline room for the 1 s probe wait.
-			const stalled = await attempt(`() => Promise.withResolvers().promise`, 10);
+			// A 12 s cell keeps the 8 s action deadline and leaves ~2 s past the 1 s probe wait
+			// before the whole-cell timeout.
+			const stalled = await attempt(`() => Promise.withResolvers().promise`, 12);
 			expect(stalled).toMatch(/; could not count matches: no answer within 1000ms$/);
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
