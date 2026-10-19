@@ -1555,6 +1555,13 @@ describe("ACP agent", () => {
 			[{ type: "resource" }],
 			[{ type: "resource", resource: { uri: "file:///x" } }],
 			[{ type: "resource", resource: { uri: "file:///x", mimeType: "text/plain" } }],
+			// A non-string arm that used to pass validation as long as the
+			// *other* arm was a string: the converter selects whichever arm
+			// it sees, so `text: 7` would have replaced the image blob with
+			// the raw number in model input. Each malformed arm rejects on
+			// its own row.
+			[{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", mimeType: "image/png", text: 7 } }],
+			[{ type: "resource", resource: { uri: "file:///x", text: 7 } }],
 			[{ type: "nope", text: "hi" }],
 			[{ type: "constructor" }],
 			[{ type: "resource_link", uri: "file:///x", title: 5 }],
@@ -1568,6 +1575,15 @@ describe("ACP agent", () => {
 			expect(error).toBeInstanceOf(RequestError);
 			expect((error as RequestError).code).toBe(-32602);
 		}
+
+		// Both arms present and string is legal: only a malformed *selected*
+		// arm rejects — never simultaneous valid arms. The text arm wins
+		// conversion and the steer queues normally.
+		const bothArms = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", text: "text wins" } }],
+		});
+		expect(bothArms).toEqual({ outcome: "promptRequired", queue: "steering" });
 		const unknownSessionError = await harness.agent
 			.extMethod("_session/steering", {
 				sessionId: "missing-session",
@@ -1582,6 +1598,93 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("queues a steering resubmission behind a dispatching turn instead of cancelling it", async () => {
+		// Regression: a steer answered `promptRequired` while the owning prompt
+		// was still preprocessing (reserved, `isStreaming` not yet raised); by
+		// the time the client resubmitted through `session/prompt`, dispatch had
+		// completed and `prompt()` saw a streaming turn — implicitly cancelling
+		// the run the steer was rejected in favor of. The resubmission must
+		// queue behind it.
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		expectAcpStructure(zNewSessionResponse, created);
+		const session = harness.findSession(created.sessionId)!;
+
+		// A two-gate prompt stub: gate one holds the pre-dispatch window
+		// (`promptTurn` assigned, `isStreaming` still false), gate two holds
+		// the turn mid-stream. `agent_end` is emitted manually per gate.
+		const dispatchStarted = Promise.withResolvers<void>();
+		const preprocessingDone = Promise.withResolvers<void>();
+		const streamingStarted = Promise.withResolvers<void>();
+		const turnFinished = Promise.withResolvers<void>();
+		const emitAgentEnd = (text: string) => {
+			const assistant = makeAssistantMessage(text);
+			session.sessionManager.appendMessage(assistant);
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [assistant] } as AgentSessionEvent);
+			}
+		};
+		session.prompt = async (text: string) => {
+			session.promptCalls.push(text);
+			if (text === "first") {
+				dispatchStarted.resolve();
+				await preprocessingDone.promise;
+				session.isStreaming = true;
+				streamingStarted.resolve();
+				await turnFinished.promise;
+				session.isStreaming = false;
+				emitAgentEnd("first answer");
+				return true;
+			}
+			session.isStreaming = true;
+			session.isStreaming = false;
+			emitAgentEnd("steer answer");
+			return true;
+		};
+		const abortSpy = spyOn(session, "abort");
+
+		try {
+			// The owning prompt is reserved but still dispatching.
+			const firstPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "first" }],
+			});
+			await dispatchStarted.promise;
+
+			// The steer lands inside the pre-dispatch window: not admitted.
+			const steer = await harness.agent.extMethod("_session/steering", {
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "steered" }],
+			});
+			expect(steer).toEqual({ outcome: "promptRequired", queue: "steering" });
+
+			// Dispatch completes and the turn goes live; the client's
+			// resubmission of the steer content arrives mid-stream.
+			// `session/prompt` entry reads the busy state synchronously, so
+			// no settling wait is needed before the assertions.
+			preprocessingDone.resolve();
+			await streamingStarted.promise;
+			const resubmission = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "steered" }],
+			});
+
+			// The queued resubmission released the gates only after the
+			// first turn finished; nothing cancelled it.
+			turnFinished.resolve();
+			const first = await firstPrompt;
+			const second = await resubmission;
+			expect(abortSpy).not.toHaveBeenCalled();
+			expect(first.stopReason).toBe("end_turn");
+			expect(second.stopReason).toBe("end_turn");
+			expect(session.promptCalls).toEqual(["first", "steered"]);
+		} finally {
+			abortSpy.mockRestore();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("replays messageIds and returns turn usage for prompts", async () => {

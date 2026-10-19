@@ -82,6 +82,14 @@ export interface SessionToolsHost {
 	 * races it against its elicit so a steer supersedes an open dialog.
 	 */
 	steeringArrivalSignal(): AbortSignal;
+	/**
+	 * The user-message group admitted by the latest steering arrival (the same
+	 * arrival that fires {@link steeringArrivalSignal}), or `undefined` before
+	 * any arrival. The permission gate promotes exactly these messages: an
+	 * agent-authored steer enqueued in the same window never fired the signal
+	 * and must not ride the promotion ahead of the user's superseding message.
+	 */
+	steeringArrivalAdmitted(): readonly AgentMessage[] | undefined;
 	queuedMessageCount(): number;
 	planModeEnabled(): boolean;
 	model(): Model | undefined;
@@ -983,14 +991,22 @@ export class SessionTools {
 					// agent reads the question that stopped the call first —
 					// the same "denying steer first" semantics as the TUI
 					// approval dialog (agent.prioritizeSteering, #15642).
-					// Identity-based promotion: text matching could hit an
-					// older equal-looking steer instead.
-					const steeringBaseline = new Set(this.#host.agent.peekSteeringQueue());
+					// Promote exactly the group whose admission fired the
+					// signal — never whatever else appeared on the queue in
+					// the same window: an agent-authored steer enqueued after
+					// the dialog opened does not fire the signal, and
+					// promoting it along would deliver it first under the
+					// one-at-a-time boundary, making the user's superseding
+					// message wait another boundary. Identity-based
+					// promotion: text matching could hit an older
+					// equal-looking steer instead.
 					const { promise: steerPromise, resolve: resolveSteer } = Promise.withResolvers<PermissionRaceResult>();
 					const onSteer = () => {
-						const added = this.#host.agent.peekSteeringQueue().filter(message => !steeringBaseline.has(message));
-						if (added.length > 0) {
-							this.#host.agent.prioritizeSteering(added);
+						const arrived = this.#host.steeringArrivalAdmitted() ?? [];
+						const queued = new Set(this.#host.agent.peekSteeringQueue());
+						const promotable = arrived.filter(message => queued.has(message));
+						if (promotable.length > 0) {
+							this.#host.agent.prioritizeSteering(promotable);
 						}
 						resolveSteer({ kind: "steered" });
 					};

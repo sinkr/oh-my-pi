@@ -1107,3 +1107,64 @@ it("delivers the steer that supersedes a permission dialog ahead of older queued
 
 	permissionPending.resolve({ outcome: "cancelled" });
 });
+
+it("delivers the user steer that supersedes a dialog ahead of an agent-authored steer", async () => {
+	// Regression: the permission gate promoted *any* queued message older
+	// than the dialog-open baseline — including steers the agent enqueued
+	// itself without ever firing the steering-arrival signal. The user's
+	// superseding steer must deliver first; the agent-authored one waits
+	// for the next boundary.
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	const turnStreamStarted = Promise.withResolvers<void>();
+	const releaseTurnStream = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel([deleteTool as AgentTool], bridge, [
+		async () => {
+			turnStreamStarted.resolve();
+			await releaseTurnStream.promise;
+			return {
+				content: [{ type: "toolCall", id: "call-delete-1", name: "delete", arguments: { path: "/tmp/gone.ts" } }],
+			};
+		},
+		{ content: ["answered user steer"] },
+		{ content: ["answered agent steer"] },
+	]);
+
+	const promptDone = session.prompt("delete something");
+	await withTimeout(turnStreamStarted.promise, 5_000, "Held turn stream never started");
+	releaseTurnStream.resolve();
+	await permissionOpened.promise;
+
+	// The agent enqueues a steer while the dialog is open. This path never
+	// fires the steering-arrival signal, so it must not be promoted.
+	session.agent.steer({
+		role: "user",
+		content: [{ type: "text", text: "agent-authored steer" }],
+		timestamp: Date.now(),
+	});
+
+	// The user steer supersedes the open dialog and delivers first.
+	expect(await session.joinActiveTurn("user steer superseding the dialog")).toBe(true);
+
+	await promptDone;
+	await session.waitForIdle();
+	expect(deleteTool.executeCalls).toBe(0);
+
+	const messages = session.agent.state.messages;
+	const contentIndexOf = (needle: string) =>
+		messages.findIndex(message => message.role === "user" && JSON.stringify(message.content).includes(needle));
+	const userSteerIndex = contentIndexOf("user steer superseding the dialog");
+	const agentSteerIndex = contentIndexOf("agent-authored steer");
+	expect(userSteerIndex).toBeGreaterThanOrEqual(0);
+	expect(agentSteerIndex).toBeGreaterThan(userSteerIndex);
+
+	permissionPending.resolve({ outcome: "cancelled" });
+});

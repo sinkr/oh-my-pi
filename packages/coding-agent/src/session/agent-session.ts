@@ -2189,6 +2189,7 @@ export class AgentSession implements SettingsScope {
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			steeringArrivalSignal: () => this.#steeringArrivalSignal(),
+			steeringArrivalAdmitted: () => this.#steeringArrivalAdmitted(),
 			queuedMessageCount: () => this.queuedMessageCount,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			model: () => this.model,
@@ -8965,8 +8966,16 @@ export class AgentSession implements SettingsScope {
 			this.agent.steer(userMessage);
 			// Wake any listener parked on steering arrival (the ACP permission
 			// gate): the message is on the queue now, so its wait ends even
-			// though the streaming boundary poll has not run yet.
-			this.#fireSteeringArrival();
+			// though the streaming boundary poll has not run yet. The whole
+			// admitted group rides along so the gate promotes exactly these
+			// messages — never an agent-authored steer that happened to be
+			// enqueued in the same window without firing the signal.
+			this.#fireSteeringArrival([
+				...prependMessages,
+				...attachmentSourceNotices,
+				...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
+				userMessage,
+			]);
 		}
 		options?.onPromptAdmitted?.();
 		// joinActiveTurn admission must never start an autonomous turn: the
@@ -8989,14 +8998,31 @@ export class AgentSession implements SettingsScope {
 	 */
 	#steeringArrivalController = new AbortController();
 
+	/**
+	 * The user-message group admitted by the latest steering arrival. Set
+	 * before that arrival's controller aborts, so a listener woken by the
+	 * abort reads exactly this group — never a later arrival's.
+	 */
+	#steeringArrivalAdmittedGroup: readonly AgentMessage[] | undefined;
+
 	/** Current {@link #steeringArrivalController} signal; see that field. */
 	#steeringArrivalSignal(): AbortSignal {
 		return this.#steeringArrivalController.signal;
 	}
 
+	/**
+	 * The user-message group admitted by the latest steering arrival, or
+	 * `undefined` before any arrival. The ACP permission gate promotes
+	 * exactly these messages — see {@link #steeringArrivalAdmittedGroup}.
+	 */
+	#steeringArrivalAdmitted(): readonly AgentMessage[] | undefined {
+		return this.#steeringArrivalAdmittedGroup;
+	}
+
 	/** Abort the current steering-arrival signal and arm the next. */
-	#fireSteeringArrival(): void {
+	#fireSteeringArrival(admitted: readonly AgentMessage[]): void {
 		const previous = this.#steeringArrivalController;
+		this.#steeringArrivalAdmittedGroup = admitted;
 		this.#steeringArrivalController = new AbortController();
 		previous.abort();
 	}

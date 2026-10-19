@@ -159,6 +159,15 @@ type PromptTurnState = {
 	 */
 	errorTextDelivery: Promise<boolean> | undefined;
 	/**
+	 * A `_session/steering` request answered `promptRequired` while this turn
+	 * was reserved but still dispatching (image preprocessing; `isStreaming`
+	 * not yet raised). The client resubmits the steer content through
+	 * `session/prompt`; that resubmission queues behind this turn instead of
+	 * implicitly cancelling the run the steer was rejected in favor of.
+	 * One-shot: consumed by the next `prompt()` on this turn.
+	 */
+	awaitingSteerResubmission?: boolean;
+	/**
 	 * `abort()` is in-flight (or its bounded-timeout race). `undefined` while the turn is
 	 * running normally and after cleanup completes. The turn occupies `record.promptTurn`
 	 * for as long as either `!settled` or `cleanup` is set — that combined window is the
@@ -237,7 +246,28 @@ function toSteeringPromptBlocks(prompt: unknown): PromptRequest["prompt"] {
 				);
 			}
 			const resourceFields = resource as Record<string, unknown>;
-			if (typeof resourceFields.text !== "string" && typeof resourceFields.blob !== "string") {
+			// `#convertPromptBlocks` selects the text arm whenever the key
+			// exists and the image arm only for a string blob: require the
+			// arm that would be selected to be a string, so a mixed shape
+			// (e.g. a string blob plus a non-string text) cannot pass here
+			// and then silently replace the image with the raw field value
+			// in model input. A resource with neither arm keeps the same
+			// rejection as before.
+			if (Object.hasOwn(resourceFields, "text")) {
+				if (typeof resourceFields.text !== "string") {
+					throw RequestError.invalidParams(
+						{ method: SESSION_STEERING_METHOD },
+						"resource block with a text arm requires string text",
+					);
+				}
+			} else if (Object.hasOwn(resourceFields, "blob")) {
+				if (typeof resourceFields.blob !== "string") {
+					throw RequestError.invalidParams(
+						{ method: SESSION_STEERING_METHOD },
+						"resource block with a blob arm requires string blob",
+					);
+				}
+			} else {
 				throw RequestError.invalidParams(
 					{ method: SESSION_STEERING_METHOD },
 					"resource block requires string text or string blob",
@@ -942,7 +972,14 @@ export class AcpAgent implements Agent {
 	async prompt(params: PromptRequest): Promise<PromptResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
 		const activeTurn = record.promptTurn;
-		if (activeTurn && !activeTurn.settled && record.session.isStreaming) {
+		// One-shot resubmission marker: a `_session/steering` request this turn
+		// answered `promptRequired` while it was still dispatching flags the
+		// turn, and the client resubmits the steer content as this prompt. It
+		// must queue behind the turn (`#queuePrompt` below) instead of
+		// implicitly cancelling the run the steer was rejected in favor of.
+		const steerResubmission = activeTurn?.awaitingSteerResubmission === true;
+		if (activeTurn) activeTurn.awaitingSteerResubmission = false;
+		if (!steerResubmission && activeTurn && !activeTurn.settled && record.session.isStreaming) {
 			// New prompt arrived while the previous turn is still in-flight (e.g. the
 			// client sent a message immediately after pressing stop, before or without
 			// a preceding session/cancel notification). Implicitly cancel the running
@@ -1396,6 +1433,19 @@ export class AcpAgent implements Agent {
 		try {
 			const admitted = await record.session.joinActiveTurn(converted.text, converted.images, { queue });
 			if (!admitted) {
+				// A turn reserved but still dispatching (image preprocessing,
+				// `isStreaming` not yet raised) refused the steer because it
+				// cannot inject mid-dispatch. The host resubmits this content
+				// through `session/prompt`; flag the turn so that resubmission
+				// queues behind it instead of implicitly cancelling the run —
+				// once dispatch completes — that the steer was rejected in
+				// favor of. A refusal while streaming is the abort window and
+				// deliberately takes no flag: a prompt then matches the user's
+				// stop intent.
+				const reserved = record.promptTurn;
+				if (reserved && !reserved.settled && !record.session.isStreaming) {
+					reserved.awaitingSteerResubmission = true;
+				}
 				return { outcome: "promptRequired", queue };
 			}
 		} catch (error: unknown) {
@@ -1906,9 +1956,21 @@ export class AcpAgent implements Agent {
 					images.push({ type: "image", data: block.data, mimeType: block.mimeType });
 					break;
 				case "resource":
-					if ("text" in block.resource) {
+					// Select arms by *type*, not key presence: `session/prompt`
+					// blocks reach here without the `_session/steering`
+					// validation, and a mixed shape (a string blob plus a
+					// non-string text key) would otherwise inject the raw
+					// field value as text instead of the image. The `in`
+					// checks narrow the union; the typeof checks keep a
+					// malformed arm from winning it.
+					if ("text" in block.resource && typeof block.resource.text === "string") {
 						textParts.push(block.resource.text);
-					} else if (typeof block.resource.mimeType === "string" && block.resource.mimeType.startsWith("image/")) {
+					} else if (
+						"blob" in block.resource &&
+						typeof block.resource.blob === "string" &&
+						typeof block.resource.mimeType === "string" &&
+						block.resource.mimeType.startsWith("image/")
+					) {
 						// `embeddedContext: true` covers both text and blob resources, but
 						// blobs aren't directly consumable by the LLM. Route image blobs
 						// to the images array so the user's intent survives; everything
