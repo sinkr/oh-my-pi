@@ -1347,6 +1347,72 @@ def _uv_pip_argv(argv: list[str]) -> list[str] | None:
     return [arg for arg in argv if arg not in _PIP_ONLY_NOOP_FLAGS]
 
 
+def _child_pids() -> dict[int, list[int]]:
+    """Map each live pid to the pids of its children."""
+    children: dict[int, list[int]] = {}
+    if sys.platform.startswith("linux"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as stat:
+                    ppid = int(stat.read().rsplit(b")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(entry))
+        return children
+    try:
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return children
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2:
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    return children
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    # Installers spawn their own children (ensurepip runs pip in one, source
+    # builds run backends and compilers), so killing `proc` alone is not enough.
+    # The tree stays in the kernel's process group so kernel shutdown still
+    # reaches it.
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.kill()
+        proc.wait()
+        return
+    # Stop each process before listing its children, so nothing can spawn
+    # behind the walk; then kill every stopped process.
+    stopped: list[int] = []
+    level = [proc.pid]
+    while level:
+        for pid in level:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                continue
+            stopped.append(pid)
+        children = _child_pids()
+        level = [child for pid in level for child in children.get(pid, ())]
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.wait()
+
+
 def _run_installer(
     cmd: list[str],
     on_text: Callable[[str], None] | None = None,
@@ -1365,8 +1431,7 @@ def _run_installer(
         return proc.wait()
     except BaseException:
         # Cancelling the cell interrupts only the kernel: stop the installer too.
-        proc.kill()
-        proc.wait()
+        _kill_process_tree(proc)
         raise
 
 

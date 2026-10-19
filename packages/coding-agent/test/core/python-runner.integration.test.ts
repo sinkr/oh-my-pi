@@ -70,6 +70,33 @@ async function startKernelWithFakeUv(dir: string, script: string): Promise<{ ker
 	return { kernel, python };
 }
 
+/** Running and not a zombie: a killed process may wait a moment for its reaper. */
+function isRunning(pid: number): boolean {
+	const ps = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+	const state = ps.stdout.toString().trim();
+	return state !== "" && !state.startsWith("Z");
+}
+
+/** Runs `code`, cancels it once the installer prints `installer-pids:<pid>,<pid>`, and returns those pids. */
+async function cancelInstall(kernel: PythonKernel, code: string): Promise<number[]> {
+	const ac = new AbortController();
+	const started = Promise.withResolvers<number[]>();
+	let streamed = "";
+	const pending = executePythonWithKernel(kernel, code, {
+		signal: ac.signal,
+		onChunk: chunk => {
+			streamed += chunk;
+			const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+			if (match) started.resolve([Number(match[1]), Number(match[2])]);
+		},
+	});
+	const pids = await started.promise;
+	ac.abort(new DOMException("user cancelled", "AbortError"));
+	const result = await pending;
+	expect(result.cancelled).toBe(true);
+	return pids;
+}
+
 describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
 		await disposeAllKernelSessions();
@@ -243,27 +270,49 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
-		"cancelling %pip stops the installer it started",
+		"cancelling %pip on the uv route stops uv and what it spawned",
 		async () => {
-			using tempDir = TempDir.createSync("@python-runner-pip-cancel-");
-			const { kernel } = await startKernelWithFakeUv(tempDir.path(), `echo "uv-pid:$$"\nexec sleep 30`);
+			using tempDir = TempDir.createSync("@python-runner-pip-cancel-uv-");
+			const { kernel } = await startKernelWithFakeUv(
+				tempDir.path(),
+				'sleep 30 &\necho "installer-pids:$$,$!"\nwait',
+			);
 			try {
-				const ac = new AbortController();
-				const started = Promise.withResolvers<number>();
-				let streamed = "";
-				const pending = executePythonWithKernel(kernel, "%pip install six", {
-					signal: ac.signal,
-					onChunk: chunk => {
-						streamed += chunk;
-						const match = /uv-pid:(\d+)/.exec(streamed);
-						if (match) started.resolve(Number(match[1]));
-					},
-				});
-				const pid = await started.promise;
-				ac.abort(new DOMException("user cancelled", "AbortError"));
-				const result = await pending;
-				expect(result.cancelled).toBe(true);
-				expect(() => process.kill(pid, 0)).toThrow();
+				const pids = await cancelInstall(kernel, "%pip install six");
+				expect(pids.filter(isRunning)).toEqual([]);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"cancelling %pip during the ensurepip bootstrap stops ensurepip and the pip it spawned",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-cancel-ensurepip-");
+			const python = await createPiplessVenv(tempDir.path());
+			// Shadows the stdlib module the way `ensurepip` behaves: pip runs in a child process.
+			const fakeDir = path.join(tempDir.path(), "fake", "ensurepip");
+			await fs.mkdir(fakeDir, { recursive: true });
+			await Bun.write(path.join(fakeDir, "__init__.py"), "");
+			await Bun.write(
+				path.join(fakeDir, "__main__.py"),
+				[
+					"import os, subprocess",
+					'child = subprocess.Popen(["sleep", "30"])',
+					'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+					"child.wait()",
+				].join("\n"),
+			);
+			const kernel = await PythonKernel.start({
+				cwd: tempDir.path(),
+				interpreter: python,
+				env: { PATH: "/usr/bin:/bin", PYTHONPATH: path.dirname(fakeDir) },
+			});
+			try {
+				const pids = await cancelInstall(kernel, "%pip install six");
+				expect(pids.filter(isRunning)).toEqual([]);
 			} finally {
 				await kernel.shutdown();
 			}
