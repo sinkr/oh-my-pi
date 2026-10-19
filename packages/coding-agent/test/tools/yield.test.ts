@@ -344,9 +344,9 @@ describe("YieldTool", () => {
 		).toEqual({ data: { summary: '{"purge":13,"keep":20}' } });
 	});
 
-	it("rejects payload fields sent beside data instead of publishing a reduced result", async () => {
-		// Regression (#16317): root siblings of `data` were healed away during arg
-		// validation and the call published success with only the `data` subtree.
+	it("rejects unsupported root siblings instead of silently omitting them", async () => {
+		// Regression (#16317): arg validation discarded root siblings while preserving
+		// the complete `data` subtree, then the call published success.
 		const tool = new YieldTool(
 			createSession({
 				outputSchema: {

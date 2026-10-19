@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `yield` reporting success while silently discarding fields sent beside `data`; such calls are now rejected with an error naming the unsupported fields ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
+- Fixed `yield` reporting success while silently omitting unsupported root fields; such calls are now rejected with an error naming the fields ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
 
 ## [18.12.2] - 2026-10-18
 
