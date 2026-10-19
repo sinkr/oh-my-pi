@@ -1107,6 +1107,55 @@ describe("Coding Agent Tools", () => {
 			}
 		});
 
+		it("keeps prefixed short-row pages unelided but spills pages that block context pushes past the threshold", async () => {
+			const shortRows = path.join(testDir, "short-rows.ts");
+			fs.writeFileSync(shortRows, `${Array.from({ length: 6000 }, (_, i) => `let v${i} = ${i};`).join("\n")}\n`);
+			// Every closer on the page pulls its off-window opener in as block context.
+			const depth = 200;
+			const nested = path.join(testDir, "deep-nesting.ts");
+			const openers = Array.from({ length: depth }, (_, i) => `${" ".repeat(i)}if (c${i} && ${"y".repeat(1000)}) {`);
+			const closers = Array.from({ length: depth }, (_, i) => `${" ".repeat(depth - 1 - i)}}`);
+			fs.writeFileSync(nested, `${[...openers, ...closers].join("\n")}\n`);
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactHeadBytes": 8,
+				"tools.artifactTailBytes": 8,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "prefix-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const spillReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, spillSettings, {
+						getSessionFile: () => spillManager.getSessionFile() ?? null,
+						getArtifactsDir: () => spillManager.getArtifactsDir(),
+					}),
+				),
+			);
+			const context = {
+				...createTestToolContext(["read"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+			const read = (target: string) =>
+				spillReadTool.execute(target, { path: target }, undefined, undefined, context);
+
+			try {
+				// Row prefixes on thousands of short rows must not tip the page into middle elision.
+				const page = await read(`${shortRows}:1-3000`);
+				const nextOffset = page.details?.meta?.truncation?.nextOffset;
+				expect(page.details?.meta?.truncation?.artifactId).toBeUndefined();
+				expect(getTextOutput(page)).not.toContain("elided");
+				expect(getTextOutput(page)).toContain(`Use :${nextOffset} to continue`);
+
+				// Block context is unbounded by the line budget, so that page still spills.
+				const closers = await read(`${nested}:${depth + 1}-${depth * 2}`);
+				expect(closers.details?.meta?.truncation?.artifactId).toBeDefined();
+				expect(Buffer.byteLength(getTextOutput(closers), "utf-8")).toBeLessThan(20 * 1024);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
 		it("bounds oversized URL reads like plain files, except pages of artifact storage", async () => {
 			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
 			const skillDir = path.join(testDir, "skills", "demo");
