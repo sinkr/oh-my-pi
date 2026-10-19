@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed hashline `REM` deleting and `MV` moving a file under an invented or stale tag; a bare file op now needs the file's current tag, like a line edit
+- Fixed hashline `REM` deleting and `MV` moving a file under an invented or stale tag; a bare file op now needs the file's current tag, like a line edit ([#16381](https://github.com/can1357/oh-my-pi/pull/16381) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.3] - 2026-10-19
 
