@@ -358,6 +358,17 @@ Handlers and tool `execute` receive `ctx` with:
 - `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
 - `getPendingPlanReview()`: the open interactive plan review still awaiting an answer, in the `plan_review_requested` shape, or `undefined`; use it to answer a review that opened before the extension loaded or reconnected
 - `openPlanReview()`: open the interactive plan review on the newest plan file, like `/plan-review`; resolves `true` once a review awaits an answer, without waiting for a choice. An already-open review is kept rather than replaced. Unlike `/plan-review` it never aborts work: it resolves `false`, silently, while the agent is streaming or compacting, when plan mode is inactive, or when no non-empty plan file exists
+- `sessionModes` (interactive TUI sessions only; `undefined` in print, JSON, RPC, ACP, and subagents): direct control of the built-in plan, vibe, goal, and loop modes without slash commands or dialogs. `getState()` returns a detached snapshot (`plan`/`goal`: `inactive | active | paused`, `vibe`: `inactive | active`, `loop`: `inactive | active | paused`, plus the plan file and goal objective/budget), so an extension that loaded late can read the current state. `set(request)` runs one explicit transition: `{ mode: "plan" | "vibe", action: "enter" | "exit" }`, `{ mode: "goal", action: "enter", objective, tokenBudget? }`, `{ mode: "goal", action: "pause" | "resume" | "drop" }`, `{ mode: "loop", action: "enter", limit?, condition? }`, or `{ mode: "loop", action: "exit" }`. Requesting a state that already holds returns `{ ok: true, changed: false }`. Refusals return `{ ok: false, code, message, state }` with `code` `busy` (a turn, compaction, or another `set()` is running), `conflict` (another mode blocks it, as with the slash commands), `disabled` (`plan.enabled` / `goal.enabled` off), or `invalid_request`. No transition submits a prompt — send one separately. Plan `exit` leaves plan mode fully, restoring tools and model, without approving the plan or deleting its draft.
+
+  ```ts
+  pi.registerCommand("mission", {
+  	handler: async (args, ctx) => {
+  		const entered = await ctx.sessionModes?.set({ mode: "plan", action: "enter" });
+  		if (!entered?.ok) return ctx.ui.notify(entered?.message ?? "Mode control needs the TUI", "warning");
+  		pi.sendUserMessage(args);
+  	},
+  });
+  ```
 - `getSystemPrompt()`
 - `isProjectTrusted()` — always `true`; OMP does not ask for per-directory trust before loading project inputs
 - `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`. An advisor's own tool calls reach the session's `tool_call`/`tool_result` handlers with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId }`, so `kind === "main"` also excludes advisor activity
@@ -434,66 +445,6 @@ const contrasting = ctx.models
   .list()
   .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
-
-### Built-in session modes (`ctx.sessionModes`)
-
-Use `ctx.sessionModes.getState()` to discover the current session's modes and supported operations, including after loading or reconnecting. It returns a detached snapshot with `sessionId`, `revision`, `plan`, `vibe`, `goal`, `loop`, and `capabilities`. Changing a returned object does not change the session.
-
-`await ctx.sessionModes.set(request)` performs an explicit lifecycle operation, not a toggle or slash-command dispatch. Entering a mode does not submit a prompt. Submit the extension's request separately with `pi.sendUserMessage(request)`.
-
-|Mode|Direct operations|Existing control before this API|Coverage|
-|---|---|---|---|
-|Plan|`enter`, `exit`, `pause`, `resume`; optional `workflow: "parallel" \| "iterative"` on entry|Interactive `/plan`, ACP mode selection, headless `--plan-yolo`; extension review APIs only|Direct lifecycle, tool/model restoration, draft preservation|
-|Vibe|`enter`, `exit`|Interactive `/vibe`|Direct lifecycle, worker teardown and tool restoration|
-|Goal|`enter`, `replace` with `objective` and optional `tokenBudget`; `pause`, `resume`, `exit`, `drop`; `budget` with positive integer or `null`|Interactive `/goal`, `goal` tool and RPC goal control|Direct objective, budget and continuation lifecycle|
-|Loop|`enter`, `configure` with optional `limit`, `condition`, `strategy`; `pause`, `resume`, `exit`|Interactive `/loop` and Escape|Direct bounded continuation lifecycle|
-
-Loop limits are `{ kind: "iterations", iterations: N }` or `{ kind: "duration", durationMs: N }`. Loop is an independent continuation mode, not a fifth persisted exclusive mode; its snapshot includes the captured prompt and remaining runtime bounds. Plan, vibe and goal retain their existing conflicts, including paused plan/goal states. Entry never silently replaces another mode. Settings gates still apply.
-
-Successful results are `{ ok: true, changed, state }`; repeating an already-satisfied operation returns `changed: false`. Failures are `{ ok: false, code, message, state, conflictingMode? }`. Handle `conflict`, `disabled`, `invalid_request`, `unsupported`, `busy`, `session_changed`, and `failed` rather than assuming a UI warning means the transition succeeded. Capabilities describe host support, not whether settings currently enable a mode.
-
-`pi.on("mode_changed", (event, ctx) => ...)` receives `{ previous, state }` after committed transitions. Read current state rather than caching an earlier event across a session change. Event handlers may call controls themselves without holding the transition lock.
-
-Leaving plan mode does **not** approve or execute a plan and does not delete its draft. Plan-review controls (`openPlanReview`, `getPendingPlanReview`, `resolvePlanReview`) remain separate and retain their existing interactive semantics. Direct transitions do not open human confirmation dialogs; slash commands retain their confirmations.
-
-|Host|Plan / vibe / goal lifecycle|Loop|Plan review|
-|---|---|---|---|
-|TUI|Supported|Supported|Existing interactive review API|
-|RPC / RPC-UI|Supported; RPC retains its goal continuation owner|Unsupported: no editor continuation driver|Interactive review API unavailable|
-|ACP|Supported; ACP retains its proposal approval/elicitation policy and protocol mode updates|Unsupported: no editor continuation driver|ACP proposal approval, not a TUI overlay|
-|Print / JSON|Supported; entry submits no request|Unsupported: no editor continuation driver|Interactive review API unavailable|
-|SDK top-level session|Supported through the session lifecycle owner|Unsupported unless a TUI owns the session|Host-dependent|
-|Subagent|State queries available; independent lifecycle operations unsupported to preserve parent-imposed tool/mode restrictions|Unsupported|Unavailable|
-
-Busy turns and transitions return `busy`; await turn completion and retry. Concurrent callers cannot silently change each other's mode. A mode-change handler may invoke another control; a control invoked from an in-progress goal mutation notification is refused as busy instead of waiting on the goal's own accounting lock.
-
-Goal `exit` pauses the objective; use `drop` to remove it. Mode entry/resume does not initiate a new goal request; after a separately submitted turn, the host's existing continuation policy still applies.
-
-In hosts without the interactive plan review (RPC, print/JSON, SDK), a plan proposal tells the agent the plan was submitted for host review and that nothing was approved; the controlling extension decides what to do next. ACP keeps its client approval flow.
-
-Run the example:
-
-```sh
-bun packages/coding-agent/src/cli.ts -e packages/coding-agent/examples/extensions/mission.ts
-```
-
-`/mission <request>` enters built-in plan mode and sends the request separately; `/mission-exit` leaves without approval. `/mission-modes` queries state, or accepts a transition JSON object such as `{"mode":"goal","action":"enter","objective":"Ship the release"}`.
-
-#### Inventory exclusions
-
-These controls are not additional session modes and are intentionally not new `ctx.sessionModes` operations:
-
-- `/plan-review`: review lifecycle, already directly controlled by the existing review API.
-- `/guided-goal`: a one-shot interview that sets up goal mode.
-- `/ratchet`: enables an eval prelude and submits a kickoff request; `/prewalk`: a one-shot model handoff.
-- `/model`, `/switch`, `/effort`, `/modelpreset`: model, thinking and role selection.
-- `/fast`, `/slow`: service tiers, already exposed through service-tier controls.
-- `/computer`, `/skillful`, `/extended-context`, advisor and TTSR configuration: ordinary capability/policy settings, not session-mode lifecycles.
-- `/shake`, `/compact`, `/handoff`: context transformations; `/force`: next-turn tool choice.
-- `/queue`, steering/follow-up/interrupt settings: message delivery controls.
-- `/live` and recording: voice operations; `/pause`: the global UI pause screen.
-- `/new`, `/clear`, `/resume`, `/branch`, `/fork`, `/fresh`: session navigation/lifecycle, already separate command-context APIs.
-- `/security plan`: an immutable scan-plan artifact, unrelated to session planning.
 
 ## 3) Command context (`ExtensionCommandContext`)
 
@@ -618,6 +569,10 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - An approval answered by an extension runs on the tier named by `input.role`, or the one currently selected in the overlay's model slider when `role` is omitted; `plan_review_requested` lists the selectable `tiers` (`role`, `provider`, `model`, and `thinkingLevel` when the role pins one; absent when fewer than two resolve). The approval executes the plan as it is at pick time: in-overlay edits if any, otherwise the plan file re-read from disk. That can differ from the reported `planContent`; an extension may write the plan file before answering to execute its own revision.
 - Tier order follows the configured role cycle, not the selected tier. The slider initially selects `default` when available; a remote `input.role` updates the displayed tier and commits the answer, preventing later terminal input from changing it.
 - `plan_review_resolved` reports how that review closed, with the selected choice id (or `undefined` when dismissed or cancelled by a session switch, a replacement review, or shutdown) and `by: "local" | "extension"`. It fires when the overlay actually closes, after every `plan_review_requested` handler has returned, so `plan_review_requested` handlers should hand off long work (a remote round-trip, a `ctx.ui` dialog) instead of awaiting it.
+
+### Mode lifecycle
+
+- `mode_changed` reports `{ previous, state }` (the `ctx.sessionModes.getState()` shape) after a built-in mode change commits, whatever caused it: `ctx.sessionModes.set()`, a slash command, the goal tool, automatic goal completion, or session restore. Goal token/time accounting is not part of the state, so it never fires the event. A handler may call `ctx.sessionModes.set()`; a call made while another `set()` is still running returns `busy` instead of waiting.
 
 ### Subagent lifecycle
 
