@@ -540,6 +540,22 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
 	});
 
+	it("rejects a per-id block whose literal value runs over several lines", async () => {
+		const filePath = path.join(tempDir, "directives-multiline.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-multiline", { path: "directives-multiline.ts" });
+		const promise = write.execute("write-directives-multiline", {
+			path: "conflict://*",
+			content: "1: const x = 1;\n   const y = 2;\n2: bar",
+		});
+		await expect(promise).rejects.toThrow(/Malformed `conflict:\/\/\*` per-id block/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+	});
+
 	it("still strips copied line numbers from a uniform bulk write when they name no conflict", async () => {
 		const filePath = path.join(tempDir, "directives-numbered.ts");
 		await Bun.write(filePath, TWO_WAY);

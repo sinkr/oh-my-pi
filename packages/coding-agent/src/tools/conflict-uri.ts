@@ -206,8 +206,8 @@ function truncateDirectiveLine(line: string): string {
  *
  * Returns `null` only when the content is not a per-id block (→ uniform bulk mode).
  * Throws on duplicate ids, and — critically — on a *malformed* directive block:
- * content that mixes valid `<id>: @side` lines with lines that aren't, or whose
- * every line is `<id>: <literal>` naming a registered conflict. Without that
+ * content that mixes valid `<id>: @side` lines with lines that aren't, or a
+ * block of `<id>: <literal>` values naming registered conflicts. Without that
  * guard a per-id write carrying non-token values (a literal or multi-line
  * replacement, e.g. `15: <multi-line content>`) fell through to uniform bulk
  * mode, which pasted the directive text (or, in hashline mode, the text with
@@ -234,15 +234,18 @@ function parseBulkDirectives(content: string, registeredIds: ReadonlySet<number>
 		}
 		map.set(id, match[2]);
 	}
-	// No `<id>: @side` line → uniform mode, unless every line is `<id>: <literal>`
-	// naming a registered conflict: a per-id block with literal values.
+	// No `<id>: @side` line → uniform mode, unless the content opens with `<id>:`
+	// naming a registered conflict and either every line is such a head or at least
+	// two registered ids head lines: a per-id block with (possibly multi-line) literal values.
 	if (!sawDirective) {
+		const headIds = stray.map(line => {
+			const head = line.match(BULK_DIRECTIVE_HEAD_RE);
+			const id = head ? Number.parseInt(head[1], 10) : undefined;
+			return id !== undefined && registeredIds.has(id) ? id : undefined;
+		});
 		const literalPerIdBlock =
-			stray.length > 0 &&
-			stray.every(line => {
-				const head = line.match(BULK_DIRECTIVE_HEAD_RE);
-				return head !== null && registeredIds.has(Number.parseInt(head[1], 10));
-			});
+			headIds[0] !== undefined &&
+			(headIds.every(id => id !== undefined) || new Set(headIds.filter(id => id !== undefined)).size >= 2);
 		if (!literalPerIdBlock) return null;
 	}
 	if (stray.length > 0) {
