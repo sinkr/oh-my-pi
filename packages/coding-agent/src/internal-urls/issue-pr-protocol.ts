@@ -21,7 +21,6 @@
  *   `gh`.
  */
 import issueDoc from "../prompts/internal-urls/issue.md" with { type: "text" };
-import { AgentRegistry } from "../registry/agent-registry";
 import {
 	formatRepoRef,
 	getOrFetchIssue,
@@ -33,7 +32,7 @@ import {
 } from "../tools/gh";
 import { type CacheStatus, formatFreshnessNote } from "../tools/github-cache";
 import { github } from "../utils/github";
-import { renderDiffFamilyResource, splitInternalUrlSegments } from "./forge-diff";
+import { renderDiffFamilyResource, resolveCwd, splitInternalUrlSegments } from "./forge-diff";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
 
 type Scheme = "issue" | "pr";
@@ -213,27 +212,6 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		throw new Error(`Invalid pr:// diff sub-path '${sub}'. Use 'all' or a 1-indexed file number.`);
 	}
 	return { kind: "pr-diff", repo, number: num, mode: "slice", index: idx };
-}
-
-/**
- * Resolve the working directory the protocol should use.
- *
- * Order:
- * 1. Caller-supplied `context.cwd` (the session that initiated `read`).
- * 2. First registered session via `AgentRegistry` (single-session fallback).
- * 3. `process.cwd()` (last resort).
- *
- * The earlier-fallback drives `gh repo view` and any `gh issue list` /
- * `gh pr list` for short-form URLs, so getting this right is what keeps
- * reads of `issue://N` from picking the wrong repo across concurrent sessions.
- */
-export function resolveCwd(context: ResolveContext | undefined): string {
-	if (context?.cwd) return context.cwd;
-	for (const ref of AgentRegistry.global().list()) {
-		const cwd = ref.session?.sessionManager?.getCwd();
-		if (cwd) return cwd;
-	}
-	return process.cwd();
 }
 
 async function resolveListRepo(

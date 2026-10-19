@@ -104,18 +104,11 @@ function parseGitlabMrUrl(text: string): ReviewPrRef | undefined {
 	if (url.protocol !== "https:") return undefined;
 	const parts = url.pathname.split("/").filter(Boolean);
 	const dash = parts.indexOf("-");
-	if (dash < 2 || parts[dash + 1] !== "merge_requests") return undefined;
-	const projectParts = parts.slice(0, dash);
-	if (!projectParts.every(isValidRepoSegment)) return undefined;
+	if (dash < 0 || parts[dash + 1] !== "merge_requests") return undefined;
+	const repo = glab.parseGitlabProjectWebUrl(`${url.origin}/${parts.slice(0, dash).join("/")}`);
 	const number = parsePositivePrNumber(parts[dash + 2]);
-	if (number === undefined) return undefined;
-	return {
-		forge: "gitlab",
-		repo: `${url.host.toLowerCase()}/${projectParts.join("/")}`,
-		number,
-		raw: text,
-		kind: "gitlab-url",
-	};
+	if (!repo || number === undefined) return undefined;
+	return { forge: "gitlab", repo, number, raw: text, kind: "gitlab-url" };
 }
 
 /** Fully qualified `mr://<host>/<group…>/<project>/<iid>/diff[/…]`; the short `mr://<iid>/…` form names no project. */

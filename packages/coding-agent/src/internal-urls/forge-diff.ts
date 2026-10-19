@@ -1,11 +1,34 @@
 /**
- * Shared URL-segment splitting and diff-family rendering (`…/diff`,
- * `…/diff/all`, `…/diff/<i>`) for the `pr://` and `mr://` protocols.
+ * Helpers shared by the forge protocols (`pr://`, `mr://`): session cwd
+ * resolution, URL-segment splitting, and diff-family rendering (`…/diff`,
+ * `…/diff/all`, `…/diff/<i>`).
  */
+import { AgentRegistry } from "../registry/agent-registry";
 import type { PrDiffFile, PrDiffPayload } from "../tools/gh-pr-diff";
 import type { ViewLookupResult } from "../tools/gh-view";
 import { formatFreshnessNote } from "../tools/github-cache";
-import type { InternalResource, InternalUrl } from "./types";
+import type { InternalResource, InternalUrl, ResolveContext } from "./types";
+
+/**
+ * Resolve the working directory the protocol should use.
+ *
+ * Order:
+ * 1. Caller-supplied `context.cwd` (the session that initiated `read`).
+ * 2. First registered session via `AgentRegistry` (single-session fallback).
+ * 3. `process.cwd()` (last resort).
+ *
+ * The cwd drives `gh repo view` / `glab repo view` and repo listings for
+ * short-form URLs, so getting this right is what keeps reads of `issue://N`
+ * or `mr://N/diff` from picking the wrong repo across concurrent sessions.
+ */
+export function resolveCwd(context: ResolveContext | undefined): string {
+	if (context?.cwd) return context.cwd;
+	for (const ref of AgentRegistry.global().list()) {
+		const cwd = ref.session?.sessionManager?.getCwd();
+		if (cwd) return cwd;
+	}
+	return process.cwd();
+}
 
 /**
  * Split an internal URL path into raw (undecoded) segments, rejecting empty,

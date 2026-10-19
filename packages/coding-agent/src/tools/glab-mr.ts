@@ -1,11 +1,11 @@
 import * as path from "node:path";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Settings } from "../config/settings";
 import { gitlab } from "../utils/gitlab";
 import { type PrDiffPayload, parsePrUnifiedDiff } from "./gh-pr-diff";
 import type { ViewLookupResult } from "./gh-view";
-import { getOrFetchView, resolveGitlabCacheAuthKey } from "./github-cache";
+import { GITLAB_TOKEN_ENV_VARS, getGlabConfigPath, getOrFetchView, resolveGitlabCacheAuthKey } from "./github-cache";
 
 /**
  * GitLab project refs are `<host>/<namespace…>/<project>` (host lowercased).
@@ -16,7 +16,8 @@ export function formatGitlabProjectArg(project: string): string {
 	return `https://${project}`;
 }
 
-const PROJECT_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
+/** One namespace or project path segment of a GitLab project ref. */
+export const GITLAB_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
 
 /** Parse a GitLab project web URL into a `<host>/<namespace…>/<project>` ref. */
 export function parseGitlabProjectWebUrl(webUrl: string): string | undefined {
@@ -28,8 +29,42 @@ export function parseGitlabProjectWebUrl(webUrl: string): string | undefined {
 	}
 	if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
 	const segments = url.pathname.split("/").filter(Boolean);
-	if (segments.length < 2 || !segments.every(segment => PROJECT_SEGMENT_PATTERN.test(segment))) return undefined;
+	if (segments.length < 2 || !segments.every(segment => GITLAB_PATH_SEGMENT_PATTERN.test(segment))) return undefined;
 	return `${url.host.toLowerCase()}/${segments.join("/")}`;
+}
+
+/**
+ * glab sends `GITLAB_TOKEN`/`GITLAB_ACCESS_TOKEN`/`OAUTH_TOKEN` to whatever
+ * host it talks to, while stored config.yml tokens are per host. When an env
+ * token is set, only let model-chosen URLs reach hosts the user already trusts
+ * with credentials: gitlab.com, the configured default host, or a host in
+ * glab's config.
+ */
+export async function assertGitlabHostTrustedForEnvToken(host: string): Promise<void> {
+	if (!GITLAB_TOKEN_ENV_VARS.some(name => process.env[name])) return;
+	const trusted = new Set(["gitlab.com"]);
+	for (const name of ["GITLAB_HOST", "GITLAB_URI", "GL_HOST"]) {
+		const value = process.env[name]?.trim();
+		if (!value) continue;
+		try {
+			trusted.add(new URL(value.includes("://") ? value : `https://${value}`).host.toLowerCase());
+		} catch {
+			logger.debug("glab: ignoring unparseable default host", { name, value });
+		}
+	}
+	if (trusted.has(host)) return;
+	try {
+		const config = Bun.YAML.parse(await Bun.file(getGlabConfigPath()).text()) as { hosts?: unknown } | null;
+		if (config && typeof config.hosts === "object" && config.hosts !== null) {
+			for (const name of Object.keys(config.hosts)) trusted.add(name.toLowerCase());
+		}
+	} catch (err) {
+		if (!isEnoent(err)) logger.debug("glab: failed to read config hosts", { err: String(err) });
+	}
+	if (trusted.has(host)) return;
+	throw new ToolError(
+		`Refusing to send GitLab token environment variables to ${host}: it is not gitlab.com, GITLAB_HOST, or a host in glab's config. Run \`glab auth login --hostname ${host}\` or set GITLAB_HOST to trust it.`,
+	);
 }
 
 /**
@@ -69,15 +104,6 @@ export async function resolveDefaultGitlabProjectMemoized(cwd: string, signal?: 
 	return untilAborted(signal, pending);
 }
 
-/** Older glab lacks `--raw`; some GitLab instances lack the `raw_diffs` endpoint. */
-function isRawDiffUnsupportedError(err: unknown): boolean {
-	const message = err instanceof Error ? err.message : String(err);
-	return (
-		message.includes("unknown flag: --raw") ||
-		(message.includes("could not obtain raw diff") && message.includes("404"))
-	);
-}
-
 export async function fetchMrDiffFresh(
 	cwd: string,
 	project: string,
@@ -89,8 +115,16 @@ export async function fetchMrDiffFresh(
 	try {
 		text = await gitlab.text(cwd, [...baseArgs, "--raw", "--color", "never"], signal, { trimOutput: false });
 	} catch (err) {
-		if (!isRawDiffUnsupportedError(err)) throw err;
-		logger.debug("glab mr diff --raw unavailable; retrying without --raw", { project, iid, err: String(err) });
+		const message = err instanceof Error ? err.message : String(err);
+		// glab releases without `--raw` print bare `---`/`+++` headers for every
+		// diff version, which no parser here can split into one file list.
+		if (message.includes("unknown flag: --raw")) {
+			throw new ToolError("GitLab CLI is too old for `glab mr diff --raw`; upgrade glab.");
+		}
+		// Instances without the `raw_diffs` endpoint: glab's rendered diff of the
+		// latest version still carries `diff --git` headers.
+		if (!(message.includes("could not obtain raw diff") && message.includes("404"))) throw err;
+		logger.debug("GitLab raw_diffs endpoint unavailable; retrying without --raw", { project, iid, err: message });
 		try {
 			text = await gitlab.text(cwd, [...baseArgs, "--color", "never"], signal, { trimOutput: false });
 		} catch {
@@ -98,6 +132,9 @@ export async function fetchMrDiffFresh(
 		}
 	}
 	const payload = parsePrUnifiedDiff(text);
+	if (payload.files.length === 0 && text.trim()) {
+		throw new ToolError("GitLab CLI returned a diff without `diff --git` file headers; upgrade glab.");
+	}
 	// `rendered` carries the verbatim diff; blank the payload copy so the cache
 	// row stores it once. `getOrFetchMrDiff` rehydrates `unified` from `rendered`.
 	return { rendered: text, sourceUrl: undefined, payload: { unified: "", files: payload.files } };

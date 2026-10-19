@@ -33,16 +33,30 @@ diff --git a/src/two.ts b/src/two.ts
 `;
 const secondSection = diffText.slice(diffText.indexOf("diff --git a/src/two.ts"));
 
+const ENV_KEYS = [
+	"OMP_GITHUB_CACHE_DB",
+	"GITLAB_TOKEN",
+	"GITLAB_ACCESS_TOKEN",
+	"OAUTH_TOKEN",
+	"GITLAB_HOST",
+	"GITLAB_URI",
+	"GL_HOST",
+	"GLAB_CONFIG_DIR",
+] as const;
+const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
 let tempDir: string;
-let originalCacheDb: string | undefined;
-let originalToken: string | undefined;
 
 beforeEach(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "mr-protocol-"));
-	originalCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+	for (const key of ENV_KEYS) {
+		savedEnv[key] = process.env[key];
+		delete process.env[key];
+	}
 	process.env.OMP_GITHUB_CACHE_DB = path.join(tempDir, "github-cache.db");
-	originalToken = process.env.GITLAB_TOKEN;
 	process.env.GITLAB_TOKEN = "test-token";
+	process.env.GITLAB_HOST = "gitlab.example.com";
+	// Empty dir: no glab config.yml hosts unless a test writes one.
+	process.env.GLAB_CONFIG_DIR = tempDir;
 	resetCacheForTests();
 	InternalUrlRouter.resetForTests();
 	GITLAB_DEFAULT_PROJECT_RESOLVED.clear();
@@ -54,10 +68,10 @@ afterEach(async () => {
 	InternalUrlRouter.resetForTests();
 	GITLAB_DEFAULT_PROJECT_RESOLVED.clear();
 	GITLAB_DEFAULT_PROJECT_INFLIGHT.clear();
-	if (originalCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
-	else process.env.OMP_GITHUB_CACHE_DB = originalCacheDb;
-	if (originalToken === undefined) delete process.env.GITLAB_TOKEN;
-	else process.env.GITLAB_TOKEN = originalToken;
+	for (const key of ENV_KEYS) {
+		if (savedEnv[key] === undefined) delete process.env[key];
+		else process.env[key] = savedEnv[key];
+	}
 	vi.restoreAllMocks();
 	await removeWithRetries(tempDir);
 });
@@ -132,5 +146,32 @@ describe("mr:// diff family", () => {
 		expect(textSpy).toHaveBeenCalledTimes(2);
 		expect(textSpy.mock.calls[0]![1]).toContain("--raw");
 		expect(textSpy.mock.calls[1]![1]).not.toContain("--raw");
+	});
+
+	it("fails with an upgrade hint instead of parsing an old glab's header-less diff", async () => {
+		const textSpy = vi.spyOn(gitlab, "text").mockRejectedValue(new Error("unknown flag: --raw"));
+
+		await expect(InternalUrlRouter.instance().resolve("mr://gitlab.com/g/p/7/diff")).rejects.toThrow(
+			/too old for `glab mr diff --raw`/,
+		);
+		expect(textSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps env tokens away from hosts the user has not configured", async () => {
+		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
+		const router = InternalUrlRouter.instance();
+
+		await expect(router.resolve("mr://attacker.example/a/b/1/diff")).rejects.toThrow(
+			/Refusing to send GitLab token environment variables to attacker\.example/,
+		);
+		expect(textSpy).not.toHaveBeenCalled();
+
+		await Bun.write(path.join(tempDir, "config.yml"), "hosts:\n    git.corp.example:\n        token: stored\n");
+		const configured = await router.resolve("mr://git.corp.example/a/b/1/diff");
+		expect(configured.content).toContain("(2 files)");
+
+		delete process.env.GITLAB_TOKEN;
+		const withoutEnvToken = await router.resolve("mr://other.example/a/b/1/diff");
+		expect(withoutEnvToken.content).toContain("(2 files)");
 	});
 });

@@ -183,7 +183,7 @@ function hashCacheIdentity(parts: string[]): string {
  * outright; otherwise the legacy `~/.config/glab-cli` path, then the
  * XDG/platform config dir. Returns the first existing candidate, else the first.
  */
-function getGlabConfigPath(): string {
+export function getGlabConfigPath(): string {
 	const override = process.env.GLAB_CONFIG_DIR;
 	if (override) return path.join(override, "config.yml");
 	const home = os.homedir();
@@ -220,7 +220,8 @@ interface AuthKeyMemoEntry {
 	value: string | undefined;
 }
 const AUTH_KEY_TOKEN_ENV_VARS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
-const GITLAB_AUTH_KEY_TOKEN_ENV_VARS = ["GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN"];
+/** Env vars glab reads tokens from; they apply to every host glab talks to. */
+export const GITLAB_TOKEN_ENV_VARS = ["GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN"];
 const authKeyMemo = new Map<string, AuthKeyMemoEntry>();
 
 function resolveCliCacheAuthKey(
@@ -290,13 +291,7 @@ export function resolveGithubCacheAuthKey(host: string = defaultGhHost()): strin
 
 /** GitLab counterpart of {@link resolveGithubCacheAuthKey}: glab token env vars and/or glab's config.yml. */
 export function resolveGitlabCacheAuthKey(host: string): string | undefined {
-	return resolveCliCacheAuthKey(
-		`gitlab:${host}`,
-		host,
-		GITLAB_AUTH_KEY_TOKEN_ENV_VARS,
-		getGlabConfigPath(),
-		"glab-config",
-	);
+	return resolveCliCacheAuthKey(`gitlab:${host}`, host, GITLAB_TOKEN_ENV_VARS, getGlabConfigPath(), "glab-config");
 }
 
 /**

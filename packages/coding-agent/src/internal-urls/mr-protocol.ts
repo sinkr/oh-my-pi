@@ -11,10 +11,14 @@
  */
 import mrDoc from "../prompts/internal-urls/mr.md" with { type: "text" };
 import { parsePositiveDecimalInt } from "../tools/gh";
-import { getOrFetchMrDiff, resolveDefaultGitlabProjectMemoized } from "../tools/glab-mr";
+import {
+	assertGitlabHostTrustedForEnvToken,
+	GITLAB_PATH_SEGMENT_PATTERN,
+	getOrFetchMrDiff,
+	resolveDefaultGitlabProjectMemoized,
+} from "../tools/glab-mr";
 import { gitlab } from "../utils/gitlab";
-import { renderDiffFamilyResource, splitInternalUrlSegments } from "./forge-diff";
-import { resolveCwd } from "./issue-pr-protocol";
+import { renderDiffFamilyResource, resolveCwd, splitInternalUrlSegments } from "./forge-diff";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
 
 export interface ParsedMrUrl {
@@ -25,7 +29,6 @@ export interface ParsedMrUrl {
 	index?: number;
 }
 
-const PROJECT_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
 const INVALID_MR_URL =
 	"Invalid mr:// URL. Expected mr://<iid>/diff or mr://<host>/<group>/<project>/<iid>/diff, optionally followed by /all or /<i>.";
 
@@ -61,7 +64,7 @@ export function parseMrUrl(url: InternalUrl): ParsedMrUrl {
 	if (iidIndex === 0) return { iid, mode, index };
 
 	const segments = all.slice(1, iidIndex);
-	if (!host || segments.length < 2 || !segments.every(segment => PROJECT_SEGMENT_PATTERN.test(segment))) {
+	if (!host || segments.length < 2 || !segments.every(segment => GITLAB_PATH_SEGMENT_PATTERN.test(segment))) {
 		throw new Error(INVALID_MR_URL);
 	}
 	return { project: `${host.toLowerCase()}/${segments.join("/")}`, iid, mode, index };
@@ -87,7 +90,10 @@ export class MrProtocolHandler implements ProtocolHandler {
 		try {
 			const cwd = resolveCwd(context);
 			let project = parsed.project;
-			if (!project) {
+			if (project) {
+				// The host came from the URL, which the model may have chosen.
+				await assertGitlabHostTrustedForEnvToken(project.split("/")[0]!);
+			} else {
 				try {
 					project = await resolveDefaultGitlabProjectMemoized(cwd, context?.signal);
 				} catch (err) {
