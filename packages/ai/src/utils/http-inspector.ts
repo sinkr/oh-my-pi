@@ -30,7 +30,7 @@ export type CapturedHttpErrorResponse = {
  * header that happens to match is harmless: dumps exist to diagnose the request
  * body, not its transport headers.
  */
-export const SENSITIVE_HEADER_PATTERN = /key|token|secret|auth|credential|cookie/i;
+const SENSITIVE_HEADER_PATTERN = /key|token|secret|auth|credential|cookie/i;
 
 /**
  * Build the JSON persisted for a rejected request. Request fields stay at the
@@ -268,12 +268,13 @@ function redactUrlQuery(url: string | undefined): string | undefined {
 	}
 }
 
-function redactHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+/** Copy of `headers` with every credential value replaced by `[redacted]`; shared by every persisted dump. */
+export function redactHeaders<T>(headers: Record<string, T> | undefined): Record<string, T | string> | undefined {
 	if (!headers) {
 		return undefined;
 	}
 
-	const redacted: Record<string, string> = {};
+	const redacted: Record<string, T | string> = {};
 	for (const [key, value] of Object.entries(headers)) {
 		if (SENSITIVE_HEADER_PATTERN.test(key)) {
 			redacted[key] = "[redacted]";
