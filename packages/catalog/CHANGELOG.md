@@ -5,6 +5,7 @@
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added Factory Droid's image models (GPT Image 2.5, GPT Image 2.5 Flare, Gemini 3 Pro Image) to the `image` role's choices, listed only while your Factory organization allows image generation and that model ([#16316](https://github.com/can1357/oh-my-pi/pull/16316) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
@@ -48,12 +49,6 @@
 ### Fixed
 
 - Gemma 4 models on Google AI Studio (`google/gemma-4-31b-it`, `google/gemma-4-26b-a4b-it`, …) no longer fail every request with `Thinking budget is not supported for this model`; thinking is now toggled with `thinkingLevel` (on = `high`, off = `minimal`) ([#16350](https://github.com/can1357/oh-my-pi/issues/16350))
-
-## [18.12.2] - 2026-10-18
-
-### Added
-
-- Added Factory Droid's image models (GPT Image 2.5, GPT Image 2.5 Flare, Gemini 3 Pro Image) to the `image` role's choices, listed only while your Factory organization allows image generation and that model
 
 ## [18.12.2] - 2026-10-18
 
