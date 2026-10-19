@@ -98,8 +98,18 @@ impl FileSystem for DelayedFilesystem {
 		Fs::native().symlink_metadata(self.path(path)?).await
 	}
 
+	/// Listing `virtual://vanishing…` stands in for a directory another
+	/// process deletes while it is refused to us: it is removed, then the
+	/// listing fails with `PermissionDenied`.
 	async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
 		delay().await;
+		if path
+			.to_str()
+			.is_some_and(|path| path.starts_with("virtual://vanishing"))
+		{
+			Fs::native().remove_dir_all(self.path(path)?).await?;
+			return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+		}
 		let mut entries = Vec::new();
 		for entry in Fs::native().read_dir(self.path(path)?).await? {
 			let entry = entry?;
@@ -703,6 +713,26 @@ async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (u
 		.await
 		.expect("mv between host and provider");
 	(u8::from(result.exit_code), captured_text(&error))
+}
+
+/// A directory `rm` cannot list may still be removable; if another process
+/// deleted it meanwhile, `-f` counts it as removed instead of reporting the
+/// listing's `Permission denied`.
+#[cfg(unix)]
+#[tokio::test]
+async fn forced_rm_of_a_directory_gone_while_refused_succeeds() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host working directory");
+	let run = async |script: &str| {
+		fs::create_dir_all(provider.path().join("vanishing/child")).expect("doomed tree");
+		run_from_host_dir(provider.path(), host.path(), script).await
+	};
+
+	assert_eq!(run("rm -rf virtual://vanishing").await, (0, String::new()));
+	assert!(!provider.path().join("vanishing").exists());
+	let (code, error) = run("rm -r virtual://vanishing").await;
+	assert_eq!(code, 1);
+	assert!(error.contains("Permission denied"), "{error}");
 }
 
 /// A rename from the host into a provider is `EXDEV`, so `mv` copies and
