@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `selectorLineRanges()` reads a bare `N` compounded with `raw` (`17:raw`, `raw:17`) as the single line `N`; `parseLineRanges()` takes an optional `"single"` mode for the same rule
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

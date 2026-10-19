@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `cursorRawReadPath()` writes a bare start line as `raw:N-` (`file:10` → `file:raw:10-`), so Cursor exec reads of such a path still read from line `N` onward now that `read` takes `N:raw` as one line
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
