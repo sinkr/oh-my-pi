@@ -5,6 +5,7 @@ import {
 	resolveFactoryDroidPolicy,
 	resolveFactoryDroidRotation,
 } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -501,25 +502,21 @@ function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): Assi
 }
 
 /**
- * Chat-completions tool names over the route's 64-char bound go out in the
- * CLI's capped form on declarations and replayed calls and results; shorter
- * names go out verbatim. Returned calls come back under the caller's tool name.
+ * Chat-completions tool names over the route's bound go out in the CLI's
+ * capped form on declarations and replayed calls and results; shorter names go
+ * out verbatim. Returned calls come back under the caller's tool name.
  */
-function encodeCompletionsToolNames(context: Context): Context {
+function encodeCompletionsToolNames(context: Context, encode: (name: string) => string): Context {
 	return {
 		...context,
-		tools: context.tools?.map(tool => ({ ...tool, name: encodeFactoryDroidCompletionsToolName(tool.name) })),
+		tools: context.tools?.map(tool => ({ ...tool, name: encode(tool.name) })),
 		messages: context.messages.map(message => {
-			if (message.role === "toolResult") {
-				return { ...message, toolName: encodeFactoryDroidCompletionsToolName(message.toolName) };
-			}
+			if (message.role === "toolResult") return { ...message, toolName: encode(message.toolName) };
 			if (message.role !== "assistant") return message;
 			return {
 				...message,
 				content: message.content.map(block =>
-					block.type === "toolCall"
-						? { ...block, name: encodeFactoryDroidCompletionsToolName(block.name) }
-						: block,
+					block.type === "toolCall" ? { ...block, name: encode(block.name) } : block,
 				),
 			};
 		}),
@@ -528,12 +525,16 @@ function encodeCompletionsToolNames(context: Context): Context {
 
 function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): AssistantMessageEventStream {
 	const { options } = a;
-	const toolNamesByWire = factoryDroidToolNamesByWire(a.context.tools, encodeFactoryDroidCompletionsToolName);
+	// The bound `transformMessages` validates replayed names against for this model.
+	const policyMaxLength = resolveCatalogPolicy(inner).toolCallNameMaxLength;
+	const maxLength = typeof policyMaxLength === "number" ? policyMaxLength : 64;
+	const encode = (name: string) => encodeFactoryDroidCompletionsToolName(name, maxLength);
+	const toolNamesByWire = factoryDroidToolNamesByWire(a.context.tools, encode);
 	// The selected dialect owns every reasoning field, so the shared encoder gets none.
 	const extraBody = buildCompletionsReasoningBody(a.route.policy, a.effort, a.disabled);
 	const source = streamOpenAICompletions(
 		{ ...inner, compat: { ...inner.compat, extraBody } },
-		encodeCompletionsToolNames(a.context),
+		encodeCompletionsToolNames(a.context, encode),
 		{
 			...a.forwarded,
 			sessionId: a.sessionUuid,
@@ -554,12 +555,9 @@ function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): 
 			// A forced choice names the tool by its declared (encoded) name.
 			toolChoice:
 				typeof options?.toolChoice === "object" && "function" in options.toolChoice
-					? {
-							...options.toolChoice,
-							function: { name: encodeFactoryDroidCompletionsToolName(options.toolChoice.function.name) },
-						}
+					? { ...options.toolChoice, function: { name: encode(options.toolChoice.function.name) } }
 					: typeof options?.toolChoice === "object" && "name" in options.toolChoice
-						? { ...options.toolChoice, name: encodeFactoryDroidCompletionsToolName(options.toolChoice.name) }
+						? { ...options.toolChoice, name: encode(options.toolChoice.name) }
 						: options?.toolChoice,
 		},
 	);
@@ -570,6 +568,9 @@ function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): 
 		for (const block of message.content) if (block.type === "toolCall") decodeCall(block);
 	};
 	const stream = new AssistantMessageEventStream();
+	// `streamOpenAICompletions` (register-builtins) turns every failure, a
+	// rejected retry wait included, into an `error` event and ends; it never
+	// rejects, so this loop always reaches `end()`.
 	(async () => {
 		for await (const event of source) {
 			if ("partial" in event) decode(event.partial);

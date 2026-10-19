@@ -2,6 +2,7 @@ import { describe, expect, it, mock } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamFactoryDroid } from "../src/providers/factory-droid";
+import { encodeFactoryDroidCompletionsToolName } from "../src/providers/factory-droid/tool-names";
 import type { Message, Model } from "../src/types";
 import {
 	assistantTurn,
@@ -560,6 +561,44 @@ describe("Factory Droid completions reasoning matrix", () => {
 			expect(result.errorMessage).toContain("both encode as");
 			expect(captured).toHaveLength(0);
 		});
+
+		it("caps at the limit it is given, so a catalog bound other than 64 moves the cap with it", () => {
+			const wire = encodeFactoryDroidCompletionsToolName(LONG, 40);
+			expect(wire).toHaveLength(40);
+			expect(wire.slice(0, 31)).toBe(LONG.slice(0, 31));
+			expect(encodeFactoryDroidCompletionsToolName(LONG, 73)).toBe(LONG);
+		});
+	});
+
+	it("ends with an error result when a provider retry wait rejects", async () => {
+		// An empty completion triggers the shared empty-response retry; its wait
+		// rejecting fails the retry stream, which the completions transport turns
+		// into an `error` event, so the tool-name wrapper ends instead of hanging.
+		const empty = [
+			JSON.stringify({
+				id: "chatcmpl-test",
+				object: "chat.completion.chunk",
+				created: 1,
+				model: "kimi-k3",
+				choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: "stop" }],
+				usage: { prompt_tokens: 11, completion_tokens: 0, total_tokens: 11 },
+			}),
+		];
+		const captured: CapturedRequest[] = [];
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: "workos-token",
+				fetch: captureFetch(captured, empty),
+				providerRetryWait: async () => {
+					throw new Error("retry wait rejected");
+				},
+			},
+		).result();
+		expect(captured).toHaveLength(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("retry wait rejected");
 	});
 
 	it("does not invent synthetic reasoning_content or content for kimi tool-call history", async () => {
