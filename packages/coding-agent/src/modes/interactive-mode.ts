@@ -5595,14 +5595,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
+		let state: GoalModeState | undefined;
+		try {
+			state = options.resume
+				? await this.session.goalRuntime.resumeGoal()
+				: await this.session.goalRuntime.createGoal({
+						objective: options.objective ?? "",
+						tokenBudget: options.tokenBudget,
+					});
+			await this.session.setActiveToolsByName(goalTools);
+		} catch (error) {
+			this.#goalModePreviousTools = undefined;
+			// The runtime already journaled the goal; without its tool it must not
+			// stay active, or every later entry is refused against a stuck goal.
+			if (state) {
+				const runtime = this.session.goalRuntime;
+				await (options.resume ? runtime.pauseGoal() : runtime.dropGoal()).catch((rollbackError: unknown) =>
+					logger.warn("Failed to roll back goal after tool activation failed", { error: String(rollbackError) }),
+				);
+			}
+			throw error;
+		}
 		this.goalModePaused = false;
-		const state = options.resume
-			? await this.session.goalRuntime.resumeGoal()
-			: await this.session.goalRuntime.createGoal({
-					objective: options.objective ?? "",
-					tokenBudget: options.tokenBudget,
-				});
-		await this.session.setActiveToolsByName(goalTools);
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
 		this.#resetGoalContinuationSuppression();
@@ -7017,6 +7031,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const planFilePath = details.planFilePath || this.planModePlanFilePath || (await this.#getPlanFilePath());
 		this.planModePlanFilePath = planFilePath;
+		// A reviewed draft can replace the recorded path; it is part of the reported state.
+		this.#notifyModeChanged();
 		const planContent = await this.#readPlanFile(planFilePath);
 		if (!planContent) {
 			this.showError(`Plan file not found at ${planFilePath}`);

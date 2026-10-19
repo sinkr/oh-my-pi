@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
 	ExtensionContext,
 	ExtensionFactory,
@@ -39,6 +39,7 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		registry.authStorage.keys.setRuntime("openai", "test-key");
 	});
 	beforeEach(() => {
+		resetSettingsForTest();
 		// init() starts a ProcessTerminal; keep it off the real terminal.
 		vi.spyOn(process.stdout, "write").mockReturnValue(true);
 		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
@@ -51,6 +52,8 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 	afterEach(async () => {
 		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 		vi.restoreAllMocks();
+		// Settings.init() binds a global singleton to this case's (now deleted) temp cwd.
+		resetSettingsForTest();
 	});
 	afterAll(() => registry.authStorage.close());
 
@@ -217,6 +220,20 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 		expect(modes.getState().goal).toEqual({ status: "inactive" });
 		expect(session.getEnabledToolNames()).toEqual(tools);
 		expect(provider.calls).toEqual([]);
+	});
+
+	it("rolls back a goal whose tool fails to activate, so a later entry succeeds", async () => {
+		const { session, modes } = await tui();
+		const tools = session.getEnabledToolNames();
+		vi.spyOn(session, "setActiveToolsByName").mockRejectedValueOnce(new Error("tool activation failed"));
+		await expect(modes.set({ mode: "goal", action: "enter", objective: "Doomed" })).rejects.toThrow(
+			"tool activation failed",
+		);
+		expect(modes.getState().goal).toEqual({ status: "inactive" });
+		expect(session.getGoalModeState()?.goal.status ?? "dropped").toBe("dropped");
+		expect(session.getEnabledToolNames()).toEqual(tools);
+		expect(changed(await modes.set({ mode: "goal", action: "enter", objective: "Retry" }))).toBe(true);
+		expect(modes.getState().goal).toMatchObject({ status: "active", objective: "Retry" });
 	});
 
 	it("does not report goal accounting as a mode change", async () => {
