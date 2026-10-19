@@ -544,6 +544,18 @@ describe("Factory Droid organization lookup", () => {
 		expect(credentials).toMatchObject({ access: scoped, orgId: "factory-org", activeOrganizationId: "org_workos" });
 	});
 
+	it("gives each Factory request its own deadline", async () => {
+		const backend = factoryBackend(["org_workos"]);
+		const signals: AbortSignal[] = [];
+		const fetchImpl: FetchImpl = async (input, init) => {
+			if (/\/api\/cli\/(org|whoami)$/.test(String(input)) && init?.signal) signals.push(init.signal);
+			return backend.fetchImpl(input, init);
+		};
+		await withGlobalFetch(fetchImpl, () => loginViaRegistry({ fetch: fetchImpl }));
+		expect(signals.length).toBeGreaterThanOrEqual(3);
+		expect(new Set(signals).size).toBe(signals.length);
+	});
+
 	it("rejects a login whose scoped bearer Factory still refuses", async () => {
 		const backend = factoryBackend(["org_workos"], { rejectScoped: true });
 		await expect(

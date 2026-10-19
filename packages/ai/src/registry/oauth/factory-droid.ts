@@ -113,16 +113,19 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 		region: sameOrg ? context.stored?.region : undefined,
 		inferenceRegion: sameOrg ? context.stored?.inferenceRegion : undefined,
 	};
-	const timeout = AbortSignal.timeout(15_000);
-	const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
-	const whoami = await readWhoami(identity, context, signal);
+	// Each Factory request gets its own 15 s deadline, so earlier slow calls do not eat into later ones.
+	const requestSignal = () => {
+		const timeout = AbortSignal.timeout(15_000);
+		return context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
+	};
+	const whoami = await readWhoami(identity, context, requestSignal());
 	// Factory rejects a bearer without an org claim. When neither the new
 	// bearer's claim nor whoami names an organization (a stored org says nothing
 	// about this bearer) and no WorkOS organization is selected yet, scope the
 	// grant to the account's one. The scoped refresh re-enters this hook with
 	// that organization selected, so it never repeats.
 	if (!credentials.orgId && !whoami.accepted && !selectedOrg) {
-		const workosOrg = await lookupWorkOSOrganization(credentials, identity.region, context, signal);
+		const workosOrg = await lookupWorkOSOrganization(credentials, identity.region, context, requestSignal());
 		if (workosOrg) {
 			let scoped: OAuthCredentials | undefined;
 			try {
@@ -139,7 +142,7 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 				// The scoped grant rotated the refresh token, so a refresh keeps it either way.
 				if (context.phase === "refresh") return scoped;
 				// The nested refresh checked whoami leniently; a login must see Factory accept the bearer.
-				const confirmed = await readWhoami(scoped, context, signal);
+				const confirmed = await readWhoami(scoped, context, requestSignal());
 				if (confirmed.failure) throw confirmed.failure;
 				return confirmed.identity;
 			}
