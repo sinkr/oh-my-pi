@@ -226,8 +226,12 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				.map(id => {
 					const target = element.ownerDocument?.getElementById(id);
 					if (!target) return "";
-					// Hidden by visibility, `display: none` or a hidden ancestor: read the whole subtree.
-					const hidden = !target.checkVisibility() || getComputedStyle(target).visibility !== "visible";
+					// Hidden by visibility, `display: none`, or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
+					const targetStyle = getComputedStyle(target);
+					const hidden =
+						targetStyle.visibility !== "visible" ||
+						targetStyle.display === "none" ||
+						target.closest("[hidden], [aria-hidden='true']") !== null;
 					return contentText(target, null, hidden ? "any" : "visible", false);
 				})
 				.join(" "),
