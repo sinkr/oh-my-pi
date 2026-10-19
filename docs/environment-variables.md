@@ -601,7 +601,7 @@ Every command the agent runs through the `bash` tool (foreground, background, PT
 | `PI_SESSION_ID`   | Current session ID                                                           |
 | `PI_SESSION_FILE` | Absolute path to the current session JSONL file; empty when not persisted (`--no-session`) |
 
-Values are resolved when each command starts, so they follow `/fork`, `/new`, and `/resume`. They are always set, so an empty value replaces a stale one inherited from a parent omp process. User `!` commands do not receive them.
+Values are read when each tool call starts, so the next call follows `/fork`, `/new`, and `/resume`, and a call already under way keeps the session it started in. They are always set, so an empty value replaces a stale one inherited from a parent omp process. User `!` commands do not receive them.
 
 ```bash
 echo "$PI_SESSION_ID"

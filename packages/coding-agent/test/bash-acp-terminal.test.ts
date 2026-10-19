@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ClientBridge, ClientBridgeTerminalHandle } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
@@ -125,7 +126,8 @@ describe("BashTool ACP terminal routing", () => {
 		const bridge: ClientBridge = { capabilities: { terminal: true }, createTerminal: async () => handle };
 		const createSpy = spyOn(bridge, "createTerminal");
 		let sessionId = "session-a";
-		let sessionFile: string | null = "/sessions/a.jsonl";
+		const fileA = path.join(os.tmpdir(), "sessions", "a.jsonl");
+		let sessionFile: string | null = fileA;
 		const tool = new BashTool({
 			...makeSession(bridge),
 			getSessionFile: () => sessionFile,
@@ -145,7 +147,7 @@ describe("BashTool ACP terminal routing", () => {
 		sessionFile = null;
 		await tool.execute("call-env-b", { command: "true" });
 
-		expect(sessionEnvOf(0)).toEqual({ PI_SESSION_ID: "session-a", PI_SESSION_FILE: "/sessions/a.jsonl" });
+		expect(sessionEnvOf(0)).toEqual({ PI_SESSION_ID: "session-a", PI_SESSION_FILE: fileA });
 		// Empty, not absent: an env overlay cannot unset a stale value inherited from a parent omp.
 		expect(sessionEnvOf(1)).toEqual({ PI_SESSION_ID: "session-b", PI_SESSION_FILE: "" });
 	});

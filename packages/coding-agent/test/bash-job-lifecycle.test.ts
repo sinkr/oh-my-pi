@@ -79,3 +79,25 @@ it.skipIf(process.platform === "win32")(
 	},
 	10_000,
 );
+
+it.skipIf(process.platform === "win32")("gives a background job the session identity, file made absolute", async () => {
+	const job = new BashTool({
+		cwd,
+		hasUI: false,
+		// A relative `--session-dir` yields a relative session file.
+		getSessionFile: () => "sessions/bg.jsonl",
+		getSessionId: () => "session-bg",
+		getSessionSpawns: () => "*",
+		asyncJobManager: manager,
+		settings: Settings.isolated({}),
+	});
+	const result = await job.execute("bg-env", {
+		command: `printf '%s|%s' "$PI_SESSION_ID" "$PI_SESSION_FILE" > env.txt`,
+		async: true,
+	});
+	if (!result.details?.async?.jobId) throw new Error("expected background job");
+	await manager.waitForAll();
+	const [id, file] = (await Bun.file(path.join(cwd, "env.txt")).text()).split("|");
+	expect(id).toBe("session-bg");
+	expect(file).toBe(path.resolve("sessions/bg.jsonl"));
+});
