@@ -33,12 +33,15 @@ import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@o
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
 import {
+	escapeXmlText,
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
 	isCompiledBinary,
 	parseFrontmatter as parseOmpFrontmatter,
+	prompt,
 } from "@oh-my-pi/pi-utils";
+import legacyAvailableSkillsTemplate from "./legacy-pi-available-skills.md" with { type: "text" };
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -1723,4 +1726,32 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 		content: match[3],
 		userMessage: match[4]?.trim() || undefined,
 	};
+}
+
+/**
+ * Render the `<available_skills>` system-prompt block, ported from upstream
+ * pi-coding-agent 1.x (`src/core/skills.ts`). omp renders skills through its
+ * own prompt templates and never exports the formatter, so legacy extensions
+ * importing it from the package root fail Bun's static named-export check
+ * (observed consumer: `pi-claude-bridge`, which forwards the block to Claude
+ * Code). Skills hidden from the prompt are skipped, whether hidden through
+ * upstream's `disableModelInvocation` or omp's `hide`.
+ */
+export function formatSkillsForPrompt(
+	skills: readonly (Skill & { disableModelInvocation?: boolean })[],
+	fileReadTool: "read" | "bash" | (string & {}) = "read",
+): string {
+	const visibleSkills = skills.filter(skill => !skill.disableModelInvocation && !skill.hide);
+	if (visibleSkills.length === 0) return "";
+	const block = prompt.render(legacyAvailableSkillsTemplate, {
+		readTool: fileReadTool === "read",
+		bashTool: fileReadTool === "bash",
+		skills: visibleSkills.map(skill => ({
+			name: escapeXmlText(skill.name),
+			description: escapeXmlText(skill.description),
+			location: escapeXmlText(skill.filePath),
+		})),
+	});
+	// Upstream returns the block with two leading newlines to append to a system prompt.
+	return `\n\n${block.trimEnd()}`;
 }
