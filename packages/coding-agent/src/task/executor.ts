@@ -3981,9 +3981,9 @@ function buildSubagentSessionOptions(
 	};
 }
 
-/** Remembers the roster `block` shows, dropping blocks the live session's prompt no longer holds. */
+/** Remembers the roster `block` shows, dropping blocks the live session's base prompt no longer holds. */
 function recordIrcRender(inputs: SubagentPromptInputs, block: string, roster: IrcPeerRosterData): void {
-	const held = AgentRegistry.global().get(inputs.id)?.session?.systemPrompt;
+	const held = AgentRegistry.global().get(inputs.id)?.session?.baseSystemPrompt;
 	if (held) {
 		for (const rendered of inputs.ircRenders.keys()) {
 			if (!held.includes(rendered)) inputs.ircRenders.delete(rendered);
@@ -3992,10 +3992,14 @@ function recordIrcRender(inputs: SubagentPromptInputs, block: string, roster: Ir
 	inputs.ircRenders.set(block, roster);
 }
 
-/** When `session` is disposed, keeps the roster its prompt held for the next warm revive to render again. */
+/**
+ * When `session` is disposed, keeps the roster its base prompt held for the next warm revive to
+ * render again. The base, not the effective prompt: a `before_agent_start` override may rewrite
+ * the block, and the revived turn re-runs that hook over the same base.
+ */
 function trackSubagentIrcRoster(session: AgentSession, inputs: SubagentPromptInputs): void {
 	session.addDisposer(() => {
-		inputs.ircRoster = session.systemPrompt
+		inputs.ircRoster = session.baseSystemPrompt
 			.map(block => inputs.ircRenders.get(block))
 			.find(roster => roster !== undefined);
 		inputs.ircRenders.clear();

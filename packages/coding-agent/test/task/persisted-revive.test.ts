@@ -1482,15 +1482,21 @@ describe("cold revival replays the system prompt the last request sent", () => {
 	}
 
 	/** Parks the spawned subagent, lets `whileParked` change the registry, and warm-revives it. */
-	async function parkAndRevive(whileParked: () => void): Promise<{ live: AgentSession; warm: RecordingSession }> {
+	async function parkAndRevive(
+		whileParked: () => void,
+		hooks?: ExtensionHooks,
+	): Promise<{ live: AgentSession; warm: RecordingSession }> {
 		const lifecycle = AgentLifecycleManager.global();
 		await lifecycle.park("prompt-blocks");
 		whileParked();
 		let warm: RecordingSession | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementationOnce(async options => {
-			warm = createRecordingSession(options!.sessionManager!, names => subagentPrompt(names, options), [
-				{ content: ["next"] },
-			]);
+			warm = createRecordingSession(
+				options!.sessionManager!,
+				names => subagentPrompt(names, options),
+				[{ content: ["next"] }],
+				hooks,
+			);
 			return { session: warm.session } as CreateAgentSessionResult;
 		});
 		const live = await lifecycle.ensureLive("prompt-blocks");
@@ -1518,6 +1524,19 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		await spawned.session.refreshBaseSystemPrompt(() => false);
 		expect(spawned.session.systemPrompt.join("\n")).not.toContain("`Peer`");
 		const { warm } = await parkAndRevive(() => AgentRegistry.global().unregister("Peer"));
+		expect(warm.requests[0]).toEqual(spawned.requests.at(-1)!);
+	});
+
+	it("warm-revives with the roster its base held when a before_agent_start hook rewrites the prompt", async () => {
+		const cwd = makeTempDir("@pi-revive-hooked-roster-");
+		const mergeBlocks = {
+			beforeAgentStart: async (_session: AgentSession, systemPrompt: string[]) => [
+				`${systemPrompt.join("\n\n")}\n\nhooked`,
+			],
+		};
+		const spawned = await spawn(cwd, subagentPrompt, spawnResponses(), mergeBlocks);
+		expect(spawned.requests.at(-1)).toHaveLength(1);
+		const { warm } = await parkAndRevive(registerPeer, mergeBlocks);
 		expect(warm.requests[0]).toEqual(spawned.requests.at(-1)!);
 	});
 
