@@ -548,6 +548,24 @@ describe("dispatchReportIssueDevice", () => {
 		}
 	});
 
+	/** Record `bash: <report>` as user `will` and return the stored report text. */
+	async function recordAsWill(report: string): Promise<string> {
+		Bun.env.PI_AUTO_QA = "1";
+		stubIdentity("/Users/will", "will");
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(session, `bash: ${report}`);
+			await settlePipeline();
+			const row = db.prepare("SELECT report FROM grievances").get() as { report: string };
+			return row.report;
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	}
+
 	it.each([
 		[
 			"launchctl print gui/501/com.will.agent failed in /Users/will/code (not /Users/willa)",
@@ -558,25 +576,13 @@ describe("dispatchReportIssueDevice", () => {
 			"transcript -Users-will-codebases-app/x.jsonl and /c/Users/will/AppData",
 			"transcript -Users-<user>-codebases-app/x.jsonl and /c/Users/<user>/AppData",
 		],
-		[
-			"Ask will. It will-do: will/max under ./will_modules/x and /srv/will/test",
-			"Ask will. It will-do: will/max under ./will_modules/x and /srv/will/test",
-		],
 	])("redacts the user's identity from %p", async (report, expected) => {
-		Bun.env.PI_AUTO_QA = "1";
-		stubIdentity("/Users/will", "will");
-		const db = openTempDb();
-		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
-		try {
-			const session = { settings: consentedSettings() } as ToolSession;
-			await dispatchReportIssueDevice(session, `bash: ${report}`);
-			await settlePipeline();
-			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
-			expect(row).toEqual({ tool: "bash", report: expected });
-		} finally {
-			openSpy.mockRestore();
-			db.close();
-		}
+		expect(await recordAsWill(report)).toBe(expected);
+	});
+
+	it("leaves the login name alone where it is a word or an unrelated path segment", async () => {
+		const report = "Ask will. It will-do: will/max under ./will_modules/x and /srv/will/test";
+		expect(await recordAsWill(report)).toBe(report);
 	});
 
 	it("writes nothing while consent is unresolved", async () => {
