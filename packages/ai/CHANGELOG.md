@@ -5,7 +5,7 @@
 ### Fixed
 
 - Fixed finalized signed reasoning disappearing from displayed thinking when no deltas streamed ([#16227](https://github.com/can1357/oh-my-pi/issues/16227))
-- Fixed native remote compaction for supported Bedrock Claude models, including response deadlines, per-iteration cost estimates, and signed-state replay, while preserving ordinary Converse turns and same-provider replay of legacy encrypted summaries ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Fixed native remote compaction for supported Bedrock Claude models without changing ordinary Converse turns ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
 ## [18.12.2] - 2026-10-18
 

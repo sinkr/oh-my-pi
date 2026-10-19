@@ -262,18 +262,9 @@ use native OpenAI compaction without an opt-in, for any provider id. Set
 `enabled: false` to turn it off, or `v2StreamingEnabled: false` to keep only
 the V1 `/responses/compact` request. See [compaction](./compaction.md).
 
-Catalog-marked Claude `bedrock-converse-stream` models also use native remote compaction by default
-when `remoteCompaction.enabled` is not `false`: compaction alone calls Bedrock Runtime `InvokeModel`
-with the Anthropic compaction beta. Ordinary turns remain on Converse and receive portable summary
-text, not the beta or signed block. The current model-card policy covers Haiku 4.5/5.5, Sonnet
-5/5.5, and Opus 4.7/4.8/5/5.5; it does not opt Converse 4.6 models in. AWS documents the beta for
-Runtime `InvokeModel` and `InvokeModelWithResponseStream`, not Converse ([AWS guide](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-compaction.html)).
-
-This Runtime side path is separate from the existing Bedrock Anthropic Messages `/anthropic` route.
-OMP supports that route on Bedrock Runtime and Bedrock Mantle when its existing endpoint gating allows
-it; see [the Anthropic Messages setup](./models.md#claude-on-bedrocks-anthropic-messages-api-anthropic).
-The AWS compaction guide documents the direct Runtime `InvokeModel` path, not this separate Messages
-route.
+Bedrock Claude compaction routing and the `remoteCompaction.enabled: false` opt-out are described in
+[compaction](./compaction.md#summary-generation). The separate Anthropic Messages `/anthropic` route has
+its own [setup](./models.md#claude-on-bedrocks-anthropic-messages-api-anthropic).
 
 ### Model value checks
 
