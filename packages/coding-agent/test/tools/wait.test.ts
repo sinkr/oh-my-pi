@@ -227,20 +227,33 @@ describe("wait", () => {
 			manager.cancel(id);
 		});
 
-		test("still aborts the wait when nothing of the caller's has settled", async () => {
+		test("ends as an interrupted wait, as after the refresh, when only running jobs remain", async () => {
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
 			const id = manager.register("bash", "still running", async () => Promise.withResolvers<string>().promise, {
 				ownerId: "Main",
 			});
 			const controller = new AbortController();
 			controller.abort(TOOL_INTERRUPT_ABORT_REASON);
-			const waiting = new WaitTool(session(manager, "Main", true)).execute(
+			const result = await new WaitTool(session(manager, "Main", true)).execute(
 				"interrupted-refresh-running",
 				{},
 				controller.signal,
 			);
-			await expect(waiting).rejects.toThrow();
+			expect(result.isError).toBeUndefined();
+			expect(result.details).toMatchObject({ op: "wait", jobs: [], interrupted: true });
+			expect(manager.getJob(id)?.status).toBe("running");
 			manager.cancel(id);
+		});
+
+		test("reports nothing to wait for, as after the refresh, when the caller has no work", async () => {
+			const controller = new AbortController();
+			controller.abort(TOOL_INTERRUPT_ABORT_REASON);
+			const waiting = new WaitTool(session(new AsyncJobManager({}), "Main", true)).execute(
+				"interrupted-refresh-idle",
+				{},
+				controller.signal,
+			);
+			await expect(waiting).rejects.toThrow("Nothing to wait for");
 		});
 	});
 });

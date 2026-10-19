@@ -75,17 +75,14 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		if (pending && messaging) return messageResult(messaging.senderId, pending);
 		// Refreshes owned-service tracking only; jobs are in-process, so a hung
 		// broker must not turn every wait into an error.
-		let refreshInterrupted = false;
 		if (cfgLaunchEnabled.get(this.session.settings)) {
 			try {
 				await listServicesTolerant(this.session, signal);
 			} catch (error) {
 				// An interrupt landing during the refresh (most often the notice
-				// of the job this wait is for) still lets the checks below return
-				// a queued message or settled job; with neither, the wait ends as
-				// interrupted.
+				// of the job this wait is for) ends the wait as one landing just
+				// after it does: the checks below and the aborted wake path.
 				if (signal?.reason !== TOOL_INTERRUPT_ABORT_REASON) throw error;
-				refreshInterrupted = true;
 			}
 			const queued = takeQueuedMessage(messaging);
 			if (queued && messaging) return messageResult(messaging.senderId, queued);
@@ -98,7 +95,6 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		if (manager && undelivered.length > 0) {
 			return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
 		}
-		if (refreshInterrupted) throwIfAborted(signal);
 		const serviceRunning = hasLiveOwnedService(this.session);
 		if (jobs.length === 0 && !serviceRunning) {
 			throw new ToolError(
