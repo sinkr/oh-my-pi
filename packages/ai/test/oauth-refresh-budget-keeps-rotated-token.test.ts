@@ -192,4 +192,65 @@ describe("OAuth refresh budget", () => {
 		const pooled = authStorage.credentials.list(PROVIDER).map(entry => entry.id);
 		expect(pooled).toEqual([target!.id]);
 	});
+
+	test("a credential removed while a failing exchange ran is not restored to the pool", async () => {
+		if (!store) throw new Error("test setup failed");
+		const authStorage = new AuthStorage(store, {});
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "oauth", access: "access-a", refresh: "a0", expires: Date.now() - 60_000 },
+			{ type: "oauth", access: "access-b", refresh: "b0", expires: Date.now() + 3_600_000 },
+			{ type: "oauth", access: "access-c", refresh: "c0", expires: Date.now() + 3_600_000 },
+		]);
+		const [target, sibling, kept] = store.listAuthCredentials(PROVIDER);
+		const gate = Promise.withResolvers<void>();
+		const refresh = authStorage.oauth.refreshStored(PROVIDER, {
+			credentialId: target!.id,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			isDefinitiveFailure: () => true,
+			refresh: async () => {
+				await gate.promise;
+				throw new Error("invalid_grant");
+			},
+		});
+		await Bun.sleep(0);
+		await store.deleteAuthCredential(sibling!.id, "deleted by user");
+		gate.resolve();
+		await expect(refresh).resolves.toMatchObject({ removed: true });
+		const pooled = authStorage.credentials.list(PROVIDER).map(entry => entry.id);
+		expect(pooled).toEqual([kept!.id]);
+	});
+
+	test("a waiter whose budget ran out does not take a lease that frees up", async () => {
+		if (!store) throw new Error("test setup failed");
+		const authStorage = new AuthStorage(store, {});
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "oauth", access: "access-r0", refresh: "r0", expires: Date.now() - 60_000 },
+		]);
+		const credentialId = store.listAuthCredentials(PROVIDER)[0]!.id;
+		expect(store.tryAcquireCredentialRefreshLease(credentialId, "peer", Date.now() + 15_000)).toBe(true);
+		// The peer lets go exactly when the waiter's budget has run out.
+		const realNow = Date.now;
+		let exchanged = false;
+		const start = realNow();
+		const sleep = Bun.sleep;
+		vi.spyOn(Bun, "sleep").mockImplementation(async ms => {
+			await sleep(ms);
+			if (realNow() - start >= 20) store?.releaseCredentialRefreshLease(credentialId, "peer");
+		});
+		const waiter = authStorage.oauth.refreshStored(PROVIDER, {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			refreshTimeoutMs: 20,
+			refresh: async () => {
+				exchanged = true;
+				return { access: "access-r1", refresh: "r1", expires: realNow() + 3_600_000 };
+			},
+		});
+		await expect(waiter).rejects.toMatchObject({
+			message: `OAuth token refresh timed out for provider: ${PROVIDER}`,
+		});
+		expect(exchanged).toBe(false);
+	});
 });

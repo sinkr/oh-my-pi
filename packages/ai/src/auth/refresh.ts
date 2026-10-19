@@ -244,6 +244,8 @@ export class OAuthRefresher {
 			if (options.canRefresh && !options.canRefresh(current)) {
 				return { credential: current, refreshed: false, removed: false };
 			}
+			// A caller whose budget ran out must not start an exchange it will not wait for.
+			if (Date.now() >= waitDeadline) return this.#budgetExceeded(provider, options, current);
 			if (leaseStore.tryAcquireCredentialRefreshLease(row.id, owner, Date.now() + OAUTH_REFRESH_LEASE_TTL_MS)) {
 				leasedCredentialId = row.id;
 				break;
@@ -309,7 +311,6 @@ export class OAuthRefresher {
 				this.#exchangeLeased(
 					provider,
 					options,
-					rows,
 					row,
 					current,
 					serialized.data,
@@ -375,7 +376,6 @@ export class OAuthRefresher {
 	async #exchangeLeased<T extends OAuthCredential>(
 		provider: string,
 		options: StoredOAuthRefreshOptions<T>,
-		rows: StoredAuthCredential[],
 		row: StoredAuthCredential,
 		current: T,
 		serializedData: string,
@@ -437,14 +437,13 @@ export class OAuthRefresher {
 					leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
 				);
 				if (disabled) {
+					// Re-read: siblings may have been removed while the exchange ran.
 					this.#deps.pool.replace(
 						provider,
-						rows
+						this.#deps.store
+							.listAuthCredentials(provider)
 							.filter(entry => entry.id !== row.id)
-							.map(entry => ({
-								id: entry.id,
-								credential: entry.credential,
-							})),
+							.map(entry => ({ id: entry.id, credential: entry.credential })),
 					);
 					this.#deps.pool.reset(provider);
 					this.#deps.pool.emitDisabled(credentialDisabledEvent(provider, row, disabledCause));
@@ -495,8 +494,13 @@ export class OAuthRefresher {
 			if (this.#mintsLocally()) {
 				this.#rememberMint(provider, row.id, merged);
 			}
-			// Reload rather than reuse `rows`: siblings may have been removed while the exchange ran.
-			await this.#deps.pool.reload();
+			// Re-read rather than reuse `rows`: siblings may have been removed while the exchange ran.
+			this.#deps.pool.replace(
+				provider,
+				this.#deps.store
+					.listAuthCredentials(provider)
+					.map(entry => ({ id: entry.id, credential: entry.credential })),
+			);
 			return { result: { credential: merged, refreshed: true, removed: false } };
 		} finally {
 			if (leasedCredentialId !== undefined && leaseStore) {
