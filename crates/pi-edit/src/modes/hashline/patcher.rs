@@ -1249,7 +1249,10 @@ mod lifecycle {
 		ctx.write_text("block.ts", &original);
 		let tag = ctx.read("block.ts", &[1]);
 		ctx.forget_reads();
-		let err = ctx.edit(&format!("[block.ts#{tag}]\nCUT 1*\n")).await.unwrap_err();
+		let err = ctx
+			.edit(&format!("[block.ts#{tag}]\nCUT 1*\n"))
+			.await
+			.unwrap_err();
 		assert!(err.contains("block.ts:2:raw"), "unexpected error: {err}");
 		assert_eq!(ctx.text("block.ts"), original);
 	}
