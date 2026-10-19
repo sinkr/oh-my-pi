@@ -347,6 +347,16 @@ describe("read surfaces conflicts as a warning footer", () => {
 			`Registered: #1 in ${path.join(tempDir, "a", "x.ts").replaceAll(path.sep, "/")}; #2 in x.ts.`,
 		);
 	});
+
+	it("caps the registered ids a not-found error lists", async () => {
+		await Bun.write(path.join(tempDir, "ten.ts"), TWO_BLOCKS.repeat(5));
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		await read.execute("read-ten-conflicts", { path: "ten.ts:conflicts" });
+		const guess = read.execute("read-ten-guess", { path: "conflict://99" });
+		await expect(guess).rejects.toThrow("Registered: #1, #2, #3, #4, #5, #6, #7, #8 (+2 more) in ten.ts.");
+	});
 });
 
 describe("write resolves conflicts via conflict://N", () => {
