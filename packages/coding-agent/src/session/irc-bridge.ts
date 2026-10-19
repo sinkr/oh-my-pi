@@ -22,6 +22,9 @@ export interface IrcBridgeHost {
 
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
 export class IrcBridge {
+	/** Tracks parent IRC steers by object identity without trusting prompt text or publication on receipt. */
+	readonly #parentSteers = new WeakSet<AgentMessage>();
+
 	readonly #host: IrcBridgeHost;
 	#interrupts: AgentMessage[] = [];
 	#asides: AgentMessage[] = [];
@@ -34,6 +37,11 @@ export class IrcBridge {
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
+	}
+
+	/** Identifies a consumed user-role steer as an actual parent IRC request, not another agent-authored steer. */
+	isParentSteer(message: AgentMessage): boolean {
+		return this.#parentSteers.has(message);
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -219,13 +227,15 @@ export class IrcBridge {
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
 			if (fromParent) {
-				this.#host.agent.steer({
+				const steer: AgentMessage = {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
 					attribution: "agent",
 					timestamp: msg.ts,
 					steering: true,
-				});
+				};
+				this.#parentSteers.add(steer);
+				this.#host.agent.steer(steer);
 			} else {
 				this.#interrupts.push(record);
 			}
