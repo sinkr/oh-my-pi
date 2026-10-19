@@ -262,15 +262,22 @@ describe("resolveImageTokenization", () => {
 			["openrouter", "deepseek/deepseek-v4.1-flash-1017"],
 			["openrouter", "deepseek/deepseek-v4.1-flash"],
 			["deepseek", "deepseek-flash"],
+			// DeepSeek's API serves the retired preview id with the current Flash.
+			["deepseek", "deepseek-v4-flash-vision-exp"],
 			["fireworks", "deepseek-v4.1-flash"],
 			["together", "deepseek-ai/DeepSeek-V4.1-Flash"],
 		] as const) {
 			expect(resolveImageTokenization(getBundledModel(provider, id))).toEqual(DEEPSEEK_PATCH);
 		}
-		// The V4.0 vision preview is unmeasured: it keeps its wire fallback.
+		// Hosts still running the V4.0 vision preview keep their wire fallback.
 		expect(resolveImageTokenization(getBundledModel("openrouter", "deepseek/deepseek-v4-flash-vision-exp"))).toEqual(
 			HIRES_FALLBACK,
 		);
+		expect(resolveImageTokenization(getBundledModel("fireworks", "deepseek-v4-flash-vision-exp"))).toEqual(GPT_PATCH);
+		// An unmeasured later Flash release is not priced, let alone verified, by V4.1's rule.
+		expect(
+			resolveImageTokenization({ provider: "fireworks", api: "openai-completions", id: "deepseek-v4.2-flash" }),
+		).toEqual(GPT_PATCH);
 	});
 });
 
@@ -327,6 +334,16 @@ describe("imageTokens", () => {
 		for (const [width, height, tokens] of measured) {
 			expect(imageTokens(DEEPSEEK_PATCH, { width, height })).toBe(tokens);
 		}
+	});
+
+	it("resizes DeepSeek images like the reference processor at extreme aspect ratios", () => {
+		// Values from `plan_image_grid` in DeepSeek's `inference/image_processor.py`.
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 1, height: 8192 })).toBe(1024);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 1 })).toBe(1024);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 64, height: 8192 })).toBe(590);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 64 })).toBe(396);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 100, height: 2000 })).toBe(234);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 2000, height: 100 })).toBe(179);
 	});
 });
 
