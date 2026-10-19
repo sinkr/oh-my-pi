@@ -45,6 +45,8 @@ export class IrcBus {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
+	/** Timestamp of the latest direct (non-broadcast) send per `from` → `to`; see {@link unansweredSends}. */
+	readonly #lastDirect = new Map<string, Map<string, number>>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -74,14 +76,19 @@ export class IrcBus {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
-			let sent = this.#lastSent.get(message.from);
-			if (!sent) {
-				sent = new Map();
-				this.#lastSent.set(message.from, sent);
-			}
-			sent.set(message.to, message.ts);
+			this.#record(this.#lastSent, message);
+			if (!message.broadcast && !message.wakeRelay) this.#record(this.#lastDirect, message);
 		}
 		return receipt;
+	}
+
+	#record(table: Map<string, Map<string, number>>, message: IrcMessage): void {
+		let sent = table.get(message.from);
+		if (!sent) {
+			sent = new Map();
+			table.set(message.from, sent);
+		}
+		sent.set(message.to, message.ts);
 	}
 
 	/**
@@ -92,6 +99,21 @@ export class IrcBus {
 	sentSince(from: string, to: string, sinceTs: number): boolean {
 		const ts = this.#lastSent.get(from)?.get(to);
 		return ts !== undefined && ts >= sinceTs;
+	}
+
+	/**
+	 * Agents `from` messaged directly at or after `sinceTs` that have sent
+	 * nothing back since, with when the latest of those messages went out:
+	 * the replies a `wait` can block for.
+	 */
+	unansweredSends(from: string, sinceTs: number): Array<{ to: string; sentAt: number }> {
+		const sends = this.#lastDirect.get(from);
+		if (!sends) return [];
+		const unanswered: Array<{ to: string; sentAt: number }> = [];
+		for (const [to, sentAt] of sends) {
+			if (sentAt >= sinceTs && !this.sentSince(to, from, sentAt)) unanswered.push({ to, sentAt });
+		}
+		return unanswered;
 	}
 
 	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
