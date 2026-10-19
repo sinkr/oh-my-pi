@@ -522,13 +522,14 @@ export async function discoverOAuthEndpoints(
 		if (typeof meta.resource === "string" && meta.resource.trim() !== "") {
 			protectedResource = meta.resource;
 		}
+		if (authServers.length > 0) advertisedAuthServers ??= new Set(authServers);
 		for (const s of authServers) {
 			addDiscoveryBase(s, true, metadataUrl);
 		}
 	};
-	// Set once protected-resource metadata lists authorization servers; commits
-	// discovery to them (no resource-server fallback).
-	let advertisedAuthServers = false;
+	// The first authorization-server list protected-resource metadata gives; commits
+	// discovery to those servers (no resource-server fallback, no unlisted issuer).
+	let advertisedAuthServers: Set<string> | undefined;
 
 	// Step 1: If a resource_metadata URL was provided, fetch it to discover auth servers.
 	// This follows the RFC 9728 chain: resource_metadata → authorization_servers.
@@ -544,15 +545,15 @@ export async function discoverOAuthEndpoints(
 				const meta = (await metaResp.json()) as Record<string, unknown>;
 				const authServers = readAuthorizationServers(meta);
 				adoptResourceMetadata(meta, authServers, resourceMetadataUrl);
-				advertisedAuthServers = authServers.length > 0;
 			}
 		} catch {
 			// Ignore errors, continue to try explicit URLs
 		}
 	}
 
-	// Step 2: Add explicit authServerUrl as an issuer candidate, then the
-	// resource server fallback unless the resource already advertised its servers.
+	// Step 2: Add explicit authServerUrl as an issuer candidate (skipped by the loop
+	// once the resource advertises other servers), then the resource server
+	// fallback unless the resource already advertised its servers.
 	addDiscoveryBase(authServerUrl, true);
 	if (!advertisedAuthServers) addDiscoveryBase(serverUrl, false);
 
@@ -615,6 +616,8 @@ export async function discoverOAuthEndpoints(
 	};
 
 	bases: for (const base of urlsToQuery) {
+		// RFC 9728 §7.6: an advertised list rules out every other issuer, including a header hint.
+		if (base.issuerCandidate && advertisedAuthServers && !advertisedAuthServers.has(base.url)) continue;
 		const wellKnownPaths = base.issuerCandidate ? issuerWellKnownPaths : resourceWellKnownPaths;
 		for (const path of wellKnownPaths) {
 			// Try each well-known path at both the absolute origin and relative

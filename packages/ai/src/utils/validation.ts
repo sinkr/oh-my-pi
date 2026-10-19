@@ -1770,7 +1770,10 @@ function restoreDroppedRootKeys(value: unknown, dropped: ReadonlyMap<string, unk
 	if (!dropped || dropped.size === 0 || !isPlainRecord(value)) return value;
 	const out: Record<string, unknown> = { ...value };
 	for (const [key, entry] of dropped) {
-		if (!(key in out)) out[key] = entry;
+		// Own-property check and define: `constructor`/`__proto__` must restore as plain fields.
+		if (!Object.hasOwn(out, key)) {
+			Object.defineProperty(out, key, { value: entry, enumerable: true, writable: true, configurable: true });
+		}
 	}
 	return out;
 }

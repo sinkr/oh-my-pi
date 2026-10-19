@@ -2135,6 +2135,21 @@ describe("Tool argument coercion", () => {
 			nested: { inner: "v" },
 			findings: ["a", "b"],
 		});
+
+		// Names that shadow Object.prototype come back as own fields, never as a prototype swap.
+		const special = JSON.parse('{"count":1,"constructor":"c","__proto__":{"polluted":true}}') as Record<
+			string,
+			unknown
+		>;
+		const kept = validateToolArguments(
+			tool,
+			{ ...toolCall, arguments: special },
+			{ keepUnknownRootKeys: true },
+		) as Record<string, unknown>;
+		expect(Object.getOwnPropertyDescriptor(kept, "constructor")?.value).toBe("c");
+		expect(Object.hasOwn(kept, "__proto__")).toBe(true);
+		expect(Object.getPrototypeOf(kept)).toBe(Object.prototype);
+		expect("polluted" in kept).toBe(false);
 	});
 
 	describe("string|array union (regression: #1788)", () => {
