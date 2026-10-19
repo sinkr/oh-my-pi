@@ -13,6 +13,10 @@
 - Fixed `/mcp reauth` writing the fresh credential binding against the wrong source: the lookup now prefers the ACP session's own server over a colliding config-file name (and vice versa where they do not correspond), respects `mcp.enableProjectConfig: false` instead of resurrecting an opted-out project entry, and never lets a print/RPC file-manager entry shadow the real project/user config ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 - Fixed `/mcp reauth` persisting a stale client `Authorization` header (and any resolved `${VAR}` secrets) into `mcp.json` alongside the fresh auth binding; the stale header is stripped on write so the new credential wins on the next load, and an ACP session-owned server definition is never copied into the global user config at all ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 - Fixed the TUI Esc handler for MCP OAuth flows being replaced by a dead predecessor's handler when a second reauth supersedes an unfinished first: the hook now installs only once the flow's single-flight claim resolves and restores the session default, so Esc keeps interrupting after either flow unwinds ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
+### Fixed
+
+- Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
+- Fixed `/move` path completion jumping into a subfolder on Tab: `..`, `.`, and `~` now complete to `../`, `./`, and `~/` before listing their children, a trailing `\` lists a folder on Windows, absolute Windows paths (`C:/…`) are no longer rewritten as relative paths, and the project directory is offered as `./` instead of `/`
 
 ## [18.12.3] - 2026-10-19
 
