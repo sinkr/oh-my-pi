@@ -6,6 +6,7 @@ import {
 	extractMcpAuthServerUrl,
 	extractOAuthChallengeScopes,
 	fetchResourceMetadataScopes,
+	OAuthIssuerMismatchError,
 	rfc9728ProtectedResourceMetadataUrl,
 } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { type FetchInput, mockFetch } from "./helpers/fetch-mock";
@@ -746,7 +747,7 @@ describe("RFC 9728 path-inserted protected resource", () => {
 		expect(calls).not.toContain(originAs);
 	});
 
-	it("does not fall back to an unadvertised origin-root AS when the advertised AS fails issuer validation", async () => {
+	it("reports the advertised AS issuer mismatch instead of falling back to an unadvertised origin-root AS", async () => {
 		// LiteLLM-style gateway: `/slack/mcp` advertises `https://gw.example/slack`,
 		// whose AS metadata wrongly claims the origin as issuer. The origin-root
 		// protected-resource metadata advertises the gateway's generic AS, which
@@ -780,8 +781,16 @@ describe("RFC 9728 path-inserted protected resource", () => {
 
 		// Advertised via the 401 resource_metadata hint, and found by resource-server probing.
 		for (const resourceMetadataUrl of [rfc9728ProtectedResourceMetadataUrl(serverUrl), undefined]) {
-			const oauth = await discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
-			expect(oauth).toBeNull();
+			const discovery = discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
+			await expect(discovery).rejects.toThrow(
+				new OAuthIssuerMismatchError([
+					{
+						authServer: `${gw}/slack`,
+						advertisedBy: `${gw}/.well-known/oauth-protected-resource/slack/mcp`,
+						issuer: gw,
+					},
+				]),
+			);
 		}
 	});
 });
