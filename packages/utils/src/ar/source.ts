@@ -1,3 +1,4 @@
+import { Readable, type Transform } from "node:stream";
 import { LRUCache } from "../lru";
 import { ArchiveError } from "./error";
 
@@ -60,6 +61,32 @@ export function fileByteSource(filePath: string): ByteSource {
 /** Materialize an entire {@link ByteSource}; use only under a limits check. */
 export async function readAllBytes(source: ByteSource): Promise<Uint8Array> {
 	return source.read(0, source.size);
+}
+
+/** Chunk size for streamed decompression, on both the compressed and the decompressed side. */
+export const STREAM_CHUNK_SIZE = 1024 * 1024;
+
+async function* readChunks(source: ByteSource): AsyncGenerator<Uint8Array> {
+	for (let start = 0; start < source.size; start += STREAM_CHUNK_SIZE) {
+		yield await source.read(start, Math.min(source.size, start + STREAM_CHUNK_SIZE));
+	}
+}
+
+/**
+ * Decompress a {@link ByteSource} through `decoder` chunk by chunk, so neither
+ * the compressed nor the decompressed stream is ever held whole.
+ */
+export async function* decodeByteSource(source: ByteSource, decoder: Transform): AsyncGenerator<Uint8Array> {
+	const input = Readable.from(readChunks(source));
+	input.once("error", error => decoder.destroy(error));
+	try {
+		for await (const chunk of input.pipe(decoder)) yield chunk;
+	} catch (error) {
+		if (error instanceof ArchiveError) throw error;
+		throw new ArchiveError(error instanceof Error ? error.message : String(error));
+	} finally {
+		input.destroy();
+	}
 }
 
 /** Options for {@link httpByteSource}. */
