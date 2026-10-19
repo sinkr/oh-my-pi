@@ -11,6 +11,18 @@
 - Fixed the composer caret drifting one cell left per pasted image or video chip in terminals that draw the chip icon as a wide emoji (JetBrains terminal); the `unicode` preset now uses `📷`/`🎬` chip icons ([#16270](https://github.com/can1357/oh-my-pi/issues/16270))
 - Fixed Tern hiding user text sent with `/skill:<name>` inside a collapsed skill card; only the loaded skill prompt is hidden ([#16311](https://github.com/can1357/oh-my-pi/issues/16311))
 
+- The tool-approval prompt's answers are a navigable menu on classic terminals — the arrows move the highlight, `Enter` confirms it, and the **Remember** checkbox toggles in place — and stay clickable buttons on Tern's native surface. The answers keep one order everywhere: the remember checkbox, **Approve Directory**, **Approve <tool> for session**, **Approve File**/**Approve**, **Approve Once**, and **Deny**, each with a tooltip naming exactly what its grant covers.
+- Settings action rows can label their control through the new `ui.actionLabel` metadata; **Forget Remembered Approvals** uses it to read **Clear cache**.
+
+### Fixed
+
+- Fixed Enter on an empty composer answering a prompt whose answer menu is not shown: without the menu the key no longer activates an invisible selection.
+- Fixed the arrow-key answer menu showing on surfaces that render the answers as buttons; the menu is classic-terminal only, and native surfaces keep their buttons and key hints.
+- Approval buttons on Tern's native surface now use the accent tone like the primary answer, so the row reads as one set of controls.
+
+### Removed
+
+- Removed the answer accelerators from the approval prompt: `app.approval.approve` (`Ctrl+Enter`/`Ctrl+Q`), `app.approval.approveFolder` (`F6`), and `app.approval.remember` (`F7`) are gone, since the prompt is answered only by choosing with the arrows and confirming with `Enter` (`Esc` denies) — a stray chord can no longer approve a call.
 ## [18.12.2] - 2026-10-18
 
 ### Added
