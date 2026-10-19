@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `validateToolArguments(tool, call, { keepUnknownRootKeys: true })` to keep unknown root keys that a closed schema would otherwise drop during argument repair ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
