@@ -179,6 +179,11 @@ type ManagedSessionRecord = {
 	// `#configureMcpServers` call; drained on reconfigure so a stale in-flight
 	// refresh can never land after a newer configuration's tools.
 	mcpRefreshChain: Promise<void> | undefined;
+	// MCP startup failures recorded during `#registerPreparedSession` (before
+	// the newSession/loadSession response has told the client the session id).
+	// Drained by `#emitBootstrapUpdates` behind the bootstrap race guard so
+	// clients (Zed) cannot drop them as notifications for an unknown session.
+	pendingMcpStartupChunks: Array<{ name: string; message: string }>;
 	promptTurn: PromptTurnState | undefined;
 	promptQueue: PromptQueueState;
 	liveMessageId: string | undefined;
@@ -1370,6 +1375,7 @@ export class AcpAgent implements Agent {
 			setToolUIContext,
 			mcpManager: undefined,
 			mcpRefreshChain: undefined,
+			pendingMcpStartupChunks: [],
 			promptTurn: undefined,
 			promptQueue: { promise: Promise.resolve(), release: undefined },
 			liveMessageId: undefined,
@@ -2150,6 +2156,21 @@ export class AcpAgent implements Agent {
 		if (this.#sessions.get(sessionId) !== record) {
 			return;
 		}
+		// MCP startup failures queued by `#configureMcpServers` flush here,
+		// behind the bootstrap race guard, so the client can finally attribute
+		// them to a session it knows.
+		for (const { name, message } of record.pendingMcpStartupChunks.splice(0)) {
+			await this.#connection.sessionUpdate({
+				sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: {
+						type: "text",
+						text: `MCP server "${name}" failed to connect: ${message}. Its tools are unavailable until it is reauthorized (/mcp reauth ${name}) or the client restarts the session.`,
+					},
+				},
+			});
+		}
 		await this.#connection.sessionUpdate({
 			sessionId,
 			update: {
@@ -2741,17 +2762,14 @@ export class AcpAgent implements Agent {
 		// through a chunk instead of the session refusing to load.
 		record.mcpManager = manager;
 		await enqueueMcpToolsRefresh();
+		// The failure chunk is queued, not sent: `#configureMcpServers` runs
+		// inside `#registerPreparedSession`, before the newSession/loadSession
+		// response has given the client this session id — a notification now
+		// would be dropped as "unknown session" by clients like Zed (the same
+		// race `#scheduleBootstrapUpdates` guards). `#emitBootstrapUpdates`
+		// drains the queue behind that guard.
 		for (const [name, message] of result.errors) {
-			await this.#connection.sessionUpdate({
-				sessionId: record.session.sessionId,
-				update: {
-					sessionUpdate: "agent_message_chunk",
-					content: {
-						type: "text",
-						text: `MCP server "${name}" failed to connect: ${message}. Its tools are unavailable until it is reauthorized (/mcp reauth ${name}) or the client restarts the session.`,
-					},
-				},
-			});
+			record.pendingMcpStartupChunks.push({ name, message });
 		}
 	}
 

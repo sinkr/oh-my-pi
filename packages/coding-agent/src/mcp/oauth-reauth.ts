@@ -163,6 +163,13 @@ export interface FoundMcpServer {
 	config: MCPServerConfig;
 	/** Live-manager entry that lives in no writable config file; writes go to user scope. */
 	discovered: boolean;
+	/**
+	 * The manager entry belongs to an ACP-isolated session: the client declared
+	 * this server at `session/new` and re-declares it (headers included) every
+	 * session, so its definition is session-owned — never a candidate for
+	 * user-config write-back.
+	 */
+	acpOwned?: boolean;
 }
 
 /**
@@ -176,11 +183,14 @@ export interface FoundMcpServer {
  * user config under the same namespaced name; the native provider
  * (priority 100) shadows the discovered entry after the next reload.
  *
- * `preferManager` flips the first step: a host that keeps its own manager
- * for the session (ACP declares servers at `session/new`; isolation means
- * the manager entry is the server actually active, and a same-named file
- * entry is inert) resolves the manager entry first. Print/RPC managers
- * enumerate the same files, so the option changes nothing there.
+ * `preferManager` flips the first step — but only for ACP-isolated managers:
+ * ACP declares servers at `session/new` (source `provider: "acp"`), and
+ * isolation means the manager entry is the server actually active while a
+ * same-named file entry is inert. Print/RPC managers enumerate the same files
+ * the lookup below reads, and their entries are env-expanded copies with
+ * synthesized user-config paths — preferring them would shadow the real
+ * project/user source, serialize expanded `${...}` placeholders, and write
+ * fresh bindings to the wrong file.
  */
 export async function findMcpServerForAuth(
 	name: string,
@@ -191,12 +201,13 @@ export async function findMcpServerForAuth(
 	if (options?.preferManager) {
 		const managerConfig = mcpManager?.getServerConfig(name);
 		const managerSource = mcpManager?.getSource(name);
-		if (managerConfig && managerSource) {
+		if (managerConfig && managerSource?.provider === "acp") {
 			return {
 				filePath: getMCPConfigPath("user", cwd),
 				scope: "user",
 				config: managerConfig,
 				discovered: true,
+				acpOwned: true,
 			};
 		}
 	}
@@ -805,11 +816,23 @@ export async function reauthorizeMcpServer(
 	// header is present, so without an explicit `auth` block the fresh
 	// credential never wins again and the next process reuses the stale
 	// bearer despite the reported success.
+	//
+	// ACP-owned manager entries never persist at all: the client re-declares
+	// the definition (header included) on every `session/new`, so a
+	// user-file copy could never override it — it would only leak a
+	// session-owned server definition and its bearer into the global user
+	// config. The fresh url-keyed credential row the flow just wrote to
+	// authStorage is the binding, and the live reconnect applies it now.
 	const hadClientBearerHeader = hasMcpAuthorizationHeader(found.config);
 	const urlKeyedId = serverUrl ? mcpOAuthCredentialId(serverUrl) : undefined;
-	const shouldPersist = currentAuth !== undefined || hadClientBearerHeader || oauthResult.credentialId !== urlKeyedId;
+	const shouldPersist =
+		found.acpOwned !== true &&
+		(currentAuth !== undefined || hadClientBearerHeader || oauthResult.credentialId !== urlKeyedId);
 	const updatedConfig = shouldPersist
-		? persistMcpOAuthResult(baseConfig, oauthResult, {
+		? // Strip the client-supplied auth surface (an `Authorization` header
+			// would both leak the bearer into the file and disable the url-keyed
+			// fallback on the next load) before the fresh auth block is added.
+			persistMcpOAuthResult(clearMcpClientAuthSurface(baseConfig), oauthResult, {
 				tokenUrl: oauth.tokenUrl,
 				// Do not turn a configured-only secret into a persisted oauth
 				// client pair by echoing the discovered client id.

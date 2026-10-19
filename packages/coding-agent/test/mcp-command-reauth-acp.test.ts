@@ -442,7 +442,10 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 			credentialId: oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL),
 			tokenUrl: "https://auth.example.com/token",
 		});
-		expect(saved.headers).toEqual({ Authorization: "Bearer stale-token" });
+		// The stale client bearer is stripped on write: keeping it would leak
+		// the token into a (possibly committed) file and re-disable the
+		// url-keyed fallback on the next load.
+		expect(saved.headers).toEqual({});
 	});
 
 	test("prefers the manager entry over a colliding config-file name", async () => {
@@ -478,5 +481,103 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 		const saved = await readSavedServer();
 		expect(saved.url).toBe(RAW_SERVER_URL);
 		expect(saved.auth).toBeUndefined();
+	});
+
+	test("ignores a file-manager entry so the real config source wins", async () => {
+		// Regression: print/RPC mode passes the file-discovery manager, whose
+		// entry is an env-expanded copy with a synthesized user-config path —
+		// preferring it shadowed the real project/user source, wrote fresh
+		// bindings to the wrong file, and could serialize expanded
+		// `${...}` placeholders as plaintext. Only ACP-isolated managers
+		// (source `provider: "acp"`) may win the manager-first lookup.
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const authStorage = freshAuthStorage();
+		const fileManager = {
+			getServerConfig: (name: string) =>
+				name === "envserver" ? { type: "http", url: "https://expanded.example.com/mcp" } : undefined,
+			getSource: (name: string) =>
+				name === "envserver"
+					? { provider: "mcp-json", providerName: "MCP JSON", level: "project" as const }
+					: undefined,
+		} as unknown as NonNullable<SlashCommandRuntime["mcpManager"]>;
+
+		await runReauth("envserver", authStorage, undefined, fileManager);
+
+		// The credential is keyed by the project file's URL, not the
+		// manager's expanded copy.
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+			access: "fresh-access",
+		});
+		expect(
+			authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId("https://expanded.example.com/mcp")),
+		).toBeUndefined();
+	});
+
+	test("resolves a multi-word server name without truncation", async () => {
+		// `validateServerName` permits spaces, so `/mcp reauth MaaS Slack`
+		// must look up "MaaS Slack" — not "MaaS".
+		await Bun.write(
+			configPath,
+			`${JSON.stringify(
+				{ mcpServers: { "MaaS Slack": { type: "stdio", command: "maas-slack-server", args: [] } } },
+				null,
+				2,
+			)}\n`,
+		);
+
+		await runReauth("MaaS Slack", freshAuthStorage());
+
+		// The named server was found (its stdio refusal), not reported
+		// missing the way a truncated "MaaS" lookup would be.
+		expect(outputs.join("\n")).toContain("stdio servers manage their own credentials");
+	});
+
+	test("writes nothing to the user config for an ACP-owned bearer-header server", async () => {
+		// Regression: an ACP-owned, manager-only server with an Authorization
+		// header used to force persistence of the whole session-owned
+		// definition — bearer included — into the global user MCP file. The
+		// client re-declares the definition every session/new, so that copy
+		// could never take effect; only the fresh url-keyed credential row
+		// (authStorage) plus the live reconnect carry the binding.
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const authStorage = freshAuthStorage();
+		const acpManager = {
+			getServerConfig: (name: string) =>
+				name === "client-server"
+					? {
+							type: "http",
+							url: "https://acp.example.com/mcp",
+							headers: { Authorization: "Bearer client-token" },
+						}
+					: undefined,
+			getSource: (name: string) =>
+				name === "client-server" ? { provider: "acp", providerName: "ACP Client" } : undefined,
+		} as unknown as NonNullable<SlashCommandRuntime["mcpManager"]>;
+
+		await runReauth("client-server", authStorage, undefined, acpManager);
+
+		expect(outputs.join("\n")).toContain('Reauthorized "client-server"');
+		// The fresh binding lives only in authStorage…
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId("https://acp.example.com/mcp"))).toMatchObject({
+			access: "fresh-access",
+		});
+		// …and neither config file gained the session-owned definition.
+		const savedProject = await readSavedServer();
+		expect(savedProject.auth).toBeUndefined();
+		const userConfigPath = getMCPConfigPath("user", projectDir);
+		const userConfig = await Bun.file(userConfigPath)
+			.json()
+			.catch(() => ({ mcpServers: {} }));
+		expect((userConfig as { mcpServers?: Record<string, unknown> }).mcpServers?.["client-server"]).toBeUndefined();
 	});
 });

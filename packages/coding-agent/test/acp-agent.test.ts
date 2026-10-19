@@ -3658,12 +3658,20 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			const update = notification.update as { content?: { text?: string } };
 			return update.content?.text ?? "";
 		};
-		const failureChunk = harness.updates.find(
-			notification =>
-				notification.sessionId === created.sessionId &&
-				chunkText(notification).includes(`MCP server "broken" failed to connect`),
-		);
-		expect(failureChunk).toBeDefined();
+		// The failure chunk is queued during `#registerPreparedSession` —
+		// before the response has told the client this session id — and is
+		// flushed behind the bootstrap race guard (50 ms). Discriminator for
+		// the deferral: right after `newSession` resolves the chunk must NOT
+		// be in the log yet; a direct send from inside registration would
+		// already be here, addressed to a session the client does not know.
+		const hasFailureChunk = (): boolean =>
+			harness.updates.some(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					chunkText(notification).includes(`MCP server "broken" failed to connect`),
+			);
+		expect(hasFailureChunk()).toBe(false);
+		await pollUntil(hasFailureChunk);
 
 		const updatesBefore = harness.updates.length;
 		await harness.agent.prompt({
@@ -3676,5 +3684,59 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			.map(chunkText)
 			.join("\n");
 		expect(reauthText).toContain("stdio servers manage their own credentials");
+	}, 15_000);
+
+	it("keeps an HTTP server with an expired client bearer reauthable through the real manager", async () => {
+		// The stdio spawn-failure test above does not prove the expired-bearer
+		// lifecycle: an HTTP 401 that settles inside MCPManager's 250 ms
+		// startup window must land the same way — the session loads, the
+		// failure chunk is delivered behind the bootstrap guard, and the kept
+		// manager entry stays reachable for `/mcp reauth` to resolve.
+		const server = Bun.serve({ port: 0, fetch: () => new Response("expired", { status: 401 }) });
+		try {
+			const harness = await createHarness();
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [
+					{
+						name: "expired",
+						type: "http",
+						url: `http://127.0.0.1:${server.port}/mcp`,
+						headers: [{ name: "Authorization", value: "Bearer stale" }],
+					},
+				],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+
+			const chunkText = (notification: (typeof harness.updates)[number]): string => {
+				const update = notification.update as { content?: { text?: string } };
+				return update.content?.text ?? "";
+			};
+			await pollUntil(() =>
+				harness.updates.some(
+					notification =>
+						notification.sessionId === created.sessionId &&
+						chunkText(notification).includes(`MCP server "expired" failed to connect`),
+				),
+			);
+
+			const updatesBefore = harness.updates.length;
+			await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/mcp reauth expired" }],
+			});
+			const reauthText = harness.updates
+				.slice(updatesBefore)
+				.filter(notification => notification.sessionId === created.sessionId)
+				.map(chunkText)
+				.join("\n");
+			// The manager entry resolved: the server is not reported missing,
+			// and the flow reached the probe (this 401 carries no OAuth
+			// metadata, so it ends in a refusal instead of a browser flow).
+			expect(reauthText).not.toContain("not found");
+			expect(reauthText.length).toBeGreaterThan(0);
+		} finally {
+			await server.stop(true);
+		}
 	}, 15_000);
 });

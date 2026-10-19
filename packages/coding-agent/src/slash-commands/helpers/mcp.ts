@@ -488,7 +488,10 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
  */
 
 async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
-	const name = rest.split(/\s+/)[0]?.trim() ?? "";
+	// `reauth` takes no other flags, so the entire rest is the server name —
+	// `validateServerName` permits spaces, and splitting on whitespace (or
+	// un-quoting) would truncate "MaaS Slack" to "MaaS".
+	const name = rest.trim();
 	if (!name) return usage("Usage: /mcp reauth <name>", runtime);
 	const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager, { preferManager: true });
 	if (!found) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
