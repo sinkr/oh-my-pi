@@ -483,15 +483,7 @@ pub(super) fn open_document(
 	})?;
 	// The window that shows the item: titled with its name (a revealed item's
 	// folder), rather than an Open panel or another document of the app.
-	let path = Path::new(target).canonicalize().ok();
-	let shown = if reveal {
-		path.as_deref().and_then(Path::parent)
-	} else {
-		path.as_deref()
-	};
-	let name = shown
-		.and_then(Path::file_name)
-		.map(|name| name.to_string_lossy().into_owned());
+	let name = shown_name(document_path(target).as_deref(), reveal);
 	let window = match opened.pid {
 		Some(pid) => first_window(
 			false,
@@ -504,6 +496,15 @@ pub(super) fn open_document(
 		None => None,
 	};
 	Ok(OpenedApplication::new(opened, window))
+}
+
+/// The title of the window that shows `path`: its name, or for `reveal` its
+/// folder's. `None` for a URL.
+fn shown_name(path: Option<&Path>, reveal: bool) -> Option<String> {
+	let shown = if reveal { path?.parent() } else { path };
+	shown
+		.and_then(Path::file_name)
+		.map(|name| name.to_string_lossy().into_owned())
 }
 
 /// The `windows` whose title names the opened item (`name`): all of them for a
@@ -519,14 +520,22 @@ fn showing(windows: Vec<DesktopWindow>, name: Option<&str>) -> Vec<DesktopWindow
 	}
 }
 
+/// The absolute path of an existing `target`, naming the entry itself: a
+/// symlink stays the link, so Finder selects the entry the caller named
+/// rather than what it points to.
+fn document_path(target: &str) -> Option<PathBuf> {
+	let path = Path::new(target);
+	if path.exists() {
+		std::path::absolute(path).ok()
+	} else {
+		None
+	}
+}
+
 /// The URL [`open_document`] opens: an existing file or folder, or, unless
 /// revealing, a URL with a scheme.
 fn document_url(target: &str, reveal: bool) -> CoreResult<Retained<NSURL>> {
-	let path = Path::new(target);
-	if path.exists() {
-		let path = path.canonicalize().map_err(|error| {
-			DesktopError::invalid_target(format!("cannot open {target:?}: {error}"))
-		})?;
+	if let Some(path) = document_path(target) {
 		let path = path
 			.to_str()
 			.ok_or_else(|| DesktopError::invalid_target(format!("{target:?} is not valid UTF-8")))?;
@@ -844,5 +853,37 @@ mod tests {
 		// A URL, or titles nobody can read, leave the frontmost window.
 		assert_eq!(ids(showing(listed, None)), ["1", "2"]);
 		assert_eq!(ids(showing(vec![window("3"), window("4")], Some("notes.txt"))), ["3", "4"]);
+	}
+
+	#[test]
+	fn a_revealed_symlink_is_selected_as_the_link_in_its_own_folder() {
+		let root = std::env::temp_dir().join(format!("pi-natives-reveal-{}", std::process::id()));
+		let (work, archive) = (root.join("work"), root.join("archive"));
+		std::fs::create_dir_all(&work).unwrap();
+		std::fs::create_dir_all(&archive).unwrap();
+		let original = archive.join("original.pdf");
+		std::fs::write(&original, "x").unwrap();
+		let link = work.join("link.pdf");
+		std::os::unix::fs::symlink(&original, &link).unwrap();
+		let url_path = |target: &Path| {
+			document_url(target.to_str().unwrap(), true)
+				.unwrap()
+				.path()
+				.unwrap()
+				.to_string()
+		};
+		assert_eq!(url_path(&link), link.to_str().unwrap());
+		assert_eq!(
+			shown_name(document_path(link.to_str().unwrap()).as_deref(), true).as_deref(),
+			Some("work")
+		);
+		// A plain file names itself, and its own name when opened.
+		assert_eq!(url_path(&original), original.to_str().unwrap());
+		assert_eq!(
+			shown_name(document_path(original.to_str().unwrap()).as_deref(), false).as_deref(),
+			Some("original.pdf")
+		);
+		assert!(document_path(root.join("missing.pdf").to_str().unwrap()).is_none());
+		std::fs::remove_dir_all(&root).unwrap();
 	}
 }

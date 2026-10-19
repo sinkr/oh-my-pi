@@ -376,6 +376,25 @@ function refuseForeground(
 	);
 }
 
+/** A URL (`https:`, `x-apple.systempreferences:`, Windows `shell:`); never a drive letter. */
+const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
+
+/**
+ * `apps.open`'s target or `app` selector, against the session's folder
+ * `cwd` when it names a path there: one written as a relative path (`./a`,
+ * `a/b`), even if missing, or a bare name of an existing entry. An exact
+ * application ID or native path (`listed`) keeps precedence over a same-named
+ * entry; absolute paths, URLs and other names pass through to native
+ * resolution.
+ */
+async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
+	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
+	const local = path.resolve(cwd, value);
+	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);
+	if (!written && !fs.existsSync(local)) return value;
+	return (await listed(value)) ? value : local;
+}
+
 const MENU_ROUTE =
 	"Use the window's menu bar with win.menu.select(...), or an element action such as press(), instead.";
 /** AX roles of the controls that open a menu when pressed, as native's `open_menu` reads them. */
@@ -1752,8 +1771,13 @@ export class ComputerWorkerCore {
 						);
 					}
 					// A relative path names an item in the session's folder, not the omp process's.
-					const local = path.resolve(context.snapshot.cwd, id);
-					const target = !path.isAbsolute(id) && fs.existsSync(local) ? local : id;
+					const listed = async (value: string): Promise<boolean> =>
+						(await nativeCall(context.signal, () => session.listApplications())).some(
+							app => app.id === value || app.path === value,
+						);
+					const cwd = context.snapshot.cwd;
+					const target = await sessionPath(id, cwd, listed);
+					if (typeof open.app === "string") open.app = await sessionPath(open.app, cwd, listed);
 					const { window: shown, ...application } = await nativeCall(context.signal, () =>
 						session.openApplication(target, open),
 					);

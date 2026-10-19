@@ -4096,28 +4096,55 @@ describe("computer background fallback", () => {
 			]);
 		});
 
-		it("opens a relative file path in the session's folder, and passes reveal and app on", async () => {
-			class FileSession extends ForegroundSession {
-				readonly opened: Array<{ id: string; options?: ApplicationOpenOptions }> = [];
-				override async openApplication(id: string, options?: ApplicationOpenOptions) {
-					this.opened.push({ id, options });
-					return super.openApplication(id, options);
-				}
+		class FileSession extends ForegroundSession {
+			readonly opened: Array<{ id: string; options?: ApplicationOpenOptions }> = [];
+			override async openApplication(id: string, options?: ApplicationOpenOptions) {
+				this.opened.push({ id, options });
+				return super.openApplication(id, options);
 			}
+		}
+		const here = (name: string) => path.join(import.meta.dir, name);
+
+		it("opens a relative path in the session's folder, even a missing one, and passes reveal and app on", async () => {
 			const native = new FileSession();
 			const code = [
 				'await desktop.apps.open("computer.test.ts", { reveal: true });',
 				'await desktop.apps.open("computer.test.ts", { app: "Editor" });',
+				'await desktop.apps.open("./missing/report.pdf", { app: "./Editor.app" });',
 				'await desktop.apps.open("Editor");',
 				'await desktop.apps.open("/tmp/report.pdf");',
+				'await desktop.apps.open("https://example.com");',
+				'await desktop.apps.open("shell:AppsFolder\\\\Calculator!App");',
 			].join("\n");
 			expect((await run(native, code, "takeover")).ok).toBe(true);
-			const here = path.join(import.meta.dir, "computer.test.ts");
 			expect(native.opened).toEqual([
-				{ id: here, options: { reveal: true } },
-				{ id: here, options: { app: "Editor" } },
+				{ id: here("computer.test.ts"), options: { reveal: true } },
+				{ id: here("computer.test.ts"), options: { app: "Editor" } },
+				{ id: here("missing/report.pdf"), options: { app: here("Editor.app") } },
 				{ id: "Editor", options: {} },
 				{ id: "/tmp/report.pdf", options: {} },
+				{ id: "https://example.com", options: {} },
+				{ id: "shell:AppsFolder\\Calculator!App", options: {} },
+			]);
+		});
+
+		it("keeps an exact application ID over a same-named file in the session's folder", async () => {
+			class ShadowedSession extends FileSession {
+				override async listApplications() {
+					return [
+						{ id: "computer.test.ts", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 },
+					];
+				}
+			}
+			const native = new ShadowedSession();
+			const code = [
+				'await desktop.apps.open("computer.test.ts");',
+				'await desktop.apps.open("README.md", { app: "computer.test.ts" });',
+			].join("\n");
+			expect((await run(native, code, "takeover")).ok).toBe(true);
+			expect(native.opened).toEqual([
+				{ id: "computer.test.ts", options: {} },
+				{ id: "README.md", options: { app: "computer.test.ts" } },
 			]);
 		});
 

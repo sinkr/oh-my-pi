@@ -176,6 +176,31 @@ fn opens_as_document(input: &str) -> bool {
 	url_scheme(input).is_some()
 }
 
+/// What `apps.open` opens.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+	Application,
+	Document,
+}
+
+/// `app` and `reveal` ask for a document. Otherwise an exact inventory ID or
+/// native path is an application, so neither a same-named file nor a
+/// URL-shaped package path (`shell:AppsFolder\…` on Windows) shadows it; then
+/// [`opens_as_document`] decides.
+fn route(apps: &[Application], input: &str, options: &ApplicationOpenOptions) -> Route {
+	if options.reveal.unwrap_or(false) || options.app.is_some() {
+		return Route::Document;
+	}
+	if apps.iter().any(|app| app.id == input || app.path == input) {
+		return Route::Application;
+	}
+	if opens_as_document(input) {
+		Route::Document
+	} else {
+		Route::Application
+	}
+}
+
 pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<OpenedApplication> {
 	if input.is_empty() || input.contains('\0') {
 		return Err(DesktopError::invalid_target(
@@ -187,12 +212,13 @@ pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<O
 			"apps.open takes reveal or app, not both: reveal shows the item in Finder",
 		));
 	}
-	if options.reveal.unwrap_or(false) || options.app.is_some() || opens_as_document(input) {
-		return open_document(input, &options);
-	}
 	#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 	{
-		let app = application(input)?;
+		let apps = platform::list()?;
+		if route(&apps, input, &options) == Route::Document {
+			return open_document(&apps, input, &options);
+		}
+		let app = application(&apps, input)?;
 		let activate = options.activate.unwrap_or(false);
 		#[cfg(target_os = "macos")]
 		return platform::open(app, activate);
@@ -202,31 +228,32 @@ pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<O
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 	{
-		let _ = options;
+		if route(&[], input, &options) == Route::Document {
+			return open_document(&[], input, &options);
+		}
 		Err(DesktopError::invalid_target(
 			"native application launch is unsupported on this operating system",
 		))
 	}
 }
 
-/// The installed application `input` names: an ID or native path, then a
-/// display name.
+/// The installed application `input` names among `apps`: an ID or native
+/// path, then a display name.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-fn application(input: &str) -> CoreResult<Application> {
-	let apps = platform::list()?;
+fn application(apps: &[Application], input: &str) -> CoreResult<Application> {
 	// Native paths are checked before display names so a real package path is
 	// never mistaken for a similarly named installed application.
 	if apps.iter().any(|app| app.id == input || app.path == input) {
-		resolve(&apps, input)?
+		resolve(apps, input)?
 			.cloned()
 			.ok_or_else(|| DesktopError::invalid_target("application disappeared"))
 	} else if Path::new(input).is_absolute()
 		|| input.contains(std::path::MAIN_SEPARATOR)
 		|| Path::new(input).exists()
 	{
-		Ok(with_listed_state(&apps, platform::from_path(Path::new(input))?))
+		Ok(with_listed_state(apps, platform::from_path(Path::new(input))?))
 	} else {
-		resolve(&apps, input)?.cloned().ok_or_else(|| {
+		resolve(apps, input)?.cloned().ok_or_else(|| {
 			DesktopError::invalid_target(format!(
 				"application {input:?} was not found; use apps.list() or an existing native \
 				 application path"
@@ -236,11 +263,19 @@ fn application(input: &str) -> CoreResult<Application> {
 }
 
 /// [`open`] for a file, folder or URL: opened by its default application or
-/// `options.app`, or with `reveal` shown selected in Finder.
-fn open_document(input: &str, options: &ApplicationOpenOptions) -> CoreResult<OpenedApplication> {
+/// `options.app` (one of `apps`), or with `reveal` shown selected in Finder.
+fn open_document(
+	apps: &[Application],
+	input: &str,
+	options: &ApplicationOpenOptions,
+) -> CoreResult<OpenedApplication> {
 	#[cfg(target_os = "macos")]
 	{
-		let app = options.app.as_deref().map(application).transpose()?;
+		let app = options
+			.app
+			.as_deref()
+			.map(|app| application(apps, app))
+			.transpose()?;
 		platform::open_document(
 			input,
 			app,
@@ -250,10 +285,10 @@ fn open_document(input: &str, options: &ApplicationOpenOptions) -> CoreResult<Op
 	}
 	#[cfg(not(target_os = "macos"))]
 	{
-		let _ = (input, options);
+		let _ = (apps, input, options);
 		Err(DesktopError::unsupported(
-			"apps.open opens files, folders and URLs, and reveal shows them, on macOS only; here it \
-			 takes an application ID, name or path",
+			"apps.open opens files, folders and URLs (app, reveal) on macOS only; here it takes an \
+			 application ID, name or path",
 		))
 	}
 }
@@ -333,6 +368,28 @@ mod tests {
 	}
 
 	#[test]
+	fn an_exact_inventory_identity_is_never_shadowed_by_a_url_or_a_file() {
+		let dir = std::env::temp_dir().join(format!("pi-natives-route-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let file = dir.join("com.example.Editor");
+		std::fs::write(&file, "x").unwrap();
+		let shadowed = file.to_str().unwrap();
+		let packaged = r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+		let apps = [app("calc", "Calculator", packaged), app(shadowed, "Editor", "/E.app")];
+		let none = ApplicationOpenOptions::default();
+		assert_eq!(route(&apps, packaged, &none), Route::Application);
+		assert_eq!(route(&apps, shadowed, &none), Route::Application);
+		// Unlisted, the same inputs are a URL and, on macOS, a file.
+		assert_eq!(route(&[], packaged, &none), Route::Document);
+		assert_eq!(route(&[], shadowed, &none) == Route::Document, cfg!(target_os = "macos"));
+		assert_eq!(route(&apps, "https://example.com", &none), Route::Document);
+		assert_eq!(route(&apps, "Calculator", &none), Route::Application);
+		let reveal = ApplicationOpenOptions { reveal: Some(true), ..Default::default() };
+		assert_eq!(route(&apps, shadowed, &reveal), Route::Document);
+		std::fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[test]
 	fn reveal_and_app_together_are_refused_before_anything_opens() {
 		let options = ApplicationOpenOptions {
 			reveal: Some(true),
@@ -355,5 +412,8 @@ mod tests {
 			assert_eq!(error.code, super::super::error::ErrorCode::Unsupported, "{input}");
 			assert!(error.message.contains("on macOS only"), "{}", error.message);
 		}
+		// A file or folder path alone is still read as an application, as before.
+		let error = open(".", ApplicationOpenOptions::default()).unwrap_err();
+		assert_ne!(error.code, super::super::error::ErrorCode::Unsupported);
 	}
 }
