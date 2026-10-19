@@ -3865,7 +3865,9 @@ export class AgentSession implements SettingsScope {
 	 * persisting handler. Record it before the transition rewrites or leaves the
 	 * session; otherwise its call is left without a result and replay fills in a
 	 * synthetic one. Its call was persisted when the assistant turn ended, before
-	 * the tool started.
+	 * the tool started. A successful `rewind` result is the exception: the
+	 * aborted turn never applies it, so recording "rewind requested" would claim
+	 * a branch cut that never happened.
 	 */
 	#persistToolResultsEndedWhileDisconnected(): void {
 		const start = this.#disconnectedMessageCount;
@@ -3873,7 +3875,9 @@ export class AgentSession implements SettingsScope {
 		const messages = this.agent.state.messages;
 		for (let index = start; index < messages.length; index++) {
 			const message = messages[index];
-			if (message.role === "toolResult") this.#persistSessionMessageIfMissing(message);
+			if (message.role !== "toolResult") continue;
+			if (!message.isError && semanticToolResult(message.toolName, message)?.toolName === "rewind") continue;
+			this.#persistSessionMessageIfMissing(message);
 		}
 		// Once per disconnect: the transition may replace the agent's messages next (compaction, reset).
 		this.#disconnectedMessageCount = undefined;
