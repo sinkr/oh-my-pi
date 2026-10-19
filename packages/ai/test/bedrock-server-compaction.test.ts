@@ -3,10 +3,13 @@ import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { completeSimple } from "@oh-my-pi/pi-ai/stream";
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
+	bedrockAnthropicChunkEvent,
 	bedrockHappyPathFrames,
+	bedrockStreamExceptionFrame,
 	bedrockTestModel,
 	BEDROCK_TEST_CONTEXT,
 	withSkippedBedrockAuth,
@@ -47,10 +50,10 @@ function fetchWaitingForAbort(): { fetch: FetchImpl; requestSignal: Promise<Abor
 		async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			const signal = init?.signal;
 			if (!signal) throw new Error("Expected Bedrock request signal");
-			requestStarted.resolve(signal);
 			const pending = Promise.withResolvers<Response>();
 			if (signal.aborted) pending.reject(signal.reason);
 			else signal.addEventListener("abort", () => pending.reject(signal.reason), { once: true });
+			requestStarted.resolve(signal);
 			return pending.promise;
 		},
 		{ preconnect: globalThis.fetch.preconnect },
@@ -58,14 +61,62 @@ function fetchWaitingForAbort(): { fetch: FetchImpl; requestSignal: Promise<Abor
 	return { fetch, requestSignal: requestStarted.promise };
 }
 
-function fetchWithStalledBody(status = 200): {
+function fetchWithStalledHttpErrorBody(): {
 	fetch: FetchImpl;
 	requestSignal: Promise<AbortSignal>;
 	bodyRead: Promise<void>;
 } {
 	const requestStarted = Promise.withResolvers<AbortSignal>();
 	const bodyReadStarted = Promise.withResolvers<void>();
+	const bodyGate = Promise.withResolvers<void>();
+	const fetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const signal = init?.signal;
+			if (!signal) throw new Error("Expected Bedrock request signal");
+			requestStarted.resolve(signal);
+			let pulls = 0;
+			const body = new ReadableStream<Uint8Array>(
+				{
+					start(controller) {
+						const onAbort = () => {
+							controller.error(signal.reason);
+							bodyGate.resolve();
+						};
+						if (signal.aborted) onAbort();
+						else signal.addEventListener("abort", onAbort, { once: true });
+					},
+					pull(controller) {
+						if (pulls++ === 0) {
+							controller.enqueue(new TextEncoder().encode("Access denied"));
+							return;
+						}
+						bodyReadStarted.resolve();
+						return bodyGate.promise;
+					},
+					cancel() {
+						bodyGate.resolve();
+					},
+				},
+				{ highWaterMark: 0 },
+			);
+			return new Response(body, { status: 403 });
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	) as FetchImpl;
+	return { fetch, requestSignal: requestStarted.promise, bodyRead: bodyReadStarted.promise };
+}
+
+function fetchWithStalledEventStream(initialFrames: Uint8Array[] = []): {
+	fetch: FetchImpl;
+	requestSignal: Promise<AbortSignal>;
+	bodyRead: Promise<void>;
+	idleRead: Promise<void>;
+} {
+	const requestStarted = Promise.withResolvers<AbortSignal>();
+	const bodyReadStarted = Promise.withResolvers<void>();
+	const idleReadStarted = Promise.withResolvers<void>();
 	const pullGate = Promise.withResolvers<void>();
+	let onAbort: (() => void) | undefined;
 	const fetch = Object.assign(
 		async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			const signal = init?.signal;
@@ -75,26 +126,39 @@ function fetchWithStalledBody(status = 200): {
 				new ReadableStream<Uint8Array>(
 					{
 						start(controller) {
-							const fail = () => {
+							onAbort = () => {
 								controller.error(signal.reason);
 								pullGate.resolve();
 							};
-							if (signal.aborted) fail();
-							else signal.addEventListener("abort", fail, { once: true });
+							if (signal.aborted) onAbort();
+							else signal.addEventListener("abort", onAbort, { once: true });
 						},
-						pull() {
+						pull(controller) {
 							bodyReadStarted.resolve();
-							return pullGate.promise;
+							const frame = initialFrames.shift();
+							if (frame) controller.enqueue(frame);
+							else {
+								idleReadStarted.resolve();
+								return pullGate.promise;
+							}
+						},
+						cancel() {
+							pullGate.resolve();
 						},
 					},
 					{ highWaterMark: 0 },
 				),
-				{ status },
+				{ headers: { "content-type": "application/vnd.amazon.eventstream" } },
 			);
 		},
 		{ preconnect: globalThis.fetch.preconnect },
 	) as FetchImpl;
-	return { fetch, requestSignal: requestStarted.promise, bodyRead: bodyReadStarted.promise };
+	return {
+		fetch,
+		requestSignal: requestStarted.promise,
+		bodyRead: bodyReadStarted.promise,
+		idleRead: idleReadStarted.promise,
+	};
 }
 
 function fetchWithPausedEventStream(): {
@@ -229,24 +293,153 @@ const compactionResponse = {
 		],
 	},
 };
+interface CompactionStreamFixture {
+	id: string;
+	model: string;
+	content: Record<string, unknown>[];
+	stop_reason: string;
+	usage: { input_tokens: number; [key: string]: unknown };
+}
+
+function eventStreamResponseFromFrames(frames: Uint8Array[]): Response {
+	return new Response(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const frame of frames) controller.enqueue(frame);
+				controller.close();
+			},
+		}),
+		{ headers: { "content-type": "application/vnd.amazon.eventstream" } },
+	);
+}
+function concatenateFrames(frames: readonly Uint8Array[]): Uint8Array {
+	const bytes = new Uint8Array(frames.reduce((total, frame) => total + frame.length, 0));
+	let offset = 0;
+	for (const frame of frames) {
+		bytes.set(frame, offset);
+		offset += frame.length;
+	}
+	return bytes;
+}
+
+/** Every native fixture splits one EventStream frame and coalesces later frames in the same chunk. */
+function nativeEventStreamResponse(events: Record<string, unknown>[]): Response {
+	const frames = events.map(bedrockAnthropicChunkEvent);
+	const chunks =
+		frames.length >= 2
+			? [
+					frames[0]!.subarray(0, 5),
+					concatenateFrames([frames[0]!.subarray(5), frames[1]!, ...frames.slice(2, 3)]),
+					...frames.slice(3),
+				]
+			: frames;
+	let index = 0;
+	return new Response(
+		new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (index < chunks.length) controller.enqueue(chunks[index++]!);
+				else controller.close();
+			},
+		}),
+		{ headers: { "content-type": "application/vnd.amazon.eventstream" } },
+	);
+}
+
+function compactionEvents(response: CompactionStreamFixture, includeMessageStop = true): Record<string, unknown>[] {
+	const contentBlock = response.content[0];
+	return [
+		{
+			type: "message_start",
+			message: {
+				id: response.id,
+				type: "message",
+				role: "assistant",
+				model: response.model,
+				content: [],
+				stop_reason: null,
+				stop_sequence: null,
+				usage: { input_tokens: response.usage.input_tokens, output_tokens: 0 },
+			},
+		},
+		{ type: "content_block_start", index: 0, content_block: contentBlock },
+		{ type: "content_block_stop", index: 0 },
+		{
+			type: "message_delta",
+			delta: { stop_reason: response.stop_reason, stop_sequence: null },
+			usage: response.usage,
+		},
+		...(includeMessageStop ? [{ type: "message_stop" }] : []),
+	];
+}
+
+function compactionEventStreamResponse(
+	response: CompactionStreamFixture = compactionResponse,
+	includeMessageStop = true,
+): Response {
+	return nativeEventStreamResponse(compactionEvents(response, includeMessageStop));
+}
+
+function openEventStreamResponse(frames: Uint8Array[]): {
+	response: Response;
+	bodyRead: Promise<void>;
+	cancelled: Promise<void>;
+} {
+	const bodyRead = Promise.withResolvers<void>();
+	const cancelled = Promise.withResolvers<void>();
+	const readGate = Promise.withResolvers<void>();
+	let sent = false;
+	const body = new ReadableStream<Uint8Array>(
+		{
+			pull(controller) {
+				if (sent) return readGate.promise;
+				sent = true;
+				controller.enqueue(concatenateFrames(frames));
+				bodyRead.resolve();
+			},
+			cancel() {
+				cancelled.resolve();
+				readGate.resolve();
+			},
+		},
+		{ highWaterMark: 0 },
+	);
+	return {
+		response: new Response(body, { headers: { "content-type": "application/vnd.amazon.eventstream" } }),
+		bodyRead: bodyRead.promise,
+		cancelled: cancelled.promise,
+	};
+}
 
 describe("Bedrock native compaction transport", () => {
-	it("uses authenticated InvokeModel with Anthropic compaction body and returns signed summary usage", async () => {
-		const { fetch, requests } = captureFetch(() => Response.json(compactionResponse));
+	it("uses authenticated InvokeModelWithResponseStream and returns signed summary usage", async () => {
+		const { fetch, requests } = captureFetch(compactionEventStreamResponse);
 		const model = compactionModel();
+		let hookPayload: unknown;
+		let hookModel: unknown;
 		const result = await completeSimple(model, BEDROCK_TEST_CONTEXT, {
 			apiKey: "bedrock-test-token",
 			anthropicCompaction: { instructions: "Keep only verified findings." },
 			requestMetadata: { run: "compaction" },
-
+			onPayload: (payload, sourceModel) => {
+				hookPayload = payload;
+				hookModel = sourceModel;
+				return payload;
+			},
 			fetch,
 		});
 		expect(requests[0]?.url).toBe(
-			"https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke",
+			"https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke-with-response-stream",
 		);
+		expect(hookModel).toBe(model);
+		expect(hookPayload).toMatchObject({
+			anthropic_version: "bedrock-2023-05-31",
+			compaction: { type: "summarize", instructions: "Keep only verified findings." },
+			messages: [{ role: "user" }],
+		});
 		expect(requests[0]?.headers.get("authorization")).toBe("Bearer bedrock-test-token");
 		expect(requests[0]?.headers.get("x-amzn-bedrock-request-metadata")).toBe('{"run":"compaction"}');
-		expect(requests[0]?.headers.get("accept")).toBe("application/json");
+		expect(requests[0]?.headers.get("accept")).toBe("application/vnd.amazon.eventstream");
+		expect(requests[0]?.headers.get("x-amzn-bedrock-accept")).toBe("application/json");
 		expect(requests[0]?.headers.get("content-type")).toBe("application/json");
 		const body = requests[0]?.body;
 		expect(body).toMatchObject({
@@ -285,7 +478,7 @@ describe("Bedrock native compaction transport", () => {
 			reasoning: true,
 			compat: { supportsServerCompaction: true },
 		});
-		const { fetch, requests } = captureFetch(() => Response.json(compactionResponse));
+		const { fetch, requests } = captureFetch(compactionEventStreamResponse);
 		await completeSimple(model, BEDROCK_TEST_CONTEXT, {
 			apiKey: "bedrock-test-token",
 			reasoning: Effort.Low,
@@ -307,6 +500,84 @@ describe("Bedrock native compaction transport", () => {
 		expect(betas).toContain("thinking-binding-controls-2026-08-01");
 		expect(betas).toContain("effort-2025-11-24");
 		expect(betas).toContain("task-budgets-2026-03-13");
+	});
+	it("preserves Haiku 4.5 High budget defaults and custom thinkingBudgets", async () => {
+		const model = bedrockTestModel({
+			id: "anthropic.claude-haiku-4-5-20251001-v1:0",
+			name: "Claude Haiku 4.5",
+			reasoning: true,
+			maxTokens: 64_000,
+			thinking: {
+				mode: "budget",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.High,
+			},
+			compat: { supportsServerCompaction: true },
+		});
+
+		for (const [thinkingBudgets, expectedBudget] of [
+			[undefined, 16_384],
+			[{ [Effort.High]: 1_234 }, 1_234],
+		] as const) {
+			const { fetch, requests } = captureFetch(compactionEventStreamResponse);
+			await completeSimple(model, BEDROCK_TEST_CONTEXT, {
+				apiKey: "bedrock-test-token",
+				reasoning: Effort.High,
+				thinkingBudgets,
+				anthropicCompaction: {},
+				fetch,
+			});
+			expect(requests[0]?.body.thinking).toMatchObject({
+				type: "enabled",
+				budget_tokens: expectedBudget,
+			});
+		}
+	});
+
+	it("emits the Haiku 5.5 KDL disabled-thinking form without binding controls", async () => {
+		const model = getBundledModel<"bedrock-converse-stream">("amazon-bedrock", "global.anthropic.claude-haiku-5-5");
+		if (!model) throw new Error("expected bundled Bedrock Haiku 5.5");
+		expect(model.compat.disabledThinking).toBe("disabled");
+
+		for (const options of [{}, { disableReasoning: true, reasoning: Effort.High }]) {
+			const { fetch, requests } = captureFetch(compactionEventStreamResponse);
+			await completeSimple(model, BEDROCK_TEST_CONTEXT, {
+				apiKey: "bedrock-test-token",
+				...options,
+				anthropicCompaction: {},
+				fetch,
+				taskBudget: { type: "tokens", total: 1024, remaining: 512 },
+			});
+			const body = requests[0]?.body;
+			expect(body?.thinking).toEqual({ type: "disabled" });
+			expect(body?.output_config).toMatchObject({
+				effort: "low",
+				task_budget: { type: "tokens", total: 1024 },
+			});
+			expect(JSON.stringify(body?.output_config)).not.toContain("remaining");
+			const betas = Array.isArray(body?.anthropic_beta) ? body.anthropic_beta : [];
+			expect(betas).toContain("effort-2025-11-24");
+			expect(betas).not.toContain("thinking-binding-controls-2026-08-01");
+		}
+	});
+
+	it("keeps the off fields omitted for Bedrock models without a disabled-thinking policy", async () => {
+		const model = getBundledModel<"bedrock-converse-stream">("amazon-bedrock", "global.anthropic.claude-opus-5-5");
+		if (!model) throw new Error("expected bundled Bedrock Opus 5.5");
+		expect(model.compat.disabledThinking).toBeUndefined();
+
+		const { fetch, requests } = captureFetch(compactionEventStreamResponse);
+		await completeSimple(model, BEDROCK_TEST_CONTEXT, {
+			apiKey: "bedrock-test-token",
+			anthropicCompaction: {},
+			fetch,
+		});
+		const body = requests[0]?.body;
+		expect(body?.thinking).toBeUndefined();
+		expect(body?.output_config).toBeUndefined();
+		const betas = Array.isArray(body?.anthropic_beta) ? body.anthropic_beta : [];
+		expect(betas).not.toContain("effort-2025-11-24");
+		expect(betas).not.toContain("thinking-binding-controls-2026-08-01");
 	});
 
 	it("keeps ordinary and unsupported/disabled requests on Converse without compaction beta", async () => {
@@ -339,7 +610,7 @@ describe("Bedrock native compaction transport", () => {
 		const produced = await streamBedrock(producer, BEDROCK_TEST_CONTEXT, {
 			bearerToken: "bedrock-test-token",
 			anthropicCompaction: {},
-			fetch: captureFetch(() => Response.json(compactionResponse)).fetch,
+			fetch: captureFetch(compactionEventStreamResponse).fetch,
 		}).result();
 		const payload = produced.providerPayload;
 		if (payload?.type !== "anthropicCompaction") throw new Error("expected a signed compaction payload");
@@ -355,7 +626,7 @@ describe("Bedrock native compaction transport", () => {
 			],
 		};
 
-		const sameModel = captureFetch(() => Response.json(compactionResponse));
+		const sameModel = captureFetch(compactionEventStreamResponse);
 		await streamBedrock(producer, context, {
 			bearerToken: "bedrock-test-token",
 			anthropicCompaction: {},
@@ -389,7 +660,7 @@ describe("Bedrock native compaction transport", () => {
 			id: "anthropic.other-bedrock-model",
 			compat: { supportsServerCompaction: true },
 		});
-		const crossModel = captureFetch(() => Response.json(compactionResponse));
+		const crossModel = captureFetch(compactionEventStreamResponse);
 		await streamBedrock(otherModel, context, {
 			bearerToken: "bedrock-test-token",
 			anthropicCompaction: {},
@@ -416,7 +687,7 @@ describe("Bedrock native compaction transport", () => {
 		expect(JSON.stringify(portable.requests[0]?.body.messages)).not.toContain('"type":"compaction"');
 	});
 
-	it("preserves InvokeModel HTTP failure status and caller cancellation", async () => {
+	it("preserves InvokeModelWithResponseStream HTTP failure status and caller cancellation", async () => {
 		const failed = captureFetch(() => new Response("Access denied", { status: 403 }));
 		const failure = await streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
 			bearerToken: "bedrock-test-token",
@@ -425,8 +696,8 @@ describe("Bedrock native compaction transport", () => {
 		}).result();
 		expect(failure.stopReason).toBe("error");
 		expect(failure.errorStatus).toBe(403);
-		expect(failed.requests[0]?.url).toEndWith("/invoke");
-		const signed = captureFetch(() => Response.json(compactionResponse));
+		expect(failed.requests[0]?.url).toEndWith("/invoke-with-response-stream");
+		const signed = captureFetch(compactionEventStreamResponse);
 		await withSkippedBedrockAuth(async () => {
 			await streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
 				anthropicCompaction: {},
@@ -448,8 +719,70 @@ describe("Bedrock native compaction transport", () => {
 		controller.abort();
 		expect((await pending.result()).stopReason).toBe("aborted");
 	});
+	it("maps native EventStream throttling and validation exceptions to their statuses", async () => {
+		for (const [exceptionType, expectedStatus] of [
+			["throttlingException", 429],
+			["validationException", 400],
+		] as const) {
+			const { fetch, requests } = captureFetch(() =>
+				eventStreamResponseFromFrames([bedrockStreamExceptionFrame(exceptionType, `Bedrock ${exceptionType}`)]),
+			);
+			const result = await streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+				bearerToken: "bedrock-test-token",
+				anthropicCompaction: {},
+				fetch,
+			}).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorStatus).toBe(expectedStatus);
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.url).toEndWith("/invoke-with-response-stream");
+		}
+	});
 
-	it("prices InvokeModel usage per iteration and falls back to aggregate pricing without iterations", async () => {
+	it("rejects a finite native stream that ends without message_stop", async () => {
+		const { fetch, requests } = captureFetch(() => compactionEventStreamResponse(compactionResponse, false));
+		const result = await streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+			bearerToken: "bedrock-test-token",
+			anthropicCompaction: {},
+			fetch,
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(requests).toHaveLength(1);
+	});
+
+	it("cancels the actual EventStream reader after message_stop and stream exceptions", async () => {
+		const completedBody = openEventStreamResponse(
+			compactionEvents(compactionResponse).map(bedrockAnthropicChunkEvent),
+		);
+		const completed = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+			bearerToken: "bedrock-test-token",
+			anthropicCompaction: {},
+			streamFirstEventTimeoutMs: 0,
+			streamIdleTimeoutMs: 0,
+			fetch: captureFetch(() => completedBody.response).fetch,
+		});
+		await completedBody.bodyRead;
+		expect((await completed.result()).stopDetails).toEqual({ type: "compaction" });
+		await completedBody.cancelled;
+
+		const failedBody = openEventStreamResponse([
+			bedrockStreamExceptionFrame("throttlingException", "temporarily unavailable"),
+		]);
+		const failedRequest = captureFetch(() => failedBody.response);
+		const failed = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+			bearerToken: "bedrock-test-token",
+			anthropicCompaction: {},
+			streamFirstEventTimeoutMs: 0,
+			streamIdleTimeoutMs: 0,
+			fetch: failedRequest.fetch,
+		});
+		await failedBody.bodyRead;
+		expect((await failed.result()).errorStatus).toBe(429);
+		expect(failedRequest.requests).toHaveLength(1);
+		await failedBody.cancelled;
+	});
+
+	it("prices InvokeModelWithResponseStream usage per iteration and falls back to aggregate pricing without iterations", async () => {
 		const model = bedrockTestModel({
 			compat: { supportsServerCompaction: true },
 			cost: {
@@ -470,7 +803,7 @@ describe("Bedrock native compaction transport", () => {
 			apiKey: "bedrock-test-token",
 			anthropicCompaction: {},
 			fetch: captureFetch(() =>
-				Response.json({
+				compactionEventStreamResponse({
 					...compactionResponse,
 					usage: {
 						input_tokens: 1,
@@ -494,7 +827,7 @@ describe("Bedrock native compaction transport", () => {
 			apiKey: "bedrock-test-token",
 			anthropicCompaction: {},
 			fetch: captureFetch(() =>
-				Response.json({
+				compactionEventStreamResponse({
 					...compactionResponse,
 					usage: {
 						input_tokens: 60_000,
@@ -513,7 +846,7 @@ describe("Bedrock native compaction transport", () => {
 			apiKey: "bedrock-test-token",
 			anthropicCompaction: {},
 			fetch: captureFetch(() =>
-				Response.json({
+				compactionEventStreamResponse({
 					...compactionResponse,
 					usage: {
 						input_tokens: 60_000,
@@ -528,7 +861,42 @@ describe("Bedrock native compaction transport", () => {
 		expect(aggregateFallback.usage.cost.total).toBeCloseTo(0.60002, 12);
 	});
 
-	it("resolves InvokeModel deadlines from model and per-call idle settings, honoring explicit timeout precedence", async () => {
+	it("preserves HTTP 403 when the pre-header deadline interrupts a stalled error-body read", async () => {
+		vi.useFakeTimers();
+		try {
+			await withEnv(
+				{
+					PI_STREAM_IDLE_TIMEOUT_MS: undefined,
+					PI_OPENAI_STREAM_IDLE_TIMEOUT_MS: undefined,
+					PI_STREAM_FIRST_EVENT_TIMEOUT_MS: undefined,
+				},
+				async () => {
+					const timeoutMs = 20;
+					const stalled = fetchWithStalledHttpErrorBody();
+					const pending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+						bearerToken: "bedrock-test-token",
+						anthropicCompaction: {},
+						fetch: stalled.fetch,
+						streamFirstEventTimeoutMs: timeoutMs,
+						streamIdleTimeoutMs: 0,
+					});
+					const signal = await stalled.requestSignal;
+					await stalled.bodyRead;
+					vi.advanceTimersByTime(timeoutMs - 1);
+					expect(signal.aborted).toBe(false);
+					vi.advanceTimersByTime(1);
+					expect(signal.aborted).toBe(true);
+					const result = await pending.result();
+					expect(result.stopReason).toBe("error");
+					expect(result.errorStatus).toBe(403);
+				},
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resolves pre-header stream deadlines from model and per-call settings, honoring explicit timeout precedence", async () => {
 		vi.useFakeTimers();
 		try {
 			await withEnv(
@@ -587,31 +955,59 @@ describe("Bedrock native compaction transport", () => {
 		}
 	});
 
-	it("keeps the InvokeModel deadline active through successful and non-2xx body reads", async () => {
+	it("applies first-event and idle deadlines while waiting for native EventStream chunks", async () => {
 		vi.useFakeTimers();
 		try {
-			for (const status of [200, 403]) {
-				const { fetch, requestSignal, bodyRead } = fetchWithStalledBody(status);
-				const pending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
-					bearerToken: "bedrock-test-token",
-					anthropicCompaction: {},
-					fetch,
-					streamFirstEventTimeoutMs: 20,
-				});
-				const signal = await requestSignal;
-				await bodyRead;
-				vi.advanceTimersByTime(20);
-				expect(signal.aborted).toBe(true);
-				expect((await pending.result()).stopReason).toBe("error");
-			}
+			await withEnv(
+				{
+					PI_STREAM_IDLE_TIMEOUT_MS: undefined,
+					PI_OPENAI_STREAM_IDLE_TIMEOUT_MS: undefined,
+					PI_STREAM_FIRST_EVENT_TIMEOUT_MS: undefined,
+				},
+				async () => {
+					const firstEvent = fetchWithStalledEventStream();
+					const firstPending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+						bearerToken: "bedrock-test-token",
+						anthropicCompaction: {},
+						fetch: firstEvent.fetch,
+						streamFirstEventTimeoutMs: 20,
+						streamIdleTimeoutMs: 0,
+					});
+					const firstSignal = await firstEvent.requestSignal;
+					await firstEvent.bodyRead;
+					vi.advanceTimersByTime(19);
+					expect(firstSignal.aborted).toBe(false);
+					vi.advanceTimersByTime(1);
+					expect((await firstPending.result()).stopReason).toBe("error");
+					expect(firstSignal.aborted).toBe(true);
+
+					const idle = fetchWithStalledEventStream([
+						bedrockAnthropicChunkEvent(compactionEvents(compactionResponse)[0]!),
+					]);
+					const idlePending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+						bearerToken: "bedrock-test-token",
+						anthropicCompaction: {},
+						fetch: idle.fetch,
+						streamFirstEventTimeoutMs: 0,
+						streamIdleTimeoutMs: 20,
+					});
+					const idleSignal = await idle.requestSignal;
+					await idle.idleRead;
+					vi.advanceTimersByTime(19);
+					expect(idleSignal.aborted).toBe(false);
+					vi.advanceTimersByTime(1);
+					expect((await idlePending.result()).stopReason).toBe("error");
+					expect(idleSignal.aborted).toBe(true);
+				},
+			);
 		} finally {
 			vi.useRealTimers();
 		}
 	});
 
-	it("keeps caller cancellation active while an InvokeModel body is stalled", async () => {
+	it("keeps caller cancellation active while a native EventStream read is stalled", async () => {
 		const controller = new AbortController();
-		const { fetch, requestSignal, bodyRead } = fetchWithStalledBody();
+		const { fetch, requestSignal, bodyRead } = fetchWithStalledEventStream();
 		const pending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
 			bearerToken: "bedrock-test-token",
 			anthropicCompaction: {},

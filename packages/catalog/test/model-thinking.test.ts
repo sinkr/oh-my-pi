@@ -1009,6 +1009,20 @@ describe("model thinking derivation", () => {
 			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "opencode-zen" }).compat
 				.supportsServerCompaction,
 		).toBe(false);
+		// The shared Messages policy remains enabled for those Bedrock model
+		// families on that adapter; its Haiku 4.5 case must not leak to Messages.
+		for (const id of ["claude-fable-5", "claude-mythos-5", "claude-mythos-preview"]) {
+			expect(
+				createModel({ id, api: "anthropic-messages", provider: "amazon-bedrock" }).compat.supportsServerCompaction,
+			).toBe(true);
+		}
+		expect(
+			createModel({
+				id: "claude-haiku-4-5",
+				api: "anthropic-messages",
+				provider: "amazon-bedrock",
+			}).compat.supportsServerCompaction,
+		).toBe(false);
 	});
 
 	it("enables Bedrock Runtime compaction only for model-card-supported Claude revisions", () => {
@@ -1038,11 +1052,16 @@ describe("model thinking derivation", () => {
 
 		for (const id of [
 			"global.anthropic.claude-opus-4-6-v1",
+			"global.anthropic.claude-haiku-4-6",
 			"global.anthropic.claude-sonnet-4-6",
 			"global.anthropic.claude-sonnet-4-5-20250929-v1:0",
 			"global.anthropic.claude-opus-5-1",
 			"global.anthropic.claude-sonnet-5-1",
-			"anthropic.claude-fable-5",
+			"global.anthropic.claude-fable-5",
+			"global.anthropic.claude-fable-5-1",
+			"global.anthropic.claude-mythos-5",
+			"global.anthropic.claude-mythos-5-1",
+			"global.anthropic.claude-mythos-preview",
 			"global.amazon.nova-pro-v1:0",
 		]) {
 			expect(

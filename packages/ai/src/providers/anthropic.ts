@@ -1490,7 +1490,7 @@ function hasAnthropicRawResponseRequest(request: unknown): request is AnthropicR
 
 type AnthropicStreamWithResponseRequest = {
 	withResponse(): Promise<{
-		data: AsyncIterable<RawMessageStreamEvent>;
+		data: AsyncIterable<AnthropicStreamEvent>;
 		response: Response;
 		request_id: string | null;
 	}>;
@@ -1526,13 +1526,13 @@ async function getAnthropicStreamResponse(
 	throw new AIError.AnthropicStreamEnvelopeError("Anthropic SDK request did not expose a stream response");
 }
 
-async function* observeDecodedAnthropicSdkEvents(
+async function* observeDecodedAnthropicEvents(
 	events: AsyncIterable<AnthropicStreamEvent>,
 	observer: (event: RawSseEvent) => void,
 ): AsyncGenerator<AnthropicStreamEvent> {
 	for await (const event of events) {
 		const data = JSON.stringify(event);
-		// Reconstructed from decoded SDK event; not literal wire bytes.
+		// Reconstructed from decoded transport events; not literal wire bytes.
 		notifyRawSseEvent(observer, { event: event.type, data, raw: [`event: ${event.type}`, `data: ${data}`] });
 		yield event;
 	}
@@ -1857,7 +1857,7 @@ function carriesSignedCompaction(params: MessageCreateParams): boolean {
  * documented billing total. Requests without a compaction iteration retain
  * their top-level usage.
  */
-export function applyAnthropicCompactionIterationUsage(usage: Usage, source: AnthropicWireUsage): boolean {
+function applyAnthropicCompactionIterationUsage(usage: Usage, source: AnthropicWireUsage): boolean {
 	const iterations = source.iterations;
 	if (!iterations?.some(iteration => iteration?.type === "compaction")) return false;
 	let input = 0;
@@ -1932,7 +1932,7 @@ function resolveIterationModel(requestModel: Model<Api>, iterationModelId: strin
  * without iterations use the requested model at the normal `calculateCost`
  * call.
  */
-export function calculateIterationTurnCost(
+function calculateIterationTurnCost(
 	requestModel: Model<Api>,
 	usage: Usage,
 	source: Pick<AnthropicWireUsage, "iterations">,
@@ -2186,10 +2186,26 @@ export function maybeAddReplayUnsignedThinkingHint(model: Model<"anthropic-messa
 	return `${hint}\n\n${message}`;
 }
 
+type AnthropicStreamTransport = {
+	sourceModel: Model<"bedrock-converse-stream">;
+	compactionSupported: boolean;
+	compactionReplayIdentity: AnthropicCompactionIdentity;
+	forceThinkingOff: boolean;
+	forceThinkingOffFields?: Record<string, unknown>;
+	prefixMismatchBehavior?: "drop_block" | "error";
+	prepareRequest: (
+		params: MessageCreateParamsStreaming,
+		betas: readonly string[],
+	) => Promise<{ payload: unknown; rawRequestDump: RawHttpRequestDump }>;
+	createClient: (getPayload: () => unknown) => AnthropicMessagesClientLike;
+	prepareOptions: (options: AnthropicOptions) => AnthropicOptions;
+};
+
 const streamAnthropicOnce = (
 	model: Model<"anthropic-messages">,
 	context: Context,
 	options?: AnthropicOptions,
+	transport?: AnthropicStreamTransport,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 
@@ -2197,26 +2213,30 @@ const streamAnthropicOnce = (
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
+		const sourceModel = transport?.sourceModel ?? model;
+		const costModel = sourceModel;
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
-			api: model.api as Api,
-			provider: model.provider,
-			model: model.id,
+			api: sourceModel.api,
+			provider: sourceModel.provider,
+			model: sourceModel.id,
 			usage: createEmptyUsage(),
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
 
 		const onSseEvent = options?.onSseEvent;
-		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, model) : undefined;
+		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
 
 		try {
 			// Built inside the try so a copilot credential/header failure surfaces as
 			// an error event instead of an unhandled rejection that leaves the stream
 			// (and any consumer awaiting `result()`) hanging forever.
+			if (transport) options = transport.prepareOptions(options ?? {});
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 			const copilotApiKey = model.provider === "github-copilot" ? parseGitHubCopilotApiKey(apiKey) : undefined;
 			const copilotBaseUrl =
@@ -2246,9 +2266,11 @@ const streamAnthropicOnce = (
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			// A caller-owned client decides the endpoint itself (its `baseURL`, or an
 			// explicit opt-in); it receives the compaction beta per request.
-			const compactionSupported = options?.client
-				? supportsAnthropicCompactionOnClient(model, options.client)
-				: supportsAnthropicCompaction(model, baseUrl);
+			const compactionSupported =
+				transport?.compactionSupported ??
+				(options?.client
+					? supportsAnthropicCompactionOnClient(model, options.client)
+					: supportsAnthropicCompaction(model, baseUrl));
 			const providerSessionState = getAnthropicProviderSessionState(
 				options?.providerSessionState,
 				options?.client,
@@ -2318,8 +2340,9 @@ const streamAnthropicOnce = (
 			// body never builds params.
 			let controlRecords: AnthropicControlRecord[] | undefined;
 			const getControlRecords = () => (controlRecords ??= collectAnthropicControlRecords(context.messages));
-			let prefixMismatchBehavior =
-				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
+			let prefixMismatchBehavior = transport
+				? transport.prefixMismatchBehavior
+				: model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
 					? (options?.anthropicPrefixMismatchBehavior ?? "drop_block")
 					: undefined;
 			// The binding-controls beta follows the finalized body's
@@ -2365,7 +2388,7 @@ const streamAnthropicOnce = (
 			let clientDefaultHeaders: Record<string, string> | undefined;
 			// Rebuild headers when a retry changes the advertised beta set.
 			const resolveClient = (): { client: AnthropicMessagesClientLike; isOAuthToken: boolean } => {
-				if (options?.client) {
+				if (options?.client && !transport) {
 					return { client: options.client, isOAuthToken: false };
 				}
 				let extraBetas = normalizeExtraBetas(options?.betas);
@@ -2391,6 +2414,7 @@ const streamAnthropicOnce = (
 				// so the effort field is dropped from the body there too (see buildParams)
 				// and advertising the beta would only earn a 400 (#5614).
 				const sendsAdaptiveEffortPin =
+					!transport?.forceThinkingOff &&
 					isAdaptiveOnlyThinking(model) &&
 					(options?.thinkingEnabled === false ||
 						(model.compat.supportsForcedToolChoice && isForcedToolChoice(options?.toolChoice)));
@@ -2510,6 +2534,13 @@ const streamAnthropicOnce = (
 				// Caller betas and a frozen redemption's beta list bypass compat.
 				if (killSwitchActive) extraBetas = extraBetas.filter(beta => killSwitchBetas[beta] !== true);
 
+				requestExtraBetas = extraBetas;
+				if (transport) {
+					return {
+						client: transport.createClient(() => transportPayload),
+						isOAuthToken: false,
+					};
+				}
 				clientArgs = {
 					model,
 					apiKey,
@@ -2537,14 +2568,16 @@ const streamAnthropicOnce = (
 				};
 				const created = createClient(model, clientArgs);
 				clientDefaultHeaders = created.defaultHeaders;
-				requestExtraBetas = extraBetas;
 				return created;
 			};
 			let { client, isOAuthToken } = resolveClient();
 			const preparedContext = await prepareAnthropicImageContext(context, model);
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
+				if (transport) rawRequestDump = undefined;
 				const built = buildParams(model, preparedContext, isOAuthToken, options, {
 					compactionSupported,
+					compactionReplayIdentity: transport?.compactionReplayIdentity,
+					forceThinkingOff: transport?.forceThinkingOff,
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
 					forceDemoteUnsignedThinking,
@@ -2559,6 +2592,29 @@ const streamAnthropicOnce = (
 					effectiveBaseUrl: baseUrl,
 				});
 				let nextParams = built.params;
+				if (transport?.forceThinkingOffFields) {
+					const offFields = transport.forceThinkingOffFields;
+					if (offFields.thinking !== undefined) {
+						nextParams.thinking = offFields.thinking as MessageCreateParamsStreaming["thinking"];
+					}
+					const offOutputConfig = offFields.output_config;
+					if (isRecord(offOutputConfig)) {
+						nextParams.output_config = {
+							...nextParams.output_config,
+							...offOutputConfig,
+						} as MessageCreateParamsStreaming["output_config"];
+					}
+					const offBetas = Array.isArray(offFields.anthropic_beta)
+						? offFields.anthropic_beta.filter((beta): beta is string => typeof beta === "string")
+						: [];
+					if (isRecord(offOutputConfig) && offOutputConfig.effort !== undefined) {
+						offBetas.push(effortBeta);
+					}
+					if (offBetas.length > 0) {
+						const bodyParams = nextParams as { anthropic_beta?: string[] };
+						bodyParams.anthropic_beta = Array.from(new Set([...(bodyParams.anthropic_beta ?? []), ...offBetas]));
+					}
+				}
 				// The last build wins: a retry may rebuild with different controls.
 				if (built.requestControls) output.requestControls = built.requestControls;
 				else delete output.requestControls;
@@ -2568,7 +2624,7 @@ const streamAnthropicOnce = (
 				if (dropFastMode) {
 					dropAnthropicFastMode(nextParams);
 				}
-				const replacementPayload = await options?.onPayload?.(nextParams, model);
+				const replacementPayload = transport ? undefined : await options?.onPayload?.(nextParams, model);
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
 				}
@@ -2576,7 +2632,7 @@ const streamAnthropicOnce = (
 				if (killSwitchActive) withholdKillSwitchFields(nextParams);
 				if (nextParams.compaction) stripCompactionIncompatibleParams(nextParams);
 				// After `onPayload`, so a hook cannot restore a field Bedrock rejects.
-				if (model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
+				if (!transport && model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
 				// Vertex rawPredict carries betas in the body. The binding token omp
 				// adds is decided here, from the final params after any hook; a token
 				// the hook itself put in `anthropic_beta` is left as it is.
@@ -2595,14 +2651,20 @@ const streamAnthropicOnce = (
 					];
 				}
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
-				rawRequestDump = {
-					provider: model.provider,
-					api: output.api,
-					model: model.id,
-					method: "POST",
-					url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
-					body: nextParams,
-				};
+				if (transport) {
+					const preparedRequest = await transport.prepareRequest(nextParams, requestExtraBetas);
+					transportPayload = preparedRequest.payload;
+					rawRequestDump = preparedRequest.rawRequestDump;
+				} else {
+					rawRequestDump = {
+						provider: model.provider,
+						api: output.api,
+						model: model.id,
+						method: "POST",
+						url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
+						body: nextParams,
+					};
+				}
 				return nextParams;
 			};
 			let usingFallbackCredit = false;
@@ -2635,7 +2697,11 @@ const streamAnthropicOnce = (
 				params = await prepareParams();
 			}
 			const seenInputTransformations = new Set<string>();
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
+			const idleTimeoutMs =
+				options?.streamIdleTimeoutMs ??
+				getStreamIdleTimeoutMs(
+					transport?.sourceModel.compat.streamIdleTimeoutMs ?? model.compat.streamIdleTimeoutMs,
+				);
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
@@ -2719,7 +2785,7 @@ const streamAnthropicOnce = (
 			const resetStreamOutputState = (): void => {
 				providerRetryAttempt = 0;
 				output.content.length = 0;
-				output.model = model.id;
+				output.model = sourceModel.id;
 				output.responseId = undefined;
 				output.upstreamModel = undefined;
 				output.errorMessage = undefined;
@@ -2915,7 +2981,7 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
-					await notifyProviderResponse(options, response, model, requestId);
+					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
 						if (slowSignal) slowMode.observe(slowSignal, slowLane);
@@ -2983,7 +3049,7 @@ const streamAnthropicOnce = (
 					});
 					const observedAnthropicStream =
 						rawSseObserver && !recordsRawSseEvents
-							? observeDecodedAnthropicSdkEvents(timedAnthropicStream, rawSseObserver)
+							? observeDecodedAnthropicEvents(timedAnthropicStream, rawSseObserver)
 							: timedAnthropicStream;
 					for await (const event of observedAnthropicStream) {
 						sawEvent = true;
@@ -3025,9 +3091,9 @@ const streamAnthropicOnce = (
 								}
 								if (
 									!(serverSideFallback || compacted) ||
-									!calculateIterationTurnCost(model, output.usage, startUsage, output.timestamp)
+									!calculateIterationTurnCost(costModel, output.usage, startUsage, output.timestamp)
 								) {
-									calculateCost(model, output.usage, output.timestamp);
+									calculateCost(costModel, output.usage, output.timestamp);
 								}
 							} else {
 								reportAnthropicEnvelopeAnomaly("message_start missing usage");
@@ -3187,7 +3253,7 @@ const streamAnthropicOnce = (
 									partial: output,
 								});
 							} else if (event.content_block.type === "compaction") {
-								compactionPayload = parseAnthropicCompactionBlock(event.content_block, model);
+								compactionPayload = parseAnthropicCompactionBlock(event.content_block, sourceModel);
 								openBlocks.set(event.index, { contentIndex: -1, kind: "compaction" });
 							} else {
 								openBlocks.set(event.index, { contentIndex: -1, kind: "ignored" });
@@ -3393,9 +3459,9 @@ const streamAnthropicOnce = (
 								}
 								if (
 									!(serverSideFallback || compacted) ||
-									!calculateIterationTurnCost(model, output.usage, deltaUsage, output.timestamp)
+									!calculateIterationTurnCost(costModel, output.usage, deltaUsage, output.timestamp)
 								) {
-									calculateCost(model, output.usage, output.timestamp);
+									calculateCost(costModel, output.usage, output.timestamp);
 								}
 							}
 						} else if (event.type === "message_stop") {
@@ -3454,7 +3520,10 @@ const streamAnthropicOnce = (
 					}
 					break;
 				} catch (streamError) {
-					const streamFailure = activeAbortTracker.getLocalAbortReason() ?? streamError;
+					const localAbortReason = activeAbortTracker.getLocalAbortReason();
+					const preserveTransportStatus = transport && AIError.status(streamError) !== undefined;
+					const streamFailure = preserveTransportStatus ? streamError : (localAbortReason ?? streamError);
+					if (transport) throw streamFailure;
 					if (
 						!disableStrictTools &&
 						firstTokenTime === undefined &&
@@ -3548,7 +3617,7 @@ const streamAnthropicOnce = (
 						if (!usingFallbackCredit) params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
@@ -3576,7 +3645,7 @@ const streamAnthropicOnce = (
 						params = await rebuildParams(streamFailure);
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
@@ -3619,7 +3688,7 @@ const streamAnthropicOnce = (
 							params = await rebuildParams(streamFailure);
 							providerRetryAttempt = 0;
 							output.content.length = 0;
-							output.model = model.id;
+							output.model = sourceModel.id;
 							output.responseId = undefined;
 							output.upstreamModel = undefined;
 							output.errorMessage = undefined;
@@ -3654,7 +3723,7 @@ const streamAnthropicOnce = (
 						params = await rebuildParams(streamFailure);
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
@@ -3696,7 +3765,7 @@ const streamAnthropicOnce = (
 						params = await rebuildParams(streamFailure);
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.errorMessage = undefined;
 						output.inputTransformations = undefined;
@@ -3723,7 +3792,7 @@ const streamAnthropicOnce = (
 						params = await rebuildParams(streamFailure);
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
@@ -3764,7 +3833,7 @@ const streamAnthropicOnce = (
 						params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
@@ -3828,7 +3897,7 @@ const streamAnthropicOnce = (
 						params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
-						output.model = model.id;
+						output.model = sourceModel.id;
 						output.responseId = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
@@ -3871,7 +3940,7 @@ const streamAnthropicOnce = (
 					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
 					await waitForRetry(options?.providerRetryWait, delayMs, options?.signal);
 					output.content.length = 0;
-					output.model = model.id;
+					output.model = sourceModel.id;
 					output.responseId = undefined;
 					output.errorMessage = undefined;
 					output.stopDetails = undefined;
@@ -3931,15 +4000,15 @@ const streamAnthropicOnce = (
 				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}
 			const result = await AIError.finalize(error, {
-				api: model.api,
-				provider: model.provider,
+				api: sourceModel.api,
+				provider: sourceModel.provider,
 				abortTracker: activeAbortTracker,
 				rawRequestDump,
 			});
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
-			output.errorMessage = maybeAddReplayUnsignedThinkingHint(model, result.message);
+			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -5195,6 +5264,7 @@ type AnthropicParamBuildOptions = {
 	 * and block replay inert. Defaults to the model's static resolution.
 	 */
 	compactionSupported?: boolean;
+	forceThinkingOff?: boolean;
 	/**
 	 * Already-resolved effective endpoint for this request (reroutes applied).
 	 * Beta routing reads this instead of the spec URL so environment reroutes
@@ -5299,6 +5369,7 @@ function buildParams(
 		controlRecords,
 		fallbacks = options?.fallbacks,
 		compactionSupported = supportsAnthropicCompaction(model),
+		forceThinkingOff,
 		effectiveBaseUrl,
 		compactionReplayIdentity,
 	} = buildOptions;
@@ -5371,7 +5442,7 @@ function buildParams(
 	// Pre-compute thinking + output_config effort.
 	let thinking: MessageCreateParamsStreaming["thinking"] | undefined;
 	let outputConfigEffort: AnthropicOutputEffort | undefined;
-	if (model.reasoning) {
+	if (!forceThinkingOff && model.reasoning) {
 		const disabledThinking = model.compat.disabledThinking;
 		if (
 			options?.thinkingEnabled === false &&
@@ -5706,61 +5777,54 @@ function buildBedrockAnthropicEncoderModel(model: Model<"bedrock-converse-stream
 	};
 	return buildModel(spec);
 }
-/** Bedrock InvokeModel envelope for an Anthropic Messages compaction request. */
-export type BedrockAnthropicCompactionRequest = Omit<MessageCreateParams, "model" | "stream"> & {
-	anthropic_version: "bedrock-2023-05-31";
-	anthropic_beta: string[];
-};
-
 /**
- * Build the compaction-only Anthropic request using the shared Messages encoder
- * and Anthropic KDL policy projected for this request. Replay identity remains
- * the source Bedrock model/API and is supplied separately to the converter.
- * Bedrock chooses the model in the InvokeModel path, so the body omits `model`;
- * non-streaming InvokeModel likewise needs no `stream` field.
+ * Route Bedrock's on-demand Anthropic compaction through the shared Messages
+ * stream consumer while keeping source-provider identity and pricing explicit.
  */
-export function buildBedrockAnthropicCompactionRequest(
-	model: Model<"bedrock-converse-stream">,
+export function streamBedrockAnthropicCompaction(
+	sourceModel: Model<"bedrock-converse-stream">,
 	context: Context,
 	options: AnthropicOptions,
-): BedrockAnthropicCompactionRequest {
-	const anthropicModel = buildBedrockAnthropicEncoderModel(model);
+	prepareRequest: (
+		params: MessageCreateParamsStreaming,
+		betas: readonly string[],
+	) => Promise<{ payload: unknown; rawRequestDump: RawHttpRequestDump }>,
+	createClient: (getPayload: () => unknown) => AnthropicMessagesClientLike,
+	prepareOptions: (options: AnthropicOptions) => AnthropicOptions,
+	forceThinkingOffFields?: Record<string, unknown>,
+): AssistantMessageEventStream {
+	const anthropicModel = buildBedrockAnthropicEncoderModel(sourceModel);
 	const sourceIdentity: AnthropicCompactionIdentity = {
-		provider: model.provider,
-		model: model.id,
-		api: model.api,
+		provider: sourceModel.provider,
+		model: sourceModel.id,
+		api: sourceModel.api,
 	};
+	const forceThinkingOff = options.reasoning === undefined;
 	const prefixMismatchBehavior =
-		anthropicModel.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
+		!forceThinkingOff && anthropicModel.thinking?.prefixBinding && sourceModel.compat.supportsThinkingBindingControls
 			? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
 			: undefined;
 	const compactionOptions = { ...options };
-	if (options.reasoning !== undefined) compactionOptions.thinkingEnabled = true;
 	delete compactionOptions.toolChoice;
 	delete compactionOptions.fallbacks;
-	const { params } = buildParams(anthropicModel, context, false, compactionOptions, {
-		disableStrictTools: true,
-		useUmansGatewayWebSearch: false,
-		forceDemoteUnsignedThinking: false,
-		supportsEagerToolInputStreaming: false,
-		prefixMismatchBehavior,
-		dropAllThinking: false,
+	const transport: AnthropicStreamTransport = {
+		sourceModel,
 		compactionSupported: true,
 		compactionReplayIdentity: sourceIdentity,
-		effectiveBaseUrl: model.baseUrl,
-	});
-	const bodyBetas = [
-		COMPACTION_BETA,
-		...resolveAnthropicControlBetas(anthropicModel, prefixMismatchBehavior),
-		...(params.output_config?.effort !== undefined ? [effortBeta] : []),
-		...(params.output_config?.task_budget !== undefined ? [taskBudgetBeta] : []),
-	];
-	const { model: _model, stream: _stream, anthropic_beta: _anthropicBeta, ...body } = params;
-	return {
-		...body,
-		anthropic_version: "bedrock-2023-05-31",
-		anthropic_beta: Array.from(new Set(bodyBetas)),
+		forceThinkingOff,
+		forceThinkingOffFields,
+		prefixMismatchBehavior,
+		prepareOptions,
+		prepareRequest,
+		createClient,
 	};
+	const streamAttempt = (
+		model: Model<"anthropic-messages">,
+		streamContext: Context,
+		streamOptions?: AnthropicOptions,
+	): AssistantMessageEventStream =>
+		streamAnthropicOnce(model, streamContext, streamOptions ?? compactionOptions, transport);
+	return streamAttempt(withoutDisabledExperimentalBetas(anthropicModel), context, compactionOptions);
 }
 
 const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";

@@ -51,8 +51,8 @@ provider "amazon-bedrock" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "budget"
 	}
-	// AWS documents compact-2026-09-04 for Bedrock Runtime InvokeModel, not
-	// Converse. Expose this only as a side-compaction capability; ordinary turns
+	// AWS documents compact-2026-09-04 for native Runtime APIs, not Converse.
+	// Expose this only as a side-compaction capability; ordinary turns
 	// continue to use the model's bedrock-converse-stream API. These revisions
 	// are limited to the Bedrock model cards that name the new beta:
 	// https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-compaction.html

@@ -810,8 +810,8 @@ export interface AnthropicCompat {
 }
 
 /**
- * Compatibility settings for Bedrock Converse requests and the InvokeModel
- * side-compaction lane. Cache pricing does not imply these capabilities.
+ * Compatibility settings for Bedrock Converse requests and native streaming
+ * side-compaction. Cache pricing does not imply these capabilities.
  */
 export interface BedrockCompat {
 	/** Explicit disabled-thinking wire form; unset preserves the provider's existing behavior. */
@@ -860,8 +860,8 @@ export interface BedrockCompat {
 	 */
 	supportsThinkingBindingControls?: boolean;
 	/**
-	 * Whether the model supports a compaction-only Bedrock Runtime InvokeModel
-	 * request. Ordinary turns still use the Converse API.
+	 * Whether the model supports a compaction-only Bedrock Runtime
+	 * InvokeModelWithResponseStream request. Ordinary turns still use Converse.
 	 */
 	supportsServerCompaction?: boolean;
 }

@@ -158,12 +158,10 @@ class "anthropic" {
 			}
 		}
 	}
-	// On-demand compaction (compact-2026-09-04) on the Anthropic Messages wire:
-	// the Claude API, Vertex, and Amazon Bedrock's `/anthropic` routes.
+	// On-demand compaction (compact-2026-09-04) works on the Claude API, Vertex,
+	// and Amazon Bedrock's `/anthropic` routes, not Bedrock Converse.
 	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
-	// effective URLs are checked at request time. Bedrock Converse's
-	// InvokeModel side lane is a deployment contract in
-	// providers/amazon-bedrock.kdl.
+	// effective URLs are checked at request time.
 	on "anthropic" "google-vertex" "amazon-bedrock" "bedrock-mantle" {
 		on-api "anthropic-messages" {
 			family "fable" {
