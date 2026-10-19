@@ -32,6 +32,11 @@ static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RECOVERY_TAG_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"#([0-9A-Fa-f]{4})\s*$").expect("valid regex"));
+/// A stand-in where the snapshot tag belongs (`#AUTO`, `#????`, `#0`, a bare
+/// `#`): one short word with no path characters, written for a file the model
+/// never got a tag for.
+static PLACEHOLDER_TAG_RE: LazyLock<Regex> =
+	LazyLock::new(|| Regex::new(r"#[^\s#./\\:\[\]]{0,16}\s*$").expect("valid regex"));
 
 /// Parsed edits, optional file operation, and parser warnings for one section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +199,15 @@ pub fn contains_recognizable_hashline_operations(input: &str) -> bool {
 		.any(|line| tokenizer.is_op(line.trim_end_matches('\r')))
 }
 
+/// Path of the first section header, for input whose headers carry no ops
+/// (so [`Patch::parse`] yields no sections).
+pub fn first_header_path(input: &str, options: &SplitOptions<'_>) -> Option<String> {
+	input.lines().find_map(|line| {
+		let clean = unbracket_envelope_markers(line.trim_end());
+		Some(parse_header_line(clean, options.cwd).ok()??.path)
+	})
+}
+
 fn unquote(path: &str) -> &str {
 	if path.len() >= 2
 		&& ((path.starts_with('"') && path.ends_with('"'))
@@ -261,8 +275,7 @@ fn parse_header_line(line: &str, cwd: Option<&Path>) -> Result<Option<RawSection
 		return Ok(Some(recovered));
 	}
 	Err(EditError::parse(format!(
-		"Input header must be [PATH] or [PATH#TAG] with a {HL_FILE_HASH_LENGTH}-hex content-hash \
-		 tag; got {}.",
+		"Input header must be [PATH#TAG] with a {HL_FILE_HASH_LENGTH}-hex content-hash tag; got {}.",
 		json_quote(trimmed)
 	)))
 }
@@ -276,6 +289,10 @@ fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
 	let (path_text, file_hash) = if let Some(captures) = RECOVERY_TAG_RE.captures(&body) {
 		let whole = captures.get(0)?;
 		(&body[..whole.start()], Some(captures[1].to_ascii_uppercase()))
+	} else if let Some(placeholder) = PLACEHOLDER_TAG_RE.find(&body) {
+		// A placeholder is no tag: the section parses untagged, and staging
+		// answers it with the file's current tag, as for an unknown hex tag.
+		(&body[..placeholder.start()], None)
 	} else {
 		(body.trim_end(), None)
 	};
