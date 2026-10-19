@@ -817,6 +817,12 @@ describe("RFC 9728 path-inserted protected resource", () => {
 					"returned metadata with issuer https://gw.example (RFC 8414 §3.3 requires an exact match).",
 			);
 		}
+
+		// A challenge naming both the resource metadata and an `Mcp-Auth-Server` hint for the
+		// valid but unadvertised origin AS: the advertised list wins, so the hint is not a way around it.
+		await expect(
+			discoverOAuthEndpoints(serverUrl, gw, rfc9728ProtectedResourceMetadataUrl(serverUrl), { fetch: fetchImpl }),
+		).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
 	});
 });
 
