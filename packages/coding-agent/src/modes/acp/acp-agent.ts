@@ -57,6 +57,7 @@ import { runExtensionCompact } from "../../extensibility/extensions/compact-hand
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { MCPManager } from "../../mcp/manager";
+import { clearMcpClientAuthSurface } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -983,10 +984,18 @@ export class AcpAgent implements Agent {
 			// `/mcp reauth` writes config-file credentials; when the ACP client
 			// also declared this server at session creation, its live manager
 			// entry picks the fresh row up on a manual reconnect instead of
-			// staying wedged in its auth-failure backoff.
+			// staying wedged in its auth-failure backoff. A client-supplied
+			// bearer would keep the fresh row out: while an Authorization
+			// header is present the manager disables the url-keyed fallback,
+			// and a stale auth block answers first — so clear that surface
+			// before reconnecting.
 			reconnectMcpServer: async name => {
 				const manager = record.mcpManager;
-				if (!manager?.getServerConfig(name)) return undefined;
+				const config = manager?.getServerConfig(name);
+				if (!manager || !config) return undefined;
+				if (config.type === "http" || config.type === "sse") {
+					manager.updateServerConfig(name, clearMcpClientAuthSurface(config));
+				}
 				await manager.reconnectServer(name, { manual: true });
 				return manager.getConnectionStatus(name);
 			},

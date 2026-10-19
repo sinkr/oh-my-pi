@@ -222,6 +222,24 @@ export function stripMcpOAuthAuth(config: MCPServerConfig): MCPServerConfig {
 }
 
 /**
+ * Drop a server definition's client-supplied auth surface so the next
+ * `MCPManager` auth resolution picks up the fresh url-keyed credential row a
+ * reauth just wrote: while an `Authorization` header is present the manager
+ * disables the url-keyed credential fallback, and a stale `auth` block
+ * answers first — either would keep the expired credential in charge of the
+ * reconnect.
+ */
+export function clearMcpClientAuthSurface(config: MCPServerConfig): MCPServerConfig {
+	const next = stripMcpOAuthAuth(config);
+	if (next.type !== "http" && next.type !== "sse") return next;
+	const headers: Record<string, string> = { ...next.headers };
+	for (const header of Object.keys(headers)) {
+		if (header.toLowerCase() === "authorization") delete headers[header];
+	}
+	return { ...next, headers };
+}
+
+/**
  * Throwaway connection used to probe a server's auth requirements. Uses the
  * host's manager when available (its `prepareConfig` honors live state),
  * else a temporary manager bound to the caller's auth storage.
@@ -331,8 +349,15 @@ export async function resolveMcpOAuthEndpointsFromServer(
 }
 
 export type McpOAuthFlowPresentation = Pick<OAuthController, "onAuth" | "onProgress" | "onManualCodeInput"> & {
-	/** Shown once the browser flow completed and the credential row was persisted. */
 	onFlowComplete?: () => void;
+	/**
+	 * Release the manual-input claim taken by {@link onManualCodeInput}. The
+	 * engine calls this in its `finally` *before* the single-flight claim
+	 * releases, so a superseding flow (which wakes on the single-flight
+	 * completion) observes the pending manual input already gone instead of
+	 * refusing to start.
+	 */
+	releaseManualInput?: () => void;
 };
 
 export interface McpOAuthFlowRunOptions extends McpOAuthFlowPresentation {
@@ -501,6 +526,7 @@ export async function runMcpOAuthFlow(opts: McpOAuthFlowRunOptions): Promise<OAu
 			throw new Error(`OAuth authentication failed: ${errorMsg}`);
 		}
 	} finally {
+		opts.releaseManualInput?.();
 		externalSignal?.removeEventListener("abort", onExternalAbort);
 		flowClaim.release();
 	}
@@ -683,6 +709,7 @@ export async function reauthorizeMcpServer(
 		onProgress: opts.onProgress,
 		onManualCodeInput: opts.onManualCodeInput,
 		onFlowComplete: opts.onFlowComplete,
+		releaseManualInput: opts.releaseManualInput,
 	});
 
 	// The flow overwrote (or minted) this profile's row; a superseded

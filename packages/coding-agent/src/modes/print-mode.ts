@@ -17,6 +17,7 @@ import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { executeAcpBuiltinSlashCommand } from "../slash-commands/acp-builtins";
 import type { SlashCommandRuntime } from "../slash-commands/types";
+import { clearMcpClientAuthSurface } from "../mcp/oauth-reauth";
 import {
 	formatPersistenceDurabilityFailure,
 	formatPersistenceFailure,
@@ -226,21 +227,40 @@ async function runPrintModeCore(
 	// model with the literal text. Unknown or non-slash input falls through to
 	// the model; a `{ prompt }` residual is forwarded. Diagnostics go to stderr
 	// so stdout stays pure model output (critical in JSON mode).
-	// Built lazily on the first slash message: session fixtures in tests (and
-	// early signal-teardown paths) never build one.
-	let builtinRuntime: SlashCommandRuntime | undefined;
+	// The runtime is rebuilt per dispatch: an earlier positional message (e.g.
+	// `/move`, `/wt`) may have changed the session cwd, and manager state may
+	// have moved since the last one.
+	const mcpManager = options.mcpManager;
+	const builtinRuntimeFor = (): SlashCommandRuntime => ({
+		session,
+		sessionManager: session.sessionManager,
+		settings: session.settings,
+		cwd: session.sessionManager.getCwd(),
+		output: writeStderrLine,
+		refreshCommands: () => {},
+		reloadPlugins: () => Promise.resolve(),
+		mcpManager,
+		reconnectMcpServer: mcpManager
+			? async name => {
+					const config = mcpManager.getServerConfig(name);
+					if (!config) return undefined;
+					if (config.type === "http" || config.type === "sse") {
+						// Same rationale as the ACP hook: a client-supplied
+						// Authorization header or stale auth block would keep the
+						// fresh url-keyed credential row out of the reconnect.
+						mcpManager.updateServerConfig(name, clearMcpClientAuthSurface(config));
+					}
+					await mcpManager.reconnectServer(name, { manual: true });
+					// Print mode wires no tools-changed callback; refresh the
+					// session binding so later prompts see the recovered tools.
+					await session.refreshMCPTools(mcpManager.getTools());
+					return mcpManager.getConnectionStatus(name);
+				}
+			: undefined,
+	});
 	const promptTextFor = async (message: string): Promise<string | undefined> => {
 		if (!message.startsWith("/")) return message;
-		builtinRuntime ??= {
-			session,
-			sessionManager: session.sessionManager,
-			settings: session.settings,
-			cwd: session.sessionManager.getCwd(),
-			output: writeStderrLine,
-			refreshCommands: () => {},
-			reloadPlugins: () => Promise.resolve(),
-		};
-		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntime);
+		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
 		if (result === false) return message;
 		if ("prompt" in result) return result.prompt;
 		return undefined; // consumed

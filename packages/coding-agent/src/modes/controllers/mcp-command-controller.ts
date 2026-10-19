@@ -826,6 +826,15 @@ export class MCPCommandController {
 	#oauthFlowCallbacks(): { callbacks: McpOAuthFlowPresentation; release: () => void } {
 		const manualInput = this.ctx.oauthManualInput;
 		let manualInputClaim: { promise: Promise<string>; clear: (reason?: string) => void } | undefined;
+		let manualInputReleased = false;
+		// Idempotent: the engine releases the manual claim in its `finally`
+		// (before the single-flight release, so a superseding flow observes no
+		// pending manual input), and the controller `finally` calls it again.
+		const releaseManualInput = (): void => {
+			if (manualInputReleased) return;
+			manualInputReleased = true;
+			manualInputClaim?.clear("Manual MCP OAuth input cleared");
+		};
 		return {
 			callbacks: {
 				onAuth: info => {
@@ -900,8 +909,9 @@ export class MCPCommandController {
 					manualInputClaim = claim;
 					return claim.promise;
 				},
+				releaseManualInput,
 			},
-			release: () => manualInputClaim?.clear("Manual MCP OAuth input cleared"),
+			release: releaseManualInput,
 		};
 	}
 
@@ -1637,6 +1647,16 @@ export class MCPCommandController {
 						mcpManager: this.ctx.mcpManager,
 						silent: options.silent,
 						signal,
+						// Same session-scoped single-flight owner `#handleOAuthFlow`
+						// uses: a reauth must supersede (and be superseded by) the
+						// add wizard and provider logins, and fail fast while one
+						// of them owns manual input, not join the module-global
+						// coordinator and contend for the callback port.
+						flowOwner: this.ctx.oauthManualInput,
+						pendingInput: () =>
+							this.ctx.oauthManualInput.hasPending()
+								? (this.ctx.oauthManualInput.pendingProviderId ?? "another provider")
+								: undefined,
 						onReauthorizing: () => {
 							this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
 						},
