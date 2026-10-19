@@ -159,10 +159,21 @@ export async function generateFactoryDroidImage(
 				}
 				const chunks: GeminiImageChunk[] = [];
 				let blockReason: string | undefined;
+				let finishReason: string | undefined;
 				for await (const chunk of readSseJson<GeminiImageChunk>(response.body, options.signal)) {
 					if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
 					blockReason = chunk.promptFeedback?.blockReason ?? blockReason;
+					finishReason = chunk.candidates?.[0]?.finishReason ?? finishReason;
 					chunks.push(chunk);
+				}
+				// A prompt block ends without candidates; anything else must reach a terminal STOP.
+				if (!blockReason && finishReason !== "STOP") {
+					throw new AIError.ProviderResponseError(
+						finishReason
+							? `Factory Gemini image generation stopped with ${finishReason}`
+							: "Factory Gemini image stream ended before a finish reason",
+						{ provider: model.provider, kind: finishReason ? "output" : "incomplete-stream" },
+					);
 				}
 				return { ...geminiImageResult(chunks), blockReason };
 			}

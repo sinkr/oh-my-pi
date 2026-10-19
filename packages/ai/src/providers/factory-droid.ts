@@ -629,16 +629,22 @@ export function factoryDroidImageRoute(
 	}
 	const scope = scopeToAccount(model, registry, wire, identity, token);
 	const requestId = crypto.randomUUID();
+	// Same route policy chat resolves for this upstream: OpenAI-family routes
+	// name their platform org, and session-locked routes say so.
+	const { policy } = resolveRoute(model, scope, wire);
 	return {
 		wire,
 		baseUrl: scope.baseUrl,
 		headers: buildIdentityHeaders({
 			upstream: scope.upstream,
-			routingSource: model.factoryDroidRoutingSource ?? "registry_default",
+			routingSource: policy.routingSessionLock
+				? "session_lock"
+				: (model.factoryDroidRoutingSource ?? "registry_default"),
 			sessionUuid: sessionId ? deterministicUuid(sessionId) : requestId,
 			requestId,
 			orgId: scope.orgId,
 			wire,
+			openaiPlatformHeader: policy.openaiPlatformHeader,
 		}),
 		identity: DROID_SYSTEM_PREFIX,
 	};

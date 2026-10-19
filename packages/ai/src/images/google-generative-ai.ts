@@ -11,7 +11,7 @@ interface GeminiPart {
 
 /** One `generateContent` response, or one chunk of its SSE stream. */
 export interface GeminiImageResponse {
-	candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
+	candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>;
 	usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
 }
 

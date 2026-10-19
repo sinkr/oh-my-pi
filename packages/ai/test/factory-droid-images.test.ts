@@ -104,7 +104,9 @@ describe("Factory Droid image generation", () => {
 	it("generates Gemini images on the native route with TEXT and IMAGE output", async () => {
 		const captured: CapturedRequest[] = [];
 		const chunk = {
-			candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: IMAGE } }] } }],
+			candidates: [
+				{ content: { parts: [{ inlineData: { mimeType: "image/png", data: IMAGE } }] }, finishReason: "STOP" },
+			],
 			usageMetadata: { promptTokenCount: 23, candidatesTokenCount: 1120 },
 		};
 		const result = await generateImage(
@@ -134,7 +136,11 @@ describe("Factory Droid image generation", () => {
 
 	it("sends the generate directive when there are no references", async () => {
 		const captured: CapturedRequest[] = [];
-		const chunk = { candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: IMAGE } }] } }] };
+		const chunk = {
+			candidates: [
+				{ content: { parts: [{ inlineData: { mimeType: "image/png", data: IMAGE } }] }, finishReason: "STOP" },
+			],
+		};
 		await generateImage(
 			factoryModel("gemini-3-pro-image-preview"),
 			{ prompt: "a lighthouse" },
@@ -159,6 +165,46 @@ describe("Factory Droid image generation", () => {
 		expect(error).toBeInstanceOf(AIError.ProviderResponseError);
 		expect(error).not.toBeInstanceOf(AIError.ProviderHttpError);
 		expect((error as Error).message).toContain("blocked (OTHER)");
+	});
+
+	it.each([
+		{ label: "ends before a finish reason", finish: undefined },
+		{ label: "stops for a non-terminal reason", finish: "MAX_TOKENS" },
+	])("fails when the Gemini stream $label, even after an image", async ({ finish }) => {
+		const chunk = {
+			candidates: [
+				{ content: { parts: [{ inlineData: { mimeType: "image/png", data: IMAGE } }] }, finishReason: finish },
+			],
+		};
+		await expect(
+			generateImage(
+				factoryModel("gemini-3-pro-image-preview"),
+				{ prompt: "a lighthouse" },
+				{ apiKey: WORKOS_TOKEN, fetch: captureFetch([], [JSON.stringify(chunk)]) },
+			),
+		).rejects.toBeInstanceOf(AIError.ProviderResponseError);
+	});
+
+	it("sends chat's route identity: the OpenAI platform org and Gemini's session lock", async () => {
+		const openai: CapturedRequest[] = [];
+		await generateImage(
+			factoryModel("gpt-image-2.5-flare"),
+			{ prompt: "a cat" },
+			{ apiKey: WORKOS_TOKEN, fetch: jsonFetch(openai, imagesResponse) },
+		);
+		expect(openai[0].headers["openai-platform"]).toStartWith("org-");
+		const google: CapturedRequest[] = [];
+		const chunk = {
+			candidates: [
+				{ content: { parts: [{ inlineData: { mimeType: "image/png", data: IMAGE } }] }, finishReason: "STOP" },
+			],
+		};
+		await generateImage(
+			factoryModel("gemini-3-pro-image-preview"),
+			{ prompt: "a lighthouse" },
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(google, [JSON.stringify(chunk)]) },
+		);
+		expect(google[0].headers["x-provider-routing-source"]).toBe("session_lock");
 	});
 
 	it("fails when the Images route answers 200 with no image", async () => {
