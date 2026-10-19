@@ -8,6 +8,8 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	demangleSymbol,
 	parseSampleProfile,
@@ -195,6 +197,40 @@ describe("read tool .sample.txt dispatch", () => {
 			input: `[demo-42.sample.txt#${tag}]\nPUT 9.=9:\n+    100 Thread_1: renamed\n`,
 		});
 		expect((await fs.readFile(filePath, "utf8")).split("\n")[8]).toBe("    100 Thread_1: renamed");
+	});
+
+	it("cuts an oversized summary to an artifact instead of a :N continuation into the file", async () => {
+		const threads = Array.from({ length: 400 }, (_, t) => [
+			`    100 Thread_${t}: worker-${t}`,
+			"    + 100 start  (in dyld) + 8  [0x100]",
+			`    +   100 worker_loop_${t}  (in demo) + 24  [0x200]`,
+			`    +     60 compute_kernel_${t}  (in demo) + 8  [0x300]`,
+			`    +     40 encode_frame_${t}  (in demo) + 8  [0x400]`,
+		]).flat();
+		const report = ["Analysis of sampling demo (pid 42) every 1 millisecond", "Call graph:", ...threads, ""];
+		const filePath = path.join(tmpDir, "busy.sample.txt");
+		await fs.writeFile(filePath, report.join("\n"));
+		const summary = renderSampleProfile(report.join("\n"));
+		expect(Buffer.byteLength(summary ?? "")).toBeGreaterThan(DEFAULT_MAX_BYTES);
+
+		const output = textOutput(
+			await wrapToolWithMetaNotice(new ReadTool(createSession(tmpDir))).execute("read-busy", { path: filePath }),
+		);
+		expect(output).toContain("macOS sample profile: demo (pid 42)");
+		expect(output).not.toMatch(/Use :\d+ to continue/);
+		expect(output).toContain("[raw output: artifact://artifact-1]");
+		expect(await fs.readFile(path.join(tmpDir, "artifact-1.log"), "utf8")).toBe(summary ?? "");
+	});
+
+	it("shows the summary without row numbers when read line numbers are on", async () => {
+		const filePath = path.join(tmpDir, "demo-42.sample.txt");
+		await fs.writeFile(filePath, FIXTURE);
+		const settings = Settings.isolated({ "edit.mode": "hashline", readLineNumbers: true });
+		const session = { ...createSession(tmpDir), settings };
+
+		const summary = textOutput(await new ReadTool(session).execute("read-sample-numbered", { path: filePath }));
+		expect(summary).toStartWith("macOS sample profile: demo (pid 42)");
+		expect(summary).not.toMatch(/^\d+\|/m);
 	});
 
 	it("falls back to plain text when a .sample.txt file is not a sample report", async () => {
