@@ -253,4 +253,35 @@ describe("OAuth refresh budget", () => {
 		});
 		expect(exchanged).toBe(false);
 	});
+
+	test("a caller whose lease acquisition outlasts its budget does not start the exchange", async () => {
+		if (!store) throw new Error("test setup failed");
+		const authStorage = new AuthStorage(store, {});
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "oauth", access: "access-r0", refresh: "r0", expires: Date.now() - 60_000 },
+		]);
+		const credentialId = store.listAuthCredentials(PROVIDER)[0]!.id;
+		// Acquisition succeeds, but only after a SQLite busy wait longer than the budget.
+		const acquire = store.tryAcquireCredentialRefreshLease.bind(store);
+		vi.spyOn(store, "tryAcquireCredentialRefreshLease").mockImplementation((id, owner, expiresAt) => {
+			const acquired = acquire(id, owner, expiresAt);
+			Bun.sleepSync(30);
+			return acquired;
+		});
+		let exchanged = false;
+		await expect(
+			authStorage.oauth.refreshStored(PROVIDER, {
+				credentialId,
+				credentialFromRow: row => row,
+				forceRefresh: true,
+				refreshTimeoutMs: 20,
+				refresh: async () => {
+					exchanged = true;
+					return { access: "access-r1", refresh: "r1", expires: Date.now() + 3_600_000 };
+				},
+			}),
+		).rejects.toMatchObject({ message: `OAuth token refresh timed out for provider: ${PROVIDER}` });
+		expect(exchanged).toBe(false);
+		expect(acquire(credentialId, "peer", Date.now() + 15_000)).toBe(true);
+	});
 });

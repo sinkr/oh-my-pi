@@ -303,6 +303,8 @@ export class OAuthRefresher {
 			}
 			const serialized = serializeCredential(provider, current);
 			if (!serialized) return { credential: current, refreshed: false, removed: false };
+			// Acquiring the lease can block on SQLite past the deadline; do not start an exchange nobody waits for.
+			if (Date.now() >= waitDeadline) return this.#budgetExceeded(provider, options, current);
 
 			// The budget only stops this caller waiting. The exchange keeps the lease
 			// and persists whatever the provider returns: a provider that rotates the
