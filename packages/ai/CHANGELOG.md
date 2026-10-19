@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Factory Droid Core models (Kimi, GLM, DeepSeek and others) dropping calls to tools with names over 64 characters and their results from later requests; such names now shorten to 64 characters, and shorter names are sent unchanged
+- Fixed Factory Droid Core models (Kimi, GLM, DeepSeek and others) dropping calls to tools with names over 64 characters and their results from later requests; such names now shorten to 64 characters, and shorter names are sent unchanged ([#16384](https://github.com/can1357/oh-my-pi/pull/16384) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.3] - 2026-10-19
 
