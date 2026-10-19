@@ -43,6 +43,7 @@ type SavedServer = {
 	type?: string;
 	url?: string;
 	auth?: { type?: string; credentialId?: string; clientId?: string; clientSecret?: string; tokenUrl?: string };
+	headers?: Record<string, string>;
 };
 
 const originalProjectDir = getProjectDir();
@@ -400,5 +401,47 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 		// credential row is the only persistence.
 		const saved = await readSavedServer();
 		expect(saved.auth).toBeUndefined();
+	});
+
+	test("persists an explicit auth binding when the definition carries a client bearer header", async () => {
+		// Regression: with an Authorization header and no auth block, the fresh
+		// url-keyed row used to skip the write-back — but at startup the header
+		// disables the url-keyed fallback, so the next process reauthored into
+		// nothing and kept serving the stale bearer.
+		await Bun.write(
+			configPath,
+			`${JSON.stringify(
+				{
+					mcpServers: {
+						envserver: {
+							type: "http",
+							url: RAW_SERVER_URL,
+							headers: { Authorization: "Bearer stale-token" },
+						},
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const authStorage = freshAuthStorage();
+
+		await runReauth("envserver", authStorage);
+
+		// The config gains an auth block pointing at the fresh url-keyed row,
+		// so the next process resolves the new credential despite the header.
+		const saved = await readSavedServer();
+		expect(saved.auth).toMatchObject({
+			type: "oauth",
+			credentialId: oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL),
+			tokenUrl: "https://auth.example.com/token",
+		});
+		expect(saved.headers).toEqual({ Authorization: "Bearer stale-token" });
 	});
 });

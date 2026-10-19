@@ -3,8 +3,9 @@
  *
  * Both the interactive `McpCommandController` and the shared ACP/text
  * `/mcp` dispatcher drive `/mcp reauth` through this module so the flow can
- * never drift between clients: server lookup precedence (user over project,
- * plus standalone `mcp.json`/`.mcp.json` fallbacks), the anonymous connection
+ * never drift between clients: server lookup precedence (project over user —
+ * matching runtime discovery's first-wins enumeration — plus standalone
+ * `mcp.json`/`.mcp.json` fallbacks), the anonymous connection
  * probe, endpoint discovery, client-credential assembly (configured >
  * persisted > stored > metadata-advertised, DCR preferred), the browser flow
  * itself, and the persistence policy (url-keyed credential row, `auth` block
@@ -25,7 +26,11 @@ import {
 	fetchResourceMetadataScopes,
 	type OAuthEndpoints,
 } from "./oauth-discovery";
-import { lookupMcpOAuthCredentialForServer, removeManagedMcpOAuthCredential } from "./oauth-credentials";
+import {
+	hasMcpAuthorizationHeader,
+	lookupMcpOAuthCredentialForServer,
+	removeManagedMcpOAuthCredential,
+} from "./oauth-credentials";
 import { MCPOAuthFlow, type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "./oauth-flow";
 import type { AuthStorage } from "../session/auth-storage";
 import type { MCPAuthChallenge, MCPAuthConfig, MCPServerConfig } from "./types";
@@ -161,14 +166,15 @@ export interface FoundMcpServer {
 }
 
 /**
- * Resolve a server for an auth/test operation. Prefers user over project
- * config on a name collision (the entry a reauth writes back to is the one
- * the next session loads), then falls back to standalone `mcp.json` /
- * `.mcp.json` (the mcp-json discovery paths), then to runtime-discovered
- * servers (`/mcp list` surfaces marketplace/Claude-Code-plugin entries that
- * live in no writable config). For a discovered server, persisted changes are
- * written into the user config under the same namespaced name; the native
- * provider (priority 100) shadows the discovered entry after the next reload.
+ * Resolve a server for an auth/test operation. Project wins over user on a
+ * name collision — runtime discovery enumerates project paths first and
+ * deduplicates first-wins, so the project entry is the server actually
+ * invoked — then falls back to standalone `mcp.json` / `.mcp.json` (the
+ * mcp-json discovery paths), then to runtime-discovered servers (`/mcp list`
+ * surfaces marketplace/Claude-Code-plugin entries that live in no writable
+ * config). For a discovered server, persisted changes are written into the
+ * user config under the same namespaced name; the native provider
+ * (priority 100) shadows the discovered entry after the next reload.
  */
 export async function findMcpServerForAuth(
 	name: string,
@@ -180,11 +186,16 @@ export async function findMcpServerForAuth(
 
 	const [userConfig, projectConfig] = await Promise.all([readMCPConfigFile(userPath), readMCPConfigFile(projectPath)]);
 
-	if (userConfig.mcpServers?.[name]) {
-		return { filePath: userPath, scope: "user", config: userConfig.mcpServers[name], discovered: false };
-	}
+	// Project wins over user on a name collision: runtime discovery enumerates
+	// project paths first and deduplicates first-wins, so the project entry is
+	// the server users actually invoke. Refreshing the user shadow instead
+	// would report success while the active project server keeps its stale
+	// credential after the next reload.
 	if (projectConfig.mcpServers?.[name]) {
 		return { filePath: projectPath, scope: "project", config: projectConfig.mcpServers[name], discovered: false };
+	}
+	if (userConfig.mcpServers?.[name]) {
+		return { filePath: userPath, scope: "user", config: userConfig.mcpServers[name], discovered: false };
 	}
 
 	// Standalone fallback files match the discovery paths used by the
@@ -769,9 +780,15 @@ export async function reauthorizeMcpServer(
 	}
 
 	// Definition-only entries resolve through the url-keyed binding alone;
-	// skip the write-back so a committed project mcp.json stays clean.
+	// skip the write-back so a committed project mcp.json stays clean. A
+	// client-supplied bearer header is the one exception: at startup
+	// `lookupMcpOAuthCredential` disables the url-keyed fallback while the
+	// header is present, so without an explicit `auth` block the fresh
+	// credential never wins again and the next process reuses the stale
+	// bearer despite the reported success.
+	const hadClientBearerHeader = hasMcpAuthorizationHeader(found.config);
 	const urlKeyedId = serverUrl ? mcpOAuthCredentialId(serverUrl) : undefined;
-	const shouldPersist = currentAuth !== undefined || oauthResult.credentialId !== urlKeyedId;
+	const shouldPersist = currentAuth !== undefined || hadClientBearerHeader || oauthResult.credentialId !== urlKeyedId;
 	const updatedConfig = shouldPersist
 		? persistMcpOAuthResult(baseConfig, oauthResult, {
 				tokenUrl: oauth.tokenUrl,

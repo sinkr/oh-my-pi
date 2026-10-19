@@ -252,11 +252,17 @@ async function runPrintModeCore(
 				}
 			: undefined,
 	});
+	// Whether a builtin consumed an input but failed (usage error, unknown
+	// server, refused operation). Print mode is automation surface: a failed
+	// builtin must not exit 0, or scripts treat a failed reauthorization as
+	// success.
+	let builtinFailed = false;
 	const promptTextFor = async (message: string): Promise<string | undefined> => {
 		if (!message.startsWith("/")) return message;
 		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
 		if (result === false) return message;
 		if ("prompt" in result) return result.prompt;
+		if (result.failed) builtinFailed = true;
 		return undefined; // consumed
 	};
 
@@ -440,5 +446,5 @@ async function runPrintModeCore(
 	}
 
 	await stderrTail;
-	return terminalFailure || durabilityFailure || strictMCPFailure ? 1 : 0;
+	return terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed ? 1 : 0;
 }

@@ -486,11 +486,22 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
  * render instead. No manual-code input either: ACP has no composer to claim;
  * the URL is the fallback when the browser cannot open (e.g. a remote host).
  */
+
+/**
+ * Emit a `/mcp reauth` failure and consume the command as failed: print mode
+ * turns the marker into a nonzero exit code so `omp -p '/mcp reauth foo'`
+ * automation does not treat a failed reauthorization as success. Other
+ * hosts ignore the marker.
+ */
+async function reauthFailure(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	await runtime.output(text);
+	return commandConsumed({ failed: true });
+}
 async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const name = rest.split(/\s+/)[0]?.trim() ?? "";
-	if (!name) return usage("Usage: /mcp reauth <name>", runtime);
+	if (!name) return reauthFailure("Usage: /mcp reauth <name>", runtime);
 	const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager);
-	if (!found) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
+	if (!found) return reauthFailure(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
 
 	const emit = (text: string): void => {
 		void Promise.resolve(runtime.output(text)).catch(() => {});
@@ -525,19 +536,19 @@ async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): 
 					: state === "connecting"
 						? " Server reconnecting…"
 						: state === "disconnected"
-							? " Server still disconnected; retries continue in the background."
+							? " Server still disconnected; no background retry is armed for a server that never connected — restart the session (or reconnect it interactively) to use the fresh credential."
 							: " Credentials apply on the next connection; restart the session if the server stays disconnected.";
 			emit(`✓ Reauthorized "${name}" (${found.scope} config).${suffix}`);
 			return commandConsumed();
 		} catch (error) {
 			if (error instanceof McpReauthRefusalError) {
-				return usage(error.message, runtime);
+				return reauthFailure(error.message, runtime);
 			}
 			if (error instanceof MCPOAuthCancelledError) {
 				emit(`Reauthorization cancelled for "${name}".`);
 				return commandConsumed();
 			}
-			return usage(`Failed to reauthorize server "${name}": ${errorMessage(error)}`, runtime);
+			return reauthFailure(`Failed to reauthorize server "${name}": ${errorMessage(error)}`, runtime);
 		}
 	};
 

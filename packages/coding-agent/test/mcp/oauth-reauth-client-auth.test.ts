@@ -159,14 +159,22 @@ describe("reconnectMcpManagerServer", () => {
 		manager.configs.set("env-server", { type: "http", url: "https://mcp.example.com/mcp" });
 		// eslint-disable-next-line no-template-curly-in-string -- raw `${...}` placeholder: the contract under test is that it does NOT interpolate here.
 		const selected: MCPServerConfig = { type: "http", url: "https://${MCP_HOST}/mcp" };
+		// Restore rather than delete: a caller-supplied MCP_HOST must survive
+		// this test, or later files observe a different environment and the
+		// full suite becomes order-dependent.
+		const originalBunHost = Bun.env.MCP_HOST;
+		const originalProcessHost = process.env.MCP_HOST;
 		Bun.env.MCP_HOST = "mcp.example.com";
+		process.env.MCP_HOST = "mcp.example.com";
 		try {
 			expect(await reconnectMcpManagerServer(manager as unknown as MCPManager, "env-server", selected)).toBe(
 				"connected",
 			);
 		} finally {
-			delete Bun.env.MCP_HOST;
-			delete process.env.MCP_HOST;
+			if (originalBunHost === undefined) delete Bun.env.MCP_HOST;
+			else Bun.env.MCP_HOST = originalBunHost;
+			if (originalProcessHost === undefined) delete process.env.MCP_HOST;
+			else process.env.MCP_HOST = originalProcessHost;
 		}
 		// No manager at all (RPC/print hosts without one): nothing to do.
 		expect(await reconnectMcpManagerServer(undefined, "env-server", selected)).toBeUndefined();
