@@ -50,7 +50,7 @@ function createHost() {
 		prelude.invoke(parameters, { session, toolCallId: "browser-release-build-timeouts-test" });
 }
 
-test("raises a main-frame wait past its timeout as Puppeteer's timeout", async () => {
+test("raises a main-frame wait past its timeout as Puppeteer's timeout, still named TimeoutError", async () => {
 	// The tab worker loads Puppeteer before any navigation; the timeout is built from that load.
 	await loadPuppeteer();
 	const events = new Set<string>();
@@ -59,22 +59,28 @@ test("raises a main-frame wait past its timeout as Puppeteer's timeout", async (
 		isClosed: () => false,
 		browser: () => ({ connected: true }),
 	} as unknown as Page;
+	const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
+	Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 	// Real time on purpose: the wait polls the frame on a timer and must stop reading at its deadline.
 	const late = setTimeout(() => events.add("load"), 90);
 	try {
 		const error = await navigateMainFrame(page, "load", 60, undefined, async () => null).catch(err => err);
 		// tab.goto stops the pending load only for an error it recognizes as Puppeteer's timeout.
 		expect(isPuppeteerTimeout(error)).toBe(true);
+		// back/forward/reload pass this error to the agent's cell, which may match on the name.
+		expect(error.name).toBe("TimeoutError");
 		expect(error.message).toBe("Navigation timeout of 60 ms exceeded");
 	} finally {
 		clearTimeout(late);
+		Object.defineProperty(TimeoutError, "name", nameDescriptor);
 	}
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser timeouts with release-build class names", () => {
 	test("tab.goto stops a navigation that never commits", async () => {
 		// The tab worker must share this process's renamed class: worker threads failing to start
-		// puts a tab on the inline worker.
+		// puts a tab on the inline worker. bun runs a file's tests one at a time, so no other browser
+		// call is in flight while `Worker` or the class name is replaced.
 		const workerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker")!;
 		Object.defineProperty(globalThis, "Worker", {
 			...workerDescriptor,

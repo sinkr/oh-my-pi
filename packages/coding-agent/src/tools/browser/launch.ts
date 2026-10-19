@@ -127,10 +127,15 @@ export function isPuppeteerTimeout(error: unknown): boolean {
 	return timeoutErrorConstructor !== undefined && error instanceof timeoutErrorConstructor;
 }
 
-/** Build Puppeteer's `TimeoutError` for a deadline omp enforces in place of one of Puppeteer's waits. */
+/**
+ * Build Puppeteer's `TimeoutError` for a deadline omp enforces in place of one of Puppeteer's waits.
+ * Its `name` stays "TimeoutError" in release builds: back/forward/reload pass this error to the agent's cell as is.
+ */
 export function puppeteerTimeoutError(message: string): Error {
 	if (!timeoutErrorConstructor) throw new Error("Puppeteer is not loaded");
-	return new timeoutErrorConstructor(message);
+	const error = new timeoutErrorConstructor(message);
+	error.name = "TimeoutError";
+	return error;
 }
 async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppeteer> {
 	const cwdDescriptor = Object.getOwnPropertyDescriptor(process, "cwd");
