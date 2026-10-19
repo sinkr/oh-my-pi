@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `_session/steering` ACP extension method (advertised as `_meta.steering.supported`) so clients like agent-shell steer running turns through omp's native steer/follow-up queues; idle sessions always answer `promptRequired` so the host keeps owning new turns, each steer resubmitted through `session/prompt` queues behind the running turn instead of implicitly cancelling it, a steer that supersedes an open permission dialog promotes only the user's steer and ends the client's dialog, and `_meta.steering.queue: "followUp"` targets the follow-up queue ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
@@ -18,7 +22,6 @@
 ### Changed
 
 - While a subagent is focused, `/model`, `/switch`, `/effort`, `Alt+P`, `Ctrl+P`, and `Shift+Tab` change that subagent's model and thinking level (session-only) instead of telling you to return to the main session; `/model` and `Alt+M` open the session-only picker there, since role assignments configure the main session
-- Added `_session/steering` ACP extension method (advertised as `_meta.steering.supported`) so clients like agent-shell steer running turns through omp's native steer/follow-up queues; idle sessions always answer `promptRequired` so the host keeps owning new turns, each steer resubmitted through `session/prompt` queues behind the running turn instead of implicitly cancelling it, a steer that supersedes an open permission dialog promotes only the user's steer and ends the client's dialog, and `_meta.steering.queue: "followUp"` targets the follow-up queue ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 
 ### Fixed
 
