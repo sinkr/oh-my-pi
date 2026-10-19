@@ -1688,3 +1688,49 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 		userMessage: match[4]?.trim() || undefined,
 	};
 }
+
+function escapeSkillXml(str: string): string {
+	return str
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&apos;");
+}
+
+/**
+ * Render the `<available_skills>` system-prompt block, ported from upstream
+ * pi-coding-agent 1.x (`src/core/skills.ts`). omp renders skills through its
+ * own prompt templates and never exports the formatter, so legacy extensions
+ * importing it from the package root fail Bun's static named-export check
+ * (observed consumer: `pi-claude-bridge`, which forwards the block to Claude
+ * Code). Skills hidden from the prompt are skipped, whether hidden through
+ * upstream's `disableModelInvocation` or omp's `hide`.
+ */
+export function formatSkillsForPrompt(
+	skills: readonly (Skill & { disableModelInvocation?: boolean })[],
+	fileReadTool: "read" | "bash" | (string & {}) = "read",
+): string {
+	const visibleSkills = skills.filter(skill => !skill.disableModelInvocation && !skill.hide);
+	if (visibleSkills.length === 0) return "";
+	const lines = [
+		"\n\nThe following skills provide specialized instructions for specific tasks.",
+		fileReadTool === "read"
+			? "Use the read tool to load a skill's file when the task matches its description."
+			: fileReadTool === "bash"
+				? "Use bash to load a skill's file when the task matches its description."
+				: "Load a skill's file when the task matches its description.",
+		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+		"",
+		"<available_skills>",
+	];
+	for (const skill of visibleSkills) {
+		lines.push("  <skill>");
+		lines.push(`    <name>${escapeSkillXml(skill.name)}</name>`);
+		lines.push(`    <description>${escapeSkillXml(skill.description)}</description>`);
+		lines.push(`    <location>${escapeSkillXml(skill.filePath)}</location>`);
+		lines.push("  </skill>");
+	}
+	lines.push("</available_skills>");
+	return lines.join("\n");
+}
