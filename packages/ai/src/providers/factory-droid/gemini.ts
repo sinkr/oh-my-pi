@@ -15,6 +15,7 @@ import { notifyProviderResponse } from "../../utils/provider-response";
 import { dereferenceJsonSchema, normalizeSchemaForFactoryDroid, toolWireSchema } from "../../utils/schema";
 import {
 	extractGoogleErrorMessage,
+	FunctionCallOrder,
 	googleStreamChunkError,
 	GoogleTextBlocks,
 	mapGoogleUsage,
@@ -168,7 +169,9 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
  *   text carries the signature Gemini put on it.
  * - Tool calls replay as `functionCall` parts carrying their
  *   `thoughtSignature`; consecutive tool results group into ONE user content,
- *   because the proxy 400s when a call turn's response part count mismatches.
+ *   because the proxy 400s when a call turn's response part count mismatches,
+ *   and sort back into call order, because Gemini pairs id-less responses by
+ *   position.
  * - Tool names are sanitized to the CLI's `[a-zA-Z0-9_-]` shape on
  *   declarations and on replayed call/response names.
  * - After the latest user turn containing a non-response part, function calls
@@ -183,6 +186,7 @@ function toGeminiContents(
 	systemInstruction?: { parts: Part[] };
 } {
 	const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [];
+	const callOrder = new FunctionCallOrder();
 	const messages = transformMessages(
 		context.messages.map(message => adoptFactoryReplay(message, model)),
 		model,
@@ -210,6 +214,7 @@ function toGeminiContents(
 				} else if (block.type === "thinking" && block.thinkingSignature) {
 					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
 				} else if (block.type === "toolCall") {
+					callOrder.call(block.id);
 					parts.push({
 						functionCall: { name: block.name, args: block.arguments },
 						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
@@ -240,6 +245,7 @@ function toGeminiContents(
 				...(binaryParts.length > 0 ? { parts: binaryParts } : {}),
 			},
 		};
+		callOrder.response(part, message.toolCallId);
 		const last = contents[contents.length - 1];
 		if (last && last.role === "user" && last.parts.every(p => p.functionResponse)) {
 			last.parts.push(part);
@@ -247,6 +253,7 @@ function toGeminiContents(
 			contents.push({ role: "user", parts: [part] });
 		}
 	}
+	callOrder.apply(contents);
 	// Sentinel injection: scope to model turns at/after the latest user turn
 	// with a non-response part (the validator only checks the current tail).
 	let lastUserText = 0;
