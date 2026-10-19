@@ -257,12 +257,19 @@ async function runPrintModeCore(
 	// builtin must not exit 0, or scripts treat a failed reauthorization as
 	// success.
 	let builtinFailed = false;
+	// Whether any input reached the model as a prompt this invocation —
+	// directly, or through a builtin that scheduled a real turn (e.g. `/retry`
+	// returns `agentInvoked`). A run where every input was consumed locally
+	// creates no assistant turn, so the persisted previous turn must not be
+	// reprinted or its old stop reason reused as this run's exit status.
+	let admittedAgentTurn = false;
 	const promptTextFor = async (message: string): Promise<string | undefined> => {
 		if (!message.startsWith("/")) return message;
 		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
 		if (result === false) return message;
 		if ("prompt" in result) return result.prompt;
 		if (result.failed) builtinFailed = true;
+		if (result.agentInvoked) admittedAgentTurn = true;
 		return undefined; // consumed
 	};
 
@@ -322,12 +329,6 @@ async function runPrintModeCore(
 		process.stderr.write("Working...\n");
 		wroteTextWorkingIndicator = true;
 	};
-
-	// Whether any input reached the model as a prompt this invocation. A run
-	// where every input was consumed locally (e.g. `omp -p '/mcp reauth foo'`)
-	// creates no assistant turn, so the persisted previous turn must not be
-	// reprinted or its old stop reason reused as this run's exit status.
-	let admittedAgentTurn = false;
 
 	// Send initial message with attachments
 	if (!strictMCPFailure && initialMessage !== undefined) {

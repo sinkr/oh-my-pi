@@ -59,10 +59,15 @@ export function commandConsumed(options?: { agentInvoked?: boolean; failed?: boo
 	return { consumed: true };
 }
 
-/** Emit a usage/error message and consume the command. */
+/**
+ * Emit a usage/error message and consume the command as failed: the command
+ * consumed the input but did not accomplish what was asked. Interactive hosts
+ * ignore the marker; print mode turns it into a nonzero exit code so `omp -p`
+ * automation does not treat a failed builtin as success.
+ */
 export async function usage(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	await runtime.output(text);
-	return commandConsumed();
+	return commandConsumed({ failed: true });
 }
 
 /** Split `<verb> <rest>` on the first whitespace; lowercases `verb`. */

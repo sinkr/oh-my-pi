@@ -175,12 +175,31 @@ export interface FoundMcpServer {
  * config). For a discovered server, persisted changes are written into the
  * user config under the same namespaced name; the native provider
  * (priority 100) shadows the discovered entry after the next reload.
+ *
+ * `preferManager` flips the first step: a host that keeps its own manager
+ * for the session (ACP declares servers at `session/new`; isolation means
+ * the manager entry is the server actually active, and a same-named file
+ * entry is inert) resolves the manager entry first. Print/RPC managers
+ * enumerate the same files, so the option changes nothing there.
  */
 export async function findMcpServerForAuth(
 	name: string,
 	cwd: string = getProjectDir(),
 	mcpManager?: MCPManager,
+	options?: { preferManager?: boolean },
 ): Promise<FoundMcpServer | null> {
+	if (options?.preferManager) {
+		const managerConfig = mcpManager?.getServerConfig(name);
+		const managerSource = mcpManager?.getSource(name);
+		if (managerConfig && managerSource) {
+			return {
+				filePath: getMCPConfigPath("user", cwd),
+				scope: "user",
+				config: managerConfig,
+				discovered: true,
+			};
+		}
+	}
 	const userPath = getMCPConfigPath("user", cwd);
 	const projectPath = getMCPConfigPath("project", cwd);
 

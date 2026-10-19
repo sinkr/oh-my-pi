@@ -444,4 +444,39 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 		});
 		expect(saved.headers).toEqual({ Authorization: "Bearer stale-token" });
 	});
+
+	test("prefers the manager entry over a colliding config-file name", async () => {
+		// Regression: the project file carries `envserver` at another URL while
+		// the ACP client declared `envserver` itself. Isolation means the
+		// manager entry is the only active server, but the lookup answered the
+		// file entry first — reporting success while refreshing an inert
+		// shadow. The manager entry must win in ACP context.
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const authStorage = freshAuthStorage();
+		const acpManager = {
+			getServerConfig: (name: string) =>
+				name === "envserver" ? { type: "http", url: "https://acp.example.com/mcp" } : undefined,
+			getSource: (name: string) =>
+				name === "envserver" ? { provider: "acp", providerName: "ACP Client" } : undefined,
+		} as unknown as NonNullable<SlashCommandRuntime["mcpManager"]>;
+
+		await runReauth("envserver", authStorage, undefined, acpManager);
+
+		// The fresh credential is keyed by the manager entry's URL…
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId("https://acp.example.com/mcp"))).toMatchObject({
+			access: "fresh-access",
+			tokenUrl: "https://auth.example.com/token",
+		});
+		// …and nothing was keyed for the inert file entry's URL.
+		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
+		// The colliding file entry stays untouched.
+		const saved = await readSavedServer();
+		expect(saved.url).toBe(RAW_SERVER_URL);
+		expect(saved.auth).toBeUndefined();
+	});
 });

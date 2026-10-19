@@ -3638,4 +3638,43 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			refreshSpy.mockRestore();
 		}
 	}, 15_000);
+
+	it("keeps a client-declared server whose initial connect fails in a usable record", async () => {
+		// Regression: a client-declared server that fails inside the startup
+		// window (here: a command that cannot spawn) used to throw out of
+		// `#configureMcpServers`, so `session/new` failed and `/mcp reauth`
+		// could never reach the very server that needed authorization. The
+		// session must load, the failure must surface as a chunk, and a reauth
+		// prompt must resolve the kept manager entry (here answering with the
+		// stdio guidance) instead of "not found".
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({
+			cwd: harness.cwdA,
+			mcpServers: [{ name: "broken", command: "/nonexistent/omp-fixture-binary", args: [], env: [] }],
+		});
+		expectAcpStructure(zNewSessionResponse, created);
+
+		const chunkText = (notification: (typeof harness.updates)[number]): string => {
+			const update = notification.update as { content?: { text?: string } };
+			return update.content?.text ?? "";
+		};
+		const failureChunk = harness.updates.find(
+			notification =>
+				notification.sessionId === created.sessionId &&
+				chunkText(notification).includes(`MCP server "broken" failed to connect`),
+		);
+		expect(failureChunk).toBeDefined();
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/mcp reauth broken" }],
+		});
+		const reauthText = harness.updates
+			.slice(updatesBefore)
+			.filter(notification => notification.sessionId === created.sessionId)
+			.map(chunkText)
+			.join("\n");
+		expect(reauthText).toContain("stdio servers manage their own credentials");
+	}, 15_000);
 });

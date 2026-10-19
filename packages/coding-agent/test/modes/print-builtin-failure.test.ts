@@ -10,6 +10,7 @@ import { describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -65,6 +66,74 @@ describe("print mode builtin exit codes", () => {
 			expect(prompts).toEqual([]);
 			expect(stderrLines.join("")).toContain("/mcp list");
 		} finally {
+			stderrSpy.mockRestore();
+			vi.restoreAllMocks();
+			await removeWithRetries(cwd);
+		}
+	});
+
+	test("counts a builtin-started turn (/retry) as admitted and prints its answer", async () => {
+		// Regression: `promptTextFor` ignored `agentInvoked`, so a consumed
+		// `/retry` left `admittedAgentTurn` false and the retried turn's
+		// assistant answer was suppressed (with its stop reason dropped from
+		// the exit status).
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-print-retry-"));
+		const stdoutLines: string[] = [];
+		const stderrLines: string[] = [];
+		const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+			chunk: unknown,
+			callback?: (err?: Error | null) => void,
+		) => {
+			stdoutLines.push(String(chunk));
+			// `writeStdoutLine` serializes on this callback; the mock must
+			// fire it or `await stdoutTail` hangs forever.
+			callback?.(null);
+			return true;
+		}) as never);
+		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+			stderrLines.push(String(chunk));
+			return true;
+		}) as never);
+		const retriedAnswer: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Recovered answer." }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-test",
+			usage: {} as AssistantMessage["usage"],
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const session = {
+			extensionRunner: undefined,
+			subscribe: () => () => {},
+			settings: Settings.isolated(),
+			sessionManager: {
+				buildSessionContext: () => ({ messages: [] }),
+				getEntries: () => [],
+				getCwd: () => cwd,
+				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
+			},
+			isStreaming: false,
+			retry: async () => true,
+			disableStopTimeTodoReminders: () => {},
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForIdle: async () => {},
+			setTextOutputCommitted: () => {},
+			waitForAdvisorCatchup: async () => true,
+			prompt: async () => {},
+			getLastAssistantMessage: () => retriedAnswer,
+			dispose: async () => {},
+		} as unknown as AgentSession;
+
+		try {
+			const exitCode = await runPrintMode(session as never, { mode: "text", messages: ["/retry"] });
+			expect(exitCode).toBe(0);
+			// The retried turn's answer is this run's outcome: it must print.
+			expect(stdoutLines.join("")).toContain("Recovered answer.");
+		} finally {
+			stdoutSpy.mockRestore();
 			stderrSpy.mockRestore();
 			vi.restoreAllMocks();
 			await removeWithRetries(cwd);

@@ -2699,9 +2699,11 @@ export class AcpAgent implements Agent {
 		// so refreshes apply in order, and each one re-reads `manager.getTools()` at the
 		// time it actually runs rather than the snapshot from when it was queued — so a
 		// refresh can never apply a stale, smaller tool set after a newer one already landed.
-		// The returned promise propagates failures (the initial awaited refresh below must
-		// fail session setup, as the pre-queue code did); the stored chain swallows them
-		// after logging so background firings only warn and the chain never rejects.
+		// The returned promise propagates failures (a session-level
+		// `refreshMCPTools` rejection still fails setup); the stored chain
+		// swallows them after logging so background firings only warn and the
+		// chain never rejects. Connection failures do NOT fail setup — see
+		// below: the record keeps the manager so `/mcp reauth` can recover.
 		const enqueueMcpToolsRefresh = (): Promise<void> => {
 			const run = (record.mcpRefreshChain ?? Promise.resolve()).then(async () => {
 				if (record.mcpManager !== manager) return;
@@ -2731,16 +2733,26 @@ export class AcpAgent implements Agent {
 		}
 
 		const result = await manager.connectServers(configs, sources);
-		if (result.errors.size > 0) {
-			throw new Error(
-				Array.from(result.errors.entries())
-					.map(([name, message]) => `${name}: ${message}`)
-					.join("; "),
-			);
-		}
-
+		// A client-declared server whose initial connect fails (e.g. an expired
+		// client-owned bearer answering 401 inside the startup window) must not
+		// abort session creation: the record keeps the manager with the failed
+		// definition, `/mcp reauth <name>` resolves it from the manager and the
+		// reconnect hook retries with the fresh credential. The client is told
+		// through a chunk instead of the session refusing to load.
 		record.mcpManager = manager;
 		await enqueueMcpToolsRefresh();
+		for (const [name, message] of result.errors) {
+			await this.#connection.sessionUpdate({
+				sessionId: record.session.sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: {
+						type: "text",
+						text: `MCP server "${name}" failed to connect: ${message}. Its tools are unavailable until it is reauthorized (/mcp reauth ${name}) or the client restarts the session.`,
+					},
+				},
+			});
+		}
 	}
 
 	#toMcpConfig(server: McpServer): MCPServerConfig {
