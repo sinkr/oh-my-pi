@@ -99,6 +99,8 @@ interface GrepPathSpec {
 	original: string;
 	clean: string;
 	literalFilesystemMatch?: boolean;
+	/** An external URL entry: fetched, so never an archive member path (`file.zip:raw` is a selector). */
+	externalUrl?: true;
 	ranges?: [LineRange, ...LineRange[]];
 }
 
@@ -200,19 +202,25 @@ async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promi
 			specs.push({ original: entry, clean: internalSplit.path, ranges });
 			continue;
 		}
-		// External URLs are fetched, not opened from disk, so their display
-		// selectors follow the read tool's URL grammar (`:raw` reaches the
-		// fetch) instead of the filesystem line-range grammar.
-		const externalUrlSpec = parseExternalUrlSpec(entry);
-		if (externalUrlSpec) {
-			specs.push({ original: entry, clean: externalUrlSpec.clean, ranges: externalUrlSpec.ranges });
-			continue;
-		}
 		// Prefer a literal filesystem match when one exists — a real file named
-		// `test:1-2` outranks the `:1-2` selector interpretation (issue #4618).
+		// `test:1-2` (or `www.example.com:raw`) outranks the selector
+		// interpretation (issue #4618).
 		const strictSplit = splitPathAndSel(entry);
 		const split = await splitPathAndSelPreferringLiteral(entry, cwd);
 		const literalFilesystemMatch = strictSplit.sel !== undefined && split.sel === undefined;
+		// External URLs are fetched, not opened from disk, so their display
+		// selectors follow the read tool's URL grammar (`:raw` reaches the
+		// fetch) instead of the filesystem line-range grammar.
+		const externalUrlSpec = literalFilesystemMatch ? null : parseExternalUrlSpec(entry);
+		if (externalUrlSpec) {
+			specs.push({
+				original: entry,
+				clean: externalUrlSpec.clean,
+				externalUrl: true,
+				ranges: externalUrlSpec.ranges,
+			});
+			continue;
+		}
 		let clean = literalFilesystemMatch ? resolveReadPath(entry, cwd) : entry;
 		let ranges: [LineRange, ...LineRange[]] | undefined;
 		if (!literalFilesystemMatch && split.sel) {
@@ -281,7 +289,7 @@ async function resolveArchiveSearchPaths(
 
 	for (let idx = 0; idx < pathSpecs.length; idx++) {
 		const spec = pathSpecs[idx];
-		if (!spec || spec.literalFilesystemMatch) continue;
+		if (!spec || spec.literalFilesystemMatch || spec.externalUrl) continue;
 		const entry = spec.clean;
 		const candidates = parseArchivePathCandidates(entry);
 		const member = candidates.find(c => c.subPath !== "" && c.archivePath !== entry);

@@ -72,4 +72,25 @@ describe("GrepTool external URL selectors", () => {
 
 		await expect(tool.execute("tail", { pattern: "needle", path: `${url}:-5` })).rejects.toThrow(/invalid selector/i);
 	});
+
+	it("fetches an archive-named URL with :raw instead of opening it as a local archive member", async () => {
+		const tool = new GrepTool(createSession());
+
+		// The `:raw` request is fetched like the bare URL, not parsed as archive `bundle.zip` + member `raw`.
+		const raw = await tool.execute("archive-url-raw", { pattern: "needle", path: `${url}/bundle.zip:raw` });
+		const bare = await tool.execute("archive-url", { pattern: "needle", path: `${url}/bundle.zip` });
+		expect(getResultText(raw)).toBe(getResultText(bare));
+	});
+
+	// `:` is not allowed in Windows file names.
+	it.skipIf(process.platform === "win32")(
+		"searches a literal file named like a host with a selector rather than fetching the host",
+		async () => {
+			await Bun.write(path.join(tmpDir, "www.example.com:conflicts"), "local needle\n");
+			const tool = new GrepTool(createSession());
+
+			const result = await tool.execute("literal", { pattern: "needle", path: "www.example.com:conflicts" });
+			expect(getResultText(result)).toContain("local needle");
+		},
+	);
 });
