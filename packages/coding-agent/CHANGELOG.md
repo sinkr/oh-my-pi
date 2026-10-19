@@ -10,6 +10,7 @@
 ### Fixed
 
 - Fixed the `computer` tool's `control.acquire` prompt, left unanswered, failing the whole call with "Computer code execution timed out"; the prompt now closes shortly before the timeout and the call returns `reason: "unanswered"`
+- Fixed the `computer` tool's `control.acquire` prompt, left unanswered, failing the whole call with "Computer code execution timed out"; the prompt now expires shortly before the timeout and the call returns `reason: "unanswered"`
 
 ## [18.12.3] - 2026-10-19
 
