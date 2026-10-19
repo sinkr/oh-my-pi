@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed agents' first `computer.windows()` call failing on a `bounds` field or attributes its entries don't have (`undefined` in JavaScript, `AttributeError` in Python) ([#16299](https://github.com/can1357/oh-my-pi/pull/16299) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed agents misreading `computer.windows()` results on their first call ([#16299](https://github.com/can1357/oh-my-pi/pull/16299) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
