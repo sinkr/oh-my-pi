@@ -1,3 +1,4 @@
+import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import { runProviderSetupWizard as runProviderWizard } from "@oh-my-pi/pi-tui/setup/lazy";
 import type { SetupHost, SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import {
@@ -65,7 +66,8 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			await ctx.settings.flush();
 		},
 		refreshProvider: async provider => {
-			await ctx.session.modelRegistry.refreshProvider(provider, "online");
+			// An OAuth alias (`openai-codex-device`) stores its credential under the base provider.
+			await ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(provider), "online");
 			await ctx.refreshScopedModelsAfterLogin?.();
 		},
 		saveComposerShape: async shape => {

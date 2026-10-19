@@ -188,8 +188,10 @@ describe("rebuildScopedModels after login", () => {
 	it("makes setup-discovered models selectable without changing the active model", async () => {
 		const settings = Settings.isolated({ enabledModels: ["prov/*"] });
 		const active = model("a");
+		const refreshed: string[] = [];
 		const registry = Object.assign(new FakeRegistry([active]), {
-			async refreshProvider(this: FakeRegistry) {
+			async refreshProvider(this: FakeRegistry, provider: string) {
+				refreshed.push(provider);
 				this.available = [active, model("b")];
 			},
 		});
@@ -206,6 +208,10 @@ describe("rebuildScopedModels after login", () => {
 
 		expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a", "b"]);
 		expect(ctx.session.model).toBe(active);
+
+		// An OAuth alias refreshes the provider its credential is stored under.
+		await createSetupHost(ctx as unknown as InteractiveModeContext).refreshProvider("openai-codex-device");
+		expect(refreshed).toEqual(["prov", "openai-codex"]);
 	});
 });
 
