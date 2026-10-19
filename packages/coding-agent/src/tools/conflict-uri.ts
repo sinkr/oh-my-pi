@@ -55,16 +55,16 @@ function requireEntry(session: ToolSession, id: number): ConflictEntry {
 	if (!entry) {
 		const byPath = new Map<string, number[]>();
 		for (const registered of history.entries()) {
-			const ids = byPath.get(registered.displayPath) ?? [];
+			const ids = byPath.get(registered.absolutePath) ?? [];
 			ids.push(registered.id);
-			byPath.set(registered.displayPath, ids);
+			byPath.set(registered.absolutePath, ids);
 		}
 		const known =
 			byPath.size > 0
-				? `Registered: ${[...byPath].map(([displayPath, ids]) => `${ids.map(n => `#${n}`).join(", ")} in ${displayPath}`).join("; ")}.`
+				? `Registered: ${[...byPath].map(([absolutePath, ids]) => `${ids.map(n => `#${n}`).join(", ")} in ${formatPathRelativeToCwd(absolutePath, session.cwd)}`).join("; ")}.`
 				: "No conflicts are registered.";
 		throw new ToolError(
-			`Conflict #${id} not found: it was resolved, or no \`read\` has shown its block yet (a ranged read registers only the blocks it shows, so unseen blocks' ids can't be guessed). Read \`<path>:conflicts\` on the file to list and register every block. ${known}`,
+			`Conflict #${id} not found: it was resolved, or no \`read\` has shown its block yet (a ranged read registers only the blocks it shows, so unseen blocks' ids can't be guessed). Read \`<path>:conflicts\` on the file to list and register its blocks. ${known}`,
 		);
 	}
 	return entry;

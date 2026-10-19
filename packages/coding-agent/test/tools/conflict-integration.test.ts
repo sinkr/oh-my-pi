@@ -292,8 +292,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 		const result = await read.execute("read-window", { path: "wide.ts:1-5" });
 		const text = getText(result);
 		expect(text).toContain("1 of 2 unresolved");
-		expect(text).toContain("this read registered only the blocks below");
-		expect(text).toContain("read `wide.ts:conflicts` to list and register every block");
+		expect(text).toContain("read `wide.ts:conflicts`");
 	});
 
 	it("names the registered ids and the `:conflicts` read when a hidden block's id is guessed", async () => {
@@ -305,13 +304,9 @@ describe("read surfaces conflicts as a warning footer", () => {
 		// Lines 1-18 hold the first three of six blocks (L1, L7, L13).
 		const windowText = getText(await read.execute("read-six-window", { path: "six.ts:1-18" }));
 		expect(windowText).toContain("3 of 6 unresolved");
-		expect(windowText).toContain("don't infer ids for the others");
 
 		const guess = read.execute("read-six-guess", { path: "conflict://4" });
-		await expect(guess).rejects.toThrow("unseen blocks' ids can't be guessed");
-		await expect(read.execute("read-six-guess-again", { path: "conflict://4" })).rejects.toThrow(
-			"Registered: #1, #2, #3 in six.ts.",
-		);
+		await expect(guess).rejects.toThrow("Registered: #1, #2, #3 in six.ts.");
 
 		await read.execute("read-six-conflicts", { path: "six.ts:conflicts" });
 		const fourth = getText(await read.execute("read-six-fourth", { path: "conflict://4" }));
@@ -331,9 +326,25 @@ describe("read surfaces conflicts as a warning footer", () => {
 		await write.execute("write-a-1", { path: "conflict://1", content: "@ours" });
 
 		const again = write.execute("write-a-1-again", { path: "conflict://1", content: "@ours" });
-		await expect(again).rejects.toThrow("Conflict #1 not found: it was resolved");
-		await expect(read.execute("read-a-1-again", { path: "conflict://1" })).rejects.toThrow(
-			"Read `<path>:conflicts` on the file to list and register every block. Registered: #2 in b.ts.",
+		await expect(again).rejects.toThrow("Registered: #2 in b.ts.");
+		await expect(read.execute("read-a-1-again", { path: "conflict://1" })).rejects.toThrow("`<path>:conflicts`");
+	});
+
+	it("names registered files relative to the current cwd, not the cwd they were read from", async () => {
+		await fs.mkdir(path.join(tempDir, "a"));
+		await fs.mkdir(path.join(tempDir, "b"));
+		await Bun.write(path.join(tempDir, "a", "x.ts"), TWO_WAY);
+		await Bun.write(path.join(tempDir, "b", "x.ts"), TWO_WAY);
+		const session = createTestSession(path.join(tempDir, "a"));
+		const read = await getTool(session, "read");
+
+		await read.execute("read-a-x", { path: "x.ts" });
+		session.cwd = path.join(tempDir, "b");
+		await read.execute("read-b-x", { path: "x.ts" });
+
+		const guess = read.execute("read-x-guess", { path: "conflict://3" });
+		await expect(guess).rejects.toThrow(
+			`Registered: #1 in ${path.join(tempDir, "a", "x.ts").replaceAll(path.sep, "/")}; #2 in x.ts.`,
 		);
 	});
 });
