@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed bash output rewritten by the output minimizer skipping the per-line column cap (`tools.outputMaxColumns`), so a line wider than the cap reached the model whole; the raw output stays in its artifact ([#16314](https://github.com/can1357/oh-my-pi/pull/16314) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
