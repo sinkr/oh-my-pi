@@ -1,4 +1,4 @@
-import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -805,6 +805,20 @@ export function executeReadQuery(
 	const statement = db.query<SqliteRow, []>(sql);
 	if (statement.paramsCount > 0) {
 		throw new ToolError("SQLite raw queries do not support bound parameters");
+	}
+	if (page) {
+		// A query that nests as a subquery pages inside SQLite, so skipped rows are
+		// never built; the newline closes a trailing `--` comment. Statements that
+		// cannot nest (PRAGMA, EXPLAIN) fail to prepare and skip rows while iterating.
+		let paged: Statement<SqliteRow, [number, number]> | undefined;
+		try {
+			paged = db.query(`SELECT * FROM (\n${sql.replace(/[\s;]+$/, "")}\n) LIMIT ? OFFSET ?`);
+		} catch {}
+		if (paged) {
+			const rows = paged.all(page.limit + 1, page.offset);
+			const truncated = rows.length > page.limit;
+			return { columns: [...paged.columnNames], rows: truncated ? rows.slice(0, page.limit) : rows, truncated };
+		}
 	}
 	const columns = [...statement.columnNames];
 	const limit = page?.limit ?? MAX_RAW_QUERY_ROWS;

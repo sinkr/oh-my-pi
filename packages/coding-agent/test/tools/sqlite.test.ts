@@ -460,6 +460,24 @@ describe("SQLite tool support", () => {
 		expect(() => parseSqliteSelector("", "q=SELECT+1&where=id=1")).toThrow("put 'where' into the SQL");
 	});
 
+	it("pages raw ?q= statements of every shape", async () => {
+		const pageOf = async (sql: string) =>
+			getText(
+				await readTool.execute("sqlite-raw-shape", {
+					path: `${sqlitePath}?q=${encodeURIComponent(sql)}&limit=1&offset=1`,
+				}),
+			);
+		// Inner LIMIT, a CTE, a trailing semicolon and a trailing line comment all page as subqueries.
+		expect(await pageOf("SELECT name FROM users ORDER BY id LIMIT 3")).toContain("Bob");
+		expect(await pageOf("WITH u AS (SELECT name, id FROM users) SELECT name FROM u ORDER BY id;")).toContain("Bob");
+		expect(await pageOf("SELECT name FROM users ORDER BY id -- by id")).toContain("Bob");
+		// PRAGMA cannot nest as a subquery and pages by skipping rows instead: row 2 is `name TEXT`, not `id INTEGER`.
+		const pragma = await pageOf("PRAGMA table_info(users)");
+		expect(pragma).toContain("TEXT");
+		expect(pragma).not.toContain("INTEGER");
+		expect(pragma).toContain("offset=2");
+	});
+
 	it("rejects table names that do not exist instead of interpolating them", async () => {
 		await expect(
 			readTool.execute("sqlite-injection-table", { path: `${sqlitePath}:users;DROP TABLE users;` }),
