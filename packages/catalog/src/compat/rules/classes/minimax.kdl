@@ -87,10 +87,12 @@ class "minimax" {
 	// The identity map replaces the M3 family's adaptive-tag-only map so each
 	// level reaches the wire. Like the M2 family, thinking cannot be turned off:
 	// `thinking-requires-effort` hides the off level and clamps forced-off
-	// requests to the lowest effort instead of sending `disabled`.
+	// requests to the lowest effort instead of sending `disabled`. Sampling
+	// params (`temperature`, `top_p`, `top_k`) are not supported.
 	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
 		models "MiniMax-M3.1-Flash" {
 			thinking-requires-effort #true
+			supports-sampling-params #false
 			thinking-efforts "low" "medium" "high" "xhigh" "max"
 			thinking-effort-map {
 				low "low"

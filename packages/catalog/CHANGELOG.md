@@ -4,7 +4,7 @@
 
 ### Changed
 
-- MiniMax `MiniMax-M3.1-Flash` now gets always-on thinking with `low` through `max` effort levels, replacing the `MiniMax-M3.1-Flash-Preview` rules ([#16315](https://github.com/can1357/oh-my-pi/pull/16315) by [@SaladDay](https://github.com/SaladDay))
+- MiniMax `MiniMax-M3.1-Flash` now gets always-on thinking with `low` through `max` effort levels and no sampling params (`temperature`, `top_p`, `top_k`), replacing the `MiniMax-M3.1-Flash-Preview` rules ([#16315](https://github.com/can1357/oh-my-pi/pull/16315) by [@SaladDay](https://github.com/SaladDay))
 
 ## [18.12.2] - 2026-10-18
 

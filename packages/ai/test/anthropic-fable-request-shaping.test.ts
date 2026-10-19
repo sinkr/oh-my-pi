@@ -432,6 +432,7 @@ describe("MiniMax Anthropic adaptive thinking", () => {
 	] as const)("clamps MiniMax-M3.1-Flash %s to low effort with thinking on", async (_label, opts) => {
 		const model = makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash", "minimax-code");
 		expect(model.thinking?.requiresEffort).toBe(true);
+		expect(model.compat.supportsSamplingParams).toBe(false);
 
 		let payload: CapturedPayload | undefined;
 		await streamSimple(model, CONTEXT, {
