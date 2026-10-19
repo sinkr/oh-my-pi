@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import * as os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -85,6 +86,12 @@ function restoreAutoQaEnv(): void {
 		return;
 	}
 	Bun.env.PI_AUTO_QA = originalPiAutoQa;
+}
+
+/** Pin the home directory and login name the redaction reads. */
+function stubIdentity(home: string, username: string): void {
+	vi.spyOn(os, "homedir").mockReturnValue(home);
+	vi.spyOn(os, "userInfo").mockReturnValue({ username, uid: 501, gid: 20, shell: "/bin/zsh", homedir: home });
 }
 
 describe("flushGrievances", () => {
@@ -435,6 +442,24 @@ describe("flushGrievances", () => {
 		expect(selectPushedIds(db).length).toBe(firstBatch);
 		expect(selectUnpushedIds(db).length).toBe(secondBatch);
 	});
+
+	it("redacts the home directory from rows recorded before record-time redaction", async () => {
+		stubIdentity("/Users/jdoe", "jdoe");
+		insertGrievance(db, "read /Users/jdoe/notes.md", "selector dropped /Users/jdoe/notes.md:4");
+
+		let sentBody: unknown;
+		const fetchSpy = vi.fn(async (_input: string | URL | Request, init: RequestInit | undefined) => {
+			sentBody = JSON.parse(String(init?.body));
+			return new Response("", { status: 200 });
+		});
+
+		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
+
+		expect(result).toEqual({ pushed: 1, ok: true });
+		expect(sentBody).toMatchObject({
+			entries: [{ tool: "read ~/notes.md", report: "selector dropped ~/notes.md:4" }],
+		});
+	});
 });
 
 describe("dispatchReportIssueDevice", () => {
@@ -513,6 +538,30 @@ describe("dispatchReportIssueDevice", () => {
 			expect(row.report).toBe(`${prose}\nglob threw instead of returning empty`);
 		} finally {
 			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	it("stores the home directory as ~ and identifier uses of the login name as <user>", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		stubIdentity("/Users/will", "will");
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(
+				session,
+				"bash: launchctl print gui/501/com.will.agent failed in /Users/will/code (not /Users/willa); it will retry",
+			);
+			await settlePipeline();
+			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
+			expect(row).toEqual({
+				tool: "bash",
+				report: "launchctl print gui/501/com.<user>.agent failed in ~/code (not /Users/willa); it will retry",
+			});
+		} finally {
+			openSpy.mockRestore();
+			vi.restoreAllMocks();
 			db.close();
 		}
 	});
