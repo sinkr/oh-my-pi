@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { expandWindowsLongPath } from "@oh-my-pi/pi-natives/path";
 import { engines, version } from "../package.json" with { type: "json" };
 import { isEnoent, isEnotdir } from "./fs-error";
+import { isBunTestRuntime } from "./test-runtime";
 
 /** App name (e.g. "omp") */
 export const APP_NAME: string = "omp";
@@ -655,8 +656,13 @@ export function getReportsDir(): string {
 	return dirs.rootSubdir("reports", "state");
 }
 
-/** Get the logs directory (~/.omp/logs). */
+/**
+ * Get the logs directory (~/.omp/logs). `bun test` processes get
+ * `<tmpdir>/omp-test-logs` instead, so suites never write into the developer's
+ * real logs.
+ */
 export function getLogsDir(): string {
+	if (isBunTestRuntime()) return path.join(os.tmpdir(), "omp-test-logs");
 	return dirs.rootSubdir("logs", "state");
 }
 

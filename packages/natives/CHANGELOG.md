@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `cargo test` writing crash reports from panicking Rust tests into your real `~/.omp/logs`: they now go to `pi-natives-test-logs/` under the OS temp dir
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

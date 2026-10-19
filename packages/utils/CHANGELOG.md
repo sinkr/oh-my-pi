@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `bun test` runs writing their logs into your real `~/.omp/logs`: test processes now log to `omp-test-logs/` under the OS temp dir
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
