@@ -47,7 +47,7 @@ import {
 } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
-import { armPreResponseTimeout, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
+import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
@@ -56,6 +56,7 @@ import {
 	applyAnthropicCompactionIterationUsage,
 	applyAnthropicUsageExtras,
 	buildBedrockAnthropicCompactionRequest,
+	calculateIterationTurnCost,
 	isThinkingPrefixBindingError,
 	parseAnthropicCompactionBlock,
 } from "./anthropic";
@@ -187,7 +188,7 @@ async function sendBedrockRequest(
 	base: URL,
 	input: unknown,
 	endpoint: BedrockRequestEndpoint,
-): Promise<{ response: Response; rawRequestDump: RawHttpRequestDump }> {
+): Promise<{ response: Response; responseBody?: string; rawRequestDump: RawHttpRequestDump }> {
 	const host = base.host;
 	const suffix = endpoint === "invoke-model" ? "invoke" : "converse-stream";
 	const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(model.id)}/${suffix}`;
@@ -259,11 +260,11 @@ async function sendBedrockRequest(
 		url,
 		body: input,
 	};
-	const watchdog = armPreResponseTimeout(
-		options.signal,
-		options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(),
-	);
+	const idleTimeoutMs = options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
+	const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+	const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
 	let response: Response;
+	let responseBody: string | undefined;
 	try {
 		response = await fetchWithRetry(url, {
 			method: "POST",
@@ -273,10 +274,15 @@ async function sendBedrockRequest(
 			fetch: options.fetch,
 			timeout: false,
 		});
+		// InvokeModel is a buffered JSON response: keep the first-event guard
+		// active until its full body (including error responses) is available.
+		if (endpoint === "invoke-model") responseBody = await response.text();
 	} finally {
+		// Converse is a true stream, so its absolute pre-response deadline ends
+		// at headers; the caller signal remains active for body cancellation.
 		watchdog.clear();
 	}
-	return { response, rawRequestDump };
+	return { response, responseBody, rawRequestDump };
 }
 
 function inferRegionFromBedrockArn(modelId: string): string | undefined {
@@ -566,10 +572,13 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		try {
 			const base = resolveBedrockBaseUrl(model, region);
 			const bearerToken = resolveBearerToken(options);
-			const sendRequest = async (input: unknown, endpoint: BedrockRequestEndpoint): Promise<Response> => {
+			const sendRequest = async (
+				input: unknown,
+				endpoint: BedrockRequestEndpoint,
+			): Promise<{ response: Response; responseBody?: string }> => {
 				const sent = await sendBedrockRequest(model, options, region, base, input, endpoint);
 				rawRequestDump = sent.rawRequestDump;
-				return sent.response;
+				return { response: sent.response, responseBody: sent.responseBody };
 			};
 			if (
 				options.anthropicCompaction !== undefined &&
@@ -580,12 +589,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				const replacementInput = await options.onPayload?.(invokeInput, model);
 				if (replacementInput !== undefined) invokeInput = replacementInput as typeof invokeInput;
 				fitBedrockAnthropicPayload(invokeInput);
-				const response = await sendRequest(invokeInput, "invoke-model");
+				const { response, responseBody } = await sendRequest(invokeInput, "invoke-model");
 				if (!response.ok) {
 					if (!bearerToken && (response.status === 401 || response.status === 403)) {
 						invalidateAwsCredentialCache({ profile: options.profile, region });
 					}
-					const errBody = await response.text().catch(() => "");
+					const errBody = responseBody ?? (await response.text().catch(() => ""));
 					throw new AIError.BedrockApiError(
 						`Bedrock HTTP ${response.status}: ${errBody.slice(0, 1000)}`,
 						response.status,
@@ -594,7 +603,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						},
 					);
 				}
-				const responseText = await response.text();
+				const responseText = responseBody ?? (await response.text());
 				let invokeOutput: unknown;
 				try {
 					invokeOutput = JSON.parse(responseText);
@@ -656,7 +665,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					applyAnthropicCompactionIterationUsage(output.usage, usage);
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-					calculateCost(model, output.usage, output.timestamp);
+					if (!calculateIterationTurnCost(model, output.usage, usage, output.timestamp)) {
+						calculateCost(model, output.usage, output.timestamp);
+					}
 				}
 				if (output.stopReason === "error") {
 					throw new AIError.BedrockApiError(output.errorMessage ?? "Bedrock compaction failed", 0);
@@ -729,7 +740,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			let prefixBindingRetryAttempted = false;
 			let response: Response;
 			while (true) {
-				response = await sendRequest(commandInput, "converse-stream");
+				response = (await sendRequest(commandInput, "converse-stream")).response;
 				if (response.ok) break;
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
 					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —

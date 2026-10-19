@@ -679,7 +679,10 @@ describe("Anthropic compaction replay", () => {
 	});
 
 	it("keeps legacy encrypted replay read-only with its beta and never-firing edit", async () => {
-		const legacy = summaryMessage({ encryptedContent: ENCRYPTED });
+		const differentProducer = buildModel({ ...spec, id: "claude-sonnet-4-6" });
+		const legacy = summaryMessage({ encryptedContent: ENCRYPTED }, "anthropic", 1, differentProducer);
+		if (legacy.providerPayload?.type !== "anthropicCompaction") throw new Error("expected compaction payload");
+		legacy.providerPayload.api = "bedrock-converse-stream";
 		const messages: Context["messages"] = [legacy, { role: "user", content: "next", timestamp: 2 }];
 		const reply = await captureRequest(model, {}, messages);
 		expect(reply.beta).toContain("compact-2026-01-12");
@@ -688,15 +691,18 @@ describe("Anthropic compaction replay", () => {
 			edits: [{ type: "compact_20260112", trigger: { type: "input_tokens", value: 1_000_000 } }],
 		});
 		expect(JSON.stringify(reply.payload.messages)).toContain(ENCRYPTED);
+		expect(JSON.stringify(reply.payload.messages)).toContain('"type":"compaction"');
 		const newRequest = await captureRequest(model, { anthropicCompaction: {} }, messages);
 		expect(newRequest.payload.compaction).toEqual({ type: "summarize" });
 		expect(newRequest.payload.context_management).toBeUndefined();
 		expect(JSON.stringify(newRequest.payload.messages)).not.toContain(ENCRYPTED);
+		expect(JSON.stringify(newRequest.payload.messages)).not.toContain('"type":"compaction"');
 		expect(JSON.stringify(newRequest.payload.messages)).toContain("<summary>");
 	});
 
 	it("keeps readable summary text if model, provider or endpoint cannot replay the block", async () => {
 		const foreign = summaryMessage({ signature: SIGNATURE }, "different-provider");
+		const foreignLegacy = summaryMessage({ encryptedContent: ENCRYPTED }, "different-provider");
 		const wrongModel = summaryMessage({ signature: SIGNATURE });
 		const wrongApi = summaryMessage({ signature: SIGNATURE });
 		if (wrongModel.providerPayload?.type !== "anthropicCompaction") throw new Error("expected compaction payload");
@@ -706,6 +712,7 @@ describe("Anthropic compaction replay", () => {
 		const unsupported = buildModel({ ...spec, id: "claude-sonnet-4-5" });
 		const cases: Array<{ requestModel: Model<"anthropic-messages">; messages: Context["messages"] }> = [
 			{ requestModel: model, messages: [foreign, { role: "user", content: "next", timestamp: 2 }] },
+			{ requestModel: model, messages: [foreignLegacy, { role: "user", content: "next", timestamp: 2 }] },
 			{ requestModel: model, messages: [wrongModel, { role: "user", content: "next", timestamp: 2 }] },
 			{ requestModel: model, messages: [wrongApi, { role: "user", content: "next", timestamp: 2 }] },
 			{
@@ -718,8 +725,13 @@ describe("Anthropic compaction replay", () => {
 		];
 		for (const { requestModel, messages } of cases) {
 			const response = await captureRequest(requestModel, {}, messages);
+			expect(response.beta).not.toContain("compact-2026-01-12");
 			expect(response.beta).not.toContain("compact-2026-09-04");
-			expect(JSON.stringify(response.payload.messages)).toContain("<summary>");
+			const wire = JSON.stringify(response.payload.messages);
+			expect(wire).toContain("<summary>");
+			expect(wire).not.toContain('"type":"compaction"');
+			expect(wire).not.toContain(ENCRYPTED);
+			expect(wire).not.toContain(SIGNATURE);
 		}
 	});
 

@@ -1707,7 +1707,7 @@ function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackConte
 
 /**
  * Whether a persisted compaction summary replays natively: it must come from
- * this provider, and signed blocks must match the exact model and API.
+ * this provider; signed blocks additionally require the exact model and API.
  */
 
 interface AnthropicCompactionIdentity {
@@ -1729,13 +1729,7 @@ function isReplayableAnthropicCompaction(
 	identity?: AnthropicCompactionIdentity,
 ): payload is AnthropicCompactionPayload {
 	const source = resolveAnthropicCompactionIdentity(model, identity);
-	return (
-		payload?.type === "anthropicCompaction" &&
-		payload.provider === source.provider &&
-		payload.content.length > 0 &&
-		(payload.model === undefined || payload.model === source.model) &&
-		(payload.api === undefined || payload.api === source.api)
-	);
+	return payload?.type === "anthropicCompaction" && payload.provider === source.provider && payload.content.length > 0;
 }
 
 /** Which persisted compaction summaries a request replays as native blocks. */
@@ -1907,15 +1901,12 @@ function fallbackServedModelFromUsage(source: AnthropicWireUsage): string | unde
  * catalog has no entry under it — the caller keeps the requested-model
  * pricing as the safe default and logs at the source.
  */
-function resolveIterationModel(
-	requestModel: Model<"anthropic-messages">,
-	iterationModelId: string | null | undefined,
-): Model<Api> {
+function resolveIterationModel(requestModel: Model<Api>, iterationModelId: string | null | undefined): Model<Api> {
 	const id = iterationModelId?.trim();
 	if (!id || id === requestModel.id) return requestModel;
 	// Bundled catalog lookup: only Anthropic provider entries are safe to
 	// reference (dated snapshots resolve to their alias entry when present).
-	if (requestModel.provider === "anthropic") {
+	if (requestModel.provider === "anthropic" && requestModel.api === "anthropic-messages") {
 		const bundled = getBundledModel("anthropic", id);
 		if (bundled?.api === "anthropic-messages") return bundled;
 	}
@@ -1941,10 +1932,10 @@ function resolveIterationModel(
  * without iterations use the requested model at the normal `calculateCost`
  * call.
  */
-function calculateIterationTurnCost(
-	requestModel: Model<"anthropic-messages">,
+export function calculateIterationTurnCost(
+	requestModel: Model<Api>,
 	usage: Usage,
-	source: AnthropicWireUsage,
+	source: Pick<AnthropicWireUsage, "iterations">,
 	timestamp: number,
 ): boolean {
 	const iterations = source.iterations ?? [];

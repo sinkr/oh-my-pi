@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { completeSimple } from "@oh-my-pi/pi-ai/stream";
 
@@ -11,6 +11,7 @@ import {
 	BEDROCK_TEST_CONTEXT,
 	withSkippedBedrockAuth,
 } from "./helpers/bedrock-stream";
+import { withEnv } from "./helpers";
 
 interface CapturedRequest {
 	url: string;
@@ -38,6 +39,119 @@ function captureFetch(response: () => Response): { fetch: FetchImpl; requests: C
 		{ preconnect: globalThis.fetch.preconnect },
 	) as FetchImpl;
 	return { fetch, requests };
+}
+
+function fetchWaitingForAbort(): { fetch: FetchImpl; requestSignal: Promise<AbortSignal> } {
+	const requestStarted = Promise.withResolvers<AbortSignal>();
+	const fetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const signal = init?.signal;
+			if (!signal) throw new Error("Expected Bedrock request signal");
+			requestStarted.resolve(signal);
+			const pending = Promise.withResolvers<Response>();
+			if (signal.aborted) pending.reject(signal.reason);
+			else signal.addEventListener("abort", () => pending.reject(signal.reason), { once: true });
+			return pending.promise;
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	) as FetchImpl;
+	return { fetch, requestSignal: requestStarted.promise };
+}
+
+function fetchWithStalledBody(status = 200): {
+	fetch: FetchImpl;
+	requestSignal: Promise<AbortSignal>;
+	bodyRead: Promise<void>;
+} {
+	const requestStarted = Promise.withResolvers<AbortSignal>();
+	const bodyReadStarted = Promise.withResolvers<void>();
+	const pullGate = Promise.withResolvers<void>();
+	const fetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const signal = init?.signal;
+			if (!signal) throw new Error("Expected Bedrock request signal");
+			requestStarted.resolve(signal);
+			return new Response(
+				new ReadableStream<Uint8Array>(
+					{
+						start(controller) {
+							const fail = () => {
+								controller.error(signal.reason);
+								pullGate.resolve();
+							};
+							if (signal.aborted) fail();
+							else signal.addEventListener("abort", fail, { once: true });
+						},
+						pull() {
+							bodyReadStarted.resolve();
+							return pullGate.promise;
+						},
+					},
+					{ highWaterMark: 0 },
+				),
+				{ status },
+			);
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	) as FetchImpl;
+	return { fetch, requestSignal: requestStarted.promise, bodyRead: bodyReadStarted.promise };
+}
+
+function fetchWithPausedEventStream(): {
+	fetch: FetchImpl;
+	requestSignal: Promise<AbortSignal>;
+	bodyRead: Promise<void>;
+	resume: () => void;
+} {
+	const requestStarted = Promise.withResolvers<AbortSignal>();
+	const bodyReadStarted = Promise.withResolvers<void>();
+	const pullGate = Promise.withResolvers<void>();
+	let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+	let onAbort: (() => void) | undefined;
+	let bodySignal: AbortSignal | undefined;
+	const fetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const signal = init?.signal;
+			if (!signal) throw new Error("Expected Bedrock request signal");
+			requestStarted.resolve(signal);
+			return new Response(
+				new ReadableStream<Uint8Array>(
+					{
+						start(controller) {
+							bodyController = controller;
+							bodySignal = signal;
+							onAbort = () => {
+								controller.error(signal.reason);
+								pullGate.resolve();
+							};
+							if (signal.aborted) onAbort();
+							else signal.addEventListener("abort", onAbort, { once: true });
+						},
+						pull() {
+							bodyReadStarted.resolve();
+							return pullGate.promise;
+						},
+					},
+					{ highWaterMark: 0 },
+				),
+				{ headers: { "content-type": "application/vnd.amazon.eventstream" } },
+			);
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	) as FetchImpl;
+	const resume = (): void => {
+		if (!bodyController) throw new Error("Converse response body has not started");
+		for (const frame of bedrockHappyPathFrames()) bodyController.enqueue(frame);
+		if (bodySignal && onAbort) bodySignal.removeEventListener("abort", onAbort);
+		bodyController.close();
+		pullGate.resolve();
+	};
+	return {
+		fetch,
+		requestSignal: requestStarted.promise,
+		bodyRead: bodyReadStarted.promise,
+		resume,
+	};
 }
 
 function messageText(message: unknown): string {
@@ -323,33 +437,212 @@ describe("Bedrock native compaction transport", () => {
 		expect(signed.requests[0]?.headers.get("x-amz-date")).toBeTruthy();
 
 		const controller = new AbortController();
-		const requestStarted = Promise.withResolvers<void>();
-		const waitingFetch = Object.assign(
-			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-				requestStarted.resolve();
-				return await new Promise<Response>((_resolve, reject) => {
-					const signal = init?.signal;
-					if (signal?.aborted) {
-						reject(new DOMException("The operation was aborted", "AbortError"));
-						return;
-					}
-					signal?.addEventListener(
-						"abort",
-						() => reject(new DOMException("The operation was aborted", "AbortError")),
-						{ once: true },
-					);
-				});
-			},
-			{ preconnect: fetch.preconnect },
-		) as FetchImpl;
+		const { fetch, requestSignal } = fetchWaitingForAbort();
 		const pending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
 			bearerToken: "bedrock-test-token",
 			anthropicCompaction: {},
-			fetch: waitingFetch,
+			fetch,
 			signal: controller.signal,
 		});
-		await requestStarted.promise;
+		await requestSignal;
 		controller.abort();
 		expect((await pending.result()).stopReason).toBe("aborted");
+	});
+
+	it("prices InvokeModel usage per iteration and falls back to aggregate pricing without iterations", async () => {
+		const model = bedrockTestModel({
+			compat: { supportsServerCompaction: true },
+			cost: {
+				input: 1,
+				output: 2,
+				cacheRead: 3,
+				cacheWrite: 4,
+				longContext: {
+					input: 10,
+					output: 20,
+					cacheRead: 30,
+					cacheWrite: 40,
+					inputThreshold: 50_000,
+				},
+			},
+		});
+		const multipleIterations = await completeSimple(model, BEDROCK_TEST_CONTEXT, {
+			apiKey: "bedrock-test-token",
+			anthropicCompaction: {},
+			fetch: captureFetch(() =>
+				Response.json({
+					...compactionResponse,
+					usage: {
+						input_tokens: 1,
+						output_tokens: 0,
+						cache_read_input_tokens: 0,
+						cache_creation_input_tokens: 0,
+						iterations: [
+							{ type: "message", input_tokens: 30_000, output_tokens: 1 },
+							{ type: "compaction", input_tokens: 30_000, output_tokens: 1 },
+						],
+					},
+				}),
+			).fetch,
+		});
+		expect(multipleIterations.usage).toMatchObject({ input: 60_000, output: 2, totalTokens: 60_002 });
+		expect(multipleIterations.usage.cost.input).toBeCloseTo(0.06, 12);
+		expect(multipleIterations.usage.cost.output).toBeCloseTo(0.000004, 12);
+		expect(multipleIterations.usage.cost.total).toBeCloseTo(0.060004, 12);
+
+		const singleIteration = await completeSimple(model, BEDROCK_TEST_CONTEXT, {
+			apiKey: "bedrock-test-token",
+			anthropicCompaction: {},
+			fetch: captureFetch(() =>
+				Response.json({
+					...compactionResponse,
+					usage: {
+						input_tokens: 60_000,
+						output_tokens: 1,
+						cache_read_input_tokens: 0,
+						cache_creation_input_tokens: 0,
+						iterations: [{ type: "compaction", input_tokens: 60_000, output_tokens: 1 }],
+					},
+				}),
+			).fetch,
+		});
+		expect(singleIteration.usage).toMatchObject({ input: 60_000, output: 1, totalTokens: 60_001 });
+		expect(singleIteration.usage.cost.total).toBeCloseTo(0.60002, 12);
+
+		const aggregateFallback = await completeSimple(model, BEDROCK_TEST_CONTEXT, {
+			apiKey: "bedrock-test-token",
+			anthropicCompaction: {},
+			fetch: captureFetch(() =>
+				Response.json({
+					...compactionResponse,
+					usage: {
+						input_tokens: 60_000,
+						output_tokens: 1,
+						cache_read_input_tokens: 0,
+						cache_creation_input_tokens: 0,
+					},
+				}),
+			).fetch,
+		});
+		expect(aggregateFallback.usage).toMatchObject({ input: 60_000, output: 1, totalTokens: 60_001 });
+		expect(aggregateFallback.usage.cost.total).toBeCloseTo(0.60002, 12);
+	});
+
+	it("resolves InvokeModel deadlines from model and per-call idle settings, honoring explicit timeout precedence", async () => {
+		vi.useFakeTimers();
+		try {
+			await withEnv(
+				{
+					PI_STREAM_IDLE_TIMEOUT_MS: undefined,
+					PI_OPENAI_STREAM_IDLE_TIMEOUT_MS: undefined,
+					PI_STREAM_FIRST_EVENT_TIMEOUT_MS: undefined,
+				},
+				async () => {
+					const model = bedrockTestModel({
+						compat: { supportsServerCompaction: true, streamIdleTimeoutMs: 450_000 },
+					});
+					const assertTimeout = async (
+						options: { streamIdleTimeoutMs?: number; streamFirstEventTimeoutMs?: number },
+						timeoutMs: number,
+					): Promise<void> => {
+						const { fetch, requestSignal } = fetchWaitingForAbort();
+						const pending = streamBedrock(model, BEDROCK_TEST_CONTEXT, {
+							bearerToken: "bedrock-test-token",
+							anthropicCompaction: {},
+							fetch,
+							...options,
+						});
+						const signal = await requestSignal;
+						vi.advanceTimersByTime(timeoutMs - 1);
+						expect(signal.aborted).toBe(false);
+						vi.advanceTimersByTime(1);
+						expect(signal.aborted).toBe(true);
+						expect((await pending.result()).stopReason).toBe("error");
+					};
+
+					await assertTimeout({}, 450_000);
+					await assertTimeout({ streamIdleTimeoutMs: 600_000 }, 600_000);
+					await withEnv({ PI_STREAM_FIRST_EVENT_TIMEOUT_MS: "5" }, async () => {
+						await assertTimeout({ streamIdleTimeoutMs: 600_000, streamFirstEventTimeoutMs: 20 }, 20);
+
+						const controller = new AbortController();
+						const { fetch, requestSignal } = fetchWaitingForAbort();
+						const pending = streamBedrock(model, BEDROCK_TEST_CONTEXT, {
+							bearerToken: "bedrock-test-token",
+							anthropicCompaction: {},
+							fetch,
+							signal: controller.signal,
+							streamFirstEventTimeoutMs: 0,
+						});
+						const signal = await requestSignal;
+						vi.advanceTimersByTime(100);
+						expect(signal.aborted).toBe(false);
+						controller.abort();
+						expect((await pending.result()).stopReason).toBe("aborted");
+					});
+				},
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps the InvokeModel deadline active through successful and non-2xx body reads", async () => {
+		vi.useFakeTimers();
+		try {
+			for (const status of [200, 403]) {
+				const { fetch, requestSignal, bodyRead } = fetchWithStalledBody(status);
+				const pending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+					bearerToken: "bedrock-test-token",
+					anthropicCompaction: {},
+					fetch,
+					streamFirstEventTimeoutMs: 20,
+				});
+				const signal = await requestSignal;
+				await bodyRead;
+				vi.advanceTimersByTime(20);
+				expect(signal.aborted).toBe(true);
+				expect((await pending.result()).stopReason).toBe("error");
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps caller cancellation active while an InvokeModel body is stalled", async () => {
+		const controller = new AbortController();
+		const { fetch, requestSignal, bodyRead } = fetchWithStalledBody();
+		const pending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+			bearerToken: "bedrock-test-token",
+			anthropicCompaction: {},
+			fetch,
+			signal: controller.signal,
+			streamFirstEventTimeoutMs: 0,
+		});
+		const signal = await requestSignal;
+		await bodyRead;
+		controller.abort();
+		expect(signal.aborted).toBe(true);
+		expect((await pending.result()).stopReason).toBe("aborted");
+	});
+
+	it("continues an ordinary Converse stream beyond its first-event deadline", async () => {
+		vi.useFakeTimers();
+		try {
+			const { fetch, requestSignal, bodyRead, resume } = fetchWithPausedEventStream();
+			const pending = streamBedrock(compactionModel(), BEDROCK_TEST_CONTEXT, {
+				bearerToken: "bedrock-test-token",
+				fetch,
+				streamFirstEventTimeoutMs: 20,
+			});
+			const signal = await requestSignal;
+			await bodyRead;
+			vi.advanceTimersByTime(100);
+			expect(signal.aborted).toBe(false);
+			resume();
+			expect((await pending.result()).stopReason).toBe("stop");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
