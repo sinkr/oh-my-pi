@@ -7,6 +7,10 @@
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `/move` path completion jumping into a subfolder on Tab: `..`, `.`, and `~` now complete to `../`, `./`, and `~/` before listing their children, a trailing `\` lists a folder on Windows, absolute Windows paths (`C:/…`) are no longer rewritten as relative paths, and the project directory is offered as `./` instead of `/`
 
+### Fixed
+
+- Fixed a browser click, fill or other selector action that timed out without saying how many elements matched when omp could not count them (seen with `aria/` selectors on a `cdp_url` browser); the timeout now gives the reason, such as `could not count matches: no answer within 1000ms`
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
