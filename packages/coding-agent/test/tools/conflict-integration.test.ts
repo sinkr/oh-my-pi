@@ -589,6 +589,22 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(await Bun.file(filePath).text()).toBe("a\nb\nc\nmiddle\na\nb\nc\ntail\n");
 	});
 
+	it("resolves per-id directives behind copied line numbers that do not count up by one", async () => {
+		const filePath = path.join(tempDir, "directives-sparse-rows.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-sparse-rows", { path: "directives-sparse-rows.ts" });
+		const result = await write.execute("write-directives-sparse-rows", {
+			path: "conflict://*",
+			content: "40:#1 = @ours\n45:#2 = @theirs",
+		});
+		expect(getText(result)).toContain("Resolved 2 conflicts");
+		expect(await Bun.file(filePath).text()).toBe("a-ours\nmiddle\nb-theirs\ntail\n");
+	});
+
 	it("still treats pure-literal content as a uniform bulk write (no false directive rejection)", async () => {
 		const filePath = path.join(tempDir, "directives-literal.ts");
 		await Bun.write(filePath, TWO_WAY);

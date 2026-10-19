@@ -186,7 +186,8 @@ async function resolveConflict(
 	};
 }
 
-const BULK_DIRECTIVE_RE = /^#?(\d+)\s*[:=]\s*(@ours|@theirs|@base|@both)$/;
+/** `<id>: @side`, optionally behind a copied `LINE:` display prefix (`40:#4 = @ours`). */
+const BULK_DIRECTIVE_RE = /^(?:\d+:)?#?(\d+)\s*[:=]\s*(@ours|@theirs|@base|@both)$/;
 /**
  * The head of a per-id directive line — `<id>:` / `<id>=` (optionally `#`-prefixed),
  * regardless of whether its value is a valid `@side` token. Used to recognise a

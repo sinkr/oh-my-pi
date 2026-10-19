@@ -136,9 +136,10 @@ pub fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
 }
 
 /// Whether each numbered row's number is one more than the row above it.
-/// Read and search output count up by one and mark every skip with a blank,
+/// `read` and `grep` count up by one and mark every skip with a blank,
 /// elision or header row, so a jump elsewhere means the numbers are content
-/// (addresses in a hex dump, timestamps in a log).
+/// (addresses in a hex dump, timestamps in a log) or a partial view such as
+/// an edit preview, which is not a file's content either way.
 fn numbers_count_up_by_one(lines: &[String]) -> bool {
 	let mut previous: Option<u64> = None;
 	for line in lines {
