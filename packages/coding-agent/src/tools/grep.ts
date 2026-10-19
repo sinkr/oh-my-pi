@@ -3,13 +3,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolTier,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -46,6 +40,7 @@ import {
 	resolveReadPath,
 	resolveSearchResultPath,
 	resolveToolSearchScope,
+	searchPathTier,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
 import { searchApprovalCacheTargets } from "./search-approval-targets";
@@ -413,11 +408,7 @@ export interface GrepToolOptions {
 
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
 	readonly name = "grep";
-	readonly approval = (args: unknown): ToolTier => {
-		const a = args as { path?: string | string[]; paths?: string | string[] };
-		// Substring scan over the raw entries: delimited lists are only split after approval.
-		return InternalUrlRouter.instance().readTier(toPathList(a.path ?? a.paths).join("\n"));
-	};
+	readonly approval = searchPathTier;
 	/**
 	 * `always-ask-cached` keys: every file and folder this grep searches, so a
 	 * folder grant recorded by a `read` covers a search of it and a search of one
