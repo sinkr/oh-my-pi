@@ -425,7 +425,10 @@ export class CacheWarmer {
 		if (message.provider !== run.model.provider || message.model !== run.model.id) return;
 		if (observed === undefined || observed === run.tier) return;
 		const delayMs = this.#delayFor(run.model, observed);
-		if (delayMs === undefined) return;
+		if (delayMs === undefined) {
+			this.#stop("cache lifetime unavailable");
+			return;
+		}
 		clearTimeout(run.timer);
 		run.timer = undefined;
 		run.tier = observed;

@@ -475,6 +475,20 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
 	});
 
+	test("stops when a response reports a tier the model has no lifetime for", () => {
+		const model = factoryModel("claude-opus-4-6", ["anthropic"]);
+		model.promptCache = { short: 300 };
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		h.warmer.onResponse({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })),
+			provider: model.provider,
+			model: model.id,
+		});
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
+	});
+
 	test("streaming mode stops when the agent settles", () => {
 		const h = harness();
 		h.mode = "streaming";
