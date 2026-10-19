@@ -2547,9 +2547,9 @@ describe("expanded computer APIs", () => {
 		const confirm = vi.fn(async () => true);
 		try {
 			const result = await supervisor.run(
-				// 150 ms remain of the 1 s run, less than the quarter a prompt must leave the script.
-				'await wait(850); return await desktop.control.acquire({ reason: "Too late" })',
-				1_000,
+				// 400 ms remain of the 2 s run, less than the quarter (500 ms) a prompt must leave the script.
+				'await wait(1_600); return await desktop.control.acquire({ reason: "Too late" })',
+				2_000,
 				snapshot(),
 				undefined,
 				confirmationContext(confirm),
