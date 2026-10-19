@@ -396,13 +396,25 @@ export function guardThinkingLoopStream(
 	const thinkingDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const textDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const checkAssistantContent = options?.loopGuard?.checkAssistantContent !== false;
+	// The provider's own timers die with the abort, so the guard keeps the
+	// clocks the aborted attempt would have reported.
+	const startTime = performance.now();
 
 	void (async () => {
 		let thinkingArmed = true;
 		let textArmed = checkAssistantContent;
 		let textStarted = false;
+		let firstTokenTime: number | undefined;
+		let partial: AssistantMessage | undefined;
 		try {
 			for await (const event of inner) {
+				if ("partial" in event) partial = event.partial;
+				if (
+					firstTokenTime === undefined &&
+					(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta")
+				) {
+					firstTokenTime = performance.now();
+				}
 				let detail: string | null = null;
 				if (event.type === "thinking_delta") {
 					// Re-arm after thinking_end / toolcall_start unless visible answer
@@ -450,7 +462,10 @@ export function guardThinkingLoopStream(
 					outer.push({
 						type: "error",
 						reason: "error",
-						error: buildThinkingLoopError(model, detail),
+						error: buildThinkingLoopError(model, detail, partial, {
+							duration: performance.now() - startTime,
+							ttft: firstTokenTime === undefined ? undefined : firstTokenTime - startTime,
+						}),
 					});
 					return;
 				}
@@ -497,7 +512,17 @@ export function withThinkingLoopGuard<
 	return guardThinkingLoopStream(dispatch(merged), model, controller, options);
 }
 
-function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMessage {
+/**
+ * The loop-abort error for one attempt. It keeps what the provider had
+ * reported when the guard tripped (usage so far, start time, response id) and
+ * the attempt's timing, so the failed attempt is accounted like any other.
+ */
+function buildThinkingLoopError(
+	model: Model<Api>,
+	detail: string,
+	partial: AssistantMessage | undefined,
+	timing: { duration: number; ttft: number | undefined },
+): AssistantMessage {
 	return {
 		role: "assistant",
 		// Empty content is load-bearing: loop-guard output is replay garbage, even
@@ -507,20 +532,26 @@ function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMes
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		// Cloned: the provider keeps mutating its output while it tears down.
+		usage: partial?.usage
+			? structuredClone(partial.usage)
+			: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
 		stopReason: "error",
 		// "stream stall" makes the transport/session retry classifiers treat this
 		// as a transient (retryable) failure with no bespoke rule.
 		errorMessage: `${THINKING_LOOP_ERROR_MARKER}: the model repeated near-identical content (${detail}). Treating as a stream stall and retrying.`,
 		errorId: AIError.create(AIError.Flag.ThinkingLoop),
-		timestamp: Date.now(),
+		...(partial?.responseId && { responseId: partial.responseId }),
+		duration: timing.duration,
+		...(timing.ttft !== undefined && { ttft: timing.ttft }),
+		timestamp: partial?.timestamp ?? Date.now(),
 	};
 }
 

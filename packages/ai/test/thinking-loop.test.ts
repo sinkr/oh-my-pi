@@ -573,6 +573,63 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 		expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
 		expect(isRetryableError(new Error(result.errorMessage))).toBe(true);
 	});
+
+	test("keeps the aborted attempt's usage, start time, response id and timing", async () => {
+		const model = {
+			api: "google-vertex",
+			provider: "google-vertex",
+			id: "gemini-2.5-pro",
+			identity: classifyModel("google-vertex", "gemini-2.5-pro"),
+		} as unknown as Model<Api>;
+		// What a provider that reports usage while streaming (Gemini, Anthropic) holds when the guard trips.
+		const partial: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "google-vertex",
+			provider: "google-vertex",
+			model: "gemini-2.5-pro",
+			responseId: "resp-looping",
+			usage: {
+				input: 116_000,
+				output: 2_400,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 118_400,
+				cost: { input: 0.145, output: 0.024, cacheRead: 0, cacheWrite: 0, total: 0.169 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now() - 5_000,
+		};
+
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			void (async () => {
+				inner.push({ type: "start", partial });
+				await scheduler.wait(30);
+				inner.push({ type: "thinking_start", contentIndex: 0, partial });
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Checking the module.\n\n", partial });
+				await scheduler.wait(30);
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial });
+				inner.push({ type: "thinking_end", contentIndex: 0, content: "", partial });
+				inner.push({ type: "done", reason: "stop", message: partial });
+			})();
+			return inner;
+		});
+
+		const result = await guarded.result();
+		// The provider keeps writing to its output while it tears down.
+		partial.usage.output = 9_999;
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+		expect(result.usage.input).toBe(116_000);
+		expect(result.usage.output).toBe(2_400);
+		expect(result.usage.cost.total).toBe(0.169);
+		expect(result.timestamp).toBe(partial.timestamp);
+		expect(result.responseId).toBe("resp-looping");
+		expect(result.ttft).toBeGreaterThanOrEqual(25);
+		expect(result.duration).toBeGreaterThanOrEqual((result.ttft ?? 0) + 25);
+	});
 });
 
 describe("withThinkingLoopGuard (thinking after toolcall)", () => {

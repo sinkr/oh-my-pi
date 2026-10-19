@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Turns stopped for a thinking loop now keep the tokens and cost the provider had reported, the response id, the request's start time, and its time to first token and duration, instead of recording zero usage and no timing
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
