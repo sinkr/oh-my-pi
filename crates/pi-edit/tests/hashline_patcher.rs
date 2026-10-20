@@ -17,7 +17,7 @@ async fn patcher_apply_cases() {
 
 #[test]
 fn matcher_paths_accept_partial_sections_and_header_noise() {
-	let engine = HashlineEngine { enforce_seen_lines: false };
+	let engine = HashlineEngine { enforce_seen_lines: false, max_columns: 512 };
 	let inspected = engine.inspect(&ArgSnapshot {
 		input: Some(
 			"[one.ts#ABCD]\nPUT 1.=1:\n+one\n[*** Update File: dir with spaces/two.ts#1234]\nPUT \
@@ -94,6 +94,60 @@ fn streaming_preview_keeps_completed_section_when_trailing_header_arrives() {
 	);
 }
 
+#[tokio::test]
+async fn rejection_names_the_path_a_foreign_tag_was_issued_for() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	let worktree = workspace.write("wt/crates/a/mcp.rs", "worktree\n");
+	workspace.write("crates/a/mcp.rs", "parent\n");
+	let tag = workspace.snapshot("wt/crates/a/mcp.rs", "worktree\n", None);
+	let writer = common::DiskWriter::default();
+	let input = format!("[crates/a/mcp.rs#{tag}]\nPUT 1.=1:\n+changed\n");
+	let error = workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect_err("foreign tag must be rejected")
+		.to_string();
+	let origin = pi_edit::path_policy::canonical_key(&worktree);
+	assert!(
+		error.contains(&format!("Hash #{tag} was issued in this session for {}.", origin.display())),
+		"{error}"
+	);
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("crates/a/mcp.rs").as_deref(), Some("parent\n"));
+	assert_eq!(workspace.read("wt/crates/a/mcp.rs").as_deref(), Some("worktree\n"));
+}
+
+#[tokio::test]
+async fn recovered_rem_reports_authored_and_deleted_paths() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	let target = workspace.write("correct/target.ts", "const value = 1;\n");
+	let tag = workspace.snapshot("correct/target.ts", "const value = 1;\n", None);
+	let input = format!("[wrong/target.ts#{tag}]\nREM\n");
+	let outcome = workspace
+		.apply_json(&json!({ "input": input }), &common::DiskWriter::default())
+		.await
+		.expect("recovered delete");
+
+	assert!(!target.exists());
+	let deleted = pi_edit::path_policy::canonical_key(&target);
+	assert!(
+		outcome
+			.text
+			.contains(&format!("Deleted {}", deleted.display())),
+		"{}",
+		outcome.text
+	);
+	assert!(
+		outcome.text.contains(&format!(
+			"Warnings:\nPath \"wrong/target.ts\" does not exist; matched its filename and snapshot \
+			 tag #{tag} to {}",
+			deleted.display()
+		)),
+		"{}",
+		outcome.text
+	);
+}
+
 #[test]
 fn completed_preview_surfaces_stale_hash_error() {
 	let workspace = common::Workspace::new(EditMode::Hashline);
@@ -109,4 +163,52 @@ fn completed_preview_surfaces_stale_hash_error() {
 			.as_deref()
 			.is_some_and(|error| error.contains("not from this session"))
 	);
+}
+
+#[tokio::test]
+async fn file_ops_reject_a_tag_that_does_not_match_the_file() {
+	for op in ["REM", "MV b.txt"] {
+		for recorded in [false, true] {
+			let workspace = common::Workspace::new(EditMode::Hashline);
+			workspace.write("a.txt", "current\n");
+			let tag = if recorded {
+				workspace.snapshot("a.txt", "old\n", None)
+			} else {
+				"0000".to_owned()
+			};
+			assert_ne!(tag, pi_edit::store::file_hash("current\n"));
+			let writer = common::DiskWriter::default();
+			let error = workspace
+				.apply_json(&json!({ "input": format!("[a.txt#{tag}]\n{op}\n") }), &writer)
+				.await
+				.expect_err("a file op under a non-matching tag must be rejected")
+				.to_string();
+			let reason = if recorded {
+				"file changed between read and edit"
+			} else {
+				"not from this session"
+			};
+			assert!(error.contains(reason), "{op} recorded={recorded}: {error}");
+			assert!(writer.requests.lock().is_empty());
+			assert_eq!(workspace.read("a.txt").as_deref(), Some("current\n"));
+			assert_eq!(workspace.read("b.txt"), None);
+		}
+	}
+}
+
+#[tokio::test]
+async fn head_insert_still_applies_across_a_stale_tag() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("a.txt", "current\n");
+	let tag = workspace.snapshot("a.txt", "old\n", None);
+	let outcome = workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{tag}]\nPUT <1:\n+head\nMV b.txt\n") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("head insert is content-independent");
+	assert_eq!(workspace.read("a.txt"), None);
+	assert_eq!(workspace.read("b.txt").as_deref(), Some("head\ncurrent\n"));
+	assert!(outcome.text.contains("despite a stale snapshot tag"), "{}", outcome.text);
 }

@@ -1,14 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import {
-	getActiveProfile,
-	getAgentDir,
-	getProfileRootDir,
-	isEnoent,
-	logger,
-	stringifyYamlConfig,
-} from "@oh-my-pi/pi-utils";
+// Subpaths, not the `@oh-my-pi/pi-utils` barrel: the barrel loads the native
+// addon (file-lock), and key-hint formatting runs on addon-free CLI paths
+// (`omp --version`, help) through cli/command-help.ts.
+import { getActiveProfile, getAgentDir, getProfileRootDir } from "@oh-my-pi/pi-utils/dirs";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import { JSONC, YAML } from "bun";
+import { formatKeyHints } from "./key-hint-format";
 import {
 	type Keybinding,
 	type KeybindingDefinitions,
@@ -18,9 +18,6 @@ import {
 	TUI_KEYBINDINGS,
 	KeybindingsManager as TuiKeybindingsManager,
 } from "./keybindings";
-import type { ModifierName } from "./keys";
-import { SYMBOL_PRESETS, type SymbolKey } from "./theme/symbols";
-import { theme } from "./theme/theme";
 
 /**
  * Application-level keybindings (coding agent specific).
@@ -40,6 +37,8 @@ interface AppKeybindings {
 	"app.model.selectTemporary": true;
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
+	"app.ask.hide": true;
+	"app.approval.approve": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.retry": true;
@@ -59,10 +58,11 @@ interface AppKeybindings {
 	"app.session.rename": true;
 	"app.session.delete": true;
 	"app.session.deleteNoninvasive": true;
-	"app.tree.foldOrUp": true;
-	"app.tree.unfoldOrDown": true;
+	"app.tree.previousBranch": true;
+	"app.tree.nextBranch": true;
 	"app.plan.toggle": true;
 	"app.history.search": true;
+	"app.stt.pushToTalk": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
 }
@@ -139,6 +139,16 @@ export const KEYBINDINGS = {
 	"app.tools.toggleVisibility": {
 		defaultKeys: "ctrl+shift+o",
 		description: "Show or hide tool activity",
+	},
+	"app.ask.hide": {
+		defaultKeys: "alt+h",
+		description: "Hide or show a pending ask dialog",
+	},
+	"app.approval.approve": {
+		// A chord, not Enter: an Enter typed for the composer as the prompt appears must not approve.
+		// Ctrl+Q backs up Ctrl+Enter, which Windows Terminal cannot deliver (#1903).
+		defaultKeys: ["ctrl+enter", "ctrl+q"],
+		description: "Approve a pending tool call",
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",
@@ -224,13 +234,13 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+backspace",
 		description: "Delete session (non-invasive)",
 	},
-	"app.tree.foldOrUp": {
-		defaultKeys: ["ctrl+left", "alt+left"],
-		description: "Fold or move up",
+	"app.tree.previousBranch": {
+		defaultKeys: [],
+		description: "Jump to the previous branch in /tree",
 	},
-	"app.tree.unfoldOrDown": {
-		defaultKeys: ["ctrl+right", "alt+right"],
-		description: "Unfold or move down",
+	"app.tree.nextBranch": {
+		defaultKeys: [],
+		description: "Jump to the next branch in /tree",
 	},
 	"app.plan.toggle": {
 		defaultKeys: "alt+shift+p",
@@ -240,9 +250,13 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+r",
 		description: "Search history",
 	},
+	"app.stt.pushToTalk": {
+		defaultKeys: "space",
+		description: "Hold to record speech-to-text",
+	},
 	"app.stt.toggle": {
 		defaultKeys: [],
-		description: "Toggle speech-to-text (default gesture: hold Space)",
+		description: "Toggle speech-to-text recording",
 	},
 	"app.live.toggle": {
 		defaultKeys: "ctrl+l",
@@ -664,117 +678,7 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 	}
 }
 
-/**
- * Key hint formatting: every key shown to the user renders through
- * {@link formatKeyHint}, so a key reads the same everywhere in the UI.
- *
- * Keys resolve through the active theme's `key.*` symbols — words in the
- * ascii preset, keycap glyphs in unicode, icons in nerd — falling back to the
- * ascii words before a theme loads. Modifiers are platform-aware: macOS
- * keycaps are labelled ⌃ ⌥ ⌘ (`key.*Mac`), while other platforms keep
- * `Ctrl`/`Alt`/`Super`, since those glyphs name no key on a PC keyboard.
- */
-
-/**
- * Platform override for key-hint rendering; `undefined` resolves to the host
- * `process.platform`. Mirrors `setKittyProtocolActive` in the TUI keys module:
- * a single seam that keeps hint output deterministic in tests without mutating
- * the global `process.platform`.
- */
-let keyHintPlatformOverride: NodeJS.Platform | undefined;
-
-/** Pin the platform used to render modifier labels (test seam). */
-export function setKeyHintPlatform(platform: NodeJS.Platform | undefined): void {
-	keyHintPlatformOverride = platform;
-}
-
-/** Platform currently used for key-hint rendering. */
-export function keyHintPlatform(): NodeJS.Platform {
-	return keyHintPlatformOverride ?? process.platform;
-}
-
-/** Modifier → [generic symbol, macOS symbol], in display order (⌃⌥⇧⌘, as macOS menus list them). */
-const MODIFIER_SYMBOLS: Record<string, readonly [SymbolKey, SymbolKey] | undefined> = {
-	ctrl: ["key.ctrl", "key.ctrlMac"],
-	alt: ["key.alt", "key.altMac"],
-	shift: ["key.shift", "key.shift"],
-	super: ["key.super", "key.superMac"],
-};
-const KEY_SYMBOLS: Record<string, SymbolKey | undefined> = {
-	esc: "key.esc",
-	escape: "key.esc",
-	enter: "key.enter",
-	return: "key.enter",
-	space: "key.space",
-	tab: "key.tab",
-	backspace: "key.backspace",
-	delete: "key.delete",
-	up: "key.up",
-	down: "key.down",
-	left: "key.left",
-	right: "key.right",
-};
-
-/** Keys without a keycap glyph; spelled out in every preset. */
-const KEY_WORDS: Record<string, string | undefined> = {
-	home: "Home",
-	end: "End",
-	pageup: "PgUp",
-	pagedown: "PgDn",
-	insert: "Ins",
-};
-
-function keySymbol(key: SymbolKey): string {
-	return typeof theme === "undefined" ? SYMBOL_PRESETS.ascii[key] : theme.symbol(key);
-}
-
-const HAS_LETTER = /[A-Za-z0-9]/;
-
-/** A displayable key: a chord, or a bare modifier for "hold ⇧" style hints. */
-export type KeyName = KeyId | ModifierName;
-
-/**
- * Format one key for display: `"ctrl+shift+c"` → `⌃⇧C` (macOS) / `Ctrl+⇧C`,
- * `"escape"` → `⎋`, `"alt+up"` → `⌥↑` / `Alt+↑`, `"shift"` → `⇧`.
- * A glyph modifier is followed by the preset's `key.joiner` (nothing in
- * unicode, a space in nerd, whose icons blur together when adjacent); a word
- * modifier takes a `+`. Modifiers
- * render in canonical order whatever the binding says (`shift+ctrl+p` → `⌃⇧P`).
- * A bare letter stays lowercase (`q`) since `Q` would read as ⇧Q; in a chord it
- * is capitalized. Other keys are capitalized (`f5` → `F5`).
- */
-export function formatKeyHint(key: KeyName): string {
-	const mac = keyHintPlatform() === "darwin";
-	// A trailing `+` is the plus key itself (`+`, `ctrl++`), not a separator.
-	const parts = key.endsWith("+") ? [...key.slice(0, -1).split("+").slice(0, -1), "+"] : key.split("+");
-	const base = parts.pop()!;
-	let out = "";
-	for (const modifier in MODIFIER_SYMBOLS) {
-		if (!parts.includes(modifier)) continue;
-		const label = keySymbol(MODIFIER_SYMBOLS[modifier]![mac ? 1 : 0]);
-		out += HAS_LETTER.test(label) ? `${label}+` : label + keySymbol("key.joiner");
-	}
-	const lower = base.toLowerCase();
-	const modifier = MODIFIER_SYMBOLS[lower];
-	const symbol = KEY_SYMBOLS[lower];
-	if (modifier) out += keySymbol(modifier[mac ? 1 : 0]);
-	else if (symbol !== undefined) out += keySymbol(symbol);
-	else if (KEY_WORDS[lower] !== undefined) out += KEY_WORDS[lower];
-	else if (base.length === 1) out += parts.length === 0 ? base : base.toUpperCase();
-	else out += base[0]!.toUpperCase() + base.slice(1);
-	return out;
-}
-
-/** Format alternative keys as a slash-separated hint (`["f5", "alt+r"]` → `F5/⌥R`). */
-export function formatKeyHints(keys: KeyName | readonly KeyName[]): string {
-	return typeof keys === "string" ? formatKeyHint(keys) : keys.map(formatKeyHint).join("/");
-}
-
-/** Format a double-tap gesture: `←←` with glyphs, `Left Left` with words. */
-export function formatDoubleTap(key: KeyName): string {
-	const label = formatKeyHint(key);
-	return `${label}${HAS_LETTER.test(label) ? " " : keySymbol("key.joiner")}${label}`;
-}
+export * from "./key-hint-format";
 
 export type { Keybinding, KeybindingsConfig, KeyId };
 export { migrateKeybindingsConfigFile };

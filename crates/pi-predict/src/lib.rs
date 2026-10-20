@@ -11,9 +11,9 @@
 //! editor (TUI) ──JSONL/unix socket──► text-prediction daemon (Bun worker)
 //!                                        └─ TextPredictor (N-API, pi_natives::predict)
 //!                                             └─ Box<dyn Predictor> on an engine thread
-//!                                                  ├─ ngram::open   (`auto` off macOS)
+//!                                                  ├─ ngram::open   (`auto`)
 //!                                                  ├─ smollm::open  (SmolLM2-135M, opt-in)
-//!                                                  └─ apple::open   (NSSpellChecker, `auto` on macOS)
+//!                                                  └─ apple::open   (NSSpellChecker, macOS only)
 //! ```
 //!
 //! # Example
@@ -59,9 +59,9 @@ pub struct Config {
 	pub model_dir:      Option<PathBuf>,
 	/// Minimum confidence [`Predictor::complete`] returns; `None` = the
 	/// engine's tuned default. Evaluation passes `f32::NEG_INFINITY` to trace
-	/// the full curve. Internal policies that model what the user was shown
-	/// (`SmolLM`'s typed-past exclusion, the n-gram single-letter floor) keep
-	/// using the tuned default, so this override changes gating only.
+	/// the full curve. `SmolLM`'s typed-past exclusion, which models what the
+	/// user was shown, keeps using the tuned default, so this override changes
+	/// gating only.
 	pub show_threshold: Option<f32>,
 }
 
@@ -87,7 +87,7 @@ pub trait Predictor: Send {
 /// Engines implemented in this crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
-	/// Personal word n-gram + web prior; serves `auto` off macOS.
+	/// Personal word n-gram + web prior; serves `auto`.
 	Ngram,
 	/// SmolLM2-135M base model with token-healed, prefix-constrained decoding.
 	SmolLm,

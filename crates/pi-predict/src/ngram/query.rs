@@ -70,52 +70,48 @@ pub enum Pick {
 /// Query-local state reused across the prefixes of one word.
 pub struct QueryState {
 	/// `before` the memo was built for.
-	before:      String,
-	version:     u64,
-	/// Shortest prefix length asked about for this `before`: the client
-	/// never saw a ghost at shorter prefixes (its gate starts there).
-	first_asked: usize,
+	before:    String,
+	version:   u64,
 	/// Lowercased tail of `before` scanned by the prompt-local cache;
 	/// byte offsets match `before[window_at..]`.
-	window:      String,
-	window_at:   usize,
-	u:           String,
-	v:           String,
-	context:     Context,
+	window:    String,
+	window_at: usize,
+	u:         String,
+	v:         String,
+	context:   Context,
 	// Scratch.
-	cands:       Vec<Candidate>,
-	stamp:       Vec<u32>,
-	slot:        Vec<u32>,
-	epoch:       u32,
-	heap:        Vec<u32>,
-	top:         Vec<u32>,
-	tail:        String,
-	key_buf:     String,
-	cu:          String,
-	cv:          String,
+	cands:     Vec<Candidate>,
+	stamp:     Vec<u32>,
+	slot:      Vec<u32>,
+	epoch:     u32,
+	heap:      Vec<u32>,
+	top:       Vec<u32>,
+	tail:      String,
+	key_buf:   String,
+	cu:        String,
+	cv:        String,
 }
 
 impl Default for QueryState {
 	fn default() -> Self {
 		Self {
-			before:      String::new(),
-			version:     u64::MAX,
-			first_asked: usize::MAX,
-			window:      String::new(),
-			window_at:   0,
-			u:           String::new(),
-			v:           String::new(),
-			context:     Context { u: Slot::None, v: Slot::None },
-			cands:       Vec::new(),
-			stamp:       Vec::new(),
-			slot:        Vec::new(),
-			epoch:       0,
-			heap:        Vec::new(),
-			top:         Vec::new(),
-			tail:        String::new(),
-			key_buf:     String::new(),
-			cu:          String::new(),
-			cv:          String::new(),
+			before:    String::new(),
+			version:   u64::MAX,
+			window:    String::new(),
+			window_at: 0,
+			u:         String::new(),
+			v:         String::new(),
+			context:   Context { u: Slot::None, v: Slot::None },
+			cands:     Vec::new(),
+			stamp:     Vec::new(),
+			slot:      Vec::new(),
+			epoch:     0,
+			heap:      Vec::new(),
+			top:       Vec::new(),
+			tail:      String::new(),
+			key_buf:   String::new(),
+			cu:        String::new(),
+			cv:        String::new(),
 		}
 	}
 }
@@ -157,7 +153,6 @@ impl QueryState {
 		self.before.clear();
 		self.before.push_str(before);
 		self.version = model.version;
-		self.first_asked = usize::MAX;
 		self.context = context_before(before, before.len(), &mut self.u, &mut self.v);
 		let mut at = before.len().saturating_sub(model.params.cache_window);
 		while !before.is_char_boundary(at) {
@@ -175,14 +170,8 @@ impl QueryState {
 		}
 	}
 
-	/// Best completion of `prefix` after `before`, with its confidence and
-	/// the show threshold that applies to it.
-	pub fn complete(
-		&mut self,
-		model: &Model,
-		before: &str,
-		prefix: &str,
-	) -> Option<(String, f64, f32)> {
+	/// Best completion of `prefix` after `before`, with its confidence.
+	pub fn complete(&mut self, model: &Model, before: &str, prefix: &str) -> Option<(String, f64)> {
 		lowercase_into(prefix, &mut self.key_buf);
 		let k_total = prefix.chars().count();
 		if k_total == 0 || self.key_buf.chars().count() != k_total {
@@ -190,12 +179,10 @@ impl QueryState {
 		}
 		self.load(model, before);
 		let key = std::mem::take(&mut self.key_buf);
-		self.first_asked = self.first_asked.min(k_total);
 		let ranked = self.rank(model, &key, prefix);
-		let threshold = model.params.threshold_at(k_total, self.first_asked);
 		let out = ranked.and_then(|(pick, confidence)| {
 			let suffix = self.suffix(model, pick, prefix, &key);
-			(!suffix.is_empty()).then_some((suffix, confidence, threshold))
+			(!suffix.is_empty()).then_some((suffix, confidence))
 		});
 		self.key_buf = key;
 		out
@@ -314,7 +301,8 @@ impl QueryState {
 		let (lo, hi) = model.vocab.base_range(key);
 		let (wlo, whi) = model.web.words.range(key);
 
-		// Merge-join the history and web followers of `v` inside the prefix range.
+		// Merge-join the history and web followers of `v` inside the prefix
+		// range.
 		let (mut disc2, mut sum_pw, mut disc3) = (0.0f64, 0.0f64, 0.0f64);
 		let (mut a, a_end) = ctx
 			.followers
@@ -371,7 +359,8 @@ impl QueryState {
 				disc3 += (f64::from(self.cands[slot].c3) - p.d3).max(0.0);
 			}
 		}
-		// Unigram candidates: range top-k over base ids plus every overflow match.
+		// Unigram candidates: range top-k over base ids plus every overflow
+		// match.
 		self.top.clear();
 		model.top_k(lo, hi, p.top_k, &mut self.heap, &mut self.top);
 		for at in 0..self.top.len() {

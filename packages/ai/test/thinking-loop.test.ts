@@ -48,6 +48,12 @@ function nearDuplicateLoop(paragraphs: number): string {
 const OBSERVED_KIRO_CYCLE =
 	"% shipped. 100% delivered. 100% verified. 100% validated. 100% approved. 100% accepted. 100% merged. 100% deployed. 100% live. 100% operational. 100% successful. 100% excellent. 100% perfect. 100% final. 100% absolute. 100% total. 100% whole. 100% full. 100% entire. 100% complete. 100% done. 100% finished. 100";
 
+/** The prose prefix from the first thinking-block trace in issue #13679, up to
+ *  the point where the model began repeating punctuation. Real reasoning text
+ *  ahead of the run, so the test exercises the suffix check on a live tail. */
+const PUNCTUATION_RUN_PREFIX =
+	"10s: 1684 = both directions: uplink ~?? + downlink ~?? mixed ✓✓✓ — 10s downlink+uplink: 168/s ✓ consistent with 65+10 = 75/s + BAR storm to .68??";
+
 /** Genuinely distinct reasoning paragraphs — must never trip the detector. */
 function distinctReasoning(): string {
 	return [
@@ -230,6 +236,32 @@ function perFileTemplates(): string {
 		.join("\n\n");
 }
 
+/** A VRML scene drafted inside reasoning — the reported gemini-3.8-flash shape.
+ *  Per-part blocks share one keyword skeleton and differ only in numeric
+ *  literals, and the fence stays unclosed when the thought summary ends. */
+function vrmlDraft(parts: number): string {
+	const blocks = Array.from({ length: parts }, (_, i) =>
+		[
+			"    Transform {",
+			`      translation ${(i * 0.05).toFixed(2)} 0.1 ${(i % 2 ? -0.2 : 0.2).toFixed(1)}`,
+			"      children [",
+			"        Shape {",
+			"          appearance Appearance {",
+			"            material Material {",
+			`              diffuseColor 0.${i % 10} 0.${(i + 3) % 10} 0.${(i + 6) % 10}`,
+			"            }",
+			"          }",
+			"          geometry Sphere {",
+			`            radius 0.0${(i % 9) + 1}`,
+			"          }",
+			"        }",
+			"      ]",
+			"    },",
+		].join("\n"),
+	);
+	return `\`\`\`wrl\n#VRML V2.0 utf8\nTransform {\n  children [\n${blocks.join("\n")}\n\n`;
+}
+
 describe("ThinkingLoopDetector", () => {
 	test("trips on a tight near-duplicate paragraph loop via the trigram path", () => {
 		// High word-trigram overlap: the cluster check claims it before the lexical
@@ -298,16 +330,69 @@ describe("ThinkingLoopDetector", () => {
 	});
 
 	test("does not trip on legitimate repetitive numeric output", () => {
-		// A zero-page hexdump is highly repetitive but legitimate: a unit with no
-		// letter or pictograph must never count as a loop.
+		// Zero-page hexdumps and zero-padded literals are highly repetitive but
+		// legitimate: a unit of only digits and whitespace never counts as a loop,
+		// even past the punctuation floor.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("00 ".repeat(200))).toBeNull();
+		expect(detector.push(`0x${"0".repeat(1100)}`)).toBeNull();
+	});
+
+	test("does not trip on structurally repetitive code that differs only in literals", () => {
+		// Numbers are dropped during normalization, so code chunks reduce to the same
+		// keyword skeleton; code lines must stay out of the prose heuristics.
+		expect(feed(vrmlDraft(24), 97)).toBeNull();
+	});
+
+	test("judges a prose loop after an unclosed code draft as if the code were absent", () => {
+		// Gemini thought summaries often end inside an open fence; later prose must
+		// stay guarded rather than being swallowed as fenced code.
+		const loop = nearDuplicateLoop(12);
+		const detail = feed(loop);
+		expect(detail).not.toBeNull();
+		expect(feed(`${vrmlDraft(8)}${loop}`)).toBe(detail);
 	});
 
 	test("does not trip on short requested repetitive text", () => {
 		// Below the repeated-char floor: a brief on-purpose repeat is not a loop.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("🌊 ".repeat(26))).toBeNull();
+	});
+
+	test("trips on a punctuation-only runaway with no letter or emoji", () => {
+		// Issue #13679: a stuck local model emitted `?!?!?!...` in a thinking block.
+		// The unit carries neither a letter nor an emoji, so the guard's letter gate
+		// never fired and the turn ran until the provider's output limit. Replayed
+		// through the detector the way the reporter's transcript arrived, in
+		// four-character deltas, to keep the streaming path honest.
+		const payload = `${PUNCTUATION_RUN_PREFIX}${"?!".repeat(2000)}`;
+		expect(feed(payload, 4)).toContain("back-to-back");
+	});
+
+	test("trips on a long dingbat-only runaway", () => {
+		// Second trace from the same report: a run of U+2713 CHECK MARK. It is in
+		// Dingbats but not Extended_Pictographic, so it was invisible to the old
+		// gate for the same reason `?!` was.
+		expect(feed(`${PUNCTUATION_RUN_PREFIX}${"✓".repeat(2000)}`, 4)).toContain("back-to-back");
+	});
+
+	test("trips on a space-separated punctuation runaway", () => {
+		expect(feed(`${PUNCTUATION_RUN_PREFIX}${"?! ".repeat(800)}`, 4)).toContain("back-to-back");
+	});
+
+	test("does not trip on a punctuation run below the repeated-char floor", () => {
+		// Short separators are ordinary output. 800 repeated characters stays under
+		// the 1024 floor, so a brief burst of `?!` is left alone.
+		const detector = new ThinkingLoopDetector();
+		expect(detector.push(`${PUNCTUATION_RUN_PREFIX}${"?!".repeat(400)}`)).toBeNull();
+	});
+
+	test("does not trip on whitespace-heavy separators", () => {
+		// Alignment padding, table gutters, and indented diffs repeat whitespace
+		// freely at length. Those units are excluded outright, so the punctuation
+		// path cannot reach them.
+		const detector = new ThinkingLoopDetector();
+		expect(detector.push(`${PUNCTUATION_RUN_PREFIX}${"  ".repeat(2000)}`)).toBeNull();
 	});
 });
 

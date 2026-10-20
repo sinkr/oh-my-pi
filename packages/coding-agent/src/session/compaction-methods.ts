@@ -13,7 +13,7 @@ export const COMPACTION_METHOD_CHOICES = [
 		value: "remote",
 		label: "Server compaction",
 		description:
-			"Use provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta) when the active route supports it",
+			"Use provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta, including on Bedrock) when the active route supports it",
 	},
 	{
 		value: "snapcompact",
@@ -113,12 +113,15 @@ export function canUseRemoteCompaction(model: Model | null | undefined, settings
  * local (snapcompact/shake) — local methods are effectively instant, so there
  * is nothing to speculate. Shared by the maintenance loop's speculation gate
  * and the status line's annotated context gauge (speculation marker).
+ * `skipRemote` passes over native compaction, e.g. after it failed for good.
  */
 export function resolveSpeculationMethod(
 	model: Model | null | undefined,
 	settings: CompactionSettings,
+	{ skipRemote = false }: { skipRemote?: boolean } = {},
 ): "remote" | "handoff" | "soft" | undefined {
 	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
+		if (skipRemote && candidate === "remote") continue;
 		const available =
 			candidate === "remote"
 				? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))

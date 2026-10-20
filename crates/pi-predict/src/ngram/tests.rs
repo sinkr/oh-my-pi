@@ -127,9 +127,6 @@ fn single_letters_complete_from_context_but_finished_words_stay_bare() {
 	observe_times(engine.as_mut(), "can you help me figure out why the build fails", 3);
 	observe_times(engine.as_mut(), "I need to figure out the release notes", 2);
 	assert_eq!(suffix(engine.as_mut(), "Can you help me figure ", "o").as_deref(), Some("ut"));
-	// The single-letter ghost survives the switch to the two-letter threshold.
-	assert_eq!(suffix(engine.as_mut(), "Can you help me figure ", "ou").as_deref(), Some("t"));
-	// `a` is a word of its own: no ghost after the single letter.
-	assert_eq!(suffix(engine.as_mut(), "can you give me ", "a"), None);
+	// `I` is a word of its own: no ghost after the single letter.
 	assert_eq!(suffix(engine.as_mut(), "", "I"), None);
 }

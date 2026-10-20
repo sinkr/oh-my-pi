@@ -1,9 +1,9 @@
 //! Portable CPU decoder: 8-bit block-quantized weights, f32 activations.
 //!
 //! Batch-1 decoding reads every weight once per token, so it is bound by
-//! memory bandwidth: 8-bit blocks (one f32 scale per 32 weights) cut the
-//! traffic 4× against f32 while activations and accumulation stay f32 (no
-//! activation quantization).
+//! memory bandwidth: the file's `Q8_0` blocks (one scale per 32 weights,
+//! widened to f32 at load) cut the traffic 4× against f32 while activations
+//! and accumulation stay f32 (no activation quantization).
 //!
 //! A forward pass is ~250 dependent steps of a few microseconds each, far
 //! below what a work-stealing pool can hand out profitably (its idle workers
@@ -14,15 +14,16 @@
 //! write disjoint ranges of shared buffers ([`Shared`]) between barriers.
 
 use std::{
+	io::{Read, Seek},
 	marker::PhantomData,
 	ops::Range,
 	sync::atomic::{AtomicUsize, Ordering},
 };
 
-use super::config::{Decoder, KvRow, LlamaConfig, TensorSource};
-
-/// Weights per quantization block.
-const BLOCK: usize = 32;
+use super::{
+	config::{Decoder, KvRow, LlamaConfig, LlamaWeights, Proj},
+	gguf::{Q8_BLOCK as BLOCK, Q8Blocks},
+};
 
 /// Row-major matrix of 8-bit blocks with one f32 scale per block.
 struct Q8 {
@@ -33,19 +34,9 @@ struct Q8 {
 }
 
 impl Q8 {
-	fn quantize(values: &[f32], rows: usize, cols: usize) -> Self {
-		debug_assert_eq!(values.len(), rows * cols);
-		let (blocks, _) = values.as_chunks::<BLOCK>();
-		let mut quants = Vec::with_capacity(blocks.len());
-		let mut scales = Vec::with_capacity(blocks.len());
-		for block in blocks {
-			let amax = block.iter().fold(0f32, |m, v| m.max(v.abs()));
-			let scale = amax / 127.0;
-			let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-			quants.push(block.map(|v| (v * inv).round().clamp(-127.0, 127.0) as i8));
-			scales.push(scale);
-		}
-		Self { rows, cols, quants, scales }
+	fn new(matrix: &Q8Blocks) -> Self {
+		let (scales, quants) = matrix.blocks().unzip();
+		Self { rows: matrix.rows, cols: matrix.cols, quants, scales }
 	}
 
 	const fn blocks_per_row(&self) -> usize {
@@ -54,6 +45,10 @@ impl Q8 {
 
 	/// `row_j · x`.
 	#[inline]
+	#[allow(
+		clippy::suboptimal_flops,
+		reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+	)]
 	fn dot(&self, j: usize, x: &[f32]) -> f32 {
 		let per = self.blocks_per_row();
 		let quants = &self.quants[j * per..(j + 1) * per];
@@ -66,11 +61,11 @@ impl Q8 {
 			let mut block = [0f32; 8];
 			for (qc, xc) in q.as_chunks::<8>().0.iter().zip(x.as_chunks::<8>().0) {
 				for k in 0..8 {
-					block[k] = f32::mul_add(f32::from(qc[k]), xc[k], block[k]);
+					block[k] += f32::from(qc[k]) * xc[k];
 				}
 			}
 			for k in 0..8 {
-				acc[k] = f32::mul_add(scale, block[k], acc[k]);
+				acc[k] += scale * block[k];
 			}
 		}
 		acc.iter().sum()
@@ -89,19 +84,28 @@ impl Q8 {
 
 /// `a · b` with lane-wise accumulators.
 #[inline]
+#[allow(
+	clippy::suboptimal_flops,
+	reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+)]
 fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
 	let mut acc = [0f32; 8];
 	for (x, y) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
 		for k in 0..8 {
-			acc[k] = f32::mul_add(x[k], y[k], acc[k]);
+			acc[k] += x[k] * y[k];
 		}
 	}
 	acc.iter().sum()
 }
 
 /// `a · b[t]` for four rows of `b` at once: independent accumulator chains
-/// keep the FMA pipes busy (the multi-token path is compute-bound).
+/// keep the multiply and add pipes busy (the multi-token path is
+/// compute-bound).
 #[inline]
+#[allow(
+	clippy::suboptimal_flops,
+	reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+)]
 fn dot4(a: &[f32], b: [&[f32]; 4]) -> [f32; 4] {
 	let (a, _) = a.as_chunks::<8>();
 	let b = b.map(|row| row.as_chunks::<8>().0);
@@ -110,7 +114,7 @@ fn dot4(a: &[f32], b: [&[f32]; 4]) -> [f32; 4] {
 	for (i, x) in a.iter().enumerate() {
 		for (acc, row) in acc.iter_mut().zip(&b) {
 			for k in 0..8 {
-				acc[k] = f32::mul_add(x[k], row[i][k], acc[k]);
+				acc[k] += x[k] * row[i][k];
 			}
 		}
 	}
@@ -284,14 +288,18 @@ fn rms_norm(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
 
 /// Non-interleaved `RoPE` (`x·cos + rotate_half(x)·sin`) on every head of one
 /// token.
+#[allow(
+	clippy::suboptimal_flops,
+	reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+)]
 fn rope(x: &mut [f32], head_dim: usize, cos: &[f32], sin: &[f32]) {
 	let half = head_dim / 2;
 	for head in x.chunks_mut(head_dim) {
 		let (a, b) = head.split_at_mut(half);
 		for i in 0..half {
 			let (x1, x2) = (a[i], b[i]);
-			a[i] = f32::mul_add(x2, -sin[i], x1 * cos[i]);
-			b[i] = f32::mul_add(x1, sin[i], x2 * cos[i]);
+			a[i] = x1 * cos[i] - x2 * sin[i];
+			b[i] = x1 * sin[i] + x2 * cos[i];
 		}
 	}
 }
@@ -328,40 +336,30 @@ struct Buffers<'a> {
 }
 
 impl CpuLlama {
-	/// Quantize the weights from `source` and start the worker pool.
+	/// Load `weights` and start the worker pool.
 	///
 	/// # Errors
-	/// Fails for missing or mis-shaped tensors and when no worker thread can
-	/// be spawned.
-	pub fn load(config: LlamaConfig, source: &mut impl TensorSource) -> anyhow::Result<Self> {
-		config.validate()?;
+	/// Fails for missing, mistyped, or mis-shaped tensors and when no worker
+	/// thread can be spawned.
+	pub fn load(mut weights: LlamaWeights<impl Read + Seek>) -> anyhow::Result<Self> {
+		let config = weights.config().clone();
 		let c = &config;
-		let (h, inter) = (c.hidden_size, c.intermediate_size);
-		let kv = c.num_key_value_heads * c.head_dim();
-		let embed = Q8::quantize(
-			&source.expect("model.embed_tokens.weight", &[c.vocab_size, h])?,
-			c.vocab_size,
-			h,
-		);
+		let embed = Q8::new(&weights.embedding()?);
 		let mut layers = Vec::with_capacity(c.num_hidden_layers);
 		for i in 0..c.num_hidden_layers {
-			let p = format!("model.layers.{i}");
-			let mut w =
-				|name: &str, shape: &[usize]| source.expect(&format!("{p}.{name}.weight"), shape);
-			let mut qkv = w("self_attn.q_proj", &[h, h])?;
-			qkv.extend(w("self_attn.k_proj", &[kv, h])?);
-			qkv.extend(w("self_attn.v_proj", &[kv, h])?);
+			let (attn_norm, mlp_norm) = weights.norms(i)?;
+			let mut project = |parts: &[Proj]| weights.stacked(i, parts).map(|m| Q8::new(&m));
 			layers.push(Layer {
-				attn_norm: w("input_layernorm", &[h])?,
-				qkv:       Q8::quantize(&qkv, h + 2 * kv, h),
-				out:       Q8::quantize(&w("self_attn.o_proj", &[h, h])?, h, h),
-				mlp_norm:  w("post_attention_layernorm", &[h])?,
-				gate:      Q8::quantize(&w("mlp.gate_proj", &[inter, h])?, inter, h),
-				up:        Q8::quantize(&w("mlp.up_proj", &[inter, h])?, inter, h),
-				down:      Q8::quantize(&w("mlp.down_proj", &[h, inter])?, h, inter),
+				attn_norm,
+				qkv: project(&[Proj::Q, Proj::K, Proj::V])?,
+				out: project(&[Proj::Out])?,
+				mlp_norm,
+				gate: project(&[Proj::Gate])?,
+				up: project(&[Proj::Up])?,
+				down: project(&[Proj::Down])?,
 			});
 		}
-		let norm = source.expect("model.norm.weight", &[h])?;
+		let norm = weights.output_norm()?;
 		let (cos, sin) = c.rope_tables();
 		// Batch-1 mat-vecs saturate memory bandwidth well before all cores,
 		// and every barrier waits for the slowest worker (efficiency cores).
@@ -526,10 +524,14 @@ impl Weights {
 					sum += *s;
 				}
 				out.fill(0.0);
+				#[allow(
+					clippy::suboptimal_flops,
+					reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+				)]
 				for (&p, v) in scores.iter().zip(values.chunks_exact(kv_width)) {
 					let w = p / sum;
 					for (o, &vv) in out.iter_mut().zip(&v[offset..offset + head_dim]) {
-						*o = w.mul_add(vv, *o);
+						*o += w * vv;
 					}
 				}
 			}
@@ -691,13 +693,12 @@ impl Decoder for CpuLlama {
 #[cfg(test)]
 pub(super) mod tests {
 	use super::{
-		super::config::tests::{RandomWeights, tiny_config},
+		super::config::tests::{random_weights, tiny_config},
 		*,
 	};
 
 	pub fn random(vocab: usize, seed: u64) -> CpuLlama {
-		let config = tiny_config(vocab);
-		CpuLlama::load(config.clone(), &mut RandomWeights::new(&config, seed)).expect("random llama")
+		CpuLlama::load(random_weights(&tiny_config(vocab), seed)).expect("random llama")
 	}
 
 	fn close(a: &[f32], b: &[f32]) -> bool {

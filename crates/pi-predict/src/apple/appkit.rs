@@ -5,17 +5,19 @@
 //! autocorrect in `pi_natives::spelling`) submits work to this lazily spawned,
 //! dedicated thread. Ranges are UTF-16 offsets, the unit both `NSString` and
 //! JavaScript strings index by.
+//!
+//! `NSSpellChecker` talks to the spelling service over XPC and needs no
+//! `NSApplication`. Never initialize one here (`NSApplicationLoad`,
+//! `NSApplication.sharedApplication`): that checks the process in with
+//! `LaunchServices`, which attributes it to the host terminal and adds a
+//! duplicate Dock tile per session (issue #12491).
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, bail};
-use objc2::{
-	class, msg_send,
-	rc::Retained,
-	runtime::{AnyObject, Bool},
-};
+use anyhow::Context;
+use objc2::rc::Retained;
 use objc2_app_kit::NSSpellChecker;
-use objc2_foundation::{NSArray, NSBundle, NSRange, NSString, NSTextCheckingType};
+use objc2_foundation::{NSArray, NSRange, NSString, NSTextCheckingType};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
@@ -31,70 +33,8 @@ static SPELLING_THREAD: LazyLock<flume::Sender<Job>> = LazyLock::new(|| {
 		.expect("failed to spawn the native spelling thread");
 	sender
 });
-static APP_KIT_LOADED: LazyLock<bool> = LazyLock::new(|| {
-	keep_process_background_only();
-	// SAFETY: AppKit documents `NSApplicationLoad` as process-global and
-	// idempotent; `LazyLock` guarantees this process calls it at most once.
-	unsafe { NSApplicationLoad() }
-});
 const NS_NOT_FOUND: usize = isize::MAX as usize;
 const THREAD_STOPPED: &str = "native spelling thread stopped";
-/// `NSApplicationActivationPolicyProhibited`.
-const ACTIVATION_POLICY_PROHIBITED: isize = 2;
-
-#[link(name = "AppKit", kind = "framework")]
-unsafe extern "C" {
-	fn NSApplicationLoad() -> bool;
-	/// The shared `NSApplication`; nil until something creates it.
-	static NSApp: *mut AnyObject;
-}
-
-/// Makes an unbundled process background-only before `AppKit` registers it
-/// with the window server.
-///
-/// An unbundled process like omp registers as a regular application, so each
-/// session that checked spelling would gain a Dock icon until it exited (the
-/// terminal's icon, through the inherited `__CFBundleIdentifier`). Bundled
-/// hosts, such as a GUI app embedding the SDK, keep their own policy even
-/// when they check spelling before creating their `NSApplication`, and so
-/// does an unbundled host that already created one.
-fn keep_process_background_only() {
-	if !is_unbundled_executable() {
-		return;
-	}
-	// SAFETY: Reading AppKit's `NSApp` global; it is written once, by the
-	// first `sharedApplication` call.
-	if !unsafe { NSApp }.is_null() {
-		return;
-	}
-	// SAFETY: `sharedApplication` takes no arguments and returns the shared
-	// instance; `setActivationPolicy:` takes an `NSInteger` and returns `BOOL`.
-	// Both are invoked before this process runs any AppKit event loop.
-	unsafe {
-		let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-		let _: Bool = msg_send![app, setActivationPolicy: ACTIVATION_POLICY_PROHIBITED];
-	}
-}
-
-/// Whether the executable has no bundle of its own.
-///
-/// Foundation treats the directory holding an unbundled executable as its
-/// main bundle; a bundled executable lives inside its bundle, such as
-/// `Name.app/Contents/MacOS/`. Anything that cannot be resolved counts as
-/// bundled, so an unknown host keeps its policy.
-fn is_unbundled_executable() -> bool {
-	let bundle = NSBundle::mainBundle();
-	let executable_dir = bundle
-		.executableURL()
-		.and_then(|executable| executable.URLByDeletingLastPathComponent())
-		.and_then(|directory| directory.URLByStandardizingPath())
-		.and_then(|directory| directory.path());
-	let bundle_dir = bundle
-		.bundleURL()
-		.URLByStandardizingPath()
-		.and_then(|directory| directory.path());
-	matches!((executable_dir, bundle_dir), (Some(executable), Some(bundle)) if executable == bundle)
-}
 
 /// A misspelled span in UTF-16 code units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,13 +45,10 @@ pub struct SpellingRange {
 	pub length: u32,
 }
 
-fn checker() -> anyhow::Result<Retained<NSSpellChecker>> {
-	if !*APP_KIT_LOADED {
-		bail!("failed to initialize AppKit");
-	}
+fn checker() -> Retained<NSSpellChecker> {
 	let checker = NSSpellChecker::sharedSpellChecker();
 	checker.setAutomaticallyIdentifiesLanguages(true);
-	Ok(checker)
+	checker
 }
 
 fn submit<T: Send + 'static>(
@@ -152,15 +89,6 @@ pub fn run_blocking<T: Send + 'static>(
 		.map_err(|_| anyhow::anyhow!(THREAD_STOPPED))?
 }
 
-/// Fail unless `AppKit` and the shared spell checker are usable.
-/// Call on the spelling thread.
-///
-/// # Errors
-/// Returns an error when `AppKit` cannot be initialized.
-pub fn ensure_available() -> anyhow::Result<()> {
-	checker().map(|_| ())
-}
-
 fn ns_range(start: u32, length: u32) -> anyhow::Result<NSRange> {
 	Ok(NSRange {
 		location: usize::try_from(start).context("spelling range start is too large")?,
@@ -171,9 +99,9 @@ fn ns_range(start: u32, length: u32) -> anyhow::Result<NSRange> {
 /// Every misspelled word in `text`. Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn check(text: &str) -> anyhow::Result<Vec<SpellingRange>> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let full = NSRange { location: 0, length: text.length() };
 	// `checkString:...` honors `automaticallyIdentifiesLanguages`, selecting
@@ -214,9 +142,7 @@ pub fn check(text: &str) -> anyhow::Result<Vec<SpellingRange>> {
 }
 
 fn strings(values: Option<Retained<NSArray<NSString>>>) -> Vec<String> {
-	values
-		.map(|values| values.iter().map(|value| value.to_string()).collect())
-		.unwrap_or_default()
+	values.map_or_default(|values| values.iter().map(|value| value.to_string()).collect())
 }
 
 /// Language macOS identifies for a word range, honoring automatic language
@@ -232,9 +158,9 @@ fn word_language(checker: &NSSpellChecker, text: &NSString, range: NSRange) -> R
 /// Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn completions(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<String>> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let range = ns_range(start, length)?;
 	let language = word_language(&checker, &text, range);
@@ -251,9 +177,9 @@ pub fn completions(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<St
 /// language macOS identifies for it. Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn is_known_word(text: &str, start: u32, length: u32) -> anyhow::Result<bool> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let range = ns_range(start, length)?;
 	let language = word_language(&checker, &text, range);
@@ -277,9 +203,9 @@ pub fn is_known_word(text: &str, start: u32, length: u32) -> anyhow::Result<bool
 /// Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn guesses(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<String>> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let range = ns_range(start, length)?;
 	let language = word_language(&checker, &text, range);
@@ -296,9 +222,9 @@ pub fn guesses(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<String
 /// if it is confident. Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn correction(text: &str, start: u32, length: u32) -> anyhow::Result<Option<String>> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let range = ns_range(start, length)?;
 	let language = word_language(&checker, &text, range);

@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { factRecall, formatContext, recall, recallEnhanced } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
+import { invalidate } from "@oh-my-pi/pi-mnemopi/core/beam/store";
 import type { BeamMemoryState } from "@oh-my-pi/pi-mnemopi/core/beam/types";
+import { currentLoopPhase } from "@oh-my-pi/pi-utils";
 
 type TestBeam = BeamMemoryState & { close(): void };
 
@@ -124,6 +126,60 @@ describe("beam recall free functions", () => {
 			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, confidence) VALUES ('noise', 's1', 'entity', 'fact', 'A predisposition to word games.', 1)",
 		);
 		expect(factRecall(beam, "redis", 5)).toEqual([]);
+	});
+
+	it("reports its synchronous ranking to the loop watchdog as mnemopi.recall", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "build", "The build succeeded.");
+
+		const query = beam.db.query.bind(beam.db);
+		const phases: (string | undefined)[] = [];
+		const spy = spyOn(beam.db, "query").mockImplementation(((...args: Parameters<typeof beam.db.query>) => {
+			phases.push(currentLoopPhase());
+			return query(...args);
+		}) as typeof beam.db.query);
+		try {
+			await recall(beam, "build", 5, { queryEmbedding: null });
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(phases.length).toBeGreaterThan(0);
+		expect(phases.every(phase => phase === "mnemopi.recall")).toBe(true);
+		expect(currentLoopPhase()).toBeUndefined();
+	});
+
+	it("labels every default-linear enhanced recall-count update with facts included", async () => {
+		const beam = makeBeam();
+		beam.config.polyphonicRecall = false;
+		beam.config.enhancedRecall = false;
+		insertWorking(beam, "build", "The build succeeded.");
+		insertEpisodic(beam, "build-runbook", "The build rollback plan is in the runbook.");
+		beam.db.run(
+			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, confidence) VALUES ('build-fact', 's1', 'build', 'status', 'succeeded', 1)",
+		);
+		const run = beam.db.run.bind(beam.db);
+		const phases: (string | undefined)[] = [];
+		const spy = spyOn(beam.db, "run").mockImplementation(((sql: string, ...params: unknown[]) => {
+			phases.push(currentLoopPhase());
+			return run(sql, ...(params as []));
+		}) as typeof beam.db.run);
+		try {
+			const results = await recallEnhanced(beam, "build", 5, {
+				includeFacts: true,
+				queryEmbedding: null,
+				useCache: false,
+			});
+			expect(results.map(result => result.id)).toContain("build");
+			expect(results.map(result => result.id)).toContain("build-runbook");
+			expect(results.some(result => result.tier_label === "fact")).toBe(true);
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(phases.length).toBeGreaterThan(0);
+		expect(phases.every(phase => phase === "mnemopi.recall")).toBe(true);
+		expect(currentLoopPhase()).toBeUndefined();
 	});
 
 	it("keeps compound synonym aliases and queried identifiers intact", async () => {
@@ -638,5 +694,35 @@ describe("beam recall free functions", () => {
 		const fullHit = full.find(row => row.id === "wm-cap");
 		expect(fullHit?.content).toBe(long);
 		expect(fullHit?.truncated).toBe(false);
+	});
+});
+
+describe("fact recall respects source lifecycle", () => {
+	it("hides a fact once its source row is superseded or expired, keeps sourceless facts visible", () => {
+		const beam = makeBeam();
+		const stale = new Date(Date.now() - 60_000).toISOString();
+		const insertFact = (factId: string, object: string, sourceMsgId: string | null): void => {
+			beam.db.run(
+				"INSERT INTO facts (fact_id, session_id, subject, predicate, object, timestamp, confidence, source_msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+				[factId, beam.sessionId, "release process", "uses", object, "2026-05-30T00:00:00.000Z", 0.8, sourceMsgId],
+			);
+		};
+
+		insertWorking(beam, "src-live", "release process uses canary", { importance: 0.6 });
+		insertFact("fact-live", "canary", "src-live");
+		insertWorking(beam, "src-expired", "release process uses bluegreen", { importance: 0.6 });
+		beam.db.run("UPDATE working_memory SET valid_until = ? WHERE id = ?", [stale, "src-expired"]);
+		insertFact("fact-expired", "bluegreen", "src-expired");
+		insertFact("fact-orphan", "orphan", null);
+
+		const before = factRecall(beam, "release process uses", 10).map(row => row.fact_id);
+		expect(before).toContain("fact-live");
+		expect(before).toContain("fact-orphan");
+		expect(before).not.toContain("fact-expired");
+
+		expect(invalidate(beam, "src-live", "src-live-v2")).toBe(true);
+		const after = factRecall(beam, "release process uses", 10).map(row => row.fact_id);
+		expect(after).not.toContain("fact-live");
+		expect(after).toContain("fact-orphan");
 	});
 });
