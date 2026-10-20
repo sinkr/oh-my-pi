@@ -441,6 +441,8 @@ describe("builtin-defaults rule provider", () => {
 			'const KINDS = new Set([/* categories * kept together */ "a", "b"]);',
 			'const CLOSERS = new Map([["close", "]"]]);',
 			'const SIZES = new Map([["small", 1] as const, ["large", 2] as const]);',
+			'const KINDS = new Set(["text", "json"] as const);',
+			'const KEYS = new Set(["topP", "topK"] as const satisfies readonly (keyof StreamOptions)[]);',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
 
@@ -458,6 +460,10 @@ describe("builtin-defaults rule provider", () => {
 			'const counts = new Map([["known", 1], ...runtimeEntries]);',
 			// A table filling a 1000-character line is not small; bailing there keeps streaming one cheap.
 			`const SCHEMAS = new Map([["schema", "${"x".repeat(1000)}"]]);`,
+			// A literal array that is only the input to a computed argument.
+			'const known = new Map([["known", 1] as const].filter(predicate));',
+			'const known = new Map([["known", 1]].filter(predicate));',
+			'const kinds = new Set(["a", "b"].map(normalize));',
 		];
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 	});
