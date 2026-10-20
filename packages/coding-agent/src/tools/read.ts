@@ -2404,28 +2404,29 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						const prefixReserve = Math.min(lineCount * prefixWidth, Math.floor(threshold / 2));
 						return Math.min(scaled, threshold - prefixReserve);
 					};
+					const collectWindow = async (
+						firstLine: number,
+						lineCount: number,
+						maxBytes: number,
+						selectedLimit: number,
+					) =>
+						buffered
+							? collectLineWindowFromBuffer(buffered, firstLine, lineCount, maxBytes, selectedLimit)
+							: await streamLinesFromFile(
+									absolutePath,
+									firstLine,
+									lineCount,
+									maxBytes,
+									selectedLimit,
+									undefined,
+									{
+										stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
+										seek: tailSeekTo?.(firstLine),
+									},
+								);
 					let maxBytesForRead = budgetFor(startLine, maxLinesToCollect);
 
-					let lineWindow = buffered
-						? collectLineWindowFromBuffer(
-								buffered,
-								startLine,
-								maxLinesToCollect,
-								maxBytesForRead,
-								selectedLineLimit,
-							)
-						: await streamLinesFromFile(
-								absolutePath,
-								startLine,
-								maxLinesToCollect,
-								maxBytesForRead,
-								selectedLineLimit,
-								undefined, // plain-file read: deterministic and fast, never abort mid-read
-								{
-									stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
-									seek: tailSeekTo?.(startLine),
-								},
-							);
+					let lineWindow = await collectWindow(startLine, maxLinesToCollect, maxBytesForRead, selectedLineLimit);
 
 					// Leading context is optional padding. If the byte budget stopped
 					// before any requested line, retry from the requested start so an
@@ -2437,26 +2438,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						maxLinesToCollect = Math.min(effectiveLimit + trailingContext, DEFAULT_MAX_LINES);
 						selectedLineLimit = effectiveLimit + trailingContext;
 						maxBytesForRead = budgetFor(startLine, maxLinesToCollect);
-						lineWindow = buffered
-							? collectLineWindowFromBuffer(
-									buffered,
-									startLine,
-									maxLinesToCollect,
-									maxBytesForRead,
-									selectedLineLimit,
-								)
-							: await streamLinesFromFile(
-									absolutePath,
-									startLine,
-									maxLinesToCollect,
-									maxBytesForRead,
-									selectedLineLimit,
-									undefined,
-									{
-										stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
-										seek: tailSeekTo?.(startLine),
-									},
-								);
+						lineWindow = await collectWindow(startLine, maxLinesToCollect, maxBytesForRead, selectedLineLimit);
 					}
 
 					const {

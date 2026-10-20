@@ -16,7 +16,7 @@ function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 }
 
 function createSession(cwd: string): ToolSession {
-	const settings = Settings.isolated({ "read.summarize.enabled": false } as never);
+	const settings = Settings.isolated({ "read.summarize.enabled": false });
 	return {
 		cwd,
 		hasUI: false,
