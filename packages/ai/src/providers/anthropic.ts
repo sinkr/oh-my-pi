@@ -993,12 +993,21 @@ type AnthropicToolResultContent =
 	| Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }>;
 
 /**
- * Convert content blocks to Anthropic API format
+ * Convert content blocks to Anthropic API format.
+ *
+ * Inline media this path cannot send as an `image` block (video, PDF, HEIC, …)
+ * fails the request when `rejectUnsupportedMedia` is set, so the turn that
+ * attached it errors instead of being answered as if nothing were attached.
+ * Elsewhere it keeps its `[unsupported image: …]` stub: an older turn has
+ * already been answered, failing on it would fail every later request of the
+ * conversation, and changing the stub's bytes would break the replayed prefix
+ * that signed thinking is bound to.
  */
 function convertContentBlocks(
 	content: (TextContent | ImageContent)[],
-	supportsImages = true,
+	options: { supportsImages: boolean; rejectUnsupportedMedia?: boolean },
 ): AnthropicToolResultContent {
+	const { supportsImages, rejectUnsupportedMedia = false } = options;
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
 	let sawText = false;
 	let sawImage = false;
@@ -1025,6 +1034,11 @@ function convertContentBlocks(
 		} else {
 			const mediaType = normalizeAnthropicImageMediaType(block.mimeType);
 			if (!mediaType) {
+				if (rejectUnsupportedMedia) {
+					throw new AIError.ValidationError(
+						`${block.mimeType} attachments are not supported here; send JPEG, PNG, GIF or WebP images instead`,
+					);
+				}
 				blocks.push({ type: "text", text: `[unsupported image: ${block.mimeType}]` });
 				continue;
 			}
@@ -5804,7 +5818,7 @@ function buildToolResultBlock(
 	msg: ToolResultMessage,
 	hoistedImages: ContentBlockParam[],
 ): ContentBlockParam {
-	let content = convertContentBlocks(msg.content, model.input.includes("image"));
+	let content = convertContentBlocks(msg.content, { supportsImages: model.input.includes("image") });
 	// Anthropic rejects images inside error tool results ("all content must be
 	// type `text` if `is_error` is true") — keep the text in the block and
 	// hoist the images after the message's tool_result run.
@@ -5982,6 +5996,29 @@ export function convertAnthropicMessages(
 		undefined,
 		opts?.credentialId,
 	);
+	// The turn this request answers: the last message that started a run (a
+	// `user` message, or a `developer` prompt such as a `/guided-goal` kickoff
+	// or the continue shortcut, which is `synthetic` or user-attributed) with no
+	// assistant reply after it. Developer reminders after it don't move it.
+	// Media Claude cannot read fails the request there (see
+	// convertContentBlocks). Only that turn is checked: once another prompt
+	// follows, the failed one is history and gets the omission note, so the
+	// session never stays stuck. A compaction request only summarizes, so it
+	// never fails on an attachment.
+	let unansweredUserIndex = -1;
+	if (!opts?.compactionRequest) {
+		for (let index = transformedMessages.length - 1; index >= 0; index--) {
+			const message = transformedMessages[index];
+			if (message.role === "assistant") break;
+			if (
+				message.role === "user" ||
+				(message.role === "developer" && (message.synthetic === true || message.attribution === "user"))
+			) {
+				unansweredUserIndex = index;
+				break;
+			}
+		}
+	}
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -6045,7 +6082,10 @@ export function convertAnthropicMessages(
 					content = msg.content.toWellFormed();
 				}
 			} else {
-				const contentBlocks = convertContentBlocks(msg.content, model.input.includes("image"));
+				const contentBlocks = convertContentBlocks(msg.content, {
+					supportsImages: model.input.includes("image"),
+					rejectUnsupportedMedia: i === unansweredUserIndex,
+				});
 				if (typeof contentBlocks === "string") {
 					if (contentBlocks.trim().length === 0) {
 						if (!hasProviderControls) continue;
