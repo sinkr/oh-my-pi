@@ -874,13 +874,28 @@ impl Drop for KernelLease {
 
 /// Real ownership without OS event monitoring: lifecycle regressions must
 /// not depend on an interactive desktop or Accessibility permissions.
+///
+/// Under a runner that runs every test in one process (bazel, `cargo test`)
+/// the previous test can still be dropping a source that holds the
+/// process's one lease after it released `OWNERSHIP_TEST`, as a test's
+/// locals outlive the worker that held the lock. Waiting for that release
+/// keeps the grant from failing on a neighbour's teardown.
 #[cfg(test)]
 pub(crate) fn grant_for_test(source: &CancellationSource) {
-	let owner = ControlLease {
-		_escape: None,
-		_kernel: KernelOwner::acquire().expect("test kernel owner"),
-		running: AtomicBool::new(false),
+	let deadline = std::time::Instant::now() + Duration::from_secs(10);
+	let kernel = loop {
+		match KernelOwner::acquire() {
+			Ok(kernel) => break kernel,
+			Err(error)
+				if error.code == crate::desktop::error::ErrorCode::InputBusy
+					&& std::time::Instant::now() < deadline =>
+			{
+				thread::sleep(Duration::from_millis(5));
+			},
+			Err(error) => panic!("test kernel owner: {error:?}"),
+		}
 	};
+	let owner = ControlLease { _escape: None, _kernel: kernel, running: AtomicBool::new(false) };
 	*source.0.state.lock() = Some(Arc::new(owner));
 }
 
