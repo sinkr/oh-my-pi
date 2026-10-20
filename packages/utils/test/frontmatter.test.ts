@@ -78,6 +78,14 @@ Body`;
 		expect(inline.body).toBe("abc<!--x-->def");
 	});
 
+	it("strips HTML comments inside the frontmatter block without flattening nested values", () => {
+		const result = parseFrontmatter("---\n<!-- reviewed -->\nname: rev\ntools:\n  - read\n  - grep\n---\nBody\n", {
+			level: "off",
+		});
+		expect(result.frontmatter).toEqual({ name: "rev", tools: ["read", "grep"] });
+		expect(result.body).toBe("Body");
+	});
+
 	it("recovers frontmatter behind a leading HTML comment on its own line", () => {
 		const result = parseFrontmatter("<!-- exported -->\n---\nname: x\n---\nBody\n", {});
 		expect(result.frontmatter).toEqual({ name: "x" });
