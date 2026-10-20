@@ -118,6 +118,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `AIAND_API_KEY`                 | ai& auth                                         | Using `aiand` provider                                         |                                                                                                     |
 | `GMI_API_KEY`                   | GMI Cloud auth                                   | Using `gmi-cloud` provider                                     |                                                                                                     |
 | `MODEL_API_KEY` / `META_API_KEY` | Meta Model API auth                             | Using `meta` provider                                          | Either variable works                                                                               |
+| `INCEPTION_API_KEY`             | Inception Mercury API auth                      | Using `inception` provider                                     | Also available via `/login inception`, which validates the key with a one-token Mercury 3 request (`/v1/models` is public) |
 | `SINGULARITYAPI_DEV_API_KEY`    | SingularityAPI universal gateway auth            | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`    |
 | `SINGULARITYAPI_TECH_API_KEY`   | SingularityAPI reserved lanes auth               | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models` |
 
@@ -591,6 +592,21 @@ These affect where coding-agent stores data and which process-local settings ove
 | `EDITOR`                   | Fallback external editor command                                               |
 
 `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases when the canonical variable is unset or empty. These controls use non-empty string checks, not boolean parsing: even `0` or `false` activates the corresponding no-CI/no-login control.
+
+### Set by the `bash` tool
+
+Every command the agent runs through the `bash` tool (foreground, background, PTY, ACP client terminal, and `name`-launched services) receives the current session identity:
+
+| Variable          | Value                                                                        |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `PI_SESSION_ID`   | Current session ID                                                           |
+| `PI_SESSION_FILE` | Absolute path to the current session JSONL file; empty when not persisted (`--no-session`) |
+
+Values are read when each tool call starts, so the next call follows `/fork`, `/new`, and `/resume`, and a call already under way keeps the session it started in. They are always set, so an empty value replaces a stale one inherited from a parent omp process. User `!` commands do not receive them.
+
+```bash
+echo "$PI_SESSION_ID"
+```
 
 ---
 
