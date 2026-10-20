@@ -6571,6 +6571,11 @@ export class AgentSession implements SettingsScope {
 		return this.agent.state.systemPrompt;
 	}
 
+	/** Base system prompt blocks the next turn builds on, before any `before_agent_start` override. */
+	get baseSystemPrompt(): string[] {
+		return this.#tools.baseSystemPrompt;
+	}
+
 	/**
 	 * Keeps a subagent transcript's latest `session_init` on the base prompt and work-pool yield items
 	 * its model calls are built from, appending a newer one when either changes: signed thinking is
@@ -12838,7 +12843,11 @@ export class AgentSession implements SettingsScope {
 				isError: reanswer.isError === true,
 				timestamp: Date.now(),
 			};
-			newLeafId = this.sessionManager.appendMessageToBranch(toolResultMessage, targetEntry.parentId);
+			// The new sibling answer itself becomes the leaf below (`branch(newLeafId)`),
+			// so it must not record the pre-navigation leaf as its own.
+			newLeafId = this.sessionManager.appendMessageToBranch(toolResultMessage, targetEntry.parentId, {
+				preserveActiveLeaf: false,
+			});
 			isAskReanswerCompletion = true;
 		} else {
 			// Non-user message (or an agent/autoload skill-prompt injection): land the
