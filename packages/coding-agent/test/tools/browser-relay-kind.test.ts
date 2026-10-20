@@ -99,10 +99,11 @@ describe("browser prelude relay guidance", () => {
 			says: string;
 		}[] = [
 			{
-				settings: { "browser.cdpUrl": "http://127.0.0.1:9333" },
+				// The block goes to the model provider: a token in the URL must not.
+				settings: { "browser.cdpUrl": "http://user:pw@127.0.0.1:9333/?token=s3cret" },
 				env: {},
 				kind: "connected",
-				says: "open in the browser at `browser.cdpUrl` (http://127.0.0.1:9333) instead",
+				says: "open in the browser at `browser.cdpUrl` (http://127.0.0.1:9333/?token=%5Bredacted%5D) instead",
 			},
 			{
 				settings: {},

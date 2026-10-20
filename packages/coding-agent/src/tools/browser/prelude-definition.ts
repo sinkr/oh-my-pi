@@ -1,5 +1,6 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeDefinition } from "../../eval/preludes";
+import { redactUrlForLog } from "../../mcp/json-rpc";
 import relayGuidance from "../../prompts/system/browser-relay.md" with { type: "text" };
 import browserDescription from "../../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../../sdk";
@@ -23,7 +24,8 @@ export function createBrowserPreludeDefinition(
 		documentation: browserDescription,
 		guidance: fallback
 			? prompt.render(relayGuidance, {
-					cdpUrl: fallback.kind === "connected" ? fallback.cdpUrl : undefined,
+					// The block reaches the model provider: never echo userinfo or token params.
+					cdpUrl: fallback.kind === "connected" ? redactUrlForLog(fallback.cdpUrl) : undefined,
 					tern: fallback.kind === "tern",
 					cmux: fallback.kind === "cmux",
 				})
