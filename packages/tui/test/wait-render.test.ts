@@ -217,6 +217,40 @@ describe("job renderer task-result preview", () => {
 			expect(Bun.stripANSI(lines.join("\n"))).toContain("Job1 running");
 		});
 
+		it("collapses to one row per settled job instead of re-printing the job tree", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: { op: "wait" as const, jobs: jobsData },
+			};
+			const component = waitToolRenderer.renderResult(
+				result,
+				{ expanded: false, isPartial: false } as Parameters<typeof waitToolRenderer.renderResult>[1],
+				theme,
+			);
+			const lines = (component.render(120) as readonly string[]).map(line => Bun.stripANSI(line));
+			// Job2 settled: one completion row. The running jobs collapse into a count,
+			// so the next poll's card does not repeat them.
+			expect(lines).toHaveLength(2);
+			expect(lines[0]).toContain("Job2 done");
+			expect(lines[1]!.trim()).toBe("2 still running");
+			expect(lines.join("\n")).not.toContain("waiting on");
+		});
+
+		it("keeps the waiting header while nothing has settled", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: { op: "wait" as const, jobs: [jobsData[0]!, jobsData[2]!] },
+			};
+			const component = waitToolRenderer.renderResult(
+				result,
+				{ expanded: false, isPartial: true } as Parameters<typeof waitToolRenderer.renderResult>[1],
+				theme,
+			);
+			const lines = (component.render(120) as readonly string[]).map(line => Bun.stripANSI(line));
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toContain("waiting on 2 jobs");
+		});
+
 		it("retains the running job in the sealed native wait card", () => {
 			const result = {
 				content: [{ type: "text" as const, text: "Still Running" }],

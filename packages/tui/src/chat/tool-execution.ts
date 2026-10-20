@@ -474,6 +474,8 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
+		/** Live: read at render time, so a ticking spinner advances it. */
+		readonly elapsedMs?: number;
 	} = {
 		expanded: false,
 		isPartial: true,
@@ -491,6 +493,10 @@ export class ToolExecutionComponent extends Container {
 		toolCallId?: string,
 	) {
 		super();
+		Object.defineProperty(this.#renderState, "elapsedMs", {
+			get: () => this.#elapsedMs(this.#nativeStatus()),
+			enumerable: true,
+		});
 		ensureThemeSync();
 		this.#toolCallId = toolCallId;
 		this.#toolName = toolName;

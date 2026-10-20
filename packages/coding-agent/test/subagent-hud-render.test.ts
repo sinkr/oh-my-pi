@@ -256,6 +256,24 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("SchemaMigrator: Migrating the users table");
 	});
 
+	it("counts running agents and previews the raw assignment, not the rendered prompt", () => {
+		const assignment = "Run the 512-rule corpus against the native build and report every mismatch";
+		const out = render([
+			makeSession({
+				id: "Corpus",
+				progress: makeProgress({
+					id: "Corpus",
+					task: `Complete assignment thoroughly:\n\n${assignment}`,
+					assignment,
+				}),
+			}),
+			makeSession({ id: "Bench", description: "Benchmark the shared build" }),
+		]);
+		expect(out).toContain("Subagents · 2 running");
+		expect(out).toContain(`Corpus ${assignment}`);
+		expect(out).not.toContain("Complete assignment thoroughly");
+	});
+
 	it("shows a non-default role badge and hides descriptions that only echo the id", () => {
 		const withRole = render([
 			makeSession({

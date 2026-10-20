@@ -151,7 +151,7 @@ export const globToolRenderer = {
 			},
 			uiTheme,
 		);
-		return new Text(text, 1, 0);
+		return new Text(text, 0, 0);
 	},
 
 	renderResult(
@@ -207,7 +207,6 @@ export const globToolRenderer = {
 					);
 					return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
 				},
-				{ paddingX: 1 },
 			);
 		}
 
@@ -298,7 +297,6 @@ export const globToolRenderer = {
 				);
 				return [header, ...fileLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
 			},
-			{ paddingX: 1 },
 		);
 	},
 	describeCall(args: GlobRenderArgs): NativeToolView {

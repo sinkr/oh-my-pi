@@ -10,7 +10,7 @@ import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { matchesKey } from "../keys";
-import { truncateToWidth } from "../utils";
+import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../utils";
 import { collapseCommand } from "../apps/ps-data";
 import { ansi, code, col, compact, item, node, row, span, stableKey, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
@@ -202,6 +202,12 @@ export class JobsSheet implements Component {
 		}
 		const detail = selected && this.#source.inspect(selected.id);
 		if (detail) {
+			// Rows show the cut label; the selected job's full command wraps here.
+			if (detail.command) {
+				for (const line of wrapTextWithAnsi(replaceTabs(detail.command), Math.max(1, width - 3))) {
+					lines.push(`   ${line}`);
+				}
+			}
 			const facts = compact([
 				detail.cwd && `cwd ${detail.cwd}`,
 				detail.pids.length > 0 && `pid ${detail.pids.join(", ")}`,

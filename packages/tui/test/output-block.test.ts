@@ -41,6 +41,17 @@ describe("renderOutputBlock", () => {
 		expect(lines.filter(line => line.startsWith("│"))).toEqual(["│ abcdefghijkl │", "│ mnop         │"]);
 	});
 
+	it("draws footer meta inside the bottom border at full width", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const lines = renderOutputBlock(
+			{ width: 30, applyBg: false, footerMeta: "Wall 0.16s", sections: [{ lines: ["out"] }] },
+			theme,
+		).map(line => stripVTControlCharacters(line));
+
+		expect(lines.at(-1)).toBe("╰─── Wall 0.16s ─────────────╯");
+		expect(lines.some(line => line.startsWith("│") && line.includes("Wall"))).toBe(false);
+	});
+
 	it("keeps explicitly flush content flush on both sides", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const lines = renderOutputBlock(

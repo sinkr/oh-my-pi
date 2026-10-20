@@ -28,8 +28,9 @@ export interface RenderResultOptions {
 	executionStarted?: boolean;
 	/**
 	 * Milliseconds since this call began executing (`tool_execution_start`),
-	 * or its total once settled; undefined before it starts. Native describe
-	 * hooks only.
+	 * or its total once settled; undefined before it starts. The terminal
+	 * transcript's options object computes it on read, so a render-time read
+	 * is live while the block's spinner ticks.
 	 */
 	elapsedMs?: number;
 	/** The call was abandoned without a final result (turn aborted, sealed). Native describe hooks only. */

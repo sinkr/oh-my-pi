@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `footerMeta` to `OutputBlockOptions` and `ToolCardSnapshot` to draw short facts inside a frame's bottom border
+
+### Changed
+
+- Collapsed `wait` cards show one row per finished job (or a single "waiting on N jobs" line) instead of re-printing the whole job tree on every poll; Ctrl+O shows the full tree
+- Bash cards show the elapsed time while a command runs, and wall time, timeout and backgrounded job in the bottom border instead of a separate `⟨…⟩` line
+- The terminal `/jobs` sheet shows the selected job's full command
+- Grep, glob, find, IRC message, and `proc://`/`agent://`/`cfg://` result rows start at the same column as other tool rows
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
