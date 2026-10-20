@@ -169,10 +169,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				// the designed wake path, so the message injects after a normal
 				// result. Any other abort stops the run.
 				if (signal.reason === TOOL_INTERRUPT_ABORT_REASON) {
+					// Not `useless`: a message woke the agent, which the loop guard
+					// must treat as progress rather than an idle poll.
 					return {
 						content: [{ type: "text", text: "Wait interrupted by message." }],
 						details: { op: "wait", jobs: [], interrupted: true },
-						useless: true,
 					};
 				}
 				throwIfAborted(signal);
