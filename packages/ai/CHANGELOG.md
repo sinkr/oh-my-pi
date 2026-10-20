@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added opt-in `reclaimAbovePct` to `auth.accountPolicies`: sessions automatically moved to a lower-priority account return to the preferred one once it has that much quota left ([#14237](https://github.com/can1357/oh-my-pi/pull/14237) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `reachesBudgetedHost()`: whether the catalog's host request budgets (inline image bytes, official image count) apply to a request, true on a model's official endpoint and on Factory Droid's own hosts ([#16288](https://github.com/can1357/oh-my-pi/pull/16288) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
