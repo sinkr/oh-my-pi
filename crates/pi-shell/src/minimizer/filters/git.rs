@@ -961,8 +961,46 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 	let mut current: Option<DiffFile> = None;
 	let mut current_hunk: Option<DiffHunk> = None;
 	let mut pending_old_path: Option<String> = None;
+	// Old and new lines still owed by the current `@@ -a,b +c,d @@` header.
+	// While either is nonzero, a line is hunk content classified by its first
+	// byte, so a removed `-- comment` or added `++ item` (shown as `--- …` /
+	// `+++ …`) is not mistaken for a file header.
+	let mut hunk_old = 0usize;
+	let mut hunk_new = 0usize;
 
 	for line in input.lines() {
+		if hunk_old > 0 || hunk_new > 0 {
+			match line.as_bytes().first() {
+				Some(b'-') => {
+					hunk_old = hunk_old.saturating_sub(1);
+					if let Some(file) = current.as_mut() {
+						file.removed += 1;
+						push_diff_line(&mut current_hunk, line);
+					}
+					continue;
+				},
+				Some(b'+') => {
+					hunk_new = hunk_new.saturating_sub(1);
+					if let Some(file) = current.as_mut() {
+						file.added += 1;
+						push_diff_line(&mut current_hunk, line);
+					}
+					continue;
+				},
+				// Context; an empty line is context whose leading space was stripped.
+				Some(b' ') | None => {
+					hunk_old = hunk_old.saturating_sub(1);
+					hunk_new = hunk_new.saturating_sub(1);
+					continue;
+				},
+				Some(b'\\') => continue,
+				// Anything else means the counts overstated the hunk: leave it.
+				Some(_) => {
+					hunk_old = 0;
+					hunk_new = 0;
+				},
+			}
+		}
 		if let Some(path) = parse_diff_git_path(line) {
 			flush_hunk(&mut current, &mut current_hunk);
 			if let Some(file) = current.take() {
@@ -1012,6 +1050,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 		}
 		if line.starts_with("@@") {
 			flush_hunk(&mut current, &mut current_hunk);
+			(hunk_old, hunk_new) = parse_hunk_counts(line).unwrap_or((0, 0));
 			current_hunk = Some(DiffHunk { header: line.to_string(), lines: Vec::new() });
 			continue;
 		}
@@ -1046,6 +1085,23 @@ fn parse_diff_git_path(line: &str) -> Option<String> {
 	let _old = parts.next()?;
 	let new = parts.next()?;
 	Some(new.strip_prefix("b/").map_or(new, |path| path).to_string())
+}
+
+/// Old and new line counts of a two-way `@@ -a[,b] +c[,d] @@` header; an
+/// omitted count is 1. Combined (`@@@`) and malformed headers yield `None`.
+fn parse_hunk_counts(line: &str) -> Option<(usize, usize)> {
+	let mut parts = line.strip_prefix("@@ ")?.split(' ');
+	let old = parts.next()?.strip_prefix('-')?;
+	let new = parts.next()?.strip_prefix('+')?;
+	if parts.next()? != "@@" {
+		return None;
+	}
+	let count = |range: &str| {
+		let (start, count) = range.split_once(',').unwrap_or((range, "1"));
+		start.parse::<usize>().ok()?;
+		count.parse::<usize>().ok()
+	};
+	Some((count(old)?, count(new)?))
 }
 
 fn flush_hunk(file: &mut Option<DiffFile>, hunk: &mut Option<DiffHunk>) {
@@ -1976,6 +2032,66 @@ mod tests {
 		assert!(out.text.contains("body line three"));
 		assert!(!out.text.contains("body line four"), "{:?}", out.text);
 		assert!(out.text.contains("[…2ln elided…]"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn diff_hunk_lines_starting_with_header_prefixes_stay_in_their_hunk() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff", &cfg);
+		// A removed `-- old comment` and an added `++ new heading` print as
+		// `--- …` / `+++ …` inside the hunk; the long context line keeps the
+		// input past the minimizer's small-output passthrough.
+		let input = format!(
+			"diff --git a/q.sql b/q.sql\nindex 1..2 100644\n--- a/q.sql\n+++ b/q.sql\n@@ -1,3 +1,3 \
+			 @@\n {}\n--- old comment\n+++ new heading\n-select 1;\n+select 2;\ndiff --git a/r.sql \
+			 b/r.sql\nindex 3..4 100644\n--- a/r.sql\n+++ b/r.sql\n@@ -1 +1 @@\n-old\n+new\n",
+			"x".repeat(17 * 1024)
+		);
+		let out = filter(&ctx, &input, 0);
+		assert!(out.changed);
+		assert!(out.text.contains("q.sql | 4 "), "{}", out.text);
+		assert!(out.text.contains("r.sql | 2 "), "{}", out.text);
+		assert!(
+			out.text
+				.contains("2 files changed, 3 insertions(+), 3 deletions(-)"),
+			"{}",
+			out.text
+		);
+		assert!(!out.text.contains("new heading |"), "{}", out.text);
+		for line in ["  --- old comment", "  +++ new heading", "  -select 1;", "  +select 2;"] {
+			assert!(out.text.contains(line), "missing {line:?} in {}", out.text);
+		}
+	}
+
+	#[test]
+	fn diff_counts_a_removed_markdown_rule() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff", &cfg);
+		let input = format!(
+			"diff --git a/doc.md b/doc.md\nindex 1..2 100644\n--- a/doc.md\n+++ b/doc.md\n@@ -1,3 \
+			 +1,2 @@\n {}\n----\n text\n",
+			"x".repeat(17 * 1024)
+		);
+		let out = filter(&ctx, &input, 0);
+		assert!(out.changed, "{}", out.text);
+		assert!(out.text.contains("doc.md | 1 -"), "{}", out.text);
+		assert!(
+			out.text
+				.contains("1 file changed, 0 insertions(+), 1 deletions(-)"),
+			"{}",
+			out.text
+		);
+		assert!(out.text.contains("  ----\n"), "{}", out.text);
+	}
+
+	#[test]
+	fn hunk_counts_default_to_one_and_skip_combined_headers() {
+		assert_eq!(parse_hunk_counts("@@ -3,4 +3,5 @@ fn main() {"), Some((4, 5)));
+		assert_eq!(parse_hunk_counts("@@ -1 +1 @@"), Some((1, 1)));
+		assert_eq!(parse_hunk_counts("@@ -0,0 +1,2 @@"), Some((0, 2)));
+		assert_eq!(parse_hunk_counts("@@@ -1,2 -1,2 +1,3 @@@"), None);
+		assert_eq!(parse_hunk_counts("@@ -oops,2 +1,2 @@"), None);
+		assert_eq!(parse_hunk_counts("@@ -,1 +,1 @@"), None);
 	}
 
 	#[test]
