@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Claude requests answering a turn whose attachment is a video, PDF, HEIC or other format Claude cannot read as if nothing were attached; the turn now fails with an error naming the format, and such an attachment in an earlier turn is noted as omitted
+- Fixed Claude requests answering a turn whose attachment is a video, PDF, HEIC or other format Claude cannot read as if nothing were attached; the turn now fails with an error naming the format, and such an attachment in an earlier turn is noted as omitted ([#16407](https://github.com/can1357/oh-my-pi/pull/16407) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.3] - 2026-10-19
 
