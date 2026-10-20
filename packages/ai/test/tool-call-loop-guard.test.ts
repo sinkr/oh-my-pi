@@ -340,6 +340,15 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(pytest())).toBeNull();
 	});
 
+	test("resets after an idle exempt poll that arrived with injected context", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["wait"] });
+		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
+		expect(guard.recordTurn(pytest())).toBeNull();
+		// An extension attached context to the timed-out wait: the rerun may see something new.
+		expect(guard.recordTurn({ ...waitTurn("Wait limit reached.", true), injectedContext: true })).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
+	});
+
 	test("counts a mixed batch and reports the first non-exempt call", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["read"] });
 		const mixed = () => [toolCall("read", { path: "a.ts" }), toolCall("bash", { command: "echo a" })];

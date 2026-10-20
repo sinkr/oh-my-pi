@@ -15,6 +15,8 @@ export interface ToolCallLoopGuardOptions {
 export interface ToolCallLoopTurn {
 	readonly message: AssistantMessage;
 	readonly toolResults: readonly ToolResultMessage[];
+	/** The turn also delivered context outside its tool results (extension `additionalContext`). */
+	readonly injectedContext?: boolean;
 }
 
 /** Details needed to steer the model away from a repeated tool call. */
@@ -89,9 +91,9 @@ export class ToolCallLoopGuard {
 			// new) is skipped, so alternating it with a repeated call cannot hide the
 			// loop. Any other exempt turn may have changed state (finished jobs, a
 			// message), so it ends the repetition.
-			const idle = toolCalls.every(
-				tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true,
-			);
+			const idle =
+				!turn.injectedContext &&
+				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
 			if (!idle) {
 				this.#lastHash = undefined;
 				this.#count = 0;
