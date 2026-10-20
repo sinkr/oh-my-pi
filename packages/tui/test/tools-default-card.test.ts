@@ -69,6 +69,11 @@ describe("generic fallback card", () => {
 		expect(kindOf(JSON.stringify({ query: "tokyo", hits: [1, 2, 3] }))).toBe("tree");
 		expect(kindOf(JSON.stringify({ blob: "x".repeat(3000) }))).toBe("ansi");
 		expect(kindOf(JSON.stringify(Array.from({ length: 300 }, (_, i) => i)))).toBe("ansi");
+		// A 64-bit id would round when parsed into a double.
+		expect(kindOf('{"id": 9223372036854775807}')).toBe("ansi");
+		// `i` is result data here, not call metadata the argument tree hides.
+		const withI = (describeDefaultToolExecution(mcpResult('{"i": "kept"}', true)).body ?? [])[0];
+		expect(JSON.stringify(withI)).toContain("kept");
 
 		const large = JSON.stringify({ blob: "x".repeat(100 * 1024) });
 		const largeChild = (describeDefaultToolExecution(mcpResult(large, true)).body ?? [])[0];
