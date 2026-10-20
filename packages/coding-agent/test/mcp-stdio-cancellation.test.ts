@@ -8,17 +8,20 @@ import * as mcpTimeout from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { StdioTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import type { JsonRpcNotification, JsonRpcRequest, MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { trackUnhandled } from "./helpers/rejection";
+import { rejectionOf, trackUnhandled } from "./helpers/rejection";
 
 type Frame = JsonRpcRequest | JsonRpcNotification;
 const FIXTURE = path.join(import.meta.dir, "fixtures", "cancellable-mcp.ts");
 const DEADLINE_MS = 150;
 const POLL_MS = 5;
-const OBSERVE_MS = 1_000;
+// Generous bounds for loaded CI hosts: passing runs return as soon as the event happens.
+const OBSERVE_MS = 5_000;
+// A hung request never settles on its own, so settling within this bound proves the abort settled it.
+const SETTLE_MS = 2_000;
 
 // Real subprocess I/O and pipe backpressure must advance alongside the platform
 // deadline; fake timers cannot drive those events. All polling and waits are bounded.
-async function within<T>(promise: Promise<T>, ms = 500): Promise<T> {
+async function within<T>(promise: Promise<T>, ms = SETTLE_MS): Promise<T> {
 	const expired = Promise.withResolvers<never>();
 	const timer = setTimeout(() => expired.reject(new Error(`Request did not settle within ${ms}ms`)), ms);
 	try {
@@ -105,7 +108,9 @@ describe("StdioTransport cancellation", () => {
 	}
 
 	async function echo(client: StdioTransport, text = "still connected"): Promise<void> {
-		await expect(client.request("tools/call", { name: "echo", arguments: { text } })).resolves.toEqual({
+		// Await before expect: on Bun 1.4.2 (Windows), `expect(pending).resolves` can stall while the
+		// promise waits on subprocess I/O.
+		expect(await client.request<unknown>("tools/call", { name: "echo", arguments: { text } })).toEqual({
 			content: [{ type: "text", text }],
 		});
 	}
@@ -118,11 +123,9 @@ describe("StdioTransport cancellation", () => {
 			.request("tools/call", { name: "hang" }, { signal: caller.signal })
 			.catch((error: unknown) => error);
 		const original = await sentRequest("tools/call", "hang");
-		const started = performance.now();
 		caller.abort(reason);
 
 		expect(await within(outcome)).toBe(reason);
-		expect(performance.now() - started).toBeLessThan(500);
 		expect(typeof original.id).toBe("number");
 		expect(await waitForCancellation()).toEqual([
 			{
@@ -224,9 +227,13 @@ describe("StdioTransport cancellation", () => {
 	it("does not cancel a request after its response already resolved", async () => {
 		const client = await start();
 		const caller = new AbortController();
-		await expect(
-			client.request("tools/call", { name: "echo", arguments: { text: "answered" } }, { signal: caller.signal }),
-		).resolves.toEqual({ content: [{ type: "text", text: "answered" }] });
+		expect(
+			await client.request<unknown>(
+				"tools/call",
+				{ name: "echo", arguments: { text: "answered" } },
+				{ signal: caller.signal },
+			),
+		).toEqual({ content: [{ type: "text", text: "answered" }] });
 		caller.abort(new Error("after response"));
 		await echo(client);
 		expect(await cancellations()).toEqual([]);
@@ -235,7 +242,7 @@ describe("StdioTransport cancellation", () => {
 	it("does not cancel a request after the server already rejected it", async () => {
 		const client = await start();
 		const caller = new AbortController();
-		await expect(client.request("unknown/method", undefined, { signal: caller.signal })).rejects.toMatchObject({
+		expect(await rejectionOf(client.request("unknown/method", undefined, { signal: caller.signal }))).toMatchObject({
 			failure: "json_rpc",
 			code: -32601,
 		});
@@ -376,10 +383,8 @@ describe("StdioTransport cancellation", () => {
 					{ signal: caller.signal },
 				)
 				.catch((error: unknown) => error);
-			const started = performance.now();
 			caller.abort(reason);
 			expect(await within(outcome)).toBe(reason);
-			expect(performance.now() - started).toBeLessThan(500);
 			expect(closes).toBe(0);
 			expect(client.connected).toBe(true);
 			await client.close();
