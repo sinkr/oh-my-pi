@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -28,6 +28,7 @@ import type {
 	OpenedApplication,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -391,8 +392,19 @@ async function sessionPath(value: string, cwd: string, listed: (value: string) =
 	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
 	const local = path.resolve(cwd, value);
 	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);
-	if (!written && !fs.existsSync(local)) return value;
+	if (!written && !(await entryExists(local))) return value;
 	return (await listed(value)) ? value : local;
+}
+
+/** Whether `local` names an entry (a link counts as itself), without blocking the worker. */
+async function entryExists(local: string): Promise<boolean> {
+	try {
+		await fs.lstat(local);
+		return true;
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
 }
 
 const MENU_ROUTE =

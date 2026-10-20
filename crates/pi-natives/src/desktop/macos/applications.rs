@@ -35,6 +35,10 @@ use super::{
 /// one and costs the whole wait, about one model turn.
 const FIRST_WINDOW_WAIT: Duration = Duration::from_secs(3);
 const FIRST_WINDOW_POLL: Duration = Duration::from_millis(50);
+/// How long a reveal waits for Finder to be running: one that was quit starts
+/// only after `activateFileViewerSelectingURLs` returns. Launch Services'
+/// own launches are given 30 s ([`launch_services`]).
+const FINDER_LAUNCH_WAIT: Duration = Duration::from_secs(30);
 
 #[link(name = "proc")]
 unsafe extern "C" {
@@ -463,7 +467,12 @@ pub(super) fn open_document(
 		let urls = NSArray::from_retained_slice(std::slice::from_ref(&url));
 		if reveal {
 			workspace.activateFileViewerSelectingURLs(&urls);
-			return finder();
+			// The call reports nothing back, and a Finder that was not running
+			// starts after it returns.
+			return wait_for(FINDER_LAUNCH_WAIT, || autoreleasepool(|_| finder()), poll_window)?
+				.ok_or_else(|| {
+					DesktopError::internal("Finder did not start after revealing the item")
+				});
 		}
 		let application = match &app {
 			Some(app) => NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&app.path), true),
@@ -483,7 +492,7 @@ pub(super) fn open_document(
 	})?;
 	// The window that shows the item: titled with its name (a revealed item's
 	// folder), rather than an Open panel or another document of the app.
-	let name = shown_name(document_path(target).as_deref(), reveal);
+	let name = shown_name(document_path(target, reveal).as_deref(), reveal);
 	let window = match opened.pid {
 		Some(pid) => first_window(
 			false,
@@ -514,18 +523,35 @@ fn showing(windows: Vec<DesktopWindow>, name: Option<&str>) -> Vec<DesktopWindow
 	match name {
 		Some(name) if windows.iter().any(|window| !window.title.is_empty()) => windows
 			.into_iter()
-			.filter(|window| window.title.contains(name))
+			.filter(|window| title_names(&window.title, name))
 			.collect(),
 		_ => windows,
 	}
 }
 
+/// Whether `title` names `name` as a whole part, as in `notes.txt`,
+/// `notes.txt — Edited` or `Preview: notes.txt`, never inside a longer name
+/// (`data.txt` does not name `a.txt`, nor `a.txt.bak`).
+fn title_names(title: &str, name: &str) -> bool {
+	let edge =
+		|c: Option<char>| c.is_none_or(|c| c.is_whitespace() || "—–()[]{}\"'“”‘’«»:,|".contains(c));
+	title.match_indices(name).any(|(at, _)| {
+		edge(title[..at].chars().next_back()) && edge(title[at + name.len()..].chars().next())
+	})
+}
+
 /// The absolute path of an existing `target`, naming the entry itself: a
 /// symlink stays the link, so Finder selects the entry the caller named
-/// rather than what it points to.
-fn document_path(target: &str) -> Option<PathBuf> {
+/// rather than what it points to. To reveal, a link whose target is gone
+/// counts too, since Finder still shows and selects it.
+fn document_path(target: &str, reveal: bool) -> Option<PathBuf> {
 	let path = Path::new(target);
-	if path.exists() {
+	let exists = if reveal {
+		path.symlink_metadata().is_ok()
+	} else {
+		path.exists()
+	};
+	if exists {
 		std::path::absolute(path).ok()
 	} else {
 		None
@@ -535,7 +561,7 @@ fn document_path(target: &str) -> Option<PathBuf> {
 /// The URL [`open_document`] opens: an existing file or folder, or, unless
 /// revealing, a URL with a scheme.
 fn document_url(target: &str, reveal: bool) -> CoreResult<Retained<NSURL>> {
-	if let Some(path) = document_path(target) {
+	if let Some(path) = document_path(target, reveal) {
 		let path = path
 			.to_str()
 			.ok_or_else(|| DesktopError::invalid_target(format!("{target:?} is not valid UTF-8")))?;
@@ -555,12 +581,31 @@ fn document_url(target: &str, reveal: bool) -> CoreResult<Retained<NSURL>> {
 	}))
 }
 
-/// Finder, which `activateFileViewerSelectingURLs` reveals items in.
-fn finder() -> CoreResult<Application> {
+/// Polls `find` until it returns a value or `timeout` passes, calling `wait`
+/// between polls.
+fn wait_for<T>(
+	timeout: Duration,
+	mut find: impl FnMut() -> Option<T>,
+	mut wait: impl FnMut() -> CoreResult<()>,
+) -> CoreResult<Option<T>> {
+	let deadline = Instant::now() + timeout;
+	loop {
+		if let Some(found) = find() {
+			return Ok(Some(found));
+		}
+		if Instant::now() >= deadline {
+			return Ok(None);
+		}
+		wait()?;
+	}
+}
+
+/// Finder, which `activateFileViewerSelectingURLs` reveals items in, if it is
+/// running.
+fn finder() -> Option<Application> {
 	NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!("com.apple.finder"))
 		.firstObject()
 		.and_then(|running| running_application(&running))
-		.ok_or_else(|| DesktopError::internal("Finder is not running after revealing the item"))
 }
 
 /// Launch Services options shared by every `apps.open` launch: no new
@@ -856,6 +901,49 @@ mod tests {
 	}
 
 	#[test]
+	fn a_window_titled_with_a_longer_name_does_not_show_the_opened_document() {
+		let titled = |id: &str, title: &str| DesktopWindow { title: title.into(), ..window(id) };
+		let ids = |windows: Vec<DesktopWindow>| windows.into_iter().map(|w| w.id).collect::<Vec<_>>();
+		// `data.txt` and `a.txt.bak` were open in front; only `a.txt`'s own
+		// window counts.
+		let listed = vec![
+			titled("1", "data.txt"),
+			titled("2", "a.txt.bak — Edited"),
+			titled("3", "a.txt — Edited"),
+		];
+		assert_eq!(ids(showing(listed, Some("a.txt"))), ["3"]);
+		assert!(showing(vec![titled("1", "data.txt")], Some("a.txt")).is_empty());
+		for title in ["a.txt", "Preview: a.txt", "a.txt (page 1 of 2)", "project | a.txt"] {
+			assert!(title_names(title, "a.txt"), "{title}");
+		}
+	}
+
+	#[test]
+	fn waits_for_an_application_that_starts_after_the_request() {
+		let mut polls = 0;
+		let found = wait_for(
+			Duration::from_secs(5),
+			|| {
+				polls += 1;
+				(polls == 3).then_some("Finder")
+			},
+			|| Ok(()),
+		);
+		assert_eq!(found.unwrap(), Some("Finder"));
+		assert_eq!(polls, 3);
+		// One that never starts gives up at the deadline.
+		let never = wait_for(
+			Duration::from_millis(20),
+			|| None::<()>,
+			|| {
+				std::thread::sleep(Duration::from_millis(5));
+				Ok(())
+			},
+		);
+		assert_eq!(never.unwrap(), None);
+	}
+
+	#[test]
 	fn a_revealed_symlink_is_selected_as_the_link_in_its_own_folder() {
 		let root = std::env::temp_dir().join(format!("pi-natives-reveal-{}", std::process::id()));
 		let (work, archive) = (root.join("work"), root.join("archive"));
@@ -874,16 +962,22 @@ mod tests {
 		};
 		assert_eq!(url_path(&link), link.to_str().unwrap());
 		assert_eq!(
-			shown_name(document_path(link.to_str().unwrap()).as_deref(), true).as_deref(),
+			shown_name(document_path(link.to_str().unwrap(), true).as_deref(), true).as_deref(),
 			Some("work")
 		);
 		// A plain file names itself, and its own name when opened.
 		assert_eq!(url_path(&original), original.to_str().unwrap());
 		assert_eq!(
-			shown_name(document_path(original.to_str().unwrap()).as_deref(), false).as_deref(),
+			shown_name(document_path(original.to_str().unwrap(), false).as_deref(), false).as_deref(),
 			Some("original.pdf")
 		);
-		assert!(document_path(root.join("missing.pdf").to_str().unwrap()).is_none());
+		assert!(document_path(root.join("missing.pdf").to_str().unwrap(), true).is_none());
+		// A link whose target is gone is still an entry Finder selects, though
+		// nothing opens it.
+		let dangling = work.join("dangling.pdf");
+		std::os::unix::fs::symlink(archive.join("gone.pdf"), &dangling).unwrap();
+		assert_eq!(url_path(&dangling), dangling.to_str().unwrap());
+		assert!(document_path(dangling.to_str().unwrap(), false).is_none());
 		std::fs::remove_dir_all(&root).unwrap();
 	}
 }
