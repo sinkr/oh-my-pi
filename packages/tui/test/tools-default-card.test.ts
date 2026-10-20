@@ -28,7 +28,12 @@ describe("generic fallback card", () => {
 
 		const expanded = Bun.stripANSI(formatDefaultToolExecution(mcpResult(rows.join("\n"), true), 80, theme));
 		// One exact ordered assertion: every row on its own line, no missing, extra, or reordered rows.
-		expect(expanded.split("\n").slice(5).map(row => row.trimEnd())).toEqual(rows);
+		expect(
+			expanded
+				.split("\n")
+				.slice(5)
+				.map(row => row.trimEnd()),
+		).toEqual(rows);
 		expect(expanded).toContain("row-39");
 		expect(expanded).not.toMatch(/more lines/);
 	});
@@ -53,20 +58,31 @@ describe("generic fallback card", () => {
 		expect(text?.endsWith(`line-4095-${"x".repeat(20)}`)).toBe(true);
 	});
 
-	it("routes JSON by size — the tree below 64 KiB, the lossless raw text above it", () => {
+	it("routes JSON the tree would cut to the lossless raw text", () => {
 		// describeJsonTree clips every string scalar at 2,000 chars and the whole tree
-		// at 200 rows, so a payload past that budget could never expand to as much as
-		// the raw view shows; it has to keep the raw path instead of the tree.
-		const small = JSON.stringify({ query: "tokyo", hits: [1, 2, 3] });
-		const smallChild = (describeDefaultToolExecution(mcpResult(small, true)).body ?? [])[0];
-		expect(smallChild !== undefined && "k" in smallChild && smallChild.k).toBe("tree");
+		// at 200 rows, so a payload past either cap could never expand to as much as
+		// the raw view shows, whatever its serialized size.
+		const kindOf = (output: string) => {
+			const child = (describeDefaultToolExecution(mcpResult(output, true)).body ?? [])[0];
+			return child !== undefined && "k" in child ? child.k : undefined;
+		};
+		expect(kindOf(JSON.stringify({ query: "tokyo", hits: [1, 2, 3] }))).toBe("tree");
+		expect(kindOf(JSON.stringify({ blob: "x".repeat(3000) }))).toBe("ansi");
+		expect(kindOf(JSON.stringify(Array.from({ length: 300 }, (_, i) => i)))).toBe("ansi");
 
 		const large = JSON.stringify({ blob: "x".repeat(100 * 1024) });
-		expect(large.length).toBeGreaterThan(64 * 1024);
 		const largeChild = (describeDefaultToolExecution(mcpResult(large, true)).body ?? [])[0];
-		expect(largeChild !== undefined && "k" in largeChild && largeChild.k).toBe("ansi");
 		const props = largeChild && "k" in largeChild ? largeChild.p : undefined;
-		const text = props && "text" in props ? props.text : undefined;
-		expect(text).toBe(large);
+		expect(props && "text" in props ? props.text : undefined).toBe(large);
+	});
+
+	it("expands JSON the tree would cut as every raw row", async () => {
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("theme unavailable");
+		const values = Array.from({ length: 300 }, (_, i) => `value-${i}`);
+		const expanded = Bun.stripANSI(
+			formatDefaultToolExecution(mcpResult(JSON.stringify(values, null, 2), true), 80, theme),
+		);
+		expect(expanded).toContain('"value-299"');
 	});
 });

@@ -112,13 +112,11 @@ function buildDefaultToolBody(input: DefaultToolRenderInput, uiTheme: Theme, con
 					const maxScalarLen = options.expanded ? JSON_TREE_SCALAR_LEN_EXPANDED : JSON_TREE_SCALAR_LEN_COLLAPSED;
 					const tree = renderJsonTreeLines(parsed, uiTheme, maxDepth, maxLines, maxScalarLen);
 
-					if (tree.lines.length > 0) {
+					// An expanded tree that hit a cap would show less than the raw output, so
+					// Ctrl+O falls through to the uncapped raw view instead.
+					if (tree.lines.length > 0 && !(options.expanded && tree.truncated)) {
 						body.push(...tree.lines);
-						if (!options.expanded) {
-							body.push(formatExpandHint(uiTheme, options.expanded, true));
-						} else if (tree.truncated) {
-							body.push(uiTheme.fg("dim", "…"));
-						}
+						if (!options.expanded) body.push(formatExpandHint(uiTheme, options.expanded, true));
 						renderedAsJson = true;
 					}
 				} catch {
@@ -158,16 +156,6 @@ export function formatDefaultToolExecution(
 	return [renderStatusLine(status, uiTheme), ...buildDefaultToolBody(input, uiTheme, contentWidth)].join("\n");
 }
 
-/**
- * Serialized JSON past this size stays on the raw `ansi` path: `describeJsonTree`
- * caps every string scalar at `JSON_TREE_SCALAR_LEN_EXPANDED` characters and the
- * whole tree at `JSON_TREE_MAX_LINES_EXPANDED` rows, so a large payload would
- * expand to fewer bytes than the raw view shows. This is the boundary the removed
- * pre-slice used to impose by accident (a >64 KiB slice never parsed) — it now
- * only picks the representation, never cuts the output.
- */
-const NATIVE_JSON_TREE_MAX_CHARS = 64 * 1024;
-
 /** Inline args summary budget in characters (a data cap, not a width). */
 const NATIVE_ARGS_SUMMARY_CHARS = 160;
 
@@ -176,8 +164,7 @@ const NATIVE_ARGS_SUMMARY_CHARS = 160;
  * summary as the head target; the result as a JSON tree or raw `ansi` output.
  * The complete output goes over the wire — the card-level disclosure clamp the
  * terminal applies is the only bound, so an expanded card keeps every row. JSON
- * larger than `NATIVE_JSON_TREE_MAX_CHARS` keeps the raw path because the tree's
- * row and scalar caps would show less than the raw output.
+ * the tree's depth, node or scalar caps would cut keeps the raw path instead.
  */
 export function describeDefaultToolExecution(input: DefaultToolRenderInput): NativeToolView {
 	const { result } = input;
@@ -191,11 +178,21 @@ export function describeDefaultToolExecution(input: DefaultToolRenderInput): Nat
 	const output = result.output.trimEnd();
 	const tone = result.skipped ? "info" : result.isError ? "error" : undefined;
 	if (!output) return { tool, tone, body: [noteText("(no output)")] };
-	if (output.length <= NATIVE_JSON_TREE_MAX_CHARS && (output.startsWith("{") || output.startsWith("["))) {
+	if (output.startsWith("{") || output.startsWith("[")) {
+		let parsed: unknown;
 		try {
-			return { tool, tone, body: [describeJsonTree(JSON.parse(output))] };
+			parsed = JSON.parse(output);
 		} catch {
 			// Not JSON: shown as raw output below.
+		}
+		if (parsed !== undefined) {
+			let truncated = false;
+			const tree = describeJsonTree(parsed, {
+				onTruncated: () => {
+					truncated = true;
+				},
+			});
+			if (!truncated) return { tool, tone, body: [tree] };
 		}
 	}
 	return { tool, tone, body: [ansi(output)] };
