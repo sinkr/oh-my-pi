@@ -1,7 +1,6 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { handleGitLab } from "@oh-my-pi/pi-coding-agent/web/scrapers/gitlab";
-
-const REAL_FETCH = globalThis.fetch;
+import { asGlobalFetch } from "../../helpers/fetch-mock.js";
 
 const MR = {
 	title: "Add frobnication",
@@ -25,17 +24,19 @@ function json(body: unknown): Response {
 }
 
 afterEach(() => {
-	globalThis.fetch = REAL_FETCH;
+	vi.restoreAllMocks();
 });
 
 describe("GitLab merge request reads", () => {
 	it("renders the description instead of [object Promise]", async () => {
-		globalThis.fetch = (async (input: string | URL | Request) => {
-			const url = String(input instanceof Request ? input.url : input);
-			if (url.includes("/merge_requests/1")) return json(MR);
-			if (url.includes("/api/v4/projects/")) return json({ id: 42 });
-			return new Response("not found", { status: 404 });
-		}) as typeof fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async input => {
+				const url = String(input instanceof Request ? input.url : input);
+				if (url.includes("/merge_requests/1")) return json(MR);
+				if (url.includes("/api/v4/projects/")) return json({ id: 42 });
+				return new Response("not found", { status: 404 });
+			}),
+		);
 
 		const result = await handleGitLab("https://gitlab.com/group/project/-/merge_requests/1", 20);
 		expect(result?.content).toContain("This MR **frobnicates** the widget.");
