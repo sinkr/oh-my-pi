@@ -4743,6 +4743,12 @@ export function togetherModelManagerOptions(
 // Inception
 // ---------------------------------------------------------------------------
 
+/**
+ * Builds Inception's authenticated model-discovery manager. A successful
+ * `/v1/models` fetch is the complete roster, keeping only rows that advertise
+ * `chat.completions` (the shared roster also lists FIM/edit and Decisions-only
+ * models); without an API key the bundled Mercury seeds are served.
+ */
 export function inceptionModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
 	return {
 		...createOpenAICompatibleModelManagerOptions({
