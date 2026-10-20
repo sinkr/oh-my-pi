@@ -63,6 +63,13 @@ function isKill(url: InternalUrl): boolean {
 	return (url.rawPathname ?? url.pathname).endsWith("/kill");
 }
 
+/** Reading a write-only action never acts (reads may be speculative); the error names the write that does. */
+function writeOnlyError(id: string, action: "kill" | "mode"): string {
+	if (action === "kill")
+		return `proc://${id}/kill is write-only; reading it did not stop anything. To cancel ${id}, call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed); read proc://${id} for its status.`;
+	return `proc://${id}/mode is write-only. To set a service's mode, call write with ${JSON.stringify({ path: `proc://${id}/mode`, content: "persist" })} (persist, session, or detached); read proc://${id} for its current mode.`;
+}
+
 function ownerJobs(session: ToolSession): AsyncJob[] {
 	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
 }
@@ -153,9 +160,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const session = context?.session;
 		if (!session) throw new Error("proc:// requires a tool session");
 		const procTarget = target(url);
-		const { id, action } = procTarget;
+		const { id } = procTarget;
 		if (procTarget.action === "streams") return streamsResource(url, session, id, procTarget.stream);
-		if (action !== "stdin") throw new Error(`proc://<id>/${action} is writable only`);
+		if (procTarget.action !== "stdin") throw new Error(writeOnlyError(id || "<id>", procTarget.action));
 		const jobs = ownerJobs(session);
 		// Jobs and agents are in-process; a hung broker must not hide them.
 		const { services, error: servicesError } = cfgLaunchEnabled.get(session.settings)
