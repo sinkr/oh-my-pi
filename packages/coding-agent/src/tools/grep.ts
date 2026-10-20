@@ -1,6 +1,7 @@
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -458,6 +459,31 @@ function formatCappedFiles(paths: readonly string[]): string {
 	return rest > 0 ? `${shown} and ${rest} more ${rest === 1 ? "file" : "files"}` : shown;
 }
 
+/**
+ * Rebase `!glob` exclusions, written relative to cwd, onto one search root for
+ * native grep, which matches them against root-relative paths. A pattern with
+ * no `/` (or starting with `**`) matches at any depth and passes through; any
+ * other is anchored to the root with a leading `/` (`!./gen` must not drop
+ * `sub/gen`); one naming a place outside this root has nothing to exclude there.
+ */
+function exclusionsForRoot(patterns: readonly string[], cwd: string, root: string): string[] | undefined {
+	const rebased: string[] = [];
+	for (const pattern of patterns) {
+		const clean = pattern.trim().replace(/\/+$/, "");
+		if (!clean) continue;
+		if (!clean.includes("/") || clean.startsWith("**")) {
+			rebased.push(clean);
+			continue;
+		}
+		if (InternalUrlRouter.instance().canHandle(root)) continue;
+		const absolute = clean.startsWith("~/") ? path.join(homedir(), clean.slice(2)) : path.resolve(cwd, clean);
+		const relative = path.relative(root, absolute).split(path.sep).join("/");
+		if (relative === "" || relative.startsWith("..")) continue;
+		rebased.push(`/${relative}`);
+	}
+	return rebased.length > 0 ? rebased : undefined;
+}
+
 type SearchParams = typeof searchSchema.infer;
 
 /**
@@ -492,11 +518,20 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	 */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
-		return searchApprovalCacheTargets(
-			toPathList(a?.path ?? a?.paths),
-			this.session.cwd,
-			entry => parseSearchPath(splitPathAndSel(entry).path).basePath,
-		);
+		const cwd = this.session.cwd;
+		// `!glob` entries exclude rather than search, so they grant nothing; one naming a real path is searched.
+		const roots = toPathList(a?.path ?? a?.paths)
+			.map(root =>
+				root
+					.split(";")
+					.filter(part => {
+						const entry = part.trim();
+						return !entry.startsWith("!") || existsSync(path.resolve(cwd, entry));
+					})
+					.join(";"),
+			)
+			.filter(root => root.trim().length > 0);
+		return searchApprovalCacheTargets(roots, cwd, entry => parseSearchPath(splitPathAndSel(entry).path).basePath);
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
@@ -575,7 +610,22 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const scopedPaths = toPathList(rawPath);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
-			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd);
+			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd);
+			// `!glob` entries exclude; the rest are what to search (all of cwd when only exclusions were given).
+			// A file or folder whose name really starts with `!` is still searched.
+			const exclusions: string[] = [];
+			const searchEntries: string[] = [];
+			for (const entry of expandedEntries) {
+				const literal =
+					entry.startsWith("!") &&
+					(await stat(path.resolve(this.session.cwd, entry)).then(
+						() => true,
+						() => false,
+					));
+				if (entry.startsWith("!") && !literal) exclusions.push(entry.slice(1));
+				else searchEntries.push(entry);
+			}
+			const rawEntries = searchEntries.length > 0 ? searchEntries : ["."];
 			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			const resolveContext = sessionResolveContext(this.session, { signal });
 			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
@@ -745,6 +795,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									maxColumns: DEFAULT_MAX_COLUMN,
 									mode: effectiveOutputMode,
 									maxCountPerFile: nativeMaxCountPerFile,
+									exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath),
 									signal,
 									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 									filesystem,
@@ -794,6 +845,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								maxColumns: DEFAULT_MAX_COLUMN,
 								mode: effectiveOutputMode,
 								maxCountPerFile: nativeMaxCountPerFile,
+								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
 								signal,
 								timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 								filesystem,
