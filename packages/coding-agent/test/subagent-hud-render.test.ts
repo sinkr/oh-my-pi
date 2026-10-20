@@ -274,6 +274,17 @@ describe("subagent HUD lines", () => {
 		expect(out).not.toContain("Complete assignment thoroughly");
 	});
 
+	it("strips terminal control sequences from the assignment preview", () => {
+		const assignment = "\x1b]0;pwned\x07\x1b[2JAudit the corpus";
+		const raw = renderSubagentHudLines(
+			[makeSession({ id: "Corpus", progress: makeProgress({ id: "Corpus", task: assignment, assignment }) })],
+			120,
+		).join("\n");
+		expect(Bun.stripANSI(raw)).toContain("Audit the corpus");
+		expect(raw).not.toContain("\x1b]0;");
+		expect(raw).not.toContain("\x1b[2J");
+	});
+
 	it("shows a non-default role badge and hides descriptions that only echo the id", () => {
 		const withRole = render([
 			makeSession({

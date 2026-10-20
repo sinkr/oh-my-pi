@@ -1221,7 +1221,10 @@ export function renderSubagentHudLines(
 					// (IRC-woken or direct sends), so it is safe to preview as is.
 					const preview = (session.progress?.assignment ?? session.progress?.task)?.trim();
 					if (preview && !labelEchoesHandle(session.id, preview)) {
-						const formatted = replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
+						const formatted = shortenEmbeddedPaths(replaceTabs(sanitizeText(preview))).replace(
+							/\s*[\r\n]+\s*/g,
+							" ↵ ",
+						);
 						const budget = Math.max(0, rowWidth - visibleWidth(line) - 1);
 						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
 					}

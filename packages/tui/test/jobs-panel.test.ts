@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import {
 	type JobsPanelDetail,
@@ -183,16 +184,19 @@ describe("JobsSheet", () => {
 		}
 	});
 
-	it("strips terminal control sequences from the full command", () => {
-		const command = `cat <<EOF\n\x1b]0;pwned\x07\x1b[2Jhello\nEOF`;
+	it("strips terminal control sequences and the home directory from the full command", () => {
+		const home = os.homedir();
+		const command = `cat <<EOF > ${home}/notes.txt\n\x1b]0;pwned\x07\x1b[2Jhello\nEOF`;
 		const job: JobsPanelJob = { id: "bash-x", type: "bash", status: "running", label: "cat", startTime: NOW };
 		const sheet = new JobsSheet({
 			load: () => ({ running: [job], recent: [] }),
 			inspect: () => ({ command, pids: [] }),
 			close: vi.fn(),
 		});
-		const text = sheet.render(80).join("\n");
+		const text = sheet.render(120).join("\n");
 		expect(text).toContain("hello");
+		expect(text).toContain("~/notes.txt");
+		expect(text).not.toContain(home);
 		expect(text).not.toContain("\x1b]0;");
 		expect(text).not.toContain("\x1b[2J");
 	});
