@@ -6,6 +6,10 @@
 
 - Added Inception API-key login (`/login inception`) and `INCEPTION_API_KEY` environment authentication ([#16439](https://github.com/can1357/oh-my-pi/pull/16439) by [@eggpeat](https://github.com/eggpeat))
 
+### Fixed
+
+- Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
