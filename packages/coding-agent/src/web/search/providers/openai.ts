@@ -1,4 +1,5 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { applySessionHeader } from "@oh-my-pi/pi-ai/providers/inference-headers";
 import { asRecord } from "@oh-my-pi/pi-utils";
 import {
 	type SearchCitation,
@@ -24,6 +25,11 @@ function getSearchQuery(params: SearchParams): { query: string; sites: string[] 
 	};
 }
 
+function acceptsNamedToolChoice(model: Model<Api>): boolean {
+	const compat = model.compat;
+	return !(compat && "supportsNamedToolChoice" in compat && compat.supportsNamedToolChoice === false);
+}
+
 function buildRequestBody(params: SearchParams): Record<string, unknown> {
 	const { query, sites } = getSearchQuery(params);
 	const tool: Record<string, unknown> = { type: "web_search" };
@@ -37,7 +43,7 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 		instructions: params.systemPrompt,
 		input: query,
 		tools: [tool],
-		tool_choice: { type: "web_search" },
+		tool_choice: acceptsNamedToolChoice(params.model) ? { type: "web_search" } : "required",
 		include: ["web_search_call.action.sources"],
 		store: false,
 	};
@@ -227,6 +233,7 @@ export async function searchOpenAIResponses(params: SearchParams): Promise<Searc
 			const headers = new Headers(configuredHeaders);
 			headers.set("Authorization", `Bearer ${apiKey}`);
 			headers.set("Content-Type", "application/json");
+			applySessionHeader(headers, params.model.compat, params.sessionId);
 			const response = await (params.fetch ?? fetch)(responsesEndpoint(params.model.baseUrl), {
 				method: "POST",
 				headers,

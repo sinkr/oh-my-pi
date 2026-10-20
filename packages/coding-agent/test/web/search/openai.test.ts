@@ -17,13 +17,15 @@ interface OpenAITestFixture {
 }
 
 interface OpenAITestModelOptions {
+	provider?: string;
 	requestModelId?: string;
 	reasoningMode?: "pro";
+	compat?: { supportsNamedToolChoice: boolean };
 }
 
 function createFixture(modelOptions: OpenAITestModelOptions = {}) {
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.keys.setRuntime("openai", API_KEY);
+	authStorage.keys.setRuntime(modelOptions.provider ?? "openai", API_KEY);
 	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	const model = buildModel({
 		id: "gpt-5.6-luna",
@@ -149,6 +151,71 @@ describe("OpenAI API-billed Responses web search", () => {
 			fixture.authStorage.close();
 		}
 	});
+
+	it("sends a string tool_choice to hosts that reject named tool choices and still maps the search response", async () => {
+		const fixture = createFixture({ compat: { supportsNamedToolChoice: false } });
+		let requestBody: Record<string, unknown> | undefined;
+		const fetch: FetchImpl = async (_input, init) => {
+			requestBody = JSON.parse(String(init?.body));
+			return new Response(
+				JSON.stringify({
+					output: [
+						{
+							type: "web_search_call",
+							status: "completed",
+							action: {
+								type: "search",
+								query: "string-only host lookup",
+								sources: [
+									{ type: "url", url: "https://search.example.test/string-only", title: "String-only result" },
+								],
+							},
+						},
+						{ type: "message", content: [{ type: "output_text", text: "Found it." }] },
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+
+		try {
+			const result = await searchOpenAIResponses(makeParams(fixture, fetch));
+			expect(requestBody).toMatchObject({ tools: [{ type: "web_search" }], tool_choice: "required" });
+			expect(result).toMatchObject({
+				answer: "Found it.",
+				sources: [{ url: "https://search.example.test/string-only", title: "String-only result" }],
+				usage: { searchRequests: 1 },
+			});
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("labels a LiteLLM search with the conversation session header", async () => {
+		const fixture = createFixture({ provider: "litellm" });
+		const sessionHeaders: (string | null)[] = [];
+		const fetch: FetchImpl = async (_input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-litellm-session-id"));
+			return Response.json({
+				output: [
+					{
+						type: "web_search_call",
+						status: "completed",
+						action: { type: "search", query: "Bun latest release" },
+					},
+					{ type: "message", content: [{ type: "output_text", text: "Found it." }] },
+				],
+			});
+		};
+
+		try {
+			await searchOpenAIResponses({ ...makeParams(fixture, fetch), sessionId: "session-1" });
+			expect(sessionHeaders).toEqual(["session-1"]);
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
 	it("counts search actions without counting page actions in a valid response", async () => {
 		const fixture = createFixture();
 		const fetch: FetchImpl = async () =>
