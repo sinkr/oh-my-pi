@@ -87,16 +87,18 @@ fn validate_bounds(edits: &[Edit], lines: &[&str]) -> Result<(), EditError> {
 	Ok(())
 }
 
+/// One `PUT N.=M:` as lowered by the parser: its replacement inserts, then one
+/// delete per consumed line, all carrying the op's payload line.
 #[derive(Clone)]
-struct ReplacementGroup {
-	insert_indices: Vec<usize>,
-	delete_indices: Vec<usize>,
-	payload:        Vec<String>,
-	start:          u32,
-	end:            u32,
+pub(super) struct ReplacementGroup {
+	insert_indices:            Vec<usize>,
+	pub(super) delete_indices: Vec<usize>,
+	pub(super) payload:        Vec<String>,
+	pub(super) start:          u32,
+	pub(super) end:            u32,
 }
 
-fn replacement_group(edits: &[Edit], start: usize) -> Option<ReplacementGroup> {
+pub(super) fn replacement_group(edits: &[Edit], start: usize) -> Option<ReplacementGroup> {
 	let Edit::Insert { cursor: Cursor::BeforeAnchor(anchor), line_num, replacement: true, .. } =
 		edits.get(start)?
 	else {
