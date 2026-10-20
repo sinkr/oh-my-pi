@@ -98,8 +98,18 @@ impl FileSystem for DelayedFilesystem {
 		Fs::native().symlink_metadata(self.path(path)?).await
 	}
 
+	/// Listing `virtual://vanishing…` stands in for a directory another
+	/// process deletes while it is refused to us: it is removed, then the
+	/// listing fails with `PermissionDenied`.
 	async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
 		delay().await;
+		if path
+			.to_str()
+			.is_some_and(|path| path.starts_with("virtual://vanishing"))
+		{
+			Fs::native().remove_dir_all(self.path(path)?).await?;
+			return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+		}
 		let mut entries = Vec::new();
 		for entry in Fs::native().read_dir(self.path(path)?).await? {
 			let entry = entry?;
@@ -155,11 +165,22 @@ impl FileSystem for DelayedFilesystem {
 		Fs::native().remove_dir(self.path(path)?).await
 	}
 
+	/// Changing `virtual://unsettable…` stands in for a directory another
+	/// process deletes first: it is removed, then the change fails `NotFound`.
 	async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
 		delay().await;
-		Fs::native()
-			.set_permissions(self.path(path)?, permissions)
-			.await
+		let target = self.path(path)?;
+		if path
+			.to_str()
+			.is_some_and(|path| path.starts_with("virtual://unsettable"))
+		{
+			let mut writable = Fs::native().metadata(&target).await?.permissions();
+			writable.set_readonly(false);
+			Fs::native().set_permissions(&target, writable).await?;
+			Fs::native().remove_dir(&target).await?;
+			return Err(io::Error::from(io::ErrorKind::NotFound));
+		}
+		Fs::native().set_permissions(target, permissions).await
 	}
 
 	async fn set_times(
@@ -688,7 +709,7 @@ async fn cmp_compares_nonseekable_files_and_discards_requested_prefixes() {
 
 /// Runs `script` from the host directory `cwd` with `virtual://` backed by
 /// `provider_root`, returning the exit status and stderr.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (u8, String) {
 	let output = tempfile::tempfile().expect("captured stdout");
 	let error = tempfile::tempfile().expect("captured stderr");
@@ -703,6 +724,47 @@ async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (u
 		.await
 		.expect("mv between host and provider");
 	(u8::from(result.exit_code), captured_text(&error))
+}
+
+/// A directory `rm` cannot list may still be removable; if another process
+/// deleted it meanwhile, `-f` counts it as removed instead of reporting the
+/// listing's `Permission denied`.
+#[cfg(unix)]
+#[tokio::test]
+async fn forced_rm_of_a_directory_gone_while_refused_succeeds() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host working directory");
+	let run = async |script: &str| {
+		fs::create_dir_all(provider.path().join("vanishing/child")).expect("doomed tree");
+		run_from_host_dir(provider.path(), host.path(), script).await
+	};
+
+	assert_eq!(run("rm -rf virtual://vanishing").await, (0, String::new()));
+	assert!(!provider.path().join("vanishing").exists());
+	let (code, error) = run("rm -r virtual://vanishing").await;
+	assert_eq!(code, 1);
+	assert!(error.contains("Permission denied"), "{error}");
+}
+
+/// On Windows `rm` clears a directory's read-only attribute to remove it;
+/// if another process deleted it meanwhile, `-f` counts it as removed
+/// instead of reporting the first attempt's `Permission denied`.
+#[cfg(windows)]
+#[tokio::test]
+async fn forced_rm_of_a_read_only_directory_gone_mid_retry_succeeds() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host working directory");
+	let dir = provider.path().join("unsettable");
+	fs::create_dir(&dir).expect("read-only directory");
+	let mut permissions = fs::metadata(&dir).expect("metadata").permissions();
+	permissions.set_readonly(true);
+	fs::set_permissions(&dir, permissions).expect("read-only attribute");
+
+	assert_eq!(
+		run_from_host_dir(provider.path(), host.path(), "rm -rf virtual://unsettable").await,
+		(0, String::new())
+	);
+	assert!(!dir.exists());
 }
 
 /// A rename from the host into a provider is `EXDEV`, so `mv` copies and
