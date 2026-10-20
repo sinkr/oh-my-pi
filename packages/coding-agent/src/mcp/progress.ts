@@ -1,4 +1,4 @@
-import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
+import { type MCPProgress, parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { MCPNotificationMethods } from "./types";
 
@@ -10,16 +10,13 @@ export function withProgressToken(
 	return { ...params, _meta: { ...(isRecord(params?._meta) ? params._meta : {}), progressToken: token } };
 }
 
-/** Parse progress without coercing correlation tokens or retaining invalid fields. */
+/** Parse a progress notification without coercing its correlation token. */
 function parseProgressNotification(params: unknown): { token: string | number; progress: MCPProgress } | undefined {
 	if (!isRecord(params)) return undefined;
 	const token = params.progressToken;
 	if (typeof token !== "string" && !(typeof token === "number" && Number.isFinite(token))) return undefined;
-	if (typeof params.progress !== "number" || !Number.isFinite(params.progress)) return undefined;
-	const progress: MCPProgress = { progress: params.progress };
-	if (typeof params.total === "number" && Number.isFinite(params.total)) progress.total = params.total;
-	if (typeof params.message === "string") progress.message = params.message;
-	return { token, progress };
+	const progress = parseMCPProgress(params);
+	return progress && { token, progress };
 }
 
 /**

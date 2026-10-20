@@ -1,4 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { DeferredMCPTool, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type {
 	MCPRequestOptions,
@@ -6,8 +9,8 @@ import type {
 	MCPToolCallResult,
 	MCPTransport,
 } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { MCPProgress, MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 
 const definition = { name: "progress_tool", inputSchema: { type: "object" as const } };
@@ -16,7 +19,24 @@ const result: MCPToolCallResult = {
 	isError: true,
 	structuredContent: { rows: [1], cursor: "next:opaque" },
 };
-const context = {} as CustomToolContext;
+let auth: AuthStorage;
+let context: CustomToolContext;
+
+beforeEach(async () => {
+	auth = await AuthStorage.create(":memory:");
+	context = {
+		sessionManager: SessionManager.inMemory(),
+		modelRegistry: new ModelRegistry(auth),
+		model: undefined,
+		isIdle: () => true,
+		hasQueuedMessages: () => false,
+		abort: () => {},
+	};
+});
+
+afterEach(() => {
+	auth.close();
+});
 
 function connectionFor(handler: (options?: MCPRequestOptions) => MCPToolCallResult): MCPServerConnection {
 	return {

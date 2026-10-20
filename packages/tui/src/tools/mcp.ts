@@ -7,7 +7,7 @@
 import { type Component, Markdown } from "../index";
 
 import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { ansi, md } from "../native/describe";
 import type { NativeChild } from "../native/node";
@@ -394,6 +394,19 @@ export interface MCPProgress {
 	progress: number;
 	total?: number;
 	message?: string;
+}
+
+/**
+ * Read MCP progress fields from an untrusted record: `progress` must be a
+ * finite number; `total` is kept only when finite and `message` only when a
+ * string. Shared by the transports, the Eval bridge, and the status renderer.
+ */
+export function parseMCPProgress(value: unknown): MCPProgress | undefined {
+	if (!isRecord(value) || typeof value.progress !== "number" || !Number.isFinite(value.progress)) return undefined;
+	const progress: MCPProgress = { progress: value.progress };
+	if (typeof value.total === "number" && Number.isFinite(value.total)) progress.total = value.total;
+	if (typeof value.message === "string") progress.message = value.message;
+	return progress;
 }
 
 /**

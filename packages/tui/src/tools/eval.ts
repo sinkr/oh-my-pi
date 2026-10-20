@@ -35,7 +35,7 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
-import { formatMCPProgress } from "./mcp";
+import { formatMCPProgress, parseMCPProgress } from "./mcp";
 import { splitPathAndSel } from "./read";
 import {
 	DEFAULT_TERMINAL_PREVIEW_LINES,
@@ -421,21 +421,12 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 	}
 
 	switch (op) {
-		case "mcp_progress":
+		case "mcp_progress": {
 			if (data.tool) parts.push(previewLine(sanitizeText(String(data.tool)), STATUS_VALUE_WIDTH));
-			if (typeof data.progress === "number") {
-				parts.push(
-					formatMCPProgress(
-						{
-							progress: data.progress,
-							...(typeof data.total === "number" ? { total: data.total } : {}),
-							...(typeof data.message === "string" ? { message: data.message } : {}),
-						},
-						STATUS_VALUE_WIDTH,
-					),
-				);
-			}
+			const progress = parseMCPProgress(data);
+			if (progress) parts.push(formatMCPProgress(progress, STATUS_VALUE_WIDTH));
 			break;
+		}
 		case "read":
 			parts.push(`${data.chars ?? data.bytes ?? 0} chars`);
 			if (data.path) parts.push(`from ${shortenPath(String(data.path))}`);

@@ -9,6 +9,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
+import { parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
@@ -308,19 +309,8 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		options.emitStatus && "mcpServerName" in tool && typeof tool.mcpServerName === "string"
 			? partial => {
 					if (settled || !isRecord(partial.details)) return;
-					const progress = partial.details.progress;
-					if (!isRecord(progress) || typeof progress.progress !== "number" || !Number.isFinite(progress.progress))
-						return;
-					options.emitStatus?.({
-						op: "mcp_progress",
-						id: toolCallId,
-						tool: name,
-						progress: progress.progress,
-						...(typeof progress.total === "number" && Number.isFinite(progress.total)
-							? { total: progress.total }
-							: {}),
-						...(typeof progress.message === "string" ? { message: progress.message } : {}),
-					});
+					const progress = parseMCPProgress(partial.details.progress);
+					if (progress) options.emitStatus?.({ op: "mcp_progress", id: toolCallId, tool: name, ...progress });
 				}
 			: undefined;
 	try {
