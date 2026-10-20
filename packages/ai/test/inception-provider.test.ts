@@ -43,19 +43,31 @@ describe("Inception chat requests", () => {
 });
 
 describe("Inception API-key login", () => {
-	test("rejects invalid credentials using a models probe without generating tokens", async () => {
+	// /v1/models is public, so only an authenticated inference call can tell a
+	// bad key from a good one.
+	test("validates keys with an authenticated chat probe", async () => {
 		const login = getProviderDefinition("inception")!.login!;
-		let endpoint = "";
-		await expect(
+		const requests: { url: string; body: Record<string, unknown> }[] = [];
+		const loginWith = (apiKey: string) =>
 			login({
 				onAuth: () => {},
-				onPrompt: async () => "invalid-test-key",
-				fetch: async input => {
-					endpoint = String(input);
-					return Response.json({ error: { message: "Incorrect API key provided" } }, { status: 401 });
+				onPrompt: async () => apiKey,
+				fetch: async (input, init) => {
+					requests.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+					return apiKey === "valid-test-key"
+						? Response.json({ choices: [{ index: 0, message: { role: "assistant", content: "" } }] })
+						: Response.json(
+								{ error: { message: "Incorrect API key provided", code: "invalid_api_key" } },
+								{ status: 401 },
+							);
 				},
-			}),
-		).rejects.toThrow();
-		expect(endpoint).toBe("https://api.inceptionlabs.ai/v1/models");
+			});
+
+		await expect(loginWith("invalid-test-key")).rejects.toThrow("Incorrect API key provided");
+		expect(await loginWith("valid-test-key")).toBe("valid-test-key");
+		expect(requests[0]).toMatchObject({
+			url: "https://api.inceptionlabs.ai/v1/chat/completions",
+			body: { model: "mercury-3", max_completion_tokens: 1 },
+		});
 	});
 });
