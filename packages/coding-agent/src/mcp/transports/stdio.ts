@@ -657,7 +657,7 @@ export class StdioTransport implements MCPTransport {
 						exitCode === null || exitCode === undefined
 							? "MCP subprocess closed stdout before responding"
 							: `MCP subprocess exited with code ${exitCode} before responding`,
-					retryable: true,
+					retryable: false,
 					code: exitCode ?? undefined,
 				});
 			}
@@ -749,16 +749,15 @@ export class StdioTransport implements MCPTransport {
 		if (!this.#connected) return;
 		this.#connected = false;
 
-		const closeError = nonRetryableMCPTransportError(
-			error ??
-				new MCPTransportError({
+		const closeError = error
+			? nonRetryableMCPTransportError(error)
+			: new MCPTransportError({
 					transport: "stdio",
 					stage: "receive",
 					failure: "closed",
 					message: "Transport closed",
 					retryable: false,
-				}),
-		);
+				});
 		// request() records and writes each frame synchronously; a synchronous
 		// write throw removes its entry, so every remaining request was handed
 		// to the subprocess.

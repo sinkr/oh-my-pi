@@ -149,10 +149,10 @@ Connected manager tools become enabled immediately. Presentation is reconciled w
 - `MCPTool` calls tools through an already connected `MCPServerConnection`.
 - `DeferredMCPTool` waits for `waitForConnection(server)` before calling; this allows cached tools to exist before connection is ready.
 - Both attempt a reconnect + single retry for retriable connection failures before dispatch, such as `Transport not connected`.
-- Connection loss after a request may have reached the server is non-retryable and is never replayed automatically: stdio has written its frame to stdin, Streamable HTTP has received a 2xx response (JSON or SSE), or legacy SSE has accepted the request POST. The operation may already have run; check its effect before retrying.
+- Connection loss after a request may have reached the server is non-retryable and is never replayed automatically: stdio has written its frame to stdin, or an HTTP or legacy SSE connection was reset or closed after it was established (with or without a response). The operation may already have run; check its effect before retrying. Refused connections are retried.
 - A structured tool-result auth challenge can trigger the configured auth handler, reconnect, and one retry. Interactive mode wires this to the `/mcp` OAuth controller; without a handler the challenge remains an MCP error.
 
-Both preserve MCP content and metadata; `structuredContent` is retained in `details.structuredContent` and rendered as text when not already duplicated in a text block. Server `isError` results propagate the error flag. Remaining exceptions become an `MCP failure` diagnostic with server/tool, transport, stage, failure class, retryability, message, optional code/trace/data, and next-step guidance; abort remains abort. Structured transport errors drive retry classification. Streamable HTTP failures before a response arrives keep their existing retry classification.
+Both preserve MCP content and metadata; `structuredContent` is retained in `details.structuredContent` and rendered as text when not already duplicated in a text block. Server `isError` results propagate the error flag. Remaining exceptions become an `MCP failure` diagnostic with server/tool, transport, stage, failure class, retryability, message, optional code/trace/data, and next-step guidance; abort remains abort. Structured transport errors drive retry classification.
 
 ## Refresh/reload paths (startup vs live reload)
 

@@ -262,7 +262,14 @@ export function normalizeMCPTransportError(
 }
 
 function nextStep(error: MCPTransportError): string {
-	if (!error.retryable && (error.failure === "eof" || error.failure === "reset" || error.failure === "closed")) {
+	// Every connection-class failure is retryable before dispatch, so a non-retryable one was lost after sending.
+	if (
+		!error.retryable &&
+		(error.failure === "connect" ||
+			error.failure === "eof" ||
+			error.failure === "reset" ||
+			error.failure === "closed")
+	) {
 		return "The connection was lost after the request was sent, so it may already have run; check its effect before retrying.";
 	}
 	switch (error.failure) {

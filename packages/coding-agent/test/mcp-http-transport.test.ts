@@ -177,7 +177,7 @@ describe("MCP Streamable HTTP failure diagnostics", () => {
 		}
 	});
 
-	it("classifies an abrupt socket reset without leaking Bun fetch advice", async () => {
+	it("classifies a reset after connecting as non-replayable without leaking Bun fetch advice", async () => {
 		const tcp = Bun.listen({
 			hostname: "127.0.0.1",
 			port: 0,
@@ -204,7 +204,7 @@ describe("MCP Streamable HTTP failure diagnostics", () => {
 				transport: "http",
 				stage: "send",
 				failure: "reset",
-				retryable: true,
+				retryable: false,
 				code: "ECONNRESET",
 			});
 			expect(error.message).not.toContain("verbose");

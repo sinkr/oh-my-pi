@@ -289,8 +289,10 @@ export class LegacySseTransport implements MCPTransport {
 		}
 		this.#pending.set(id, pending);
 
+		let posted = false;
 		try {
 			const response = await this.#postJson(body, operation.signal);
+			posted = true;
 			if (!response.ok) {
 				const text = await response.text();
 				throw new Error(`HTTP ${response.status}: ${text}`);
@@ -303,6 +305,13 @@ export class LegacySseTransport implements MCPTransport {
 			if (pending.abortHandler) operation.signal?.removeEventListener("abort", pending.abortHandler);
 			if (operation.isTimeoutAbort(error)) {
 				throw new Error(`Request timeout after ${timeout}ms`);
+			}
+			if (!posted && error instanceof Error && error.name !== "AbortError") {
+				// A reset or EOF can follow the server reading the POST; only a refused connection proves it was not sent.
+				const normalized = normalizeMCPTransportError(error, { transport: "http", stage: "send" });
+				if (normalized.failure === "reset" || normalized.failure === "eof") {
+					throw nonRetryableMCPTransportError(normalized);
+				}
 			}
 			throw error;
 		}

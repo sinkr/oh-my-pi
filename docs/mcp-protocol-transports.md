@@ -280,7 +280,7 @@ For previously connected HTTP/SSE servers that remain unavailable after that lad
 
 `MCPTool` and `DeferredMCPTool` also attempt one reconnect + retry for retriable connection errors during a tool call. This is tool availability recovery, not transport-level retry.
 
-Connection loss is non-retryable once the request may have reached the server: after writing a stdio frame to stdin, receiving a Streamable HTTP 2xx response (JSON or SSE), or accepting a legacy SSE POST. These calls are never replayed automatically; check the operation's effect before retrying manually. Pre-dispatch failures, including `Transport not connected`, retain reconnect + retry. Streamable HTTP failures before a response arrives keep their existing retry classification.
+Connection loss is non-retryable once the request may have reached the server: after writing a stdio frame to stdin, after a Streamable HTTP or legacy SSE POST connection is reset or closed once established (before or after its response starts), after receiving a Streamable HTTP 2xx response (JSON or SSE), or after a legacy SSE POST is accepted. These calls are never replayed automatically; check the operation's effect before retrying manually. Failures that prove the request never left OMP, such as `Transport not connected` or a refused connection, retain reconnect + retry.
 
 ## Failure scenarios summary
 
