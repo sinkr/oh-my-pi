@@ -4,11 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-function createSession(cwd: string): ToolSession {
+function createSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -18,6 +19,7 @@ function createSession(cwd: string): ToolSession {
 		allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
 		settings: Settings.isolated(),
 		enableLsp: false,
+		getClientBridge: bridge ? () => bridge : undefined,
 	};
 }
 
@@ -128,5 +130,49 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 		await fs.writeFile(filePath, "\uFEFFold\r\n");
 		await new WriteTool(createSession(tmpDir)).execute("call-1", { path: filePath, content: "" });
 		expect((await fs.readFile(filePath)).length).toBe(0);
+	});
+
+	it("finds the first line break past the binary sniff window", async () => {
+		const tool = new WriteTool(createSession(tmpDir));
+		// 8190 puts the CRLF inside the 8 KiB window, 8191 splits it across the edge, 9000 is past it.
+		for (const firstLineLength of [8190, 8191, 9000]) {
+			const filePath = path.join(tmpDir, `long-${firstLineLength}.txt`);
+			await fs.writeFile(filePath, `${"a".repeat(firstLineLength)}\r\nold\r\n`);
+			await tool.execute(`call-${firstLineLength}`, { path: filePath, content: "new\ntext\n" });
+			expect(await fs.readFile(filePath, "latin1")).toBe("new\r\ntext\r\n");
+		}
+	});
+
+	it("follows the first line break of a mixed file, as edit does", async () => {
+		const tool = new WriteTool(createSession(tmpDir));
+		const lfFirst = path.join(tmpDir, "lf-first.txt");
+		await fs.writeFile(lfFirst, "a\nb\r\nc\r\n");
+		await tool.execute("call-1", { path: lfFirst, content: "x\ny\n" });
+		expect(await fs.readFile(lfFirst, "latin1")).toBe("x\ny\n");
+
+		const crlfFirst = path.join(tmpDir, "crlf-first.txt");
+		await fs.writeFile(crlfFirst, "a\r\nb\nc\n");
+		await tool.execute("call-2", { path: crlfFirst, content: "x\ny\n" });
+		expect(await fs.readFile(crlfFirst, "latin1")).toBe("x\r\ny\r\n");
+	});
+
+	it("claims only the conventions an editor bridge persisted", async () => {
+		const filePath = path.join(tmpDir, "Saved.cs");
+		await fs.writeFile(filePath, "\uFEFFclass A {}\r\n");
+		// An editor whose save normalizes to LF without a BOM.
+		const bridge: ClientBridge = {
+			capabilities: { writeTextFile: true },
+			writeTextFile: async ({ path: target, content }) => {
+				await Bun.write(target, content.replace(/^\uFEFF/, "").replaceAll("\r\n", "\n"));
+			},
+		};
+
+		const result = await new WriteTool(createSession(tmpDir, bridge)).execute("call-1", {
+			path: filePath,
+			content: "class A {}\nclass B {}\n",
+		});
+
+		expect(await fs.readFile(filePath, "latin1")).toBe("class A {}\nclass B {}\n");
+		expect(resultText(result)).not.toContain("Note: kept");
 	});
 });

@@ -17,7 +17,6 @@ import {
 	isEnoent,
 	isProbablyBinaryHeader,
 	isRecord,
-	peekFile,
 	prompt,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
@@ -29,7 +28,7 @@ import {
 	readArchiveEntries,
 	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
-import { normalizeToLF } from "../edit/normalize";
+import { detectLineEnding, normalizeToLF } from "../edit/normalize";
 
 import { extractUriScheme, InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
@@ -397,44 +396,66 @@ interface TextFileConvention {
 	crlf: boolean;
 }
 
+/** Bytes read per step while looking for a first line break past the binary sniff window. */
+const LINE_BREAK_SCAN_BYTES = 64 * 1024;
+
 /**
- * Read the convention of the file at `absolutePath` from its first {@link BINARY_SNIFF_BYTES}:
- * a leading UTF-8 BOM, and CRLF when its first line break is one (the rule `edit` applies).
- * `undefined` for a binary file, whose bytes say nothing about text line endings.
+ * Read the convention of the `size`-byte file at `absolutePath`: a leading UTF-8 BOM, and CRLF when
+ * its first line break is one (the rule `edit` applies). The first {@link BINARY_SNIFF_BYTES} decide
+ * whether it is text; a longer first line is scanned to its end. `undefined` for a binary file,
+ * whose bytes say nothing about text line endings.
  */
-async function readTextFileConvention(absolutePath: string): Promise<TextFileConvention | undefined> {
-	return peekFile(absolutePath, BINARY_SNIFF_BYTES, header => {
-		if (isProbablyBinaryHeader(header)) return undefined;
-		const lf = header.indexOf(0x0a);
-		return {
-			bom: header[0] === 0xef && header[1] === 0xbb && header[2] === 0xbf,
-			crlf: lf > 0 && header[lf - 1] === 0x0d,
-		};
-	});
+async function readTextFileConvention(absolutePath: string, size: number): Promise<TextFileConvention | undefined> {
+	const file = Bun.file(absolutePath);
+	let chunk = await file.slice(0, BINARY_SNIFF_BYTES).bytes();
+	if (isProbablyBinaryHeader(chunk)) return undefined;
+	const bom = chunk[0] === 0xef && chunk[1] === 0xbb && chunk[2] === 0xbf;
+	let offset = 0;
+	let previous: number | undefined;
+	for (;;) {
+		const lf = chunk.indexOf(0x0a);
+		if (lf !== -1) return { bom, crlf: (lf > 0 ? chunk[lf - 1] : previous) === 0x0d };
+		offset += chunk.length;
+		if (chunk.length === 0 || offset >= size) return { bom, crlf: false };
+		previous = chunk[chunk.length - 1];
+		chunk = await file.slice(offset, offset + LINE_BREAK_SCAN_BYTES).bytes();
+	}
 }
 
 /**
  * Give `content` the CRLF line endings and BOM of the file it replaces, as `edit` keeps them.
  * Models write LF text, so without this replacing a CRLF file rewrites every line and drops its BOM.
- * Content that already has a carriage return or a BOM is written as given. `note` names what was
- * kept, so the model knows the bytes on disk differ from the text it sent.
+ * Each is independent: content with a carriage return keeps its line endings, content that starts
+ * with a BOM keeps it, and empty content stays empty. `applied` says which were added.
  */
 function applyTextFileConvention(
 	content: string,
 	convention: TextFileConvention | undefined,
-): { text: string; note?: string } {
-	if (!convention) return { text: content };
-	const kept: string[] = [];
+): { text: string; applied: TextFileConvention } {
+	const applied = { bom: false, crlf: false };
+	if (!convention) return { text: content, applied };
 	let text = content;
 	if (convention.crlf && text.includes("\n") && !text.includes("\r")) {
 		text = text.replaceAll("\n", "\r\n");
-		kept.push("CRLF line endings");
+		applied.crlf = true;
 	}
 	if (convention.bom && text.length > 0 && !text.startsWith("\uFEFF")) {
 		text = `\uFEFF${text}`;
-		kept.push("UTF-8 BOM");
+		applied.bom = true;
 	}
-	return kept.length === 0 ? { text } : { text, note: `Note: kept the replaced file's ${kept.join(" and ")}.` };
+	return { text, applied };
+}
+
+/**
+ * Name each convention `applied` added that `finalText` (what the editor or formatter persisted)
+ * still has, so the model knows the file differs from the text it sent. A convention an editor or
+ * formatter removed again is not claimed.
+ */
+function textFileConventionNote(applied: TextFileConvention, finalText: string): string | undefined {
+	const kept: string[] = [];
+	if (applied.crlf && detectLineEnding(finalText) === "\r\n") kept.push("CRLF line endings");
+	if (applied.bom && finalText.startsWith("\uFEFF")) kept.push("UTF-8 BOM");
+	return kept.length === 0 ? undefined : `Note: kept the replaced file's ${kept.join(" and ")}.`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1029,9 +1050,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			// An unreadable file keeps today's behavior; the write itself reports why it fails.
 			const convention = existing?.isFile()
-				? await readTextFileConvention(absolutePath).catch(() => undefined)
+				? await readTextFileConvention(absolutePath, existing.size).catch(() => undefined)
 				: undefined;
-			const { text: writeContent, note: conventionNote } = applyTextFileConvention(cleanContent, convention);
+			const { text: writeContent, applied } = applyTextFileConvention(cleanContent, convention);
 			const writeBytes = writeContent === cleanContent ? cleanBytes : Buffer.byteLength(writeContent, "utf8");
 
 			emitWriteProgress(onUpdate, writeBytes, displayPath, absolutePath);
@@ -1052,6 +1073,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (stripped) {
 					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 				}
+				const conventionNote = textFileConventionNote(applied, bridgeWrite.text);
 				if (conventionNote) {
 					resultText += `\n${conventionNote}`;
 				}
@@ -1082,6 +1104,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 			}
+			const conventionNote = textFileConventionNote(applied, finalContent);
 			if (conventionNote) {
 				resultText += `\n${conventionNote}`;
 			}
