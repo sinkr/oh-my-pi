@@ -162,6 +162,43 @@ fn does_not_spare_a_deleted_closing_line_that_the_payload_restates() {
 	assert!(result.warnings.is_empty());
 }
 
+fn rejection(text: &str, edits: &[Edit], path: &str) -> String {
+	apply_edits(text, edits, ApplyOptions {
+		clipboard:      None,
+		path:           Some(path),
+		on_empty_paste: EmptyPaste::Throw,
+	})
+	.unwrap_err()
+	.to_string()
+}
+
+const JSON_LIST: &str = "{\n  \"a\": [\n    \"x\",\n    \"y\"\n  ]\n}\n";
+
+#[test]
+fn names_the_trailing_comma_that_keeps_a_one_row_replacement_from_parsing() {
+	for body in [&["    \"z\","][..], &["    \"z\",  ", ""]] {
+		let error = rejection(JSON_LIST, &replacement(4, 4, body, 1), "x.json");
+		assert!(error.contains("`PUT 4.=4:` rejected"), "{error}");
+		assert!(error.contains("ends with a comma"), "{error}");
+		assert!(!error.contains("body indentation"), "{error}");
+	}
+}
+
+#[test]
+fn keeps_the_placement_rejection_when_dropping_the_comma_does_not_parse() {
+	// The comma stands in for a JSON closer, and a non-JSON space after the
+	// comma stays when only the comma goes.
+	let cases = [
+		("{\n  \"a\": [\n    \"x\"\n  ],\n  \"b\": 1\n}\n", "  \"c\": 2,"),
+		(JSON_LIST, "    \"z\",\u{a0}"),
+	];
+	for (file, row) in cases {
+		let error = rejection(file, &replacement(4, 4, &[row], 1), "x.json");
+		assert!(error.contains("`PUT 4.=4:` rejected"), "{error}");
+		assert!(error.contains("body indentation does not establish"), "{error}");
+	}
+}
+
 #[test]
 fn drops_duplicated_leading_and_trailing_boundary_lines_around_a_range_replacement() {
 	let file = "function f() {\n  keepA();\n  old1();\n  old2();\n  keepB();\n}";
