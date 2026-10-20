@@ -116,7 +116,7 @@ Stdio and legacy HTTP+SSE route `notifications/progress` through their pending-r
 
 Routing stops when the request settles, including failure or timeout. For Streamable HTTP SSE responses it stops immediately when the matching response is captured, even if later notifications occur in the same batch or the stream continues draining. Unknown, malformed, or stale progress does not reach a request callback. All progress notifications, including matched ones, still reach `onNotification`, preserving manager listener fanout and startup buffering. Callback exceptions are debug-logged and do not fail the request or other calls.
 
-When a tool update sink exists, `MCPTool` and `DeferredMCPTool` expose the latest progress in partial `details.progress` and a bounded one-line text update. Identical text coalesces within a call. Final results retain their existing text, error status, and structured content, without a progress field.
+When a tool update sink exists, `MCPTool` and `DeferredMCPTool` expose the latest progress in partial `details.progress` and a bounded one-line text update. Identical text coalesces within a call, and updates are spaced at least `PROGRESS_UPDATE_INTERVAL_MS` (50 ms) apart: the first progress shows immediately, and a burst inside the interval shows only its newest step when the interval ends. A coalesced update still waiting when the call settles is dropped. Final results retain their existing text, error status, and structured content, without a progress field.
 
 Progress never resets or extends the absolute request deadline. An awaited MCP tool call also continues counting against an Eval cell's watchdog while it reports progress.
 

@@ -336,9 +336,20 @@ type MCPToolCallAttempt = {
 	error?: unknown;
 };
 
+/** Minimum spacing between one call's progress updates; a burst coalesces to its newest progress. */
+export const PROGRESS_UPDATE_INTERVAL_MS = 50;
+
+interface ProgressUpdater {
+	onProgress: NonNullable<MCPRequestOptions["onProgress"]>;
+	/** Stop updating once the call settles; a coalesced update still waiting is dropped. */
+	close(): void;
+}
+
 /**
- * Turn a call's progress notifications into tool updates. Heartbeats that
- * repeat the displayed text (the same phase message) emit nothing.
+ * Turn a call's progress notifications into tool updates. The first progress
+ * shows immediately; progress inside the following interval waits and only
+ * the newest is shown when it ends. Heartbeats that repeat the displayed text
+ * (the same phase message) emit nothing.
  */
 function progressUpdater(
 	onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
@@ -346,10 +357,13 @@ function progressUpdater(
 	mcpToolName: string,
 	provider?: string,
 	providerName?: string,
-): MCPRequestOptions["onProgress"] {
+): ProgressUpdater | undefined {
 	if (!onUpdate) return undefined;
 	let lastText: string | undefined;
-	return (progress: MCPProgress) => {
+	let waiting: MCPProgress | undefined;
+	let cooldown: NodeJS.Timeout | undefined;
+	let closed = false;
+	const show = (progress: MCPProgress) => {
 		const text = formatMCPProgress(progress);
 		if (text === lastText) return;
 		lastText = text;
@@ -357,6 +371,25 @@ function progressUpdater(
 			content: [{ type: "text", text }],
 			details: { serverName, mcpToolName, provider, providerName, progress },
 		});
+		cooldown = setTimeout(() => {
+			cooldown = undefined;
+			const next = waiting;
+			waiting = undefined;
+			if (next) show(next);
+		}, PROGRESS_UPDATE_INTERVAL_MS);
+	};
+	return {
+		onProgress: progress => {
+			if (closed) return;
+			if (cooldown) waiting = progress;
+			else show(progress);
+		},
+		close: () => {
+			closed = true;
+			clearTimeout(cooldown);
+			cooldown = undefined;
+			waiting = undefined;
+		},
 	};
 }
 
@@ -751,7 +784,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
-		const onProgress = progressUpdater(onUpdate, this.connection.name, this.tool.name, provider, providerName);
+		const progress = progressUpdater(onUpdate, this.connection.name, this.tool.name, provider, providerName);
+		const onProgress = progress?.onProgress;
 
 		try {
 			const attempt = await callToolWithAuthRetry(
@@ -807,6 +841,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				}
 			}
 			return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
+		} finally {
+			progress?.close();
 		}
 	}
 }
@@ -894,7 +930,8 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
 		const provider = this.#fallbackProvider;
 		const providerName = this.#fallbackProviderName;
-		const onProgress = progressUpdater(onUpdate, this.serverName, this.tool.name, provider, providerName);
+		const progress = progressUpdater(onUpdate, this.serverName, this.tool.name, provider, providerName);
+		const onProgress = progress?.onProgress;
 
 		try {
 			const connection = await untilAborted(signal, () => this.getConnection());
@@ -981,6 +1018,8 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				}
 			}
 			return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
+		} finally {
+			progress?.close();
 		}
 	}
 }

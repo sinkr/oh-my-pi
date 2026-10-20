@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
-import { DeferredMCPTool, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { DeferredMCPTool, MCPTool, PROGRESS_UPDATE_INTERVAL_MS } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type {
 	MCPRequestOptions,
 	MCPServerConnection,
@@ -34,9 +34,12 @@ beforeEach(async () => {
 		hasQueuedMessages: () => false,
 		abort: () => {},
 	};
+	// Progress updates are throttled; tests drive the interval instead of waiting it out.
+	vi.useFakeTimers();
 });
 
 afterEach(() => {
+	vi.useRealTimers();
 	auth.close();
 });
 
@@ -56,9 +59,15 @@ function connectionFor(handler: (options?: MCPRequestOptions) => MCPToolCallResu
 	};
 }
 
+/** Report progress as a server pacing its notifications at least one update interval apart. */
+function report(options: MCPRequestOptions | undefined, step: MCPProgress): void {
+	options?.onProgress?.(step);
+	vi.advanceTimersByTime(PROGRESS_UPDATE_INTERVAL_MS);
+}
+
 function withSteps(steps: MCPProgress[]): MCPServerConnection {
 	return connectionFor(options => {
-		for (const step of steps) options?.onProgress?.(step);
+		for (const step of steps) report(options, step);
 		return result;
 	});
 }
@@ -148,7 +157,7 @@ describe("MCP tools/call progress updates", () => {
 		for (const failure of ["auth", "connection"] as const) {
 			it(`${kind}: retains progress on a ${failure} retry`, async () => {
 				const first = connectionFor(options => {
-					options?.onProgress?.({ progress: 1, message: "initial" });
+					report(options, { progress: 1, message: "initial" });
 					if (failure === "connection") throw new Error("Transport closed");
 					return {
 						content: [{ type: "text", text: "authorize" }],
@@ -188,5 +197,24 @@ describe("MCP tools/call progress updates", () => {
 		const updates: AgentToolResult<MCPToolDetails>[] = [];
 		await tool.execute("lookup-retry", {}, partial => updates.push(partial), context);
 		expect(updates.map(update => update.details?.progress)).toEqual([{ progress: 1, message: "reconnected" }]);
+	});
+
+	it("coalesces a progress burst to its newest step and drops one still waiting when the call ends", async () => {
+		const tool = new MCPTool(
+			connectionFor(options => {
+				for (const progress of [1, 2, 3]) options?.onProgress?.({ progress, total: 9 });
+				vi.advanceTimersByTime(PROGRESS_UPDATE_INTERVAL_MS);
+				for (const progress of [4, 5]) options?.onProgress?.({ progress, total: 9 });
+				return result;
+			}),
+			definition,
+		);
+		const texts: unknown[] = [];
+		await tool.execute("burst", {}, partial => texts.push(partial.content[0]), context);
+		vi.advanceTimersByTime(PROGRESS_UPDATE_INTERVAL_MS * 2);
+		expect(texts).toEqual([
+			{ type: "text", text: "1/9" },
+			{ type: "text", text: "3/9" },
+		]);
 	});
 });
