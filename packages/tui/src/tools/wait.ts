@@ -360,6 +360,7 @@ function jobsRenderResult(
 	const widgetJobs = sortedJobs.filter(job => job.status === "running" && job.widget?.state === "live");
 	const compactJobLines = (width: number, live: boolean): string[] => {
 		const lines: string[] = [];
+		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
 		// Failures sort first, so the cap never hides one behind successes;
 		// Ctrl+O lists the rest.
 		for (const job of settledJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)) {
@@ -384,6 +385,20 @@ function jobsRenderResult(
 				line += `  ${uiTheme.fg("muted", truncateToWidth(label, labelBudget, Ellipsis.Unicode))}`;
 			}
 			lines.push(line);
+			// A failure says why on the collapsed row; the rest of its output
+			// stays behind Ctrl+O.
+			const reason =
+				job.status === "failed"
+					? stripOutputNotice(job.errorText ?? "", job.meta)
+							.split(/\r?\n/)
+							.find(part => part.trim())
+							?.trim()
+					: undefined;
+			if (reason) {
+				lines.push(
+					`${indent}${uiTheme.fg("error", truncateToWidth(replaceTabs(reason), Math.max(1, width - indent.length), Ellipsis.Unicode))}`,
+				);
+			}
 			// The root warning is suppressed when a row owns the failure, so the
 			// compact row carries it too — otherwise it only shows after Ctrl+O.
 			const artifactError = job.meta?.artifactError ?? job.artifactError;
@@ -391,7 +406,6 @@ function jobsRenderResult(
 				lines.push(uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), width)));
 			}
 		}
-		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
 		const hiddenSettled = settledJobs.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
 		if (hiddenSettled > 0) lines.push(`${indent}${uiTheme.fg("dim", `… ${hiddenSettled} more settled`)}`);
 		const shownWidgetJobs = widgetJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
