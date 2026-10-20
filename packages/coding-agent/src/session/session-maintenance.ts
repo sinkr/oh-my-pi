@@ -161,15 +161,16 @@ function hasConfiguredCompactionMethod(settings: CompactionSettings): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).length > 0;
 }
 
-/** Kept Anthropic thinking requires compaction by the same live model. */
+/** Kept Claude thinking (Anthropic Messages or Bedrock Converse) requires compaction by the same live model. */
 function canUseLiveProviderNativeCompaction(
 	candidate: Model,
 	liveModel: Model,
 	settings: EngineCompactionSettings,
 ): boolean {
+	const requiresSameModel = candidate.api === "anthropic-messages" || candidate.api === "bedrock-converse-stream";
 	return (
 		candidate.provider === liveModel.provider &&
-		(candidate.api !== "anthropic-messages" || (candidate.api === liveModel.api && candidate.id === liveModel.id)) &&
+		(!requiresSameModel || (candidate.api === liveModel.api && candidate.id === liveModel.id)) &&
 		shouldUseProviderNativeCompaction(candidate, settings)
 	);
 }
