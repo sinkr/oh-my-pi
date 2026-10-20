@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Fixed `ln -s local://… <path>` in the bash tool creating a host symlink that holds the URL text, which nothing can follow; a symlink on the host to a file-backed URL now stores the file it stands for
+- Fixed `ln -s local://… <path>` in the bash tool creating a host symlink that holds the URL text, which nothing can follow; a symlink on the host to a file-backed URL now stores the file it stands for ([#16428](https://github.com/can1357/oh-my-pi/pull/16428) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.3] - 2026-10-19
 
