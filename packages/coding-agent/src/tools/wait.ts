@@ -15,7 +15,6 @@ import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletio
 import { drainPendingInbox, messageResult } from "../irc/messaging";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
 
@@ -97,9 +96,17 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		}
 		const serviceRunning = hasLiveOwnedService(this.session);
 		if (jobs.length === 0 && !serviceRunning) {
-			throw new ToolError(
-				"Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own.",
-			);
+			// An idle poll, not a failure: flagged so the loop guard keeps counting across it.
+			return {
+				content: [
+					{
+						type: "text",
+						text: "Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own.",
+					},
+				],
+				details: { op: "wait", jobs: [] },
+				useless: true,
+			};
 		}
 		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate });
 	}

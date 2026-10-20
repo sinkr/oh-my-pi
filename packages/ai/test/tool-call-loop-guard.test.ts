@@ -349,26 +349,27 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(pytest())).toBeNull();
 	});
 
-	test("keeps counting across an exempt poll that failed with nothing to wait for", () => {
-		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["wait"] });
+	test("resets after an exempt call that failed", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["grep"] });
 		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
-		const call = toolCall("wait", {});
-		const failedWait = turn(
+		const call = toolCall("grep", { pattern: "x" });
+		const failedGrep = turn(
 			[call],
 			[
 				{
 					role: "toolResult",
 					toolCallId: call.id,
-					toolName: "wait",
-					content: [{ type: "text", text: "Nothing to wait for." }],
+					toolName: "grep",
+					content: [{ type: "text", text: "Invalid regex." }],
 					isError: true,
 					timestamp: Date.now(),
 				},
 			],
 		);
 		expect(guard.recordTurn(pytest())).toBeNull();
-		expect(guard.recordTurn(failedWait)).toBeNull();
-		expect(guard.recordTurn(pytest())).toMatchObject({ toolName: "bash", count: 2 });
+		// Only a result its tool flagged useless is an idle poll; a failure may follow real work.
+		expect(guard.recordTurn(failedGrep)).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
 	});
 
 	test("counts a mixed batch and reports the first non-exempt call", () => {
