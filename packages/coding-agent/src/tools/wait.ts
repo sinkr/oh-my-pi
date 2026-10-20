@@ -178,7 +178,13 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				}
 				throwIfAborted(signal);
 			}
-			if (manager && jobs.length > 0) return buildJobResult(this.session, manager, "wait", jobs, []);
+			if (manager && jobs.length > 0) {
+				const result = buildJobResult(this.session, manager, "wait", jobs, []);
+				// A finished service is news even while every watched job still runs.
+				if (wake !== "service") return result;
+				const { useless: _idle, ...woke } = result;
+				return woke;
+			}
 			return {
 				content: [
 					{
