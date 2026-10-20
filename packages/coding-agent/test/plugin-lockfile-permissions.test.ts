@@ -34,31 +34,22 @@ describe("plugin runtime lockfile permissions", () => {
 	});
 
 	// A setting a plugin marks `secret` is a credential the user asked to be
-	// masked. The file holding it must not be readable by other local accounts.
+	// masked. A lockfile an earlier install left world-readable must not receive
+	// it: the write publishes a new owner-only file instead of rewriting that inode.
 	test.skipIf(process.platform === "win32")(
-		"a plugin setting lands in a lockfile only its owner can read",
-		async () => {
-			await new PluginManager(tmpRoot).setPluginSetting("omp-commit", "apiToken", "sk-live-secret");
-
-			expect(await fs.readFile(lockfile, "utf8")).toContain("sk-live-secret");
-			expect(await modeOf(lockfile)).toBe(0o600);
-		},
-	);
-
-	// A lockfile written before this change keeps its old, wider mode: the
-	// mode only applies to a file the write creates, so the file is tightened
-	// explicitly.
-	test.skipIf(process.platform === "win32")(
-		"an existing world-readable lockfile is tightened on the next write",
+		"a plugin setting replaces a world-readable lockfile with an owner-only one",
 		async () => {
 			await fs.mkdir(pluginsDir, { recursive: true });
 			await fs.writeFile(lockfile, JSON.stringify({ plugins: {}, settings: {} }));
 			await fs.chmod(lockfile, 0o644);
-			expect(await modeOf(lockfile)).toBe(0o644);
+			const before = (await fs.stat(lockfile)).ino;
 
 			await new PluginManager(tmpRoot).setPluginSetting("omp-commit", "apiToken", "sk-live-secret");
 
+			expect(await fs.readFile(lockfile, "utf8")).toContain("sk-live-secret");
 			expect(await modeOf(lockfile)).toBe(0o600);
+			expect((await fs.stat(lockfile)).ino).not.toBe(before);
+			expect((await fs.readdir(pluginsDir)).filter(name => name.endsWith(".tmp"))).toEqual([]);
 		},
 	);
 
