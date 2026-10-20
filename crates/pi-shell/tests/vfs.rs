@@ -682,6 +682,40 @@ async fn backed_urls_expose_physical_paths_without_changing_native_readlink() {
 	assert!(!directory.path().join("missing").exists());
 }
 
+/// The operating system resolves a host symlink and cannot read a URL, so
+/// `ln -s` to a host path stores the file a backed URL aliases; a URL that
+/// aliases nothing keeps its spelling.
+#[cfg(unix)]
+#[tokio::test]
+async fn host_symlinks_to_backed_urls_store_the_backing_path() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host working directory");
+	fs::write(provider.path().join("target"), b"content").expect("backing file");
+
+	let (code, error) = run_from_host_dir(
+		provider.path(),
+		host.path(),
+		"mkdir sub && ln -s virtual://target link && ln -s virtual://missing dangling && ln -sr \
+		 virtual://target sub/relative && ln -s virtual://rendered/x rendered",
+	)
+	.await;
+	assert_eq!(code, 0, "{error}");
+
+	assert_eq!(fs::read_link(host.path().join("link")).unwrap(), provider.path().join("target"));
+	assert_eq!(fs::read(host.path().join("link")).unwrap(), b"content");
+	assert_eq!(
+		fs::read_link(host.path().join("dangling")).unwrap(),
+		provider.path().join("missing")
+	);
+	let relative = fs::read_link(host.path().join("sub/relative")).unwrap();
+	assert!(relative.is_relative(), "{}", relative.display());
+	assert_eq!(fs::read(host.path().join("sub/relative")).unwrap(), b"content");
+	assert_eq!(
+		fs::read_link(host.path().join("rendered")).unwrap(),
+		Path::new("virtual://rendered/x")
+	);
+}
+
 #[tokio::test]
 async fn cmp_compares_nonseekable_files_and_discards_requested_prefixes() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
