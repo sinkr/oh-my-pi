@@ -45,7 +45,7 @@ describe("wait", () => {
 		expect(manager.isDeliverySuppressed(id)).toBe(true);
 	});
 
-	test("errors for a subagent whose only running work is its parent's job on it", async () => {
+	test("finds nothing to wait for in a subagent whose only running work is its parent's job on it", async () => {
 		const registry = AgentRegistry.global();
 		const streaming = { isStreaming: true } as never;
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: streaming, status: "running" });
@@ -65,8 +65,9 @@ describe("wait", () => {
 			agentId: "Child",
 			ownerId: "Main",
 		});
-		const waiting = new WaitTool(session(manager, "Child")).execute("child-wait", {});
-		await expect(waiting).rejects.toThrow("Nothing to wait for");
+		const result = await new WaitTool(session(manager, "Child")).execute("child-wait", {});
+		expect(result.useless).toBe(true);
+		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Nothing to wait for") });
 		childRun.resolve("done");
 	});
 
@@ -248,12 +249,14 @@ describe("wait", () => {
 		test("reports nothing to wait for, as after the refresh, when the caller has no work", async () => {
 			const controller = new AbortController();
 			controller.abort(TOOL_INTERRUPT_ABORT_REASON);
-			const waiting = new WaitTool(session(new AsyncJobManager({}), "Main", true)).execute(
+			const result = await new WaitTool(session(new AsyncJobManager({}), "Main", true)).execute(
 				"interrupted-refresh-idle",
 				{},
 				controller.signal,
 			);
-			await expect(waiting).rejects.toThrow("Nothing to wait for");
+			// The interrupt is news for the model, so the loop guard must not skip this poll.
+			expect(result.useless).toBeUndefined();
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Nothing to wait for") });
 		});
 	});
 });
