@@ -12,7 +12,15 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 
-import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	BINARY_SNIFF_BYTES,
+	isEnoent,
+	isProbablyBinaryHeader,
+	isRecord,
+	peekFile,
+	prompt,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveMemberContent,
 	archiveFormatFromPath,
@@ -381,6 +389,52 @@ async function maybeMarkExecutableForShebang(absolutePath: string, content: stri
 	} catch {
 		return false;
 	}
+}
+
+/** Line-ending and BOM convention of a text file a write is about to replace. */
+interface TextFileConvention {
+	bom: boolean;
+	crlf: boolean;
+}
+
+/**
+ * Read the convention of the file at `absolutePath` from its first {@link BINARY_SNIFF_BYTES}:
+ * a leading UTF-8 BOM, and CRLF when its first line break is one (the rule `edit` applies).
+ * `undefined` for a binary file, whose bytes say nothing about text line endings.
+ */
+async function readTextFileConvention(absolutePath: string): Promise<TextFileConvention | undefined> {
+	return peekFile(absolutePath, BINARY_SNIFF_BYTES, header => {
+		if (isProbablyBinaryHeader(header)) return undefined;
+		const lf = header.indexOf(0x0a);
+		return {
+			bom: header[0] === 0xef && header[1] === 0xbb && header[2] === 0xbf,
+			crlf: lf > 0 && header[lf - 1] === 0x0d,
+		};
+	});
+}
+
+/**
+ * Give `content` the CRLF line endings and BOM of the file it replaces, as `edit` keeps them.
+ * Models write LF text, so without this replacing a CRLF file rewrites every line and drops its BOM.
+ * Content that already has a carriage return or a BOM is written as given. `note` names what was
+ * kept, so the model knows the bytes on disk differ from the text it sent.
+ */
+function applyTextFileConvention(
+	content: string,
+	convention: TextFileConvention | undefined,
+): { text: string; note?: string } {
+	if (!convention) return { text: content };
+	const kept: string[] = [];
+	let text = content;
+	if (convention.crlf && text.includes("\n") && !text.includes("\r")) {
+		text = text.replaceAll("\n", "\r\n");
+		kept.push("CRLF line endings");
+	}
+	if (convention.bom && text.length > 0 && !text.startsWith("\uFEFF")) {
+		text = `\uFEFF${text}`;
+		kept.push("UTF-8 BOM");
+	}
+	return kept.length === 0 ? { text } : { text, note: `Note: kept the replaced file's ${kept.join(" and ")}.` };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -973,11 +1027,18 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				cleanContent,
 			);
 
-			emitWriteProgress(onUpdate, cleanBytes, displayPath, absolutePath);
+			// An unreadable file keeps today's behavior; the write itself reports why it fails.
+			const convention = existing?.isFile()
+				? await readTextFileConvention(absolutePath).catch(() => undefined)
+				: undefined;
+			const { text: writeContent, note: conventionNote } = applyTextFileConvention(cleanContent, convention);
+			const writeBytes = writeContent === cleanContent ? cleanBytes : Buffer.byteLength(writeContent, "utf8");
+
+			emitWriteProgress(onUpdate, writeBytes, displayPath, absolutePath);
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
-			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
+			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, writeContent, signal);
 			if (bridgeWrite) {
 				// `write` always replaces the whole file, so (unlike hashline's
 				// hunk-scoped diff) there's no size cost to keying the header/
@@ -986,10 +1047,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// hands back a tag that matches what's actually on disk.
 				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
 				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text, displayPath);
-				const writeLine = `Successfully wrote ${cleanBytes} bytes to ${displayPath}`;
+				const writeLine = `Successfully wrote ${writeBytes} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
 					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+				}
+				if (conventionNote) {
+					resultText += `\n${conventionNote}`;
 				}
 				if (madeExecutable) {
 					resultText += `\n${EXECUTABLE_NOTICE}`;
@@ -1001,7 +1065,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 
 			const { writethrough, deferred } = this.#lspWritethrough();
-			const diagnostics = await writethrough(absolutePath, cleanContent, signal, undefined, batchRequest, dst =>
+			const diagnostics = await writethrough(absolutePath, writeContent, signal, undefined, batchRequest, dst =>
 				deferred?.begin(dst),
 			);
 			invalidateFsScanAfterWrite(absolutePath);
@@ -1012,11 +1076,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, finalContent);
 
 			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
-			const finalBytes = finalContent === cleanContent ? cleanBytes : Buffer.byteLength(finalContent, "utf8");
+			const finalBytes = finalContent === writeContent ? writeBytes : Buffer.byteLength(finalContent, "utf8");
 			const writeLine = `Successfully wrote ${finalBytes} bytes to ${displayPath}`;
 			let resultText = header ? `${header}\n${writeLine}` : writeLine;
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+			}
+			if (conventionNote) {
+				resultText += `\n${conventionNote}`;
 			}
 			if (madeExecutable) {
 				resultText += `\n${EXECUTABLE_NOTICE}`;
