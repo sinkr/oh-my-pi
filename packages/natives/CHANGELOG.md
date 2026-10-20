@@ -2,15 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `index.d.ts` drifting from the generated bindings, so building the natives no longer leaves the checkout modified ([#16306](https://github.com/can1357/oh-my-pi/pull/16306) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `cargo test` writing crash reports from panicking Rust tests into your real `~/.omp/logs`: they now go to a per-user `pi-natives-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
 ### Changed
 
 - Reduced native Git diff allocation overhead ([#16349](https://github.com/can1357/oh-my-pi/pull/16349) by [@kyle-elliott](https://github.com/kyle-elliott))
 - Reduced native memory-reranking allocations when candidate text contains repeated words ([#16348](https://github.com/can1357/oh-my-pi/pull/16348) by [@kyle-elliott](https://github.com/kyle-elliott))
 - Reduced allocation overhead when collecting directory grep results, including paginated searches ([#16226](https://github.com/can1357/oh-my-pi/pull/16226) by [@kyle-elliott](https://github.com/kyle-elliott))
+- Token counting for OpenAI, Qwen, DeepSeek, Kimi, GLM and Jev models is 11-30% faster on English text, code and Markdown ([#16399](https://github.com/can1357/oh-my-pi/pull/16399) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
+- Fixed the bash tool's `rm -rf` reporting `No such file or directory` for entries another process removed first and leaving the parent directories behind; under `-f` an entry already gone now counts as removed, as in GNU rm ([#16433](https://github.com/can1357/oh-my-pi/pull/16433) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the bash tool's `rg -c` and `rg --count-matches` printing `path:0` for every file without a match; zero counts are now printed only with `--include-zero`, as in ripgrep ([#16432](https://github.com/can1357/oh-my-pi/pull/16432) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed `ln -s local://… <path>` in the bash tool creating a host symlink that holds the URL text, which nothing can follow; a symlink on the host to a file-backed URL now stores the file it stands for ([#16428](https://github.com/can1357/oh-my-pi/pull/16428) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.3] - 2026-10-19
 
@@ -68,6 +78,7 @@
 - Fixed a macOS `takeover: true` click or key that opened a document or closed a sheet or panel leaving its app in front for good; focus now returns to your app unless you clicked or pressed a shortcut during the takeover ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the in-process `cksum --check` panicking on a tagged checksum line that starts with `(` (for example `(file)= <hash>`) instead of reporting it as an invalid checksum line ([#16142](https://github.com/can1357/oh-my-pi/pull/16142) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed `grep --path-separator` leaving `\` separators untouched in printed paths on Windows, so displayed paths no longer mix `\` with the configured separator ([#16143](https://github.com/can1357/oh-my-pi/pull/16143) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed macOS background input leaving the target app in front of yours when it came forward just as you clicked another window of your app; your app comes back with the window you clicked ([#16217](https://github.com/can1357/oh-my-pi/pull/16217) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS computer use reporting a working physical Escape stop (`globalEscape: true`) when Input Monitoring was turned off and the stop could not see keys; `inputPermission` now reports event-posting access, and permission errors name the terminal or IDE to grant ([#15157](https://github.com/can1357/oh-my-pi/pull/15157) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a persistent `Shell` session discarding its variables, functions, and options when a command ran `exit` or stopped under `set -e`; those now end only the command, and only a failed run resets the session ([#16153](https://github.com/can1357/oh-my-pi/pull/16153) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a macOS element-ref `StaleRef` giving no lead when the app destroyed the element and put an identical one in its place: the error now names the one element of the window with the fields the ref was read with, registered as a new ref, and sends nothing to it ([#15574](https://github.com/can1357/oh-my-pi/pull/15574) by [@will-bogusz](https://github.com/will-bogusz))
@@ -511,6 +522,10 @@
 ### Changed
 
 - Updated desktop input-control capabilities to use a unified `takeover` setting, including `takeover: true` for forced foreground pointer interaction.
+
+### Fixed
+
+- Fixed omp sessions on macOS adding a terminal icon to the Dock after the `computer` tool listed displays ([#13455](https://github.com/can1357/oh-my-pi/pull/13455) by [@VelizarSeleznev](https://github.com/VelizarSeleznev))
 
 ## [18.3.1] - 2026-09-25
 
