@@ -696,7 +696,7 @@ export async function renderHtmlToText(
 			if (!rendered) continue;
 			const content = stripDataUriImages(rendered);
 			if (content.trim().length <= 100) continue;
-			if (!isLowQualityOutput(content)) {
+			if (!isLowQualityOutput(content, method)) {
 				return { content, ok: true, method };
 			}
 			lowQuality ??= { content, method };
@@ -712,9 +712,9 @@ export async function renderHtmlToText(
 }
 
 /**
- * Check if lynx output looks JS-gated or mostly navigation
+ * Check if rendered output looks JS-gated, or, for a lynx dump, mostly navigation.
  */
-function isLowQualityOutput(content: string): boolean {
+function isLowQualityOutput(content: string, method: string): boolean {
 	const lower = content.toLowerCase();
 
 	// JS-gated indicators
@@ -729,7 +729,11 @@ function isLowQualityOutput(content: string): boolean {
 		return true;
 	}
 
-	// Mostly navigation (high link/menu density)
+	// Mostly navigation (high link/menu density). Only lynx dumps the whole page, menus
+	// included; the reader backends already drop navigation, and in their markdown short
+	// lines are table rows, code, list items and headings, so the same ratio would reject
+	// a page's content for a weaker reader's.
+	if (method !== "lynx") return false;
 	const lines = content.split("\n").filter(l => l.trim());
 	const shortLines = lines.filter(l => l.trim().length < 40);
 	if (lines.length > 10 && shortLines.length / lines.length > 0.7) {
@@ -1529,7 +1533,7 @@ async function renderUrl(
 		}
 
 		// Step 6: If rendered output is low quality, try more targeted fallbacks
-		if (isLowQualityOutput(htmlResult.content)) {
+		if (isLowQualityOutput(htmlResult.content, htmlResult.method)) {
 			const docLinks = extractDocumentLinks(rawContent, finalUrl);
 			if (docLinks.length > 0) {
 				const docUrl = docLinks[0];
