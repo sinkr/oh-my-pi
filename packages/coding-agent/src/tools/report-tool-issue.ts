@@ -82,10 +82,13 @@ const MAX_TOOL_BYTES = 128;
 function redactUserIdentity(text: string): string {
 	let redacted = text;
 	const home = os.homedir();
+	// Case-insensitive throughout: Windows and default macOS volumes name the
+	// same home in any case (`c:\users\will`), and over-matching another
+	// casing only hides more.
 	if (home.length > 1) {
 		for (const form of new Set([home, home.replaceAll("\\", "/")])) {
 			const pattern = `(?<![\\p{L}\\p{N}_.-])${RegExp.escape(form)}(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}])`;
-			redacted = redacted.replace(new RegExp(pattern, "gu"), "~");
+			redacted = redacted.replace(new RegExp(pattern, "giu"), "~");
 		}
 	}
 	let user: string | undefined;
@@ -98,7 +101,7 @@ function redactUserIdentity(text: string): string {
 		const name = RegExp.escape(user);
 		const pattern = new RegExp(
 			`(?<=(?<![\\p{L}\\p{N}])(?:Users|home)[/\\\\-]|~|(?<![\\p{L}\\p{N}])(?:com|org|net|io|dev)\\.)${name}(?![\\p{L}\\p{N}])|(?<![\\p{L}\\p{N}])${name}(?=@)`,
-			"gu",
+			"giu",
 		);
 		redacted = redacted.replace(pattern, "<user>");
 	}

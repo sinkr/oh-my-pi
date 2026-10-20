@@ -585,6 +585,26 @@ describe("dispatchReportIssueDevice", () => {
 		expect(await recordAsWill(report)).toBe(report);
 	});
 
+	it("redacts a Windows home written in another case", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		stubIdentity("C:\\Users\\Will", "Will");
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(
+				session,
+				"read: c:\\users\\will\\secret.txt and C:/USERS/WILL/x and -users-will-proj",
+			);
+			await settlePipeline();
+			const row = db.prepare("SELECT report FROM grievances").get() as { report: string };
+			expect(row.report).toBe("~\\secret.txt and ~/x and -users-<user>-proj");
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
 	it("writes nothing while consent is unresolved", async () => {
 		Bun.env.PI_AUTO_QA = "1";
 		const originalPush = Bun.env.PI_AUTO_QA_PUSH;
