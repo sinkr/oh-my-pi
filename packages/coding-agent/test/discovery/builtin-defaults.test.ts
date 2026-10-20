@@ -301,6 +301,131 @@ describe("builtin-defaults rule provider", () => {
 		).toEqual([]);
 	});
 
+	async function streamRule(name: string): Promise<(...deltas: string[]) => string[]> {
+		const rule = (await loadBuiltinRules()).find(r => r.name === name);
+		if (!rule) throw new Error(`${name} rule missing`);
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
+		return (...deltas) => {
+			manager.resetBuffer();
+			return deltas.flatMap(delta => manager.checkDelta(delta, ctx).map(r => r.name));
+		};
+	}
+
+	it("fires ts-set-map on string-literal initializers but not on empty or computed sets and maps", async () => {
+		const fired = await streamRule("ts-set-map");
+		const hits = [
+			'const KINDS = new Set(["text", "json"]);',
+			"const LABELS = new Map<string, string>([['text', 'Text']]);",
+			'const ROLES = new Set<PropertyKey>([\n\t"select",\n\t"confirm",\n]);',
+			'const LABELS = new Map<\n\tstring,\n\tstring\n>([["text", "Text"]]);',
+			'const TRANSFORMS = new Map<string, (value: string) => string>([["trim", value => value.trim()]]);',
+			'const KINDS = new Set<string>([ /* categories */ "a", "b" ]);',
+			'const KINDS = new Set([\n\t// text kinds\n\t"text",\n\t"json", // structured\n]);',
+			'const LABELS = new Map([\n\t["text", "Text"],\n\t["json", "JSON"],\n]);',
+			'const ALIASES = new Map<string, string[]>([["ts", ["typescript", "tsx"]]]);',
+			'const COLUMNS = new Map([["first", ROW[0]], ["second", ROW[1]]]);',
+			"const KINDS = new Set([`text`, `json`]);",
+			'const GREETINGS = new Set(["say \\"hi\\"", "bye"]);',
+			'const KINDS = new Set([/* categories * kept together */ "a", "b"]);',
+			'const CLOSERS = new Map([["close", "]"]]);',
+		];
+		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
+
+		// Shapes the rule body keeps as Set/Map: runtime-built membership and lookups.
+		const misses = [
+			"const seen = new Set<string>();",
+			"#pending = new Map<number, (m: { result?: unknown }) => void>();",
+			"const byId = new Map(items.map(item => [item.id, item]));",
+			"const keys = new Set([...Object.keys(a), ...Object.keys(b)]);",
+			// oxlint-disable-next-line no-template-curly-in-string -- literal TypeScript source fed to the rule
+			"const prefixed = new Set([`${prefix}-a`]);",
+			"for (const id of new Set(ids)) {}",
+			'const labels = new Map<string, string>().set("key", choose<string>(["a", "b"]));',
+			'const keep = new Set(["vendor", ...legs.map(leg => leg.id)]);',
+			'const counts = new Map([["known", 1], ...runtimeEntries]);',
+		];
+		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
+	});
+
+	it("fires ts-import-type on inline type imports but not on runtime import() calls", async () => {
+		const fired = await streamRule("ts-import-type");
+		const hits = [
+			'function run(client: import("some-sdk").Client): void {}',
+			'type Condense = import("./designs.js").Condense;',
+			'const options: import("arktype").infer<Schema> = value;',
+			'const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");',
+			'type Mod = typeof import("./mod");',
+			'let call: Parameters<typeof import("./declared-arguments").check>[0];',
+			'type Page = import("puppeteer-core")["Page"];',
+			'type Client = import(/* sdk */ "some-sdk").Client;',
+			'type Load = () => typeof import("./mod");',
+			'type Pair = [typeof import("./a"), string];',
+			'type Both = Base & typeof import("./mod");',
+			'type Thing = import("pkg", { with: { "resolution-mode": "import" } }).Thing;',
+			'type Mod = (typeof import("./mod"));',
+			'type Keys = keyof typeof import("./mod");',
+			'type Client = import(/* SDK * pinned */ "sdk").Client;',
+		];
+		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
+
+		// Runtime loads belong to ts-no-dynamic-import, or to no rule at all.
+		const misses = [
+			'const { carryFindings } = await import("./designs.js");',
+			'const mod = (await import("./known-module")).default;',
+			// oxlint-disable-next-line no-template-curly-in-string -- literal TypeScript source fed to the rule
+			"const { completeText } = await import(`${cwd}/src/client.ts`);",
+			'const [manifest] = await Promise.all([import("../readers/manifest.js")]);',
+			'const impit = import("impit").then(({ Impit }) => new Impit());',
+		];
+		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
+
+		// The stream pauses mid-call: the rule waits for the member name before deciding.
+		expect(fired('const impit = import("impit").', "then(({ Impit }) => new Impit());")).toEqual([]);
+	});
+
+	it("fires ts-no-any on any annotations and casts but not on the English word in comments", async () => {
+		const fired = await streamRule("ts-no-any");
+		const hits = [
+			"function readId(value: any): string {}",
+			"const root = el as any;",
+			"const config = { port: 3000 } as any as ServerConfig;",
+			"const config = value as any satisfies Config;",
+			"const rows: any[] = [];",
+			"let entry: any;",
+			"items.map((item: any) => item.id);",
+			"function readId(value: unknown): any {",
+			"const id = (value as any) ?? fallback;",
+			"const id = value as any ?? fallback;",
+			"const id = value as any!;",
+			"let entry: any /* TODO */;",
+			"let entry: any // TODO: type this\n",
+			"\t*next(value: any) {}",
+			"const n = value as any + 1;",
+			"const n = value as any instanceof Foo;",
+			"const n = (value as any) in obj;",
+			"let entry: any",
+			"type Box = { value: any extends string ? 1 : 0 };",
+		];
+		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-no-any"]);
+
+		const misses = [
+			"// Native terminal mapping: any tool call wins over every finish",
+			" * intact: anything that cited the preview's lines can still resolve.",
+			" * (`tallyStep`'s `items`): any of them fails the phase.",
+			"/** `posts.raw_json`, as far as anything reads it back. */",
+			"// The debugging bar shows while omp has any one attached.",
+			"return any?.newest ? { date: any.newest } : {};",
+			"// mapping: any\nconst flag = true;",
+			"const flag = true; // as far as any\nreturn flag;",
+		];
+		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
+
+		// A stream paused right after the word must not fire before the rest of it arrives.
+		expect(fired(" * intact: any", "thing that cited the preview's lines.\n")).toEqual([]);
+	});
+
 	it("is the lowest-priority rule provider so user/project rules override defaults", () => {
 		const { cap, provider } = ruleProvider();
 		const others = cap.providers.filter(p => p.id !== BUILTIN_DEFAULTS_PROVIDER_ID);
