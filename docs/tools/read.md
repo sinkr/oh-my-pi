@@ -169,8 +169,8 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Profiler reports
 
-- Recognized macOS `sample` call-tree files (`*.sample.txt`) and V8 `.cpuprofile` JSON are rendered as bottleneck summaries rather than raw dumps when valid and at most `32 MiB`.
-- Line selectors page the rendered summary. `:raw` bypasses profile rendering and reads the original file.
+- A whole-file read of a recognized macOS `sample` call-tree file (`*.sample.txt`) or V8 `.cpuprofile` JSON returns a bottleneck summary rather than the raw dump when valid and at most `32 MiB`.
+- The summary is generated text: it has no row numbers, hashline header or `:N` continuation, and one over `tools.artifactSpillThreshold` spills to an artifact like any tool result. Line selectors, tails and `:raw` read the original file, so their line numbers and snapshot tag are the file's.
 - A file that merely has one of those names/extensions but does not parse as the expected report falls through to ordinary text handling.
 
 ### SQLite databases
@@ -333,7 +333,7 @@ Notes: ...
 - File streaming chunk size: `8 * 1024` bytes (`READ_CHUNK_SIZE`).
 - Local streamed byte budget for line reads: `max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512)`.
 - Structural summaries only run when file size `<= 2 MiB` and line count `<= 20_000`.
-- Profile summaries run only for recognized reports at most `32 MiB`; `:raw` bypasses them.
+- Profile summaries run only for whole-file reads of recognized reports at most `32 MiB`; line selectors and `:raw` read the file.
 - Image input max: `20 MiB`.
 - Directory tree caps for local directories: depth `2`, per-directory children `12`.
 - Archive directory default list cap: `500` entries; archive members cap at `64 MiB`, and tar/tgz containers cap at `256 MiB`.

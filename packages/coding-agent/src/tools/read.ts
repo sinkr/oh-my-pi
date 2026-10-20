@@ -2104,21 +2104,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const resolvedDisplayPath = located?.url ?? formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
-		// replace the raw dump with a bottleneck summary (hot paths, top self
-		// time/samples). `:raw` reads the original bytes; text that merely wears
-		// the extension falls through to the plain-text path.
-		if (!mimeType && !isRawSelector(parsed) && fileSize <= MAX_PROFILE_SUMMARY_BYTES) {
+		// a whole-file read gets a bottleneck summary (hot paths, top self
+		// time/samples) instead of the raw dump. Line selectors and `:raw` read the
+		// file itself, so their line numbers and snapshot tag are the file's; text
+		// that merely wears the extension falls through to the plain-text path.
+		if (!mimeType && parsed.kind === "none" && fileSize <= MAX_PROFILE_SUMMARY_BYTES) {
 			let rendered: string | null = null;
 			if (isSampleProfilePath(renderAbsolutePath))
 				rendered = renderSampleProfile(await Bun.file(absolutePath).text());
 			else if (isCpuProfilePath(renderAbsolutePath))
 				rendered = renderCpuProfile(await Bun.file(absolutePath).text());
 			if (rendered) {
-				return buildInMemorySelectorResult(this.session, rendered, parsed, {
-					details: { resolvedPath: renderAbsolutePath },
-					sourcePath: renderAbsolutePath,
-					entityLabel: "profile summary",
-				});
+				// One unnumbered document: `:N` addresses the file, so the summary carries no row
+				// numbers, snapshot tag or `:N` continuation, and no line count that would mark it a
+				// complete read of the file. An oversized summary goes to the central artifact spill.
+				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath })
+					.text(rendered)
+					.sourcePath(renderAbsolutePath)
+					.done();
 			}
 		}
 		// Read the file based on type
