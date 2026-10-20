@@ -2,11 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `cargo test` writing crash reports from panicking Rust tests into your real `~/.omp/logs`: they now go to a per-user `pi-natives-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
 ### Changed
 
 - Reduced native Git diff allocation overhead ([#16349](https://github.com/can1357/oh-my-pi/pull/16349) by [@kyle-elliott](https://github.com/kyle-elliott))
 - Reduced native memory-reranking allocations when candidate text contains repeated words ([#16348](https://github.com/can1357/oh-my-pi/pull/16348) by [@kyle-elliott](https://github.com/kyle-elliott))
 - Reduced allocation overhead when collecting directory grep results, including paginated searches ([#16226](https://github.com/can1357/oh-my-pi/pull/16226) by [@kyle-elliott](https://github.com/kyle-elliott))
+- Token counting for OpenAI, Qwen, DeepSeek, Kimi, GLM and Jev models is 11-30% faster on English text, code and Markdown ([#16399](https://github.com/can1357/oh-my-pi/pull/16399) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed the bash tool's `rm -rf` reporting `No such file or directory` for entries another process removed first and leaving the parent directories behind; under `-f` an entry already gone now counts as removed, as in GNU rm ([#16433](https://github.com/can1357/oh-my-pi/pull/16433) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the bash tool's `rg -c` and `rg --count-matches` printing `path:0` for every file without a match; zero counts are now printed only with `--include-zero`, as in ripgrep ([#16432](https://github.com/can1357/oh-my-pi/pull/16432) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -511,6 +520,10 @@
 ### Changed
 
 - Updated desktop input-control capabilities to use a unified `takeover` setting, including `takeover: true` for forced foreground pointer interaction.
+
+### Fixed
+
+- Fixed omp sessions on macOS adding a terminal icon to the Dock after the `computer` tool listed displays ([#13455](https://github.com/can1357/oh-my-pi/pull/13455) by [@VelizarSeleznev](https://github.com/VelizarSeleznev))
 
 ## [18.3.1] - 2026-09-25
 

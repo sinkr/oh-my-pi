@@ -98,7 +98,9 @@ const BROWSER_RUN_SCOPE: readonly string[] = ["tab", "page", "browser", "wait", 
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
-	"relay?": type("boolean").describe("drive the user's own tabs via the omp browser relay"),
+	"relay?": type("boolean").describe(
+		"true drives the user's own tabs via the omp browser relay; false skips a relay the settings enable",
+	),
 	"tern?": type("boolean").describe("inside Tern: true forces a Tern picture-in-picture, false opts out"),
 	"args?": type("string[]").describe("extra cli args"),
 	"target?": type("string").describe(
