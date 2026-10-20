@@ -51,7 +51,7 @@ function summarizeText(text: string, limit: number): string {
 	return summary;
 }
 
-function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCallId: string): string {
+function toolResultText(toolResults: readonly ToolResultMessage[], toolCallId: string): string {
 	const result = toolResults.find(candidate => candidate.toolCallId === toolCallId);
 	if (!result) return "";
 
@@ -61,7 +61,7 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
 			textParts.push(block.text);
 		}
 	}
-	return summarizeText(textParts.join("\n"), RESULT_SUMMARY_LIMIT);
+	return textParts.join("\n");
 }
 
 /** Detects consecutive identical assistant tool calls across model turns. */
@@ -70,6 +70,8 @@ export class ToolCallLoopGuard {
 	#exemptTools: ReadonlySet<string>;
 	#lastHash: string | undefined;
 	#count = 0;
+	/** Calls and results of the last all-exempt turn, to tell an idle poll from a productive one. */
+	#lastExemptHash: string | undefined;
 
 	constructor(options: ToolCallLoopGuardOptions) {
 		this.#threshold = Math.max(1, Math.trunc(options.threshold));
@@ -82,9 +84,31 @@ export class ToolCallLoopGuard {
 		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
+			this.#lastExemptHash = undefined;
 			return null;
 		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
+			// An exempt turn that repeats the previous one call for call and result for
+			// result (a poll that returned nothing new) is skipped, so alternating it with
+			// a repeated call cannot hide the loop. Any other exempt turn may have changed
+			// state (a `hub` start/send, a wait that returned finished work), so it ends
+			// the repetition.
+			const exemptHash = JSON.stringify(
+				toolCalls
+					.map(tc =>
+						JSON.stringify([
+							tc.name,
+							canonicalizeToolCallValue(tc.arguments),
+							toolResultText(turn.toolResults, tc.id),
+						]),
+					)
+					.sort(),
+			);
+			if (exemptHash !== this.#lastExemptHash) {
+				this.#lastExemptHash = exemptHash;
+				this.#lastHash = undefined;
+				this.#count = 0;
+			}
 			return null;
 		}
 
@@ -105,7 +129,7 @@ export class ToolCallLoopGuard {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
 			count: this.#count,
-			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
+			resultSummary: summarizeText(toolResultText(turn.toolResults, reportCall.id), RESULT_SUMMARY_LIMIT),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
 				ARGUMENT_SUMMARY_LIMIT,

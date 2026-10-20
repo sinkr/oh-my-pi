@@ -6,6 +6,10 @@
 
 - Added Inception API-key login (`/login inception`) and `INCEPTION_API_KEY` environment authentication ([#16439](https://github.com/can1357/oh-my-pi/pull/16439) by [@eggpeat](https://github.com/eggpeat))
 
+### Fixed
+
+- Fixed the repeated-tool-call guard missing a loop the model interleaves with an exempt poll that returns nothing new, such as `hub wait` between identical commands ([#11874](https://github.com/can1357/oh-my-pi/pull/11874) by [@dickyudhandika](https://github.com/dickyudhandika))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
@@ -679,7 +683,6 @@
 
 - Fixed Anthropic prompt-cache head re-baselining on every memory recall refresh: the system breakpoint now anchors on the last stable segment instead of the volatile recall suffix, and the stable-system fingerprint ignores recall blocks, so a recall refresh re-bills only the suffix instead of the whole tools+system head.
 - Fixed auth-broker client config resolution failing silently on Windows when reading the token file or `config.yml`; reads now use `node:fs` instead of `Bun.file`.
-- Fixed ToolCallLoopGuard zeroing its consecutive-repeat counter when all tool calls in a turn are exempt, allowing interleaved polling turns to bypass repeat detection ([#11874](https://github.com/can1357/oh-my-pi/pull/11874) by [@dickyudhandika](https://github.com/dickyudhandika)).
 
 ## [18.2.5] - 2026-09-17
 

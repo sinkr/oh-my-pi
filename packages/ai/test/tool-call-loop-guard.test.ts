@@ -301,24 +301,44 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(turn(batch()))).toBeNull();
 	});
 
-	test("does not reset when every call in a multi-call turn is exempt", () => {
-		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["read"] });
-		const batch = () => [toolCall("bash", { command: "echo a" }), toolCall("read", { path: "a.ts" })];
-		expect(guard.recordTurn(turn(batch()))).toBeNull();
-		expect(
-			guard.recordTurn(turn([toolCall("read", { path: "x.ts" }), toolCall("read", { path: "y.ts" })])),
-		).toBeNull();
-		expect(guard.recordTurn(turn(batch()))).toMatchObject({ toolName: "bash", count: 2 });
+	/** An exempt `hub` turn whose wait returned `text`. */
+	function hubWait(text: string) {
+		const call = toolCall("hub", { op: "wait" });
+		return turn(
+			[call],
+			[
+				{
+					role: "toolResult",
+					toolCallId: call.id,
+					toolName: "hub",
+					content: [{ type: "text", text }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			],
+		);
+	}
+
+	test("keeps counting across a repeated idle exempt poll between identical turns", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["hub"] });
+		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
+		expect(guard.recordTurn(pytest())).toBeNull();
+		expect(guard.recordTurn(hubWait("no messages"))).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
+		// The same poll with the same empty answer made no progress, so it does not hide the loop.
+		expect(guard.recordTurn(hubWait("no messages"))).toBeNull();
+		expect(guard.recordTurn(pytest())).toMatchObject({ toolName: "bash", count: 2 });
 	});
 
-	test("does not reset consecutive counter when an exempt polling turn occurs between identical turns", () => {
+	test("resets after an exempt turn that returned something new", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["hub"] });
-		expect(guard.recordTurn(turn([toolCall("bash", { command: "pytest" })]))).toBeNull();
-		expect(guard.recordTurn(turn([toolCall("hub", { op: "wait" })]))).toBeNull();
-		expect(guard.recordTurn(turn([toolCall("bash", { command: "pytest" })]))).toMatchObject({
-			toolName: "bash",
-			count: 2,
-		});
+		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
+		expect(guard.recordTurn(pytest())).toBeNull();
+		expect(guard.recordTurn(hubWait("no messages"))).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
+		// Finished peer work may have changed what the rerun sees.
+		expect(guard.recordTurn(hubWait("worker finished: fixed test"))).toBeNull();
+		expect(guard.recordTurn(pytest())).toBeNull();
 	});
 
 	test("counts a mixed batch and reports the first non-exempt call", () => {
