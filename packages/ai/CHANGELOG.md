@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic and Bedrock logging one warning per dropped thinking block (hundreds for one request) after a conversation change; the drop now logs one warning with the count ([#16392](https://github.com/can1357/oh-my-pi/pull/16392) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Factory Droid Core models (Kimi, GLM, DeepSeek and others) dropping calls to tools with names over 64 characters and their results from later requests; such names now shorten to 64 characters, and shorter names are sent unchanged ([#16384](https://github.com/can1357/oh-my-pi/pull/16384) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added opt-in `reclaimAbovePct` to `auth.accountPolicies`: sessions automatically moved to a lower-priority account return to the preferred one once it has that much quota left ([#14237](https://github.com/can1357/oh-my-pi/pull/14237) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `reachesBudgetedHost()`: whether the catalog's host request budgets (inline image bytes, official image count) apply to a request, true on a model's official endpoint and on Factory Droid's own hosts ([#16288](https://github.com/can1357/oh-my-pi/pull/16288) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Devin `/usage` showing no data for accounts signed in with `/login devin`, and Devin chat sending a failing extra auth request for legacy Windsurf Enterprise keys ([#13677](https://github.com/can1357/oh-my-pi/pull/13677) by [@will-bogusz](https://github.com/will-bogusz))
+- Turns stopped for a thinking loop now keep the tokens and cost the provider had reported, the response id, the request's start time, and its time to first token and duration, instead of recording zero usage and no timing ([#16437](https://github.com/can1357/oh-my-pi/pull/16437) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Claude requests answering a turn whose attachment is a video, PDF, HEIC or other format sent outside a JPEG/PNG/GIF/WebP image as if nothing were attached; the turn now fails with an error naming the format ([#16407](https://github.com/can1357/oh-my-pi/pull/16407) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added Inception API-key login (`/login inception`) and `INCEPTION_API_KEY` environment authentication ([#16439](https://github.com/can1357/oh-my-pi/pull/16439) by [@eggpeat](https://github.com/eggpeat))
+
+### Changed
+
+- `cursorRawReadPath()` writes a bare start line as `raw:N-` (`file:10` → `file:raw:10-`), so Cursor exec reads of such a path still read from line `N` onward now that `read` takes `N:raw` as one line ([#16438](https://github.com/can1357/oh-my-pi/pull/16438) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed the repeated-tool-call guard missing a loop the model interleaves with a `wait` that elapses with nothing new; a wait that returns finished work still ends the repetition ([#11874](https://github.com/can1357/oh-my-pi/pull/11874) by [@dickyudhandika](https://github.com/dickyudhandika))
+- Fixed Google Antigravity chat and image requests failing with false 429 quota-exhausted errors ([#11849](https://github.com/can1357/oh-my-pi/pull/11849) by [@jotafurtado](https://github.com/jotafurtado))
+- Fixed the stream loop guard never stopping a model stuck repeating punctuation or symbols (`?!?!`, `✓✓✓`) until the output limit; such runs now trip once they repeat for 1 KB, while digit and whitespace runs such as padding and hexdumps are left alone ([#14436](https://github.com/can1357/oh-my-pi/pull/14436) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed native remote compaction for supported Bedrock Claude models without changing ordinary Converse turns; a custom non-AWS `baseUrl` needs `remoteCompaction.enabled: true` ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+- Fixed Anthropic compaction blocks dropping their signed `tool_changes`, which made the replayed block fail its signature ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
+- Added `validateToolArguments(tool, call, { keepUnknownRootKeys: true })` to keep unknown root keys that a closed schema would otherwise drop during argument repair ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
+
+### Fixed
+
+- Fixed Claude streams that a gateway cut off before `message_delta` failing the turn instead of being retried ([#16341](https://github.com/can1357/oh-my-pi/pull/16341) by [@lz-lunzi](https://github.com/lz-lunzi))
+- Fixed Gemini pairing parallel same-name tool results with the wrong call when history stores them out of call order (sessions from before 18.4.2, SDK-built contexts) ([#16259](https://github.com/can1357/oh-my-pi/pull/16259) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Factory Droid Gemini dropping calls to tools with names over 64 characters (most MCP tools) and their results from later requests, so the model called the tool again; such names now shorten to 64 characters ([#16283](https://github.com/can1357/oh-my-pi/pull/16283) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Factory Droid Gemini requests failing with 400 "For schema with items, schema type should be ARRAY" when a tool parameter accepts a string or a list, as the default `task` tool's `model` field does ([#16249](https://github.com/can1357/oh-my-pi/pull/16249) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `PI_REQ_DEBUG=1` request dumps writing your API key, bearer token and response cookies to disk in plain text: credential headers now read `[redacted]`, as in rejected-request dumps ([#16293](https://github.com/can1357/oh-my-pi/pull/16293) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed finalized signed reasoning disappearing from displayed thinking when no deltas streamed ([#16227](https://github.com/can1357/oh-my-pi/issues/16227))
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
@@ -95,6 +139,14 @@
 - Fixed turns stopping instead of retrying when a gateway reports its upstream WebSocket closed before `response.completed` ([#15628](https://github.com/can1357/oh-my-pi/pull/15628) by [@nqrwhal](https://github.com/nqrwhal)).
 - Fixed Claude on Google Vertex ignoring `cacheRetention: "long"`: prompt caches now get the 1h TTL instead of expiring after 5 minutes, and the `extended-cache-ttl` beta (which Vertex rejects) is never sent there ([#15505](https://github.com/can1357/oh-my-pi/pull/15505) by [@hpost](https://github.com/hpost))
 - Fixed Gemini tool continuations failing on OpenAI-compatible gateways that return `reasoning_signature`, including restored sessions ([#15678](https://github.com/can1357/oh-my-pi/pull/15678) by [@Zzz141592653](https://github.com/Zzz141592653))
+### Added
+
+- Added image support for native OpenAI Decisions and Workers AI judgments, prompted vision chat, and auth-gateway System One requests; images exceeding a judgment API's documented caps (e.g. Clef's 4 images, 4 MiB each) are rejected locally ([#15471](https://github.com/can1357/oh-my-pi/pull/15471) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- `isSurvivingAssistant` in `providers/transform-messages`: whether an assistant turn reaches a replay, malformed tool calls dropped first, so callers outside `transformMessages` pick the same latest turn ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
+- Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can hide whole providers and API keys: `"*": false` makes the file an allow-list, and an entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
 - Fixed Cursor sessions failing every rebuilt request with `PROVIDER_ERROR` after the server re-sent a tool call: the call is recorded once, and histories that already repeat it replay it once with its latest result ([#15749](https://github.com/can1357/oh-my-pi/issues/15749))
 - Fixed Cursor turns cut off mid-stream failing every retry with `PROVIDER_ERROR` until you sent a new message; the retry now starts a fresh Cursor conversation ([#15830](https://github.com/can1357/oh-my-pi/issues/15830))
 - Fixed malformed image-generation inputs being forwarded to providers or reported as credential/upstream errors ([#15765](https://github.com/can1357/oh-my-pi/pull/15765) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
@@ -2332,26 +2384,4 @@
 - Fixed OpenAI Responses native history replay leaking image generation provider-only fields into the next request, which made OpenAI-compatible proxies reject `pi` tool-calling sessions with `Unknown parameter: input[1].action`. ([#3201](https://github.com/can1357/oh-my-pi/issues/3201))
 - Fixed a stream thought-leakage issue for `gemini-3.5-flash` where the model's internal reasoning JSON could leak into the visible text stream. The stream parser now uses a brace-balanced counting algorithm to accurately slice and discard the leading thought JSON block, with a robust fallback for unescaped double quotes, dynamic tool-name derivation, and preservation of subsequent text deltas without triggering empty-response retries.
 
-## [16.1.10] - 2026-06-21
-
-### Changed
-
-- Improved JSON robustness by replacing external dependency with a custom, high-performance parser
-- Strengthened streaming JSON parsing to prevent non-finite numbers from surfacing as `undefined/NaN`
-- Configured JSON parser to reject JS-specific `NaN` and `Infinity` values for tool arguments
-- Replaced the JSON repair/parse helpers (`parseJsonWithRepair`, `parseStreamingJson`) with a single from-scratch tolerant parser (`RelaxedJson`) that accepts single-quoted strings, unquoted object keys, trailing/stray commas, `//` and `/* */` comments, Python `True`/`False`/`None`, raw control characters, invalid escapes, and unescaped apostrophes (`'it's'`). Final parsing still throws on truncated/garbage input (so a malformed tool call is skipped rather than executed with half-formed args) and rejects JS-only `NaN`/`Infinity`; streaming parsing stays non-throwing and rolls back incomplete trailing tokens instead of surfacing `undefined`/`NaN`. The Cursor provider's ad-hoc regex + JSON5 tool-argument parser now routes through the shared parser.
-
-### Fixed
-
-- Fixed tool call ID normalization for Anthropic-compatible models
-- Fixed Anthropic Messages replay sanitizing malformed tool-call IDs, including aborted native tool calls with empty IDs, so retries no longer send invalid `tool_use.id` / `tool_result.tool_use_id` pairs.
-- Fixed the Codex Responses WebSocket transport attributing a prior turn's output to the current one on a reused connection: a trailing/duplicate frame from a cleanly-completed previous response that slipped past the queue drain could be consumed as this request's terminal (ending the turn with empty output) or as a stale tool call. Frames are now keyed by `response.id` — a frame carrying the previous response's id is dropped, and one carrying a third id (or a regressed `sequence_number`) fails closed so the turn retries instead of mixing two responses' streams. Idless frames (deltas, the rate-limit/metadata preamble, `response.created`-less streams) still pass through, matching upstream codex-rs.
-- Fixed `transformMessages` pulling an earlier, orphaned tool result onto a later tool call that reused the same id (left behind when compaction folded the originating `tool_use` into a summary). The pending-call flush now pairs each call with a result positioned _after_ its assistant turn, so a reused id surfaces its own output rather than a prior turn's.
-- Fixed DashScope 429 rate-limit messages that mention authorization being classified as credential failures, preventing valid API keys from being invalidated after throttling. ([#3172](https://github.com/can1357/oh-my-pi/issues/3172))
-- Fixed OpenCode Go `401 Insufficient balance` quota errors being treated as unknown failures instead of usage-limit errors, restoring credential rotation and fallback chains. ([#3169](https://github.com/can1357/oh-my-pi/issues/3169))
-
-### Removed
-
-- Removed the `partial-json` dependency; streaming JSON parsing now uses the in-house `RelaxedJson` parser.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@bb602d67c9b6](https://github.com/can1357/oh-my-pi/blob/bb602d67c9b685535bbf8ef1a1cc9de3c944ede4/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@5eb78e90fa4e](https://github.com/can1357/oh-my-pi/blob/5eb78e90fa4ec4318b9520302f1977fa58c48745/packages/ai/CHANGELOG.md).
