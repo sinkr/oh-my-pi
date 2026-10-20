@@ -120,12 +120,16 @@ async function createHarness(): Promise<ShutdownHarness> {
 	const session = {
 		extensionRunner: undefined,
 		model: { provider: "anthropic", id: "test-model" },
-		settings: { get: () => false },
+		settings: Settings.isolated(),
 		sessionManager: manager,
 		subscribe: () => {},
+		addDisposer: () => {},
 		getAllToolNames: () => [],
+		validateRetryFallbackChains: () => {},
 		getLastAssistantMessage: () => undefined,
+		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => {},
+		waitForIdle: async () => {},
 		setTextOutputCommitted: () => {},
 		waitForAdvisorCatchup: async () => true,
 		// Later writes keep failing on the real store path; the manager latches

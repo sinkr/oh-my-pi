@@ -1,21 +1,47 @@
 import type { SummaryResult } from "@oh-my-pi/pi-natives";
 import { formatNumberedLine } from "./hashline-format";
 import { LINE_RANGE_CHUNK_SOURCE, parseLineRanges } from "./line-ranges";
+import * as os from "node:os";
 import * as path from "node:path";
+import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	RenderResultContextOptions,
+	NativeToolView,
+	RenderResultOptions,
+	ToolActivityContext,
+	ToolActivitySummary,
+	ToolRenderer,
+} from "./renderer";
+import { ansi, compact, md } from "../native/describe";
+import { base64ImageNode, nativeMediaNode, readMediaPath } from "../native/blobs";
+import type { NativeChild, NativeNode } from "../native/node";
+import { fileHref, footnoteText, inlineErrorView, resultText } from "./native-view";
+import { numberedCode } from "./grouped-file-output";
 import { getLanguageFromPath } from "../lang-from-path";
 import type { Theme } from "../theme/theme";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine } from "../render";
 import { markFramedBlockComponent } from "../render/output-block";
 import { framedToolCard } from "../render/tool-card";
-import { type ReadUrlToolDetails, renderReadUrlCall, renderReadUrlResult } from "./fetch";
+import {
+	describeReadUrlCall,
+	describeReadUrlResult,
+	type ReadUrlToolDetails,
+	renderReadUrlCall,
+	renderReadUrlResult,
+} from "./fetch";
 import { formatFullOutputReference, formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
 import { formatBytes, sanitizeDisplayLines, shortenPath, wrapBrackets } from "../render/render-utils";
 
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
+import { describeProcRead, renderProcRead, type ProcReadDetails } from "./proc-render";
+import { describeCfgRead, renderCfgRead, type CfgReadDetails } from "./cfg-render";
+import type { CardToolResult } from "./result-card";
+import { type InternalUrlSchemeSpec, internalUrlSchemeSpec, splitUrlScheme } from "./url-scheme-host";
 
 /** Read result metadata retains truncation statistics, not a second copy of the body. */
 export type ReadTruncationStats = Omit<TruncationResult, "content">;
@@ -23,11 +49,19 @@ export type ReadTruncationStats = Omit<TruncationResult, "content">;
 /** Display metadata for file and URL reads. */
 export interface ReadToolDetails {
 	kind?: "file" | "url";
+	proc?: ProcReadDetails;
+	cfg?: CfgReadDetails;
 	/** Filesystem hyperlink target resolved by the executing tool. */
 	displayTarget?: string;
 	truncation?: ReadTruncationStats;
 	isDirectory?: boolean;
 	resolvedPath?: string;
+	/**
+	 * Absolute path of the disk file whose image this read returned. A native TSP host that
+	 * supports `media` shows the file by path instead of the uploaded image bytes. Unset for
+	 * screenshots, URL reads and other images not backed by a file. Display-only.
+	 */
+	mediaPath?: string;
 	suffixResolution?: { from: string; to: string };
 	url?: string;
 	finalUrl?: string;
@@ -39,6 +73,11 @@ export interface ReadToolDetails {
 	fileSize?: number;
 	/** Full source line count when the read reached EOF and the count is exact. */
 	totalLines?: number;
+	/**
+	 * Whether the text's rows carry line-number prefixes (`N:` hashline, `N|` line numbers). Set where a
+	 * file read is formatted; a raw read sets `false`. Snapcompact reads it to tell a `12:` prefix from content.
+	 */
+	rowPrefixes?: boolean;
 	/** Raw text + start line for user-visible TUI rendering, set when content is text-like.
 	 * Mirrors the same lines the model receives but without hashline/line-number prefixes,
 	 * so the TUI can render the file content with its own gutter without re-parsing the formatted text. */
@@ -50,7 +89,10 @@ export interface ReadToolDetails {
 	summary?: { lines: number; elidedSpans: number; elidedLines: number };
 	/** Number of unresolved git conflicts surfaced by this read (TUI uses for inline `⚠ N` badge). */
 	conflictCount?: number;
-	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
+	/**
+	 * Paths recovered from a delimited read argument. The TUI renders one call as multiple read rows; snapcompact
+	 * keeps such a composite result as text.
+	 */
 	displayReadTargets?: string[];
 	/**
 	 * Resolved filesystem link target for each {@link displayReadTargets} entry, aligned by index; `null` when a
@@ -75,36 +117,6 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
-// Schemes whose host grammar is identifier-shaped, so any trailing
-// `:<selector-chunk>` is unambiguously a read-tool selector. `mcp://` is
-// excluded because mcp resource URIs may legitimately contain colons. `ssh://`
-// is included despite an optional `:port`; `splitInternalUrlSel` skips the peel
-// for an `ssh://host:port` that has no `/path`, so the port colon is never
-// mistaken for a selector (a real ssh selector trails the `/path`, e.g.
-// `ssh://h/f:1-5`).
-const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
-	agent: true,
-	artifact: true,
-	issue: true,
-	history: true,
-	local: true,
-	memory: true,
-	omp: true,
-	pr: true,
-	rule: true,
-	security: true,
-	skill: true,
-	ssh: true,
-	vault: true,
-};
-// Schemes whose resource URIs are server-defined and may legitimately end
-// with selector-shaped tails (e.g. `:raw`, `:conflicts`, `:1-50`, `/:raw`).
-// `McpProtocolHandler` resolves by exact URI match (`r.uri === uri`), so
-// peeling syntactically can make valid resources unreachable. Keep these
-// schemes opaque; selector support for them needs a resolver-aware path that
-// tries the exact URI before interpreting any suffix as a read selector.
-const OPAQUE_RESOURCE_SCHEMES: ReadonlySet<string> = new Set(["mcp"]);
-const INTERNAL_URL_SCHEME_RE = /^([a-z][a-z0-9+.-]*):\/\//i;
 /** Split a filesystem path from its trailing read selector. */
 export function splitPathAndSel(rawPath: string): { path: string; sel?: string } {
 	const colon = rawPath.lastIndexOf(":");
@@ -148,30 +160,28 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
  * This function iteratively peels selector-shaped chunks (well-formed plus
  * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
  * clean URL to the protocol handler and surface selector errors via parseSel
- * instead of as misleading "host invalid" errors from the handler. Schemes
- * whose resource URIs may legitimately contain colons (`mcp://`) are skipped.
+ * instead of as misleading "host invalid" errors from the handler.
+ *
+ * Only schemes whose spec declares `lines` selectors peel; server-defined URIs
+ * (`opaque`), selector-free schemes, and unregistered schemes pass through
+ * verbatim. `specOf` defaults to the installed scheme host, so nothing peels
+ * before a host is installed.
  *
  * Falls back to the input unchanged when nothing matches.
  */
+export function splitInternalUrlSel(
+	rawPath: string,
+	specOf: (scheme: string) => InternalUrlSchemeSpec | undefined = internalUrlSchemeSpec,
+): { path: string; sel?: string } {
+	const url = splitUrlScheme(rawPath);
+	if (!url) return { path: rawPath };
+	const spec = specOf(url.scheme);
+	if (spec?.selectors !== "lines") return { path: rawPath };
+	// With no `/path` after the authority, a trailing `:N` is the port
+	// (ssh://host:2222), not a read selector.
+	if (spec.portAuthority && !url.rest.includes("/")) return { path: rawPath };
 
-export function splitInternalUrlSel(rawPath: string): { path: string; sel?: string } {
-	const schemeMatch = rawPath.match(INTERNAL_URL_SCHEME_RE);
-	if (!schemeMatch) return { path: rawPath };
-	const scheme = schemeMatch[1].toLowerCase();
-	// Opaque schemes (mcp://, etc.) carry server-defined resource URIs that may
-	// legitimately end in selector-shaped tails. Forward verbatim — see
-	// OPAQUE_RESOURCE_SCHEMES.
-	if (OPAQUE_RESOURCE_SCHEMES.has(scheme)) return { path: rawPath };
-	if (!INTERNAL_SCHEMES_WITH_SELECTORS[scheme]) return { path: rawPath };
-
-	const schemeEnd = schemeMatch[0].length;
-	// ssh:// authority carries an optional `:port`; with no `/path` after the
-	// authority, a trailing `:NNNN` is the port, not a read selector
-	// (e.g. ssh://host:2222). Other schemes' authority-trailing selectors
-	// (artifact://5:1-50) still peel, so this guard is ssh-specific.
-	if (scheme === "ssh" && rawPath.indexOf("/", schemeEnd) === -1) {
-		return { path: rawPath };
-	}
+	const schemeEnd = rawPath.length - url.rest.length;
 	let path = rawPath;
 	const chunks: string[] = [];
 	while (true) {
@@ -215,10 +225,77 @@ export interface ReadRenderArgs {
 	raw?: boolean;
 }
 
-const INTERNAL_URL_LIKE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+/** Transcript card for reads of a scheme with its own UI (process table, settings tree). */
+interface ReadUrlCard {
+	/** Activity label, e.g. `Process · web`. */
+	readonly label: string;
+	/** Activity detail when the URL names no target. */
+	readonly rootDetail: string;
+	/** Result details field whose presence identifies this card. */
+	readonly detailsKey: "proc" | "cfg";
+	/** Pending call card when `result` is undefined, else the finished result card. */
+	render(
+		url: string,
+		target: string,
+		result: CardToolResult | undefined,
+		details: ReadToolDetails | undefined,
+		options: RenderResultOptions,
+		uiTheme: Theme,
+	): Component;
+}
+
+/** Read cards keyed by URL scheme. */
+const READ_URL_CARDS: Record<string, ReadUrlCard> = {
+	proc: {
+		label: "Process",
+		rootDetail: "jobs & services",
+		detailsKey: "proc",
+		render: (_url, target, result, details, options, uiTheme) =>
+			renderProcRead(target, result, details?.proc, options, uiTheme),
+	},
+	cfg: {
+		label: "Config",
+		rootDetail: "all settings",
+		detailsKey: "cfg",
+		render: (url, _target, result, details, options, uiTheme) =>
+			renderCfgRead(splitInternalUrlSel(url).path, result, details?.cfg, options, uiTheme),
+	},
+};
+
+/**
+ * Card that renders a read of `rawPath` with the text after `scheme://` as its target.
+ * Result details identify the card before the URL scheme does.
+ */
+function readUrlCard(rawPath: string, details?: ReadToolDetails): { card: ReadUrlCard; target: string } | undefined {
+	const url = splitUrlScheme(rawPath);
+	const target = url?.rest ?? "";
+	if (details) {
+		for (const scheme in READ_URL_CARDS) {
+			const card = READ_URL_CARDS[scheme];
+			if (details[card.detailsKey] !== undefined) return { card, target };
+		}
+	}
+	if (!url || !Object.hasOwn(READ_URL_CARDS, url.scheme)) return undefined;
+	return { card: READ_URL_CARDS[url.scheme], target };
+}
+
+// A scheme-less host followed by a slash can be a web target. Do not force a
+// file: link onto it; explicit relative paths (./host/path) remain filesystem paths.
+const BARE_WEB_HOST_RE = /^(?:(?:[a-z][a-z0-9-]*|\[[0-9a-f:]+\])(?::\d+)|(?:[a-z0-9-]+\.)+[a-z0-9-]+(?::\d+)?)\//i;
+
+/** Local file a pending read/write input points at, before the tool resolves it:
+ * expands `~` and drops archive-member / SQLite-row selectors so the link opens
+ * the containing file. */
+export function pendingFileLinkPath(inputPath: string): string {
+	const expanded = inputPath.replace(/^~(?=$|[\\/])/, os.homedir());
+	if (!expanded.includes(":")) return path.resolve(expanded);
+	const archive = parseArchivePathCandidates(expanded).find(candidate => candidate.archivePath !== expanded);
+	const sqlite = expanded.match(/^(.+\.(?:sqlite3?|db3?))(?=[:?])/i);
+	return path.resolve(archive?.archivePath ?? sqlite?.[1] ?? expanded);
+}
 
 function splitReadRenderPath(rawPath: string): { path: string; sel?: string } {
-	if (INTERNAL_URL_LIKE_RE.test(rawPath)) {
+	if (splitUrlScheme(rawPath)) {
 		const internal = splitInternalUrlSel(rawPath);
 		if (internal.sel) return internal;
 	}
@@ -235,9 +312,17 @@ function firstReadSelectorLine(sel: string | undefined): number | undefined {
  * target when the structured `resolvedPath` isn't set (the common plain-file and
  * image reads only record the path in `meta.source`). URL/internal sources are
  * not fs paths, so only `type: "path"` qualifies. */
-export function readSourceFsPath(details: ReadToolDetails | undefined): string | undefined {
-	const source = details?.meta?.source;
-	return source?.type === "path" && typeof source.value === "string" ? source.value : undefined;
+export function readSourceFsPath(details: unknown): string | undefined {
+	if (!isRecord(details) || !isRecord(details.meta) || !isRecord(details.meta.source)) return undefined;
+	const source = details.meta.source;
+	return source.type === "path" && typeof source.value === "string" ? source.value : undefined;
+}
+
+function readLinkTarget(details: unknown): string | undefined {
+	if (!isRecord(details)) return undefined;
+	if (typeof details.resolvedPath === "string") return details.resolvedPath;
+	if (typeof details.displayTarget === "string") return details.displayTarget;
+	return readSourceFsPath(details);
 }
 
 function formatReadPathLink(
@@ -253,22 +338,154 @@ function formatReadPathLink(
 	const split = splitReadRenderPath(rawPath);
 	const basePath = split.path || rawPath;
 	const selectorSuffix = split.sel ? `:${split.sel}` : "";
-	const plainDisplayPath = options.suffixResolution
-		? shortenPath(options.suffixResolution.to)
-		: shortenPath(basePath || options.resolvedPath || options.fallbackLabel || rawPath);
-	const absoluteInputPath = path.isAbsolute(basePath) ? basePath : undefined;
-	const target = options.resolvedPath ?? options.sourcePath ?? absoluteInputPath;
+	const plainDisplayPath = sanitizeText(
+		options.suffixResolution
+			? shortenPath(options.suffixResolution.to)
+			: shortenPath(basePath || options.resolvedPath || options.fallbackLabel || rawPath),
+	);
+	// Calls render before the tool has resolved a filesystem target. Preserve
+	// protocol resources as plain text, but resolve direct relative file paths
+	// so terminals receive an explicit file: link rather than guessing HTTPS.
+	const inputPath =
+		basePath && !splitUrlScheme(basePath) && !BARE_WEB_HOST_RE.test(basePath)
+			? pendingFileLinkPath(basePath)
+			: undefined;
+	const target = options.resolvedPath ?? options.sourcePath ?? inputPath;
 	const line = firstReadSelectorLine(split.sel) ?? options.offset;
 	const linkOptions = line !== undefined ? { line } : undefined;
 	const linkedPath = target ? fileHyperlink(target, plainDisplayPath, linkOptions) : plainDisplayPath;
 	return `${linkedPath}${selectorSuffix}`;
 }
 
+function readRawPath(args: ReadRenderArgs | undefined): string {
+	return typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+}
+
+/**
+ * Whether a read result renders as a Markdown preview rather than numbered source:
+ * the read tool tagged it `text/markdown` (`read.renderMarkdown`, or a protocol
+ * resource) and the call did not ask for `:raw` source. Shared by the standalone
+ * read card and the read group's content previews so both honor the setting.
+ */
+export function readResultIsMarkdown(details: ReadToolDetails | undefined, args: ReadRenderArgs | undefined): boolean {
+	if (details?.contentType !== "text/markdown" || args?.raw === true) return false;
+	const sel = splitReadRenderPath(readRawPath(args)).sel;
+	return sel?.split(":").some(chunk => chunk.toLowerCase() === "raw") !== true;
+}
+
+/**
+ * Native read head (§7.3 read): `Read path:13-36` with the path as the
+ * target (shortened, plus the selector / legacy offset range), a `file://`
+ * link when the fs path is known, and a suffix correction as meta.
+ */
+function readNativeHead(
+	rawPath: string,
+	args: ReadRenderArgs | undefined,
+	details?: ReadToolDetails,
+	linkPath?: string,
+): NativeToolHead {
+	const split = splitReadRenderPath(rawPath);
+	const suffix = details?.suffixResolution;
+	let target = suffix ? shortenPath(suffix.to) : shortenPath(split.path || rawPath);
+	if (split.sel) target += `:${split.sel}`;
+	if (args?.offset !== undefined || args?.limit !== undefined) {
+		const startLine = args.offset ?? 1;
+		const endLine = args.limit !== undefined ? startLine + args.limit - 1 : "";
+		target += `:${startLine}${endLine ? `-${endLine}` : ""}`;
+	}
+	const meta: string[] = [];
+	if (suffix) meta.push(`corrected from ${shortenPath(suffix.from)}`);
+	if (details?.summary) {
+		const n = details.summary.elidedSpans;
+		meta.push(`summary: ${n} elided span${n === 1 ? "" : "s"}`);
+	}
+	const conflicts = details?.conflictCount ?? 0;
+	return {
+		title: "Read",
+		target: sanitizeText(target) || "…",
+		targetKind: "path",
+		href: fileHref(linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details)),
+		meta,
+		badges:
+			conflicts > 0 ? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }] : undefined,
+	};
+}
+
+/**
+ * The first line a read shows: the selector's (or legacy `offset`'s) range
+ * start, so legacy results without `displayContent` still number from there.
+ */
+function readRangeStart(rawPath: string, args: ReadRenderArgs | undefined): number {
+	const sel = splitReadRenderPath(rawPath).sel;
+	return firstReadSelectorLine(sel) ?? args?.offset ?? 1;
+}
+
+/**
+ * Read content as numbered, wrapped `code` (no path header: the head names
+ * the file), matching the ANSI preview's hanging wrap. Numbers come from
+ * `lineNumbers` (`displayContent`'s per-line numbers, `null` for an elided
+ * block; runs split with `…` between) when they cover every line, else count
+ * up from `start`.
+ */
+export function readContentCode(
+	content: string,
+	start: number,
+	numbers: readonly (number | null)[] | undefined,
+	path: string | undefined,
+): NativeNode[] {
+	const lines = content.split("\n");
+	return numberedCode(
+		lines.map((text, i) => ({ n: numbers && numbers.length === lines.length ? numbers[i]! : start + i, text })),
+		{ path, wrap: true },
+	);
+}
+
+/** An image content block as the read tool emits it (base64 data + mime type). */
+interface ReadImageBlock {
+	type: "image";
+	data: string;
+	mimeType: string;
+}
+
+function isImageBlock(block: { type: string }): block is ReadImageBlock {
+	return (
+		block.type === "image" &&
+		typeof (block as Partial<ReadImageBlock>).data === "string" &&
+		typeof (block as Partial<ReadImageBlock>).mimeType === "string"
+	);
+}
+
+/** Cached `image` node on its content block, so decoding and hashing happen once per block. */
+const kReadImageNode = Symbol("read.imageNode");
+
+interface TaggedReadImageBlock extends ReadImageBlock {
+	[kReadImageNode]?: NativeNode;
+}
+
+/** Native `image` node for a read image: registered blob, alt = displayed path, source pixel size when parseable. */
+function describeReadImage(block: TaggedReadImageBlock, alt: string): NativeNode {
+	const cached = block[kReadImageNode];
+	if (cached) return cached;
+	const described = base64ImageNode(block.data, block.mimeType, { alt: alt || "image", role: "omp.tool.read.image" });
+	block[kReadImageNode] = described;
+	return described;
+}
+
 /** Render file, image, and URL reads in the transcript. */
 export const readToolRenderer = {
+	activitySummary(args: unknown, _context: ToolActivityContext): ToolActivitySummary {
+		const input = args as ReadRenderArgs | undefined;
+		const rawPath =
+			typeof input?.file_path === "string" ? input.file_path : typeof input?.path === "string" ? input.path : "";
+		const routed = readUrlCard(rawPath);
+		if (routed) return { label: routed.card.label, detail: routed.target || routed.card.rootDetail };
+		return { label: "Read", detail: sanitizeText(shortenPath(rawPath)) };
+	},
 	renderCall(args: ReadRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		const routed = readUrlCard(rawPath);
+		if (routed) return routed.card.render(rawPath, routed.target, undefined, undefined, _options, uiTheme);
 		if (isReadableUrlPath(rawPath)) {
 			return renderReadUrlCall({ path: rawPath, raw: args.raw }, _options, uiTheme);
 		}
@@ -289,13 +506,17 @@ export const readToolRenderer = {
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: ReadToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		uiTheme: Theme,
 		args?: ReadRenderArgs,
 	): Component {
+		const linkPath = readLinkTarget(options.renderContext?.rawDetails);
 		const urlDetails = result.details as ReadUrlToolDetails | undefined;
 		const baseRawPathForKind =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+		const routed = readUrlCard(baseRawPathForKind, result.details);
+		if (routed)
+			return routed.card.render(baseRawPathForKind, routed.target, result, result.details, options, uiTheme);
 		if (urlDetails?.kind === "url" || isReadableUrlPath(baseRawPathForKind)) {
 			return renderReadUrlResult(
 				result as {
@@ -316,8 +537,8 @@ export const readToolRenderer = {
 			const filePath =
 				formatReadPathLink(rawPath, {
 					offset: args?.offset,
-					sourcePath: result.details?.displayTarget ?? readSourceFsPath(result.details),
-				}) || shortenPath(rawPath);
+					sourcePath: linkPath ?? result.details?.displayTarget ?? readSourceFsPath(result.details),
+				}) || sanitizeText(shortenPath(rawPath));
 			let title = filePath ? `Read ${filePath}` : "Read";
 			if (args?.offset !== undefined || args?.limit !== undefined) {
 				const startLine = args.offset ?? 1;
@@ -349,7 +570,9 @@ export const readToolRenderer = {
 		const truncation = details?.meta?.truncation;
 		const fallback = details?.truncation;
 		if (details?.resolvedPath) {
-			warningLines.push(uiTheme.fg("dim", wrapBrackets(`Resolved path: ${details.resolvedPath}`, uiTheme)));
+			warningLines.push(
+				uiTheme.fg("dim", wrapBrackets(`Resolved path: ${shortenPath(details.resolvedPath)}`, uiTheme)),
+			);
 		}
 		if (truncation) {
 			if (fallback?.firstLineExceedsLimit) {
@@ -367,7 +590,7 @@ export const readToolRenderer = {
 		if (imageContent) {
 			const suffix = details?.suffixResolution;
 			const displayPath = formatReadPathLink(rawPath, {
-				resolvedPath: details?.resolvedPath,
+				resolvedPath: linkPath ?? details?.resolvedPath,
 				sourcePath: details?.displayTarget ?? readSourceFsPath(details),
 				suffixResolution: suffix,
 				fallbackLabel: "image",
@@ -399,7 +622,7 @@ export const readToolRenderer = {
 		// reads only record the absolute path in meta.source, so fall back to that
 		// to keep the title clickable.
 		const displayPath = formatReadPathLink(rawPath, {
-			resolvedPath: details?.resolvedPath,
+			resolvedPath: linkPath ?? details?.resolvedPath,
 			sourcePath: details?.displayTarget ?? readSourceFsPath(details),
 			suffixResolution: suffix,
 			offset: args?.offset,
@@ -418,12 +641,15 @@ export const readToolRenderer = {
 			const n = details.conflictCount;
 			title += ` ${uiTheme.fg("warning", `(⚠ ${n} conflict${n === 1 ? "" : "s"})`)}`;
 		}
-		const rawRequested =
-			args?.raw === true || renderPath.sel?.split(":").some(chunk => chunk.toLowerCase() === "raw") === true;
-		const isMarkdown = details?.contentType === "text/markdown" && !rawRequested;
+		const isMarkdown = readResultIsMarkdown(details, args);
 		let cachedWidth: number | undefined;
 		let cachedExpanded: boolean | undefined;
 		let cachedLines: string[] | undefined;
+		const dropCache = () => {
+			cachedWidth = undefined;
+			cachedExpanded = undefined;
+			cachedLines = undefined;
+		};
 		return markFramedBlockComponent({
 			render: (width: number) => {
 				const expanded = options.expanded;
@@ -458,12 +684,91 @@ export const readToolRenderer = {
 				cachedExpanded = expanded;
 				return cachedLines;
 			},
-			invalidate: () => {
-				cachedWidth = undefined;
-				cachedExpanded = undefined;
-				cachedLines = undefined;
-			},
+			invalidate: dropCache,
+			releaseRenderCaches: dropCache,
 		});
+	},
+	describeCall(args: ReadRenderArgs): NativeToolView {
+		const rawPath = readRawPath(args);
+		const routed = readUrlCard(rawPath);
+		if (routed?.card.detailsKey === "proc") return describeProcRead(routed.target, undefined, undefined);
+		if (routed) return describeCfgRead(splitInternalUrlSel(rawPath).path, undefined, undefined);
+		if (isReadableUrlPath(rawPath)) return describeReadUrlCall({ path: rawPath, raw: args.raw });
+		return { tool: readNativeHead(rawPath, args), inline: true };
+	},
+
+	/**
+	 * Inline (§7.3 read): the head names the file and range; the content
+	 * (numbered from the range start, no path header) is the disclosed body.
+	 * An error shows its message in the head, never behind the disclosure.
+	 */
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: ReadToolDetails; isError?: boolean },
+		options: RenderResultContextOptions,
+		args?: ReadRenderArgs,
+	): NativeToolView {
+		const linkPath = readLinkTarget(options.renderContext?.rawDetails);
+		const details = result.details;
+		const rawPath = readRawPath(args);
+		const routed = readUrlCard(rawPath, details);
+		if (routed?.card.detailsKey === "proc") return describeProcRead(routed.target, result, details?.proc);
+		if (routed) return describeCfgRead(splitInternalUrlSel(rawPath).path, result, details?.cfg);
+		if (details?.kind === "url" || isReadableUrlPath(rawPath)) {
+			return describeReadUrlResult({
+				content: result.content,
+				details: result.details as ReadUrlToolDetails | undefined,
+				isError: result.isError,
+			});
+		}
+
+		if (result.isError) {
+			const message = (resultText(result) || "Unknown error").replace(/^Error:\s*/, "");
+			return inlineErrorView(readNativeHead(rawPath, args, details, linkPath), message);
+		}
+
+		const suffix = details?.suffixResolution;
+		const head = readNativeHead(rawPath, args, details, linkPath);
+		const truncation = details?.meta?.truncation;
+		const fallback = details?.truncation;
+		const firstLineTooLong = truncation !== undefined && fallback?.firstLineExceedsLimit === true;
+		const foot = footnoteText(
+			compact([
+				details?.resolvedPath !== undefined && `resolved ${shortenPath(details.resolvedPath)}`,
+				firstLineTooLong &&
+					`First line exceeds ${formatBytes(fallback.outputBytes ?? fallback.totalBytes)} limit${truncation.artifactId ? `. ${formatFullOutputReference(truncation.artifactId)}` : ""}`,
+			]),
+			firstLineTooLong ? { artifactError: details?.meta?.artifactError } : details?.meta,
+		);
+
+		const contentText = details?.displayContent?.text ?? stripOutputNotice(resultText(result), details?.meta);
+		// A file Tern's media viewer shows (image, model, PDF, video, audio): the host loads it by path.
+		const mediaPath = readMediaPath(options.renderContext?.rawDetails) ?? details?.mediaPath;
+		const media = options.media && mediaPath ? nativeMediaNode(mediaPath, "media") : undefined;
+		const imageBlock = result.content?.find(isImageBlock);
+		if (imageBlock) {
+			const detailText = contentText.trim();
+			return {
+				tool: head,
+				tone: suffix ? "warning" : undefined,
+				inline: true,
+				body: compact<NativeChild>([
+					media ?? describeReadImage(imageBlock, shortenPath(suffix?.to ?? splitReadRenderPath(rawPath).path)),
+					detailText.length > 0 && ansi(detailText),
+					foot,
+				]),
+			};
+		}
+
+		const renderPath = splitReadRenderPath(rawPath);
+		const content: NativeChild[] = readResultIsMarkdown(details, args)
+			? [md(contentText)]
+			: readContentCode(
+					contentText,
+					details?.displayContent?.startLine ?? readRangeStart(rawPath, args),
+					details?.displayContent?.lineNumbers,
+					renderPath.path,
+				);
+		return { tool: head, inline: true, body: compact<NativeChild>([media, ...content, foot]) };
 	},
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<ReadRenderArgs, ReadToolDetails>;

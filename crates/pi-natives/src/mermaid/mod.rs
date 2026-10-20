@@ -256,6 +256,14 @@ mod tests {
 		assert!(!art.contains("┬┬"), "shared exits must attach at the same border column:\n{art}");
 	}
 
+	#[test]
+	fn zero_width_entities_do_not_shift_node_borders() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render("flowchart TD\nA[\"a&ZeroWidthSpace;b#8203;c\"]", &options).unwrap();
+		assert!(art.lines().any(|line| line.contains("│ abc │")), "{art}");
+		assert!(!art.contains('\u{200b}'), "{art}");
+	}
+
 	/// One case of `fixtures/mermaid.json`: the exact output (or error
 	/// message) for a source and option set. Originally captured from the
 	/// TypeScript renderer; flowchart layouts have since been re-baselined
@@ -291,9 +299,8 @@ mod tests {
 	/// `MERMAID_DUMP=1`.
 	#[test]
 	fn matches_golden_fixtures() {
-		let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/mermaid.json");
 		let fixtures: Vec<Fixture> =
-			serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+			serde_json::from_str(include_str!("../../fixtures/mermaid.json")).unwrap();
 		let filter = std::env::var("MERMAID_FIXTURE").ok();
 		let dump = std::env::var_os("MERMAID_DUMP").is_some();
 		let mut failures = String::new();

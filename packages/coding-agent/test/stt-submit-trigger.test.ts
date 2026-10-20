@@ -1,18 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { Settings, settings } from "../src/config/settings";
 import * as asrClient from "../src/stt/asr-client";
 import * as downloader from "../src/stt/downloader";
-import { STTController } from "../src/stt/stt-controller";
+import { STTController, type STTControllerDependencies } from "../src/stt/stt-controller";
 import { evaluateSubmitTrigger, type SttSubmitTrigger } from "../src/stt/submit-trigger";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
+import { cfgSttSubmitTrigger } from "@oh-my-pi/pi-coding-agent/stt/settings";
+
 const DICTATION_MODELS = [getBundledModel("local", "whisper-base")];
-const registry: ModelBrowserRegistry = {
+const registry: STTControllerDependencies["registry"] = {
 	getError: () => undefined,
 	getAvailable: () => DICTATION_MODELS,
 	getAll: () => DICTATION_MODELS,
+	resolver: () => () => "test-key",
 };
 
 describe("STT Submit Trigger Evaluation", () => {
@@ -196,15 +198,15 @@ describe("STTController submit trigger integration", () => {
 		};
 	}
 
-	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger) {
-		settings.set("stt.submitTrigger", trigger);
+	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger, manualSubmit?: boolean) {
+		cfgSttSubmitTrigger.set(settings, trigger);
 		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
 			pushAudio: vi.fn(),
 			stop: vi.fn().mockResolvedValue(transcript),
 			cancel: vi.fn(),
 		});
 		const editor = makeEditor();
-		const options = makeOptions();
+		const options = { ...makeOptions(), manualSubmit };
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
 
 		await controller.toggle(editor, options);
@@ -219,7 +221,7 @@ describe("STTController submit trigger integration", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.setModelRole("dictation", "local/whisper-base");
-		settings.set("stt.submitTrigger", "never");
+		cfgSttSubmitTrigger.set(settings, "never");
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
 	});
@@ -253,11 +255,11 @@ describe("STTController submit trigger integration", () => {
 		expect(editor.submit).toHaveBeenCalledTimes(1);
 	});
 
-	it("submits the existing draft when streaming dictation only says submit", async () => {
-		const { editor } = await transcribeStream("submit", "say-submit");
+	it("keeps manually submitted streaming dictation intact despite the say-submit trigger", async () => {
+		const { editor } = await transcribeStream("please review this submit.", "say-submit", true);
 
-		expect(editor.commitVolatileText).toHaveBeenCalledWith("submit");
-		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(6);
-		expect(editor.submit).toHaveBeenCalledTimes(1);
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("please review this submit.");
+		expect(editor.deleteBeforeCursor).not.toHaveBeenCalled();
+		expect(editor.submit).not.toHaveBeenCalled();
 	});
 });

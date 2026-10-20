@@ -5,6 +5,7 @@
  * (or sandboxes where subprocess spawning is restricted) does not fail.
  */
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -19,7 +20,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 const SHOULD_RUN = Bun.env.PI_PYTHON_INTEGRATION === "1";
 const MATPLOTLIB_TEST_CWD = process.cwd();
 
-async function hasMatplotlib(cwd: string): Promise<boolean> {
+async function hasModule(cwd: string, module: string): Promise<boolean> {
 	if (!SHOULD_RUN) return false;
 	try {
 		const { env } = (await Settings.init()).getShellConfig();
@@ -28,7 +29,7 @@ async function hasMatplotlib(cwd: string): Promise<boolean> {
 		for (const [key, value] of Object.entries(runtime.env)) {
 			if (typeof value === "string") spawnEnv[key] = value;
 		}
-		const result = Bun.spawnSync([runtime.pythonPath, "-c", "import matplotlib"], {
+		const result = Bun.spawnSync([runtime.pythonPath, "-c", `import ${module}`], {
 			cwd,
 			env: spawnEnv,
 			stdout: "ignore",
@@ -40,7 +41,8 @@ async function hasMatplotlib(cwd: string): Promise<boolean> {
 	}
 }
 
-const HAS_MATPLOTLIB = await hasMatplotlib(MATPLOTLIB_TEST_CWD);
+const HAS_MATPLOTLIB = await hasModule(MATPLOTLIB_TEST_CWD, "matplotlib");
+const HAS_PANDAS = await hasModule(MATPLOTLIB_TEST_CWD, "pandas");
 
 describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
@@ -135,14 +137,95 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
-	it("preserves user namespace across calls", async () => {
-		using tempDir = TempDir.createSync("@python-runner-session-");
+	it("executes file-backed cells in the retained namespace with script import semantics", async () => {
+		using tempDir = TempDir.createSync("@python-runner-file-");
+		const scriptDir = path.join(tempDir.path(), "scripts");
+		await fs.mkdir(scriptDir, { recursive: true });
+		await Bun.write(path.join(scriptDir, "sibling.py"), "VALUE = 2\n");
+		const filename = path.join(scriptDir, "loaded.py");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
 		try {
-			await executePythonWithKernel(kernel, "x = 41");
-			const result = await executePythonWithKernel(kernel, "x + 1");
-			expect(result.exitCode).toBe(0);
-			expect(result.output).toContain("42");
+			await executePythonWithKernel(kernel, "seed = 40");
+			const loaded = await executePythonWithKernel(
+				kernel,
+				[
+					"import asyncio",
+					"import sibling",
+					"await asyncio.sleep(0)",
+					"loaded_value = seed + sibling.VALUE",
+					"print(__file__)",
+				].join("\n"),
+				{ filename },
+			);
+			expect(loaded.exitCode).toBe(0);
+			expect(loaded.output).toContain(filename);
+
+			const retained = await executePythonWithKernel(kernel, "loaded_value");
+			expect(retained.exitCode).toBe(0);
+			expect(retained.output).toContain("42");
+
+			const failed = await executePythonWithKernel(kernel, "raise RuntimeError('from loaded file')", {
+				filename,
+			});
+			expect(failed.exitCode).toBe(1);
+			expect(failed.output).toContain(filename);
+			expect(failed.output).toContain("raise RuntimeError('from loaded file')");
+
+			const missing = await executePythonWithKernel(kernel, "import omp_definitely_missing_module");
+			expect(missing.exitCode).toBe(1);
+			expect(missing.output).toContain("Distribution names can differ");
+			expect(missing.output).toContain("%pip install <distribution-name>");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("loads quoted scripts without source echo, retaining namespace, filename and async execution", async () => {
+		using tempDir = TempDir.createSync("@python-runner-load-");
+		const scriptDir = path.join(tempDir.path(), "script folder");
+		await fs.mkdir(scriptDir, { recursive: true });
+		await Bun.write(path.join(scriptDir, "sibling.py"), "VALUE = 2\n");
+		const filename = path.join(scriptDir, "loaded file.py");
+		await Bun.write(
+			filename,
+			[
+				"import asyncio",
+				"import sibling",
+				"await asyncio.sleep(0)",
+				"loaded_value = seed + sibling.VALUE",
+				"load_count = globals().get('load_count', 0) + 1",
+				"print('script output', load_count)",
+			].join("\n"),
+		);
+		const canonicalFilename = await fs.realpath(filename);
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "seed = 40");
+			const first = await executePythonWithKernel(kernel, `%load "${filename}"`);
+			expect(first.exitCode).toBe(0);
+			expect(first.output.trim()).toBe("script output 1");
+			expect(first.output).not.toContain("loaded_value =");
+			const retained = await executePythonWithKernel(kernel, "print(loaded_value, load_count, __file__)");
+			expect(retained.exitCode).toBe(0);
+			expect(retained.output.trim()).toBe(`42 1 ${canonicalFilename}`);
+
+			const second = await executePythonWithKernel(kernel, `%load "${filename}"`);
+			expect(second.exitCode).toBe(0);
+			expect(second.output.trim()).toBe("script output 2");
+
+			await Bun.write(filename, "raise RuntimeError('loaded traceback')\n");
+			const failed = await executePythonWithKernel(kernel, `%load "${filename}"`);
+			expect(failed.exitCode).toBe(1);
+			expect(failed.output).toContain(canonicalFilename);
+			expect(failed.output).toContain("raise RuntimeError('loaded traceback')");
+			expect(failed.output).not.toContain("_exec_source_async");
+
+			const missing = await executePythonWithKernel(kernel, '%load "missing file.py"');
+			expect(missing.exitCode).toBe(1);
+			expect(missing.output).toContain("missing file.py");
+			const usage = await executePythonWithKernel(kernel, "%load");
+			expect(usage.exitCode).toBe(1);
+			expect(usage.output).toContain("Usage: %load <path>");
 		} finally {
 			await kernel.shutdown();
 		}
@@ -164,49 +247,28 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			);
 			expect(defined.exitCode).toBe(0);
 
-			const described: unknown[] = [];
-			const describeResult = await kernel.invokeTool(
-				{ op: "describe", names: ["dbl", "missing"] },
-				{
-					onDisplay: output => {
-						described.push(output);
-					},
-				},
-			);
+			const describeResult = await kernel.invokeTool({ op: "describe", names: ["dbl", "missing"] });
 			expect(describeResult.status).toBe("ok");
-			expect(described).toEqual([
-				{
-					type: "json",
-					data: {
-						ok: true,
-						tools: [
-							{
-								name: "dbl",
-								description: "Double an integer.",
-								parameters: {
-									type: "object",
-									properties: { n: { type: "integer" } },
-									required: ["n"],
-									additionalProperties: false,
-								},
-							},
-						],
-						missing: ["missing"],
+			expect(describeResult.reply).toEqual({
+				ok: true,
+				tools: [
+					{
+						name: "dbl",
+						description: "Double an integer.",
+						parameters: {
+							type: "object",
+							properties: { n: { type: "integer" } },
+							required: ["n"],
+							additionalProperties: false,
+						},
 					},
-				},
-			]);
+				],
+				missing: ["missing"],
+			});
 
-			const called: unknown[] = [];
-			const callResult = await kernel.invokeTool(
-				{ op: "call", name: "dbl", args: { n: 2 } },
-				{
-					onDisplay: output => {
-						called.push(output);
-					},
-				},
-			);
+			const callResult = await kernel.invokeTool({ op: "call", name: "dbl", args: { n: 2 } });
 			expect(callResult.status).toBe("ok");
-			expect(called).toEqual([{ type: "json", data: { ok: true, value: 4 } }]);
+			expect(callResult.reply).toEqual({ ok: true, value: 4 });
 
 			// A raising tool is reported to the caller, not surfaced as a kernel crash.
 			const failing = await executePythonWithKernel(
@@ -297,13 +359,13 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		using tempDir = TempDir.createSync("@python-runner-shadow-plan-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
 		try {
-			await expect(kernel.shadowPlan('tool.read({"path": "src/a.py"})')).resolves.toMatchObject({
+			await expect(kernel.shadowPlan('await tool.read({"path": "src/a.py"})')).resolves.toMatchObject({
 				operations: [
 					{
 						kind: "tool",
 						call: {
-							id: "py:0::0",
-							siteId: "py:0",
+							id: "py:6::0",
+							siteId: "py:6",
 							name: "read",
 							args: {
 								kind: "object",
@@ -314,7 +376,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					},
 				],
 			});
-			await expect(kernel.shadowPlan("tool.read({'path': str(True)})")).resolves.toMatchObject({
+			await expect(kernel.shadowPlan("await tool.read({'path': str(True)})")).resolves.toMatchObject({
 				operations: [
 					{
 						call: {
@@ -336,23 +398,23 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				],
 			});
 			const mappingAttribute = await kernel.shadowPlan(
-				['cfg = {"path": "secret.txt"}', 'tool.read({"path": cfg.path})'].join("\n"),
+				['cfg = {"path": "secret.txt"}', 'await tool.read({"path": cfg.path})'].join("\n"),
 			);
 			expect(mappingAttribute?.operations).toEqual([]);
 			expect(mappingAttribute?.barrier?.reason).toBe("unsupported Python statement");
-			const jsonDumps = await kernel.shadowPlan('tool.read({"path": json.dumps({"a": 1})})');
+			const jsonDumps = await kernel.shadowPlan('await tool.read({"path": json.dumps({"a": 1})})');
 			expect(jsonDumps?.operations).toEqual([]);
 			expect(jsonDumps?.barrier?.reason).toBe("unsupported Python statement");
-			const ambiguousAddition = await kernel.shadowPlan("if [] + []:\n    tool.read({'path': 'wrong'})");
+			const ambiguousAddition = await kernel.shadowPlan("if [] + []:\n    await tool.read({'path': 'wrong'})");
 			expect(ambiguousAddition?.operations).toEqual([]);
 			expect(ambiguousAddition?.barrier?.reason).toBe("unsupported Python condition");
-			const stringAddition = await kernel.shadowPlan("tool.read({'path': 'src/' + 'a.py'})");
+			const stringAddition = await kernel.shadowPlan("await tool.read({'path': 'src/' + 'a.py'})");
 			expect(stringAddition?.barrier).toBeUndefined();
 			expect(stringAddition?.operations).toHaveLength(1);
-			const invalidJoin = await kernel.shadowPlan("tool.read({'path': ''.join(['secret', 1, '.txt'])})");
+			const invalidJoin = await kernel.shadowPlan("await tool.read({'path': ''.join(['secret', 1, '.txt'])})");
 			expect(invalidJoin?.operations).toEqual([]);
 			expect(invalidJoin?.barrier?.reason).toBe("unsupported Python statement");
-			const formattedValue = await kernel.shadowPlan('tool.read({"path": f"{\'secret\'!r}"})');
+			const formattedValue = await kernel.shadowPlan('await tool.read({"path": f"{\'secret\'!r}"})');
 			expect(formattedValue?.operations).toEqual([]);
 			expect(formattedValue?.barrier?.reason).toBe("unsupported Python statement");
 			const completion = await kernel.shadowPlan("completion('constant')");
@@ -422,7 +484,140 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
-	it.skipIf(!HAS_MATPLOTLIB)("captures display(fig) as a PNG before the figure is closed", async () => {
+	it("echoes a long trailing dict as text plus a JSON view with unsafe integers as decimal strings", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const text =
+				"{'seed': 18446744073709551615, 'nested': [9007199254740991, 9007199254740992, -9007199254740992, True]}";
+			const result = await executePythonWithKernel(kernel, text);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe(`${text}\n`);
+			expect(result.displayOutputs).toEqual([
+				{
+					type: "view",
+					text,
+					view: {
+						kind: "json",
+						value: {
+							seed: "18446744073709551615",
+							nested: [9007199254740991, "9007199254740992", "-9007199254740992", true],
+						},
+					},
+				},
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("keeps short structures as plain text", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(kernel, "print({'a': 1})\n[1, 2]");
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("{'a': 1}\n[1, 2]\n");
+			expect(result.displayOutputs).toEqual([]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("prints an image dict as a placeholder and emits the image with its metadata", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				"print('see', {'type': 'image', 'mimeType': 'image/png', 'data': b'png-bytes', 'detail': 'low'})",
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("see <image image/png>\n");
+			expect(result.displayOutputs).toEqual([
+				{ type: "image", mimeType: "image/png", data: Buffer.from("png-bytes").toString("base64"), detail: "low" },
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("prints Markdown objects as their source with a markdown view", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				["class Note:", "    def _repr_markdown_(self):", "        return '# Title'", "print(Note())"].join("\n"),
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("# Title\n");
+			expect(result.displayOutputs).toEqual([
+				{ type: "view", text: "# Title", view: { kind: "markdown", text: "# Title" } },
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it.skipIf(!HAS_PANDAS)("prints a DataFrame as its text with a matching table view", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				[
+					"import pandas as pd",
+					"df = pd.DataFrame({'n': [1, 2], 'name': ['a', 'b']})",
+					"print(df)",
+					"print(df, file=__import__('sys').stderr)",
+				].join("\n"),
+			);
+			expect(result.exitCode).toBe(0);
+			const text = "   n name\n0  1    a\n1  2    b";
+			expect(result.output).toBe(`${text}\n${text}\n`);
+			expect(result.displayOutputs).toEqual([
+				{
+					type: "view",
+					text,
+					view: {
+						kind: "table",
+						columns: [{ head: "", numeric: true }, { head: "n", numeric: true }, { head: "name" }],
+						rows: [
+							["0", "1", "a"],
+							["1", "2", "b"],
+						],
+					},
+				},
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it.skipIf(!HAS_PANDAS)("elides truncated DataFrame rows like pandas' own repr", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				["import pandas as pd", "pd.DataFrame({'x': range(100)})"].join("\n"),
+			);
+			expect(result.exitCode).toBe(0);
+			const view = result.displayOutputs.find(output => output.type === "view");
+			expect(view?.type === "view" && view.view.kind === "table" ? view.view.rows : []).toEqual([
+				["0", "0"],
+				["1", "1"],
+				["2", "2"],
+				["3", "3"],
+				["4", "4"],
+				["…", "…"],
+				["95", "95"],
+				["96", "96"],
+				["97", "97"],
+				["98", "98"],
+				["99", "99"],
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it.skipIf(!HAS_MATPLOTLIB)("captures a printed figure as a PNG before the figure is closed", async () => {
 		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
 		try {
 			const result = await executePythonWithKernel(
@@ -431,7 +626,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					"import matplotlib.pyplot as plt",
 					"fig, ax = plt.subplots()",
 					"ax.plot([0, 1], [0, 1])",
-					"display(fig)",
+					"print(fig)",
 					"plt.close(fig)",
 				].join("\n"),
 			);
@@ -440,24 +635,20 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const images = result.displayOutputs.filter(output => output.type === "image");
 			expect(images).toHaveLength(1);
 			expect(images[0]).toMatchObject({ mimeType: "image/png" });
-			expect(images[0]?.data).not.toContain("blob:");
-			expect(result.output).toContain("<Figure");
+			expect(result.output).toContain("Figure(");
 		} finally {
 			await kernel.shutdown();
 		}
 	});
 
-	it.skipIf(!HAS_MATPLOTLIB)("does not flush a second PNG for a displayed open figure", async () => {
+	it.skipIf(!HAS_MATPLOTLIB)("does not flush a second PNG for an echoed open figure", async () => {
 		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
 		try {
 			const result = await executePythonWithKernel(
 				kernel,
-				[
-					"import matplotlib.pyplot as plt",
-					"fig, ax = plt.subplots()",
-					"ax.plot([0, 1], [1, 0])",
-					"display(fig)",
-				].join("\n"),
+				["import matplotlib.pyplot as plt", "fig, ax = plt.subplots()", "ax.plot([0, 1], [1, 0])", "fig"].join(
+					"\n",
+				),
 			);
 
 			expect(result.exitCode).toBe(0);

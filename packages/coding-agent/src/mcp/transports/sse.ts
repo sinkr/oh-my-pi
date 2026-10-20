@@ -10,6 +10,12 @@ import type {
 	MCPTransport,
 } from "../../mcp/types";
 import { toJsonRpcError } from "../../mcp/types";
+import {
+	createMCPJsonRpcError,
+	MCPTransportError,
+	nonRetryableMCPTransportError,
+	normalizeMCPTransportError,
+} from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { createMCPTimeout, getNeverAbortSignal, resolveMCPTimeoutMs } from "../timeout";
 import { type MCPFetchInit, mcpFetch } from "./header-policy";
@@ -84,14 +90,18 @@ export class LegacySseTransport implements MCPTransport {
 		return this.#config.url;
 	}
 
-	async connect(): Promise<void> {
+	/** `signal` cancels only the wait for the endpoint event; an established stream outlives it. */
+	async connect(signal?: AbortSignal): Promise<void> {
 		if (this.#connected) return;
 		if (this.#sseConnection) return;
 
 		if (this.#lifecycleController.signal.aborted) {
 			this.#lifecycleController = new AbortController();
 		}
+		signal?.throwIfAborted();
 		const connection = new AbortController();
+		const onAbort = () => connection.abort(signal?.reason);
+		signal?.addEventListener("abort", onAbort, { once: true });
 		const timeout = resolveMCPTimeoutMs(this.#config.timeout);
 		const operation = createMCPTimeout(timeout, this.#operationSignal(connection.signal));
 		const endpointReady = Promise.withResolvers<void>();
@@ -126,6 +136,8 @@ export class LegacySseTransport implements MCPTransport {
 				throw new LegacySseConnectionTimeoutError(timeout);
 			}
 			throw error;
+		} finally {
+			signal?.removeEventListener("abort", onAbort);
 		}
 	}
 
@@ -182,12 +194,24 @@ export class LegacySseTransport implements MCPTransport {
 			} else if (error instanceof Error && error.name !== "AbortError") {
 				logger.debug("Legacy SSE stream error", { url: this.#config.url, error: error.message });
 				this.onError?.(error);
-				this.#rejectPending(error);
+				this.#rejectPending(
+					nonRetryableMCPTransportError(
+						normalizeMCPTransportError(error, { transport: "http", stage: "receive" }),
+					),
+				);
 			}
 		} finally {
 			operation.clear();
 			if (endpointReceived) {
-				this.#rejectPending(new Error("Transport closed: legacy SSE stream closed"));
+				this.#rejectPending(
+					new MCPTransportError({
+						transport: "http",
+						stage: "receive",
+						failure: "closed",
+						message: "Transport closed: legacy SSE stream closed",
+						retryable: false,
+					}),
+				);
 			}
 		}
 	}
@@ -201,7 +225,7 @@ export class LegacySseTransport implements MCPTransport {
 				if (pending.abortHandler) pending.operation.signal?.removeEventListener("abort", pending.abortHandler);
 				const response = message as JsonRpcResponse;
 				if (response.error) {
-					pending.reject(new Error(`MCP error ${response.error.code}: ${response.error.message}`));
+					pending.reject(createMCPJsonRpcError("http", response.error));
 				} else {
 					pending.resolve(response.result);
 				}
@@ -265,8 +289,10 @@ export class LegacySseTransport implements MCPTransport {
 		}
 		this.#pending.set(id, pending);
 
+		let posted = false;
 		try {
 			const response = await this.#postJson(body, operation.signal);
+			posted = true;
 			if (!response.ok) {
 				const text = await response.text();
 				throw new Error(`HTTP ${response.status}: ${text}`);
@@ -279,6 +305,13 @@ export class LegacySseTransport implements MCPTransport {
 			if (pending.abortHandler) operation.signal?.removeEventListener("abort", pending.abortHandler);
 			if (operation.isTimeoutAbort(error)) {
 				throw new Error(`Request timeout after ${timeout}ms`);
+			}
+			if (!posted && error instanceof Error && error.name !== "AbortError") {
+				// A reset or EOF can follow the server reading the POST; only a refused connection proves it was not sent.
+				const normalized = normalizeMCPTransportError(error, { transport: "http", stage: "send" });
+				if (normalized.failure === "reset" || normalized.failure === "eof") {
+					throw nonRetryableMCPTransportError(normalized);
+				}
 			}
 			throw error;
 		}
@@ -399,8 +432,11 @@ export class LegacySseTransport implements MCPTransport {
 }
 
 /** Create and connect a legacy HTTP+SSE transport. */
-export async function createSseTransport(config: MCPSseServerConfig): Promise<LegacySseTransport> {
+export async function createSseTransport(
+	config: MCPSseServerConfig,
+	signal?: AbortSignal,
+): Promise<LegacySseTransport> {
 	const transport = new LegacySseTransport(config);
-	await transport.connect();
+	await transport.connect(signal);
 	return transport;
 }

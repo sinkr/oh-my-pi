@@ -13,8 +13,9 @@
  */
 import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ConfigError } from "../config/config-file";
@@ -24,6 +25,8 @@ import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } 
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
+
+import { cfgDisabledExtensions, cfgExtensions } from "../extensibility/settings";
 
 export type ModelsAction = "ls" | "find" | "refresh";
 
@@ -81,6 +84,7 @@ interface ModelJson {
 	thinking: readonly Effort[] | null;
 	input: ("text" | "image")[];
 	cost: Model<Api>["cost"];
+	pricingStatus: ModelPricingStatus;
 }
 
 interface ModelsJson {
@@ -110,6 +114,8 @@ function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
 }
 
 function toModelJson(model: Model<Api>): ModelJson {
+	// Scalar legs report the card in force now, not the one current when the row was built.
+	const { input, output, cacheRead, cacheWrite } = getEffectiveTokenCost(model.cost);
 	return {
 		provider: model.provider,
 		kind: modelKind(model),
@@ -121,7 +127,8 @@ function toModelJson(model: Model<Api>): ModelJson {
 		reasoning: model.reasoning,
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
 		input: model.input,
-		cost: model.cost,
+		cost: { ...model.cost, input, output, cacheRead, cacheWrite },
+		pricingStatus: getModelPricingStatus(model),
 	};
 }
 
@@ -361,6 +368,9 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		// Discover runtime (extension) provider catalogs now that they are registered.
 		await modelRegistry.refreshRuntimeProviders(action === "refresh" ? "online" : "online-if-uncached");
 
+		for (const warning of modelRegistry.drainConfigWarnings()) {
+			process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+		}
 		renderProviderModels(modelRegistry, action, pattern, json, kind);
 	} finally {
 		await emitSessionShutdownEvent(extensionRunner);
@@ -384,9 +394,9 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 	}
 
 	const cwd = getProjectDir();
-	const authStorage = await discoverAuthStorage();
+	const settings = await Settings.init({ cwd, configFiles: command.flags.config });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const settings = await Settings.init({ cwd, configFiles: command.flags.config });
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		if (action === "refresh" && !json && process.stderr.isTTY) {
@@ -406,8 +416,8 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 			json,
 			kind,
 			additionalExtensionPaths: cliExtensionPaths,
-			settingsExtensions: settings.get("extensions") ?? [],
-			disabledExtensionIds: settings.get("disabledExtensions") ?? [],
+			settingsExtensions: cfgExtensions.get(settings),
+			disabledExtensionIds: cfgDisabledExtensions.get(settings),
 			disableExtensionDiscovery: Boolean(command.flags.noExtensions),
 		});
 	} finally {

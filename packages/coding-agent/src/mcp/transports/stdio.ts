@@ -20,9 +20,15 @@ import type {
 	MCPTransport,
 } from "../../mcp/types";
 import { toJsonRpcError } from "../../mcp/types";
-import { createMCPJsonRpcError, MCPTransportError, normalizeMCPTransportError } from "../errors";
+import {
+	createMCPJsonRpcError,
+	MCPTransportError,
+	nonRetryableMCPTransportError,
+	normalizeMCPTransportError,
+} from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
+import { isThenable } from "../../utils/ipc";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
 export interface StdioSpawnCommand {
@@ -347,6 +353,16 @@ export async function resolveStdioSpawnCommand(
 	// same console session. Only hide the child when OMP itself has no console
 	// to share; CREATE_NO_WINDOW breaks console inheritance for nested wrappers.
 	const detached = false;
+	// A path-qualified command with no file behind it (bare or with a PATHEXT extension) can only fail
+	// inside cmd.exe, whose "not recognized" stderr surfaces as an opaque early stdout EOF. Spawn it
+	// directly so the launch fails with ENOENT naming the missing path, as it does on POSIX.
+	if (
+		resolved === null &&
+		hasPathSegment(config.command) &&
+		!(await fileExists(path.resolve(options.cwd, config.command)))
+	) {
+		return { cmd: [config.command, ...args], windowsHide, detached };
+	}
 	const needsCmdExe = resolved === null || isWindowsBatchCommand(resolvedCommand);
 	if (!needsCmdExe) return { cmd: [resolvedCommand, ...args], windowsHide, detached };
 
@@ -362,15 +378,6 @@ export async function resolveStdioSpawnCommand(
 interface FrameSink {
 	write(chunk: string): unknown;
 	flush(): unknown;
-}
-
-/** Narrow a value to a thenable so a rejection handler can be attached. */
-function isThenable(value: unknown): value is PromiseLike<unknown> {
-	return (
-		value != null &&
-		(typeof value === "object" || typeof value === "function") &&
-		typeof (value as { then?: unknown }).then === "function"
-	);
 }
 
 /**
@@ -650,7 +657,7 @@ export class StdioTransport implements MCPTransport {
 						exitCode === null || exitCode === undefined
 							? "MCP subprocess closed stdout before responding"
 							: `MCP subprocess exited with code ${exitCode} before responding`,
-					retryable: true,
+					retryable: false,
 					code: exitCode ?? undefined,
 				});
 			}
@@ -738,19 +745,22 @@ export class StdioTransport implements MCPTransport {
 		writeFrame(this.#process.stdin, `${JSON.stringify(response)}\n`);
 	}
 
-	#handleClose(error?: Error): void {
+	#handleClose(error?: MCPTransportError): void {
 		if (!this.#connected) return;
 		this.#connected = false;
 
-		const closeError =
-			error ??
-			new MCPTransportError({
-				transport: "stdio",
-				stage: "receive",
-				failure: "closed",
-				message: "Transport closed",
-				retryable: true,
-			});
+		const closeError = error
+			? nonRetryableMCPTransportError(error)
+			: new MCPTransportError({
+					transport: "stdio",
+					stage: "receive",
+					failure: "closed",
+					message: "Transport closed",
+					retryable: false,
+				});
+		// request() records and writes each frame synchronously; a synchronous
+		// write throw removes its entry, so every remaining request was handed
+		// to the subprocess.
 		for (const [, pending] of this.#pendingRequests) {
 			pending.reject(closeError);
 		}
@@ -845,10 +855,12 @@ export class StdioTransport implements MCPTransport {
 
 		const stdin = this.#process.stdin;
 		const message = `${JSON.stringify(request)}\n`;
+		let dispatched = false;
 		const failFromSend = (error: unknown) => {
 			if (settled) return;
 			cleanup();
-			reject(normalizeMCPTransportError(error, { transport: "stdio", stage: "send" }));
+			const normalized = normalizeMCPTransportError(error, { transport: "stdio", stage: "send" });
+			reject(dispatched ? nonRetryableMCPTransportError(normalized) : normalized);
 		};
 		try {
 			// Never `await` write/flush. Bun's FileSink returns a pending Promise
@@ -861,6 +873,7 @@ export class StdioTransport implements MCPTransport {
 			// into `reject()` while leaving the returned promise free to settle
 			// from the response, timer, abort signal, or read-loop transport-close.
 			const wrote = stdin.write(message);
+			dispatched = true;
 			if (isThenable(wrote)) wrote.then(undefined, failFromSend);
 			const flushed = stdin.flush();
 			if (isThenable(flushed)) flushed.then(undefined, failFromSend);

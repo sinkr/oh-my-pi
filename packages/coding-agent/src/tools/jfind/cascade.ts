@@ -14,14 +14,15 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgmentResult, NoulQuestion } from "@oh-my-pi/pi-ai";
-import type { FindHit, FindStats } from "@oh-my-pi/pi-tui/tools/find";
+import type { FindCoverage, FindHit, FindStats } from "@oh-my-pi/pi-tui/tools/find";
+import type { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import { throwIfAborted } from "../tool-errors";
 import { fileScore, grepIndex, idf } from "./lexical";
 import { keywords as deriveKeywords } from "./keywords";
 import { type HeatRange, mergeHeat, type Passage, plainContent, selectWindows, sketch, windows } from "./passages";
 import { nameBatch, passageBatch, passageKey, entryKey, type Request, type SketchCard, sketchBatch } from "./questions";
 import { lines, readText, ReadTextError, takeChars } from "./text";
-import { type FileEntry, listFiles } from "./tree";
+import { type FileEntry, listFiles, type SearchRoot } from "./tree";
 
 /** Requests in flight per dispatched phase. */
 const PARALLEL = 16;
@@ -57,7 +58,9 @@ const SCAN_TIMEOUT_MS = 30_000;
 const FAILURES_KEPT = 5;
 
 export interface CascadeOptions {
-	root: string;
+	root: SearchRoot;
+	/** Filesystem the root is listed, scanned, and read through: host paths and internal URLs alike. */
+	filesystem: InternalUrlFilesystem;
 	query: string;
 	/** Caller-supplied lexical keywords, added to those derived from the query. */
 	extraKeywords: readonly string[];
@@ -70,6 +73,8 @@ export interface CascadeOptions {
 export interface CascadeResult {
 	/** Files whose verified passages cleared the threshold, strongest first. */
 	hits: FindHit[];
+	/** Whether the judge answered; an empty `hits` proves nothing when `unavailable`. */
+	coverage: FindCoverage;
 	threshold: number;
 	keywords: string[];
 	stats: FindStats;
@@ -107,7 +112,8 @@ class Cascade {
 	readonly stats: FindStats = {
 		listed: 0,
 		requests: 0,
-		errors: 0,
+		failed: 0,
+		unanswered: 0,
 		judged: 0,
 		filesRead: 0,
 		fileBytes: 0,
@@ -145,7 +151,7 @@ class Cascade {
 		} catch (error) {
 			throwIfAborted(signal);
 			this.stats.requests++;
-			this.stats.errors++;
+			this.stats.failed++;
 			this.stats.apiMs += performance.now() - started;
 			return { ok: false, error };
 		}
@@ -168,13 +174,14 @@ class Cascade {
 	}
 
 	async run(): Promise<CascadeResult> {
-		const { root, query, includeHidden, signal, onProgress } = this.#options;
+		const { root, filesystem, query, includeHidden, signal, onProgress } = this.#options;
 		const keywords = deriveKeywords(query, this.#options.extraKeywords);
 
 		onProgress?.("lexical scan");
+		const native = filesystem.shellFilesystem();
 		const [entries, index] = await Promise.all([
-			listFiles(root, { includeHidden, signal }),
-			grepIndex(root, keywords, { includeHidden, signal, timeoutMs: SCAN_TIMEOUT_MS }),
+			listFiles(root, { includeHidden, filesystem: native, signal }),
+			grepIndex(root.path, keywords, { includeHidden, filesystem: native, signal, timeoutMs: SCAN_TIMEOUT_MS }),
 		]);
 		this.stats.listed = entries.length;
 		const weights = idf(index);
@@ -189,7 +196,7 @@ class Cascade {
 		const nameScore = Array.from<number | undefined>({ length: entries.length });
 
 		// Wave 1: filename ranking over the lexical shortlist.
-		const project = path.basename(root);
+		const project = path.basename(root.path);
 		const nameJobs = chunks(
 			ranked.map(candidate => candidate.node),
 			NAME_BATCH,
@@ -210,7 +217,7 @@ class Cascade {
 				const p = noul(outcome, entryKey(k));
 				nameScore[node] = p;
 				if (p === undefined) {
-					if (outcome.ok) this.stats.errors++;
+					if (outcome.ok) this.stats.unanswered++;
 				} else {
 					this.stats.judged++;
 				}
@@ -231,7 +238,7 @@ class Cascade {
 			selected.map(async (node): Promise<FilePlan | undefined> => {
 				const entry = entries[node]!;
 				try {
-					const read = await readText(entry.path, READ_LIMIT);
+					const read = await readText(filesystem, entry.path, READ_LIMIT);
 					const passages = selectWindows(windows(read.text, WINDOW_BYTES, keywords, weights), WINDOWS);
 					if (passages.length === 0) return undefined;
 					return { node, total: lines(read.text).length, truncated: read.truncated, passages };
@@ -266,7 +273,7 @@ class Cascade {
 			if (!outcome.ok) this.#fail("sketches", outcome.error);
 			job.batch.forEach(({ f, p }, k) => {
 				const score = noul(outcome, passageKey(k));
-				if (score === undefined && outcome.ok) this.stats.errors++;
+				if (score === undefined && outcome.ok) this.stats.unanswered++;
 				// Failure is unknown, never grounds for a negative judgment.
 				candidates.push({ f, p, score: score ?? 1 });
 			});
@@ -312,7 +319,7 @@ class Cascade {
 			job.passages.forEach((passage, k) => {
 				const score = noul(outcome, passageKey(k));
 				if (score === undefined) {
-					this.stats.errors++;
+					this.stats.unanswered++;
 					return;
 				}
 				const text = plainContent(passage);
@@ -347,7 +354,9 @@ class Cascade {
 		this.stats.fileBytes += sketchSentBytes;
 		this.stats.filesRead += files.length - results.size;
 		hits.sort((a, b) => b.contentScore - a.contentScore);
-		return { hits, threshold: THRESHOLD, keywords, stats: this.stats };
+		const { requests, failed } = this.stats;
+		const coverage: FindCoverage = failed === 0 ? "complete" : failed === requests ? "unavailable" : "partial";
+		return { hits, coverage, threshold: THRESHOLD, keywords, stats: this.stats };
 	}
 }
 

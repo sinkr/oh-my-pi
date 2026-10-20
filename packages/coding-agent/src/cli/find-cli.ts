@@ -2,17 +2,15 @@
  * `omp find`: run the semantic `find` tool's cascade from the shell. Same
  * search as the tool, printed as a ranked, colored digest (or JSON).
  */
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { formatBytes, formatDuration, formatNumber, isEnoent } from "@oh-my-pi/pi-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { ModelRegistry } from "../config/model-registry";
-import { Settings } from "../config/settings";
-import { resolveJudge } from "../judgment";
-import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import { expandPath } from "../tools/path-utils";
+import { InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesystem";
+import { openStandaloneJudge } from "../judgment/standalone";
+import { formatPathRelativeToCwd, resolveSearchResultPath } from "../tools/path-utils";
 import { type CascadeResult, runCascade } from "../tools/jfind/cascade";
 import { rankedHeat } from "../tools/jfind/passages";
+import { resolveSearchRoot, type SearchRoot } from "../tools/jfind/tree";
 
 export interface FindCommandArgs {
 	query: string;
@@ -37,11 +35,14 @@ function gauge(p: number): string {
 	return scoreStyle(p)("━".repeat(filled)) + chalk.dim("─".repeat(GAUGE_WIDTH - filled));
 }
 
-function printReport(cmd: FindCommandArgs, root: string, result: CascadeResult, elapsedMs: number): void {
-	const { hits, stats, threshold } = result;
-	const rel = path.relative(process.cwd(), root) || ".";
+function printReport(cmd: FindCommandArgs, rel: string, result: CascadeResult, elapsedMs: number): void {
+	const { hits, stats, threshold, coverage } = result;
 	console.log("");
-	if (hits.length === 0) {
+	if (coverage === "unavailable") {
+		console.log(
+			`${chalk.red("find unavailable")} ${chalk.dim(`for "${cmd.query}" in ${rel}: all ${stats.requests} judge requests failed, nothing was judged; use grep`)}`,
+		);
+	} else if (hits.length === 0) {
 		console.log(
 			`${chalk.yellow("no hits")} ${chalk.dim(`for "${cmd.query}" in ${rel} · τ ${threshold.toFixed(2)}`)}`,
 		);
@@ -63,59 +64,70 @@ function printReport(cmd: FindCommandArgs, root: string, result: CascadeResult, 
 			}
 		}
 	}
+	if (coverage === "partial") {
+		console.log(chalk.yellow(`partial: ${stats.failed} of ${stats.requests} judge requests failed`));
+	}
 	console.log("");
 	console.log(
 		chalk.dim(
-			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
+			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests${stats.unanswered > 0 ? ` · ${stats.unanswered} unanswered` : ""} · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
 		),
 	);
 	for (const failure of stats.failures) console.log(chalk.yellow(failure));
 }
 
-/** Run one search and print it. Exits non-zero on a bad root or when every judgment failed. */
+/** Run one search and print it. Exits non-zero on a bad root or when every judge request failed. */
 export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	if (!cmd.query.trim()) {
 		console.error(chalk.red("Error: query is required"));
 		process.exit(1);
 	}
-	const root = path.resolve(expandPath(cmd.path));
+	const log = cmd.quiet ? () => {} : (message: string) => console.error(chalk.dim(message));
+	const cwd = process.cwd();
+	// Internal URLs (`omp://`, `local://`, …) are searched in place; `find` only reads.
+	const filesystem = new InternalUrlFilesystem({ context: { cwd }, tier: "read" });
+	let root: SearchRoot;
 	try {
-		if (!(await fs.stat(root)).isDirectory()) {
-			console.error(chalk.red(`Error: not a directory: ${cmd.path}`));
-			process.exit(1);
-		}
+		root = await resolveSearchRoot(filesystem, cmd.path, cwd);
 	} catch (error) {
-		if (!isEnoent(error)) throw error;
-		console.error(chalk.red(`Error: path not found: ${cmd.path}`));
+		if (!(error instanceof ToolError)) throw error;
+		console.error(chalk.red(`Error: ${error.message}`));
 		process.exit(1);
 	}
 
-	const log = cmd.quiet ? () => {} : (message: string) => console.error(chalk.dim(message));
+	// Settings and extensions belong to the searched project; a file or URL
+	// scope has none of its own, so it keeps the caller's.
+	const baseCwd = root.type === "directory" && !isUrlPath(root.path) ? root.path : cwd;
 	log("resolving judge");
-	const settings = await Settings.init({ cwd: root });
-	const authStorage = await discoverAuthStorage();
+	const { judge, close } = await openStandaloneJudge(baseCwd, "find");
 	try {
-		const registry = new ModelRegistry(authStorage);
-		await registry.refresh();
-		await loadCliExtensionProviders(registry, settings, root);
-		const judge = resolveJudge({ settings, registry, sessionId: Bun.randomUUIDv7() });
 		const started = performance.now();
-		const result = await runCascade({
+		const raw = await runCascade({
 			root,
+			filesystem,
 			query: cmd.query.trim(),
 			extraKeywords: cmd.keywords,
 			judge,
 			includeHidden: cmd.hidden,
 			onProgress: log,
 		});
+		// Hits print as paths usable from the caller's cwd: relative files or URLs.
+		const result: CascadeResult = {
+			...raw,
+			hits: raw.hits.map(hit => ({
+				...hit,
+				rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel), cwd),
+			})),
+		};
 		const elapsedMs = performance.now() - started;
 		if (cmd.json) {
-			console.log(JSON.stringify({ query: cmd.query, root, elapsedMs, ...result }, null, 2));
+			console.log(JSON.stringify({ query: cmd.query, root: root.path, elapsedMs, ...result }, null, 2));
 		} else {
-			printReport(cmd, root, result, elapsedMs);
+			printReport(cmd, formatPathRelativeToCwd(root.path, cwd), result, elapsedMs);
 		}
-		if (result.stats.requests > 0 && result.stats.errors === result.stats.requests) process.exit(1);
+		// `exitCode`, not `exit`: process.exit skips the finally below, and with it close().
+		if (result.coverage === "unavailable") process.exitCode = 1;
 	} finally {
-		authStorage.close();
+		close();
 	}
 }

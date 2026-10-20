@@ -1,18 +1,20 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
-import { LSP_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/lsp";
 import {
 	type ApprovalMode,
 	denyError,
 	formatApprovalPrompt,
+	requestApproval,
 	requiresApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
 	truncateForPrompt,
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import { DEBUG_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/tools/debug";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
+import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types";
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
 import type { ToolSession } from "../../src/tools";
@@ -28,27 +30,21 @@ function tool(
 }
 
 function createBashTool(settingsOverrides: Record<string, unknown> = {}, resolvedShell = "/bin/bash"): BashTool {
-	const settings = {
-		get(key: string): unknown {
-			if (Object.hasOwn(settingsOverrides, key)) return settingsOverrides[key];
-			switch (key) {
-				case "async.enabled":
-				case "bash.autoBackground.enabled":
-				case "astGrep.enabled":
-				case "astEdit.enabled":
-				case "grep.enabled":
-				case "glob.enabled":
-					return false;
-				case "bash.autoBackground.thresholdMs":
-					return 60_000;
-				default:
-					return undefined;
-			}
-		},
-		getShellConfig() {
-			return { shell: resolvedShell, args: ["-c"], env: {}, prefix: undefined };
-		},
-	};
+	const settings = Settings.isolated({
+		"async.enabled": false,
+		"bash.autoBackground.enabled": false,
+		"astGrep.enabled": false,
+		"astEdit.enabled": false,
+		"grep.enabled": false,
+		"glob.enabled": false,
+		...settingsOverrides,
+	});
+	spyOn(settings, "getShellConfig").mockReturnValue({
+		shell: resolvedShell,
+		args: ["-c"],
+		env: {},
+		prefix: undefined,
+	});
 	return new BashTool({ settings } as unknown as ConstructorParameters<typeof BashTool>[0]);
 }
 
@@ -245,9 +241,153 @@ describe("MCP fallback and prompt formatting", () => {
 		]);
 	});
 
+	it("the dialog's compact prompt summarizes the details to one row, keeping origin, reason, and appendix", async () => {
+		const prompts: { full: string; compact: string }[] = [];
+		const ui = {
+			select: async () => undefined,
+			approve: async (prompt: { full: string; compact: string }) => {
+				prompts.push(prompt);
+				return "once" as const;
+			},
+		};
+		const write = tool("mcp__server__write", undefined, () => ["Path: /tmp/out", "Content:\nsecret\nbody"]);
+		expect(
+			await requestApproval(
+				ui,
+				write,
+				{},
+				{
+					reason: "Critical pattern",
+					appendix: ["Provider safety checks:", "- check"],
+				},
+			),
+		).toBe("once");
+		expect(prompts[0]!.compact.split("\n")).toEqual([
+			"Allow tool: mcp__server__write",
+			"Origin: MCP server tool",
+			"Reason: Critical pattern",
+			// A label alone takes its body's first line; `…` marks the lines left out.
+			"Path: /tmp/out · Content: secret …",
+			"Provider safety checks:",
+			"- check",
+		]);
+		// The full prompt, which the dialog's expand key shows, keeps every detail whole.
+		expect(prompts[0]!.full).toContain("Content:\nsecret\nbody");
+		// A detail that fits on its row is shown as is, without an ellipsis.
+		await requestApproval(
+			ui,
+			tool("bash", "exec", () => ["Command: git push"]),
+			{},
+		);
+		expect(prompts[1]!.compact).toBe("Allow tool: bash\nCommand: git push");
+	});
+
 	it("does not add MCP origin for annotated MCP tools", () => {
 		const subject = tool("mcp__server__safe", "read");
 		expect(formatApprovalPrompt(subject, {}, undefined)).toBe("Allow tool: mcp__server__safe");
+	});
+
+	it("shows decoded manifests through MCP registrations, MCP fallback, and device writes", () => {
+		const args = {
+			context: "some-context",
+			resource: "apiVersion: v1\nkind: Pod\nmetadata:\n  name: probe\n  namespace: probe-ns",
+		};
+		const definition: MCPToolDefinition = { name: "apply", inputSchema: { type: "object" } };
+		const connection = { name: "kubernetes" } as MCPServerConnection;
+		const eager = new MCPTool(connection, definition);
+		const deferred = new DeferredMCPTool("kubernetes", definition, async () => connection);
+		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
+		const expected = [
+			"Arguments:",
+			"{",
+			'  "context": "some-context",',
+			'  "resource": "',
+			"    apiVersion: v1",
+			"    kind: Pod",
+			"    metadata:",
+			"      name: probe",
+			"      namespace: probe-ns",
+			'  "',
+			"}",
+		].join("\n");
+		const cases: { subject: ApprovalTool; args: unknown }[] = [
+			{ subject: eager, args },
+			{ subject: deferred, args },
+			{ subject: tool(eager.name), args },
+			{ subject: writeTool, args: { path: `xd://${eager.name}`, content: JSON.stringify(args) } },
+		];
+		for (const entry of cases) {
+			expect(formatApprovalPrompt(entry.subject, entry.args)).toContain(expected);
+		}
+	});
+
+	it("keeps multiline array strings distinct from numbers and their commas outside the body", () => {
+		const subject = tool("mcp__server__run");
+		const prompt = formatApprovalPrompt(subject, { scripts: ["1\n", "2\n"], enabled: true });
+		expect(prompt).toContain('  "scripts": [\n    "\n      1\n      \n    ",\n    "\n      2\n      \n    "\n  ],');
+		expect(prompt).not.toBe(formatApprovalPrompt(subject, { scripts: [1, 2], enabled: true }));
+		expect(prompt).toContain('  "enabled": true');
+	});
+
+	it("normalizes CRLF and CR, expands tabs, and keeps terminal controls escaped in string blocks", () => {
+		const prompt = formatApprovalPrompt(tool("mcp__server__run"), {
+			script: "first\r\n\tsecond\rthird\u001b[2J\b\nlast",
+		});
+		expect(prompt).toContain("first\n       second\n    third\\u001b[2J\\b\n    last");
+		expect(prompt).not.toMatch(/[\r\t\u001b\b]/);
+	});
+
+	it("retains explicit MCP approval detail formatters, including suppressed details", () => {
+		const args = { hidden: "custom formatter owns disclosure" };
+		expect(
+			formatApprovalPrompt(
+				tool("mcp__server__run", undefined, () => []),
+				args,
+			),
+		).not.toContain("Arguments:");
+		expect(
+			formatApprovalPrompt(
+				tool("mcp__server__run", undefined, () => "Custom details"),
+				args,
+			),
+		).toContain("Custom details");
+	});
+
+	it("shows empty and null JSON device payloads while omitting absent direct MCP arguments", () => {
+		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
+		for (const content of ["{}", "[]", "null"]) {
+			expect(formatApprovalPrompt(writeTool, { path: "XD://run", content })).toContain(`Arguments:\n${content}`);
+		}
+		expect(formatApprovalPrompt(tool("mcp__server__run"), undefined)).not.toContain("Arguments:");
+	});
+
+	it("regular file write keeps Path and Content lines unchanged", () => {
+		const session = { cwd: "." } as ToolSession;
+		const writeTool = new WriteTool(session);
+		const details = writeTool.formatApprovalDetails({
+			path: "src/main.ts",
+			content: '{"script":"first\\nsecond"}',
+		});
+		expect(details).toEqual(["Path: src/main.ts", 'Content:\n{"script":"first\\nsecond"}']);
+	});
+
+	it("falls back to raw Content for xd:// write with non-JSON content", () => {
+		const session = { cwd: "." } as ToolSession;
+		const writeTool = new WriteTool(session);
+		const details = writeTool.formatApprovalDetails({
+			path: "xd://some_device",
+			content: "not-json-content",
+		});
+		expect(details).toEqual(["Path: xd://some_device", "Content:\nnot-json-content"]);
+	});
+
+	it("caps large device argument payloads at prompt truncation limit", () => {
+		const longScript = "echo test\n".repeat(300);
+		const subject = tool("mcp__server__eval");
+		const prompt = formatApprovalPrompt(subject, { script: longScript });
+		const displayed = prompt.split("Arguments:\n")[1]!;
+		expect(displayed).toMatch(/^.{2000}\[…\d+ch elided…\]$/s);
+		expect(displayed).toContain('  "script": "\n    echo test');
 	});
 
 	it("truncates prompt details without touching short strings", () => {
@@ -267,7 +407,7 @@ describe("MCP fallback and prompt formatting", () => {
 	}
 
 	function sloppySection(path: string, find = "old", put = "new"): string {
-		return [`*** SM:EDIT ${path}`, "*** SM:FIND", find, "*** SM:PUT", put].join("\n");
+		return [`*** Edit File: ${path}`, "*** Find", find, "*** Replace", put].join("\n");
 	}
 
 	it("shows the file from a sloppy edit section header", () => {
@@ -922,20 +1062,9 @@ describe("tool-owned dynamic approval declarations", () => {
 			source: "mode",
 		});
 	});
-
-	it("exports LSP and debug read-only action sets from their owning tools", () => {
-		expect(LSP_READONLY_ACTIONS.has("diagnostics")).toBe(true);
-		expect(LSP_READONLY_ACTIONS.has("rename")).toBe(false);
-		expect(DEBUG_READONLY_ACTIONS.has("variables")).toBe(true);
-		expect(DEBUG_READONLY_ACTIONS.has("continue")).toBe(false);
-	});
 });
 
 describe("resolveApprovalFromContext fail-closed default", () => {
-	function settingsGet(values: Record<string, unknown>) {
-		return { get: (key: string) => values[key] };
-	}
-
 	it("fails closed to always-ask with no grant when context is missing", () => {
 		expect(resolveApprovalFromContext(undefined)).toEqual({ approvalMode: "always-ask", userPolicies: {} });
 		expect(resolveApprovalFromContext(null)).toEqual({ approvalMode: "always-ask", userPolicies: {} });
@@ -950,17 +1079,17 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 	it("honors configured mode and per-tool policies when settings are present", () => {
 		expect(
 			resolveApprovalFromContext({
-				settings: settingsGet({ "tools.approvalMode": "write", "tools.approval": { bash: "deny" } }),
+				settings: Settings.isolated({ "tools.approvalMode": "write", "tools.approval": { bash: "deny" } }),
 			}),
 		).toEqual({ approvalMode: "write", userPolicies: { bash: "deny" } });
-		expect(resolveApprovalFromContext({ settings: settingsGet({ "tools.approvalMode": "yolo" }) })).toEqual({
+		expect(resolveApprovalFromContext({ settings: Settings.isolated({ "tools.approvalMode": "yolo" }) })).toEqual({
 			approvalMode: "yolo",
 			userPolicies: {},
 		});
 	});
 
 	it("keeps the schema default yolo when settings exist but approvalMode is unset", () => {
-		expect(resolveApprovalFromContext({ settings: settingsGet({}) })).toEqual({
+		expect(resolveApprovalFromContext({ settings: Settings.isolated() })).toEqual({
 			approvalMode: "yolo",
 			userPolicies: {},
 		});
@@ -970,7 +1099,7 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 		expect(
 			resolveApprovalFromContext({
 				autoApprove: true,
-				settings: settingsGet({ "tools.approvalMode": "always-ask", "tools.approval": { bash: "deny" } }),
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask", "tools.approval": { bash: "deny" } }),
 			}),
 		).toEqual({ approvalMode: "yolo", userPolicies: { bash: "deny" } });
 		expect(resolveApprovalFromContext({ autoApprove: true })).toEqual({ approvalMode: "yolo", userPolicies: {} });

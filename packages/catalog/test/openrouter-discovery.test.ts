@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 const CHAT_PAYLOAD = {
@@ -60,18 +63,93 @@ const DECISIONS_PAYLOAD = {
 			supported_parameters: [],
 			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
 		},
+		{
+			id: "typesafe/jev-1.13",
+			name: "TypeSafe: Jev 1.13",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+		{
+			id: "typesafe/jev-1.14",
+			name: "TypeSafe: Jev 1.14",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+		{
+			id: "typesafe/jev-unverified",
+			name: "TypeSafe: Jev Unverified",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
 	],
 };
 
-describe("OpenRouter chat, image, and decisions discovery", () => {
+const RERANK_PAYLOAD = {
+	data: [
+		{
+			id: "cohere/rerank-v3.5",
+			name: "Cohere: Rerank v3.5",
+			architecture: { modality: "text->rerank", input_modalities: ["text"], output_modalities: ["rerank"] },
+			context_length: 4096,
+			pricing: { prompt: "0", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 4096, max_completion_tokens: 3686 },
+		},
+	],
+};
+
+const VIDEO_PAYLOAD = {
+	data: [
+		{
+			id: "google/veo-3.1",
+			name: "Google: Veo 3.1",
+			supported_durations: [4, 6, 8],
+			supported_resolutions: ["720p", "1080p", "4K"],
+			supported_aspect_ratios: ["16:9", "9:16"],
+			pricing_skus: { duration_seconds_with_audio: "0.40" },
+		},
+	],
+};
+
+const EMBEDDING_PAYLOAD = {
+	data: [
+		{
+			id: "qwen/qwen3-embedding-8b",
+			name: "Qwen: Qwen3 Embedding 8B",
+			architecture: {
+				modality: "text->embeddings",
+				input_modalities: ["text"],
+				output_modalities: ["embeddings"],
+			},
+			context_length: 32768,
+			pricing: { prompt: "0.00000001", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: null },
+		},
+	],
+};
+
+describe("OpenRouter chat, image, decisions, rerank, video, and embedding discovery", () => {
 	it("keeps image-only rows and lets the image endpoint win id collisions", async () => {
 		const requested: string[] = [];
 		const options = openrouterModelManagerOptions({
 			fetch: async input => {
 				const url = String(input);
 				requested.push(url);
+				if (url.endsWith("/videos/models")) return Response.json(VIDEO_PAYLOAD);
+				if (url.endsWith("/embeddings/models")) return Response.json(EMBEDDING_PAYLOAD);
 				if (url.endsWith("/images/models")) return Response.json(IMAGE_PAYLOAD);
 				if (url.endsWith("/models?output_modalities=decisions")) return Response.json(DECISIONS_PAYLOAD);
+				if (url.endsWith("/models?output_modalities=rerank")) return Response.json(RERANK_PAYLOAD);
 				if (url.endsWith("/models")) return Response.json(CHAT_PAYLOAD);
 				return new Response(null, { status: 404 });
 			},
@@ -79,9 +157,12 @@ describe("OpenRouter chat, image, and decisions discovery", () => {
 
 		const models = await options.fetchDynamicModels?.();
 		expect(requested.sort()).toEqual([
+			"https://openrouter.ai/api/v1/embeddings/models",
 			"https://openrouter.ai/api/v1/images/models",
 			"https://openrouter.ai/api/v1/models",
 			"https://openrouter.ai/api/v1/models?output_modalities=decisions",
+			"https://openrouter.ai/api/v1/models?output_modalities=rerank",
+			"https://openrouter.ai/api/v1/videos/models",
 		]);
 		// Decision rows answer only through `/api/alpha/decisions`; they are judge-kind, tool-less, input-priced.
 		expect(models?.find(model => model.id === "~typesafe/jev-latest")).toEqual(
@@ -96,6 +177,57 @@ describe("OpenRouter chat, image, and decisions discovery", () => {
 				maxTokens: 28800,
 			}),
 		);
+		const bundledJev = seedModels("openrouter").find(model => model.id === "~typesafe/jev-latest");
+		if (!bundledJev) throw new Error("OpenRouter bundled Jev alias is missing");
+		expect(bundledJev.input).toEqual(["text"]);
+		expect(buildModel(bundledJev).input).toEqual(["text", "image"]);
+
+		const discoveredJev = models?.filter(model =>
+			["typesafe/jev-1.13", "typesafe/jev-1.14", "typesafe/jev-unverified"].includes(model.id),
+		);
+		expect(discoveredJev?.map(model => [model.id, model.input])).toEqual([
+			["typesafe/jev-1.13", ["text"]],
+			["typesafe/jev-1.14", ["text"]],
+			["typesafe/jev-unverified", ["text"]],
+		]);
+		expect(discoveredJev?.map(model => [model.id, buildModel(model).input])).toEqual([
+			["typesafe/jev-1.13", ["text", "image"]],
+			["typesafe/jev-1.14", ["text", "image"]],
+			["typesafe/jev-unverified", ["text"]],
+		]);
+		expect(models?.find(model => model.id === "cohere/rerank-v3.5")).toMatchObject({
+			api: "openrouter-rerank",
+			kind: "rerank",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			supportsTools: false,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 3686,
+		});
+		expect(models?.find(model => model.id === "google/veo-3.1")).toMatchObject({
+			api: "openrouter-video",
+			kind: "video",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			supportsTools: false,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(models?.find(model => model.id === "qwen/qwen3-embedding-8b")).toMatchObject({
+			api: "openai-embeddings",
+			kind: "embedding",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			supportsTools: false,
+			cost: { input: 0.01, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32768,
+			maxTokens: null,
+		});
 		expect(models?.find(model => model.id === "openrouter/auto")).toMatchObject({
 			api: "openrouter",
 			input: ["text"],
@@ -127,7 +259,7 @@ describe("OpenRouter chat, image, and decisions discovery", () => {
 			fetch: async input => {
 				const url = String(input);
 				if (url.endsWith("/images/models")) throw new Error("image endpoint unavailable");
-				if (url.endsWith("/models")) return Response.json(CHAT_PAYLOAD);
+				if (url === "https://openrouter.ai/api/v1/models") return Response.json(CHAT_PAYLOAD);
 				return new Response(null, { status: 404 });
 			},
 		});
@@ -135,5 +267,38 @@ describe("OpenRouter chat, image, and decisions discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 		expect(models?.some(model => model.id === "openrouter/auto" && model.api === "openrouter")).toBe(true);
 		expect(models?.some(model => model.api === "openrouter-images")).toBe(false);
+	});
+
+	it("keeps decision models that advertise zero limits, as unknown limits", async () => {
+		// Live respan/span-01* rows report `context_length: 0` and `max_completion_tokens: 0`.
+		const spanLite = {
+			id: "respan/span-01-lite",
+			name: "Respan: Span 01 Lite",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 0,
+			pricing: { prompt: "0", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 0, max_completion_tokens: 0 },
+		};
+		const result = await resolveProviderModels(
+			{
+				...openrouterModelManagerOptions({
+					fetch: async input =>
+						String(input).endsWith("/models?output_modalities=decisions")
+							? Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] })
+							: new Response(null, { status: 404 }),
+				}),
+				staticModels: [],
+				cacheDbPath: ":memory:",
+			},
+			"online",
+		);
+
+		expect(result.models.find(model => model.id === "respan/span-01-lite")).toMatchObject({
+			api: "openrouter-decisions",
+			kind: "judge",
+			contextWindow: null,
+			maxTokens: null,
+		});
 	});
 });
