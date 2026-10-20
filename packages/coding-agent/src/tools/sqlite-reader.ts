@@ -806,10 +806,12 @@ export function executeReadQuery(
 	if (statement.paramsCount > 0) {
 		throw new ToolError("SQLite raw queries do not support bound parameters");
 	}
-	if (page) {
-		// A query that nests as a subquery pages inside SQLite, so skipped rows are
-		// never built; the newline closes a trailing `--` comment. Statements that
-		// cannot nest (PRAGMA, EXPLAIN) fail to prepare and skip rows while iterating.
+	const columns = [...statement.columnNames];
+	// A query that nests as a subquery pages inside SQLite, so skipped rows are
+	// never built; the newline closes a trailing `--` comment. Statements that
+	// cannot nest (PRAGMA, EXPLAIN) fail to prepare, and repeated column names
+	// would come back renamed (`x`, `x:1`); both skip rows while iterating.
+	if (page && new Set(columns).size === columns.length) {
 		let paged: Statement<SqliteRow, [number, number]> | undefined;
 		try {
 			paged = db.query(`SELECT * FROM (\n${sql.replace(/[\s;]+$/, "")}\n) LIMIT ? OFFSET ?`);
@@ -817,10 +819,9 @@ export function executeReadQuery(
 		if (paged) {
 			const rows = paged.all(page.limit + 1, page.offset);
 			const truncated = rows.length > page.limit;
-			return { columns: [...paged.columnNames], rows: truncated ? rows.slice(0, page.limit) : rows, truncated };
+			return { columns, rows: truncated ? rows.slice(0, page.limit) : rows, truncated };
 		}
 	}
-	const columns = [...statement.columnNames];
 	const limit = page?.limit ?? MAX_RAW_QUERY_ROWS;
 	let skip = page?.offset ?? 0;
 	const rows: SqliteRow[] = [];

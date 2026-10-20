@@ -478,6 +478,17 @@ describe("SQLite tool support", () => {
 		expect(pragma).toContain("offset=2");
 	});
 
+	it("pages a query with repeated column names exactly as it reads unpaged", async () => {
+		const read = async (query: string) =>
+			getText(await readTool.execute("sqlite-raw-dup", { path: `${sqlitePath}?${query}` })).split("\n[")[0];
+		const sql = encodeURIComponent("SELECT id AS x, id + 10 AS x FROM users ORDER BY id");
+		const unpagedRow = await read(
+			`q=${encodeURIComponent("SELECT id AS x, id + 10 AS x FROM users ORDER BY id LIMIT 1 OFFSET 1")}`,
+		);
+
+		expect(await read(`q=${sql}&limit=1&offset=1`)).toBe(unpagedRow);
+	});
+
 	it("rejects table names that do not exist instead of interpolating them", async () => {
 		await expect(
 			readTool.execute("sqlite-injection-table", { path: `${sqlitePath}:users;DROP TABLE users;` }),
