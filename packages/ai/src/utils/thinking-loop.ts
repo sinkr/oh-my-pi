@@ -403,14 +403,20 @@ export function guardThinkingLoopStream(
 		let textStarted = false;
 		// The provider's latest snapshot of this attempt, and when (wall clock,
 		// like its `timestamp`) its first delta arrived: the guard reports the
-		// attempt that tripped, not the wrapper's lifetime around retries.
+		// attempt that tripped, not the wrapper's lifetime around retries. The
+		// attempt's start is kept as a value: providers that retry may reset
+		// the same output object's `timestamp` in place.
 		let snapshot: AssistantMessage | undefined;
+		let attemptStart: number | undefined;
 		let firstDeltaAt: number | undefined;
 		try {
 			for await (const event of inner) {
 				const next = "partial" in event ? event.partial : event.type === "done" ? event.message : undefined;
 				if (next) {
-					if (next.timestamp !== snapshot?.timestamp) firstDeltaAt = undefined;
+					if (next.timestamp !== attemptStart) {
+						attemptStart = next.timestamp;
+						firstDeltaAt = undefined;
+					}
 					snapshot = next;
 				}
 				if (

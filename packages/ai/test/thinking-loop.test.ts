@@ -577,12 +577,7 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 });
 
 describe("thinking-loop error accounting", () => {
-	const model = {
-		api: "google-vertex",
-		provider: "google-vertex",
-		id: "gemini-2.5-pro",
-		identity: classifyModel("google-vertex", "gemini-2.5-pro"),
-	} as unknown as Model<Api>;
+	const model = createMockModel({ provider: "google-vertex", id: "gemini-2.5-pro" }).model;
 	const usage = (input: number, output: number, total: number): AssistantMessage["usage"] => ({
 		input,
 		output,
@@ -655,6 +650,30 @@ describe("thinking-loop error accounting", () => {
 		expect(result.usage.input).toBe(50_000);
 		expect(result.duration).toBeLessThan(60);
 		expect(result.ttft).toBeLessThan(60);
+	});
+
+	test("restarts attempt timing when a provider resets its output in place for a retry", async () => {
+		// Google's empty-response retry rewrites the same output object (timestamp included).
+		const output = attempt("attempt-1");
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			void (async () => {
+				inner.push({ type: "start", partial: output });
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
+				await scheduler.wait(80);
+				output.timestamp = Date.now();
+				output.responseId = "attempt-2";
+				inner.push({ type: "start", partial: output });
+				await scheduler.wait(30);
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
+			})();
+			return inner;
+		});
+
+		const result = await guarded.result();
+		expect(result.responseId).toBe("attempt-2");
+		expect(result.ttft).toBeGreaterThanOrEqual(25);
+		expect(result.duration).toBeLessThan(80);
 	});
 
 	test("takes the final message when the loop only shows at the end-of-stream flush", async () => {
