@@ -1,4 +1,5 @@
-import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
+import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
+import { contextLocalProtocolOptions } from "../internal-urls/context";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
@@ -46,6 +47,8 @@ export interface ExecutorBackendResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId: string | undefined;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
@@ -68,20 +71,18 @@ export interface ExecutorBackend {
 
 /**
  * Resolve the on-disk roots that the eval helpers substitute for internal-URL
- * schemes (currently `local://`). Prefers the session's own
- * {@link LocalProtocolOptions} — the exact mapping `read local://…` uses — so an
- * eval `write("local://x")` and a later `read local://x` agree on the location.
+ * schemes from {@link contextLocalProtocolOptions}, resolved the way the
+ * protocol handlers do, so an eval `write("local://x")` and a later
+ * `read local://x` agree on the location. `local://` maps to its root;
+ * `artifact://` maps to the session's artifacts dir, the dir `read artifact://<id>`
+ * searches first, so `read("artifact://<id>")` returns the artifact's text.
+ * A scheme is absent when its root does not resolve (read would fail the same way).
  */
 export function resolveEvalUrlRoots(session: ToolSession): Record<string, string> {
-	return buildEvalUrlRoots(resolveEvalLocalProtocolOptions(session));
-}
-
-/** Keep file-backed eval and prelude helpers on the calling session's local URL root. */
-export function resolveEvalLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
-	return (
-		session.localProtocolOptions ?? {
-			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
-			getSessionId: () => session.getSessionId?.() ?? null,
-		}
-	);
+	const protocolOptions = contextLocalProtocolOptions(session);
+	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: protocolOptions });
+	const roots = options ? buildEvalUrlRoots(options) : {};
+	const artifactsDir = protocolOptions?.getArtifactsDir?.();
+	if (artifactsDir) roots.artifact = artifactsDir;
+	return roots;
 }

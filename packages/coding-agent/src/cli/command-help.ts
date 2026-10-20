@@ -1,22 +1,32 @@
 import type { CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 
 export const acpHelp = {
-	description: "Run Oh My Pi as an ACP (Agent Client Protocol) server over stdio",
+	description: "Run omp as an ACP (Agent Client Protocol) server over stdio",
 } satisfies CommandMetadata;
 
 export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
+
+export const anonymizeHelp = {
+	description:
+		"Write a shareable copy of a session and its subagents: turn contents redacted, metadata kept, paths and literals replaced by consistent mock tokens",
+} satisfies CommandMetadata;
+
+export const authHelp = {
+	description: "Export or import stored provider credentials (API keys and OAuth logins) as JSON",
+} satisfies CommandMetadata;
 
 export const authBrokerHelp = {
 	description: "Manage the omp auth-broker (credential vault)",
 } satisfies CommandMetadata;
 
 export const authGatewayHelp = {
-	description: "Run an auth-gateway forward proxy backed by the configured broker",
+	description:
+		"Run an auth-gateway: an HTTP forward proxy backed by the configured broker, or JSON lines on stdio with your own credentials",
 } satisfies CommandMetadata;
 
 export const benchHelp = {
 	description:
-		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads",
+		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads, or single-user vs parallel load (--detailed)",
 } satisfies CommandMetadata;
 
 export const browserRelayHelp = {
@@ -77,6 +87,10 @@ export const grievancesHelp = {
 	description: "View, clean, or push reported tool issues (auto-QA grievances)",
 } satisfies CommandMetadata;
 
+export const loginHelp = {
+	description: "Log in to a model provider (terminal counterpart of /login)",
+} satisfies CommandMetadata;
+
 export const imagesHelp = {
 	description: "Inspect, diagnose, probe, and purge image publication backends",
 } satisfies CommandMetadata;
@@ -95,6 +109,10 @@ export const playHelp = {
 	description: "Replay a /record session recording in the terminal (space pauses, q quits)",
 } satisfies CommandMetadata;
 
+export const predictHelp = {
+	description: "Type a prompt and compare every word-completion engine's ghost text live",
+} satisfies CommandMetadata;
+
 export const psHelp = {
 	description: "List and control daemon-supervised background processes (logs, stop, kill, restart)",
 } satisfies CommandMetadata;
@@ -111,6 +129,10 @@ export const sayHelp = {
 } satisfies CommandMetadata;
 
 export const searchHelp = { description: "Test web search providers" } satisfies CommandMetadata;
+
+export const sessionHelp = {
+	description: "Hand a session to another machine: pack it, unpack it, or mark the local copy moved",
+} satisfies CommandMetadata;
 
 export const shareHelp = {
 	description: "Share a saved session via an encrypted link (same as /share)",
@@ -135,10 +157,14 @@ export const streamHelp = {
 } satisfies CommandMetadata;
 
 export const tinyModelsHelp = {
-	description: "Download tiny local models (session titles + memory)",
+	description: "Download tiny local models (session titles, memory, word completion)",
 } satisfies CommandMetadata;
 
 export const tokenHelp = { description: "Get the API key or OAuth token for a provider" } satisfies CommandMetadata;
+
+export const toksHelp = {
+	description: "Count a file or text with every embedded offline tokenizer (OpenAI, Claude, Qwen, …)",
+} satisfies CommandMetadata;
 
 export const ttsrHelp = {
 	description: "Inspect and test Time-Traveling Stream Rules (TTSR)",

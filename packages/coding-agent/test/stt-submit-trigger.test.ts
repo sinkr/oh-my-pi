@@ -7,6 +7,8 @@ import { STTController, type STTControllerDependencies } from "../src/stt/stt-co
 import { evaluateSubmitTrigger, type SttSubmitTrigger } from "../src/stt/submit-trigger";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
+import { cfgSttSubmitTrigger } from "@oh-my-pi/pi-coding-agent/stt/settings";
+
 const DICTATION_MODELS = [getBundledModel("local", "whisper-base")];
 const registry: STTControllerDependencies["registry"] = {
 	getError: () => undefined,
@@ -196,15 +198,15 @@ describe("STTController submit trigger integration", () => {
 		};
 	}
 
-	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger) {
-		settings.set("stt.submitTrigger", trigger);
+	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger, manualSubmit?: boolean) {
+		cfgSttSubmitTrigger.set(settings, trigger);
 		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
 			pushAudio: vi.fn(),
 			stop: vi.fn().mockResolvedValue(transcript),
 			cancel: vi.fn(),
 		});
 		const editor = makeEditor();
-		const options = makeOptions();
+		const options = { ...makeOptions(), manualSubmit };
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
 
 		await controller.toggle(editor, options);
@@ -219,7 +221,7 @@ describe("STTController submit trigger integration", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.setModelRole("dictation", "local/whisper-base");
-		settings.set("stt.submitTrigger", "never");
+		cfgSttSubmitTrigger.set(settings, "never");
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
 	});
@@ -253,11 +255,11 @@ describe("STTController submit trigger integration", () => {
 		expect(editor.submit).toHaveBeenCalledTimes(1);
 	});
 
-	it("submits the existing draft when streaming dictation only says submit", async () => {
-		const { editor } = await transcribeStream("submit", "say-submit");
+	it("keeps manually submitted streaming dictation intact despite the say-submit trigger", async () => {
+		const { editor } = await transcribeStream("please review this submit.", "say-submit", true);
 
-		expect(editor.commitVolatileText).toHaveBeenCalledWith("submit");
-		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(6);
-		expect(editor.submit).toHaveBeenCalledTimes(1);
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("please review this submit.");
+		expect(editor.deleteBeforeCursor).not.toHaveBeenCalled();
+		expect(editor.submit).not.toHaveBeenCalled();
 	});
 });

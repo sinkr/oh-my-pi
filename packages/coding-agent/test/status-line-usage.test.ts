@@ -50,8 +50,10 @@ function makeComponent(
 				fetchUsageReports: async () => reports,
 				modelRegistry: {
 					authStorage: {
-						getOAuthAccountIdentity: (provider: string) =>
-							provider === options.provider ? options.activeIdentity : undefined,
+						oauth: {
+							identity: (provider: string) =>
+								provider === options.provider ? options.activeIdentity : undefined,
+						},
 					},
 				},
 				getAsyncJobSnapshot: () => ({ running: [] }),
@@ -297,10 +299,12 @@ describe("usage status-line segment", () => {
 			fetchUsageReports: async () => reports,
 			modelRegistry: {
 				authStorage: {
-					getOAuthAccountIdentity: (requestedProvider: string) =>
-						requestedProvider === provider && provider === "openai-codex"
-							? { accountId: "active-account" }
-							: undefined,
+					oauth: {
+						identity: (requestedProvider: string) =>
+							requestedProvider === provider && provider === "openai-codex"
+								? { accountId: "active-account" }
+								: undefined,
+					},
 				},
 			},
 			getAsyncJobSnapshot: () => ({ running: [] }),
@@ -367,8 +371,10 @@ describe("usage status-line segment", () => {
 			fetchUsageReports: async () => reports,
 			modelRegistry: {
 				authStorage: {
-					getOAuthAccountIdentity: (requestedProvider: string) =>
-						requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+					oauth: {
+						identity: (requestedProvider: string) =>
+							requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+					},
 				},
 			},
 			getAsyncJobSnapshot: () => ({ running: [] }),
@@ -428,24 +434,6 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("7d");
 		expect(content).toContain("8%");
 		expect(content).not.toContain("66%");
-	});
-
-	it("renders tiered limits with the tier label", () => {
-		const result = renderSegment("usage", {
-			usage: {
-				tier: "prolite",
-				fiveHour: { percent: 50, resetMinutes: 120 },
-				sevenDay: { percent: 10, resetHours: 48 },
-			},
-		} as unknown as SegmentContext);
-		const content = stripVTControlCharacters(result.content);
-
-		expect(result.visible).toBe(true);
-		expect(content).toContain("prolite");
-		expect(content).toContain("5h");
-		expect(content).toContain("50%");
-		expect(content).toContain("7d");
-		expect(content).toContain("10%");
 	});
 
 	it("sanitizes tier labels before rendering", () => {

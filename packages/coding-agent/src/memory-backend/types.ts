@@ -95,6 +95,12 @@ export interface MemoryBackendStartOptions {
 /** A successful recall, including an empty result, staged until user-turn delivery. */
 export interface MemoryPromptPreparation {
 	context?: string;
+	/**
+	 * Model-facing note delivered with this turn's user message, e.g. what changed in the
+	 * memories a reused recall holds. Persisted in the transcript as a hidden custom message
+	 * whose `details` carry the backend's bookkeeping, so both land only once delivered.
+	 */
+	notice?: { content: string; details: unknown };
 	/** Commit synchronously after delivery validation; false rejects lost ownership without state writes. */
 	commit(): boolean;
 }
@@ -114,9 +120,11 @@ export interface MemoryBackend {
 	/**
 	 * Markdown injected as the system-prompt append section.
 	 * Returned on every prompt rebuild via `refreshBaseSystemPrompt()`.
+	 * `cwd` is the session's project directory and selects project-scoped memory.
 	 */
 	buildDeveloperInstructions(
 		agentDir: string,
+		cwd: string,
 		settings: Settings,
 		session?: AgentSession,
 	): Promise<string | undefined>;
@@ -176,4 +184,12 @@ export interface MemoryBackend {
 		settings: Settings,
 		session?: AgentSession,
 	): Promise<string | undefined>;
+
+	/**
+	 * Optional hook to apply live edits to this backend's own `<id>.*` settings
+	 * (`changed` lists them) in a running top-level session. When omitted, the
+	 * session re-applies the whole backend (`applyMemoryBackend`), which rebuilds
+	 * its runtime state, memory tools, and prompt from the current settings.
+	 */
+	applySettings?(session: AgentSession, changed: readonly string[]): Promise<void>;
 }

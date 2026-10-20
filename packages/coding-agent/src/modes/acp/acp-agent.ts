@@ -44,19 +44,18 @@ import {
 	type SetSessionModeResponse,
 	type Usage,
 } from "@oh-my-pi/pi-utils/acp";
-import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
+import { disableProvider, enableProvider } from "../../capability";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	getExtensionUISelectOptionLabel,
+	timedOutAskDialogResult,
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
-import { loadSlashCommands } from "../../extensibility/slash-commands";
-import { resolveLocalUrlToPath } from "../../internal-urls";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
@@ -75,9 +74,17 @@ import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { OTHER_OPTION } from "../../tools/ask";
-import { normalizeLocalScheme } from "../../tools/path-utils";
+import { resolvePlanFilePath } from "../../plan-mode/plan-files";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { DEFAULT_TTS_VOICE, TTS_LOCAL_MODELS, TTS_LOCAL_VOICE_OPTIONS } from "../../tts/models";
+import {
+	DEFAULT_TTS_SPEED,
+	DEFAULT_TTS_VOICE,
+	TTS_LOCAL_MODELS,
+	TTS_LOCAL_VOICE_OPTIONS,
+	TTS_SPEED_MAX,
+	TTS_SPEED_MIN,
+	TTS_SPEED_OPTIONS,
+} from "../../tts/models";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -86,6 +93,9 @@ import {
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
+
+import { cfgDisabledExtensions } from "../../extensibility/settings";
+import { cfgPlanEnabled } from "../../plan-mode/settings";
 
 const ACP_DEFAULT_MODE_ID = "default";
 const ACP_PLAN_MODE_ID = "plan";
@@ -252,17 +262,22 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 	const defaultSpeechModel = localSelector(TTS_LOCAL_MODELS[0].key);
 	const defaultDictationModel = localSelector(DEFAULT_STT_MODEL_KEY);
 	const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
+	// Speed settings are numeric, so presets are advertised as numbers clients can write back as-is.
+	const speeds = TTS_SPEED_OPTIONS.map(({ value, label }) => ({ value: Number(value), label }));
 	return {
 		settings: {
 			speechToTextModel: "modelRoles.dictation",
 			textToSpeechModel: "modelRoles.speech",
 			textToSpeechVoice: "tts.localVoice",
 			speechVoice: "speech.voice",
+			textToSpeechSpeed: "tts.localSpeed",
+			speechSpeed: "speech.speed",
 		},
 		defaults: {
 			speechToTextModel: defaultDictationModel,
 			textToSpeechModel: defaultSpeechModel,
 			voice: DEFAULT_TTS_VOICE,
+			speed: DEFAULT_TTS_SPEED,
 		},
 		speechToText: {
 			setting: "modelRoles.dictation",
@@ -277,8 +292,12 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 			modelSetting: "modelRoles.speech",
 			voiceSetting: "tts.localVoice",
 			speechVoiceSetting: "speech.voice",
+			speedSetting: "tts.localSpeed",
+			speechSpeedSetting: "speech.speed",
 			defaultModel: defaultSpeechModel,
 			defaultVoice: DEFAULT_TTS_VOICE,
+			defaultSpeed: DEFAULT_TTS_SPEED,
+			speedRange: { min: TTS_SPEED_MIN, max: TTS_SPEED_MAX },
 			models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
 				value: localSelector(key),
 				label,
@@ -286,6 +305,7 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 				voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
 			})),
 			voices,
+			speeds,
 		},
 	};
 }
@@ -427,6 +447,7 @@ export function createAcpExtensionUiContext(
 ): ExtensionUIContext {
 	const supportsForm = clientCapabilities?.elicitation?.form != null;
 	return {
+		supportsEditor: false,
 		select: async (title, options, dialogOptions) => {
 			if (!supportsForm) return undefined;
 			const value = await elicitFromAcpClient(
@@ -518,28 +539,7 @@ export function createAcpExtensionUiContext(
 					},
 				},
 			);
-			if (timedOut) {
-				return {
-					kind: "submit",
-					results: questions.map(question => {
-						const labels = question.options.map(option => option.label);
-						const fallbackIndex = Math.min(
-							Math.max(question.recommended ?? 0, 0),
-							Math.max(labels.length - 1, 0),
-						);
-						const fallback = labels[fallbackIndex];
-						return {
-							id: question.id,
-							question: question.question,
-							options: labels,
-							multi: question.multi ?? false,
-							selectedOptions: fallback === undefined ? [] : [fallback],
-							customInput: undefined,
-							timedOut: true,
-						};
-					}),
-				};
-			}
+			if (timedOut) return timedOutAskDialogResult(questions);
 			if (!content) return undefined;
 
 			return {
@@ -598,6 +598,7 @@ export function createAcpExtensionUiContext(
 		},
 		addAutocompleteProvider: () => {},
 		setEditorComponent: () => {},
+		getEditorComponent: () => undefined,
 		get theme() {
 			return theme;
 		},
@@ -644,7 +645,7 @@ export class AcpAgent implements Agent {
 			authMethods.push({
 				type: "terminal",
 				id: "terminal",
-				name: "Set up Oh My Pi in terminal",
+				name: "Set up omp in terminal",
 				description: "Launch the omp TUI to add provider keys and select models.",
 				args: [ACP_TERMINAL_AUTH_FLAG],
 			});
@@ -652,8 +653,8 @@ export class AcpAgent implements Agent {
 		return {
 			protocolVersion: PROTOCOL_VERSION,
 			agentInfo: {
-				name: "oh-my-pi",
-				title: "Oh My Pi",
+				name: "omp",
+				title: "omp",
 				version: VERSION,
 			},
 			authMethods,
@@ -999,7 +1000,16 @@ export class AcpAgent implements Agent {
 					},
 				});
 			},
-			notifyConfigChanged: async () => {
+			notifyConfigChanged: async options => {
+				// Mirrors `setSessionConfigOption`: once the session-lifetime
+				// subscription is installed, `model_changed`/`thinking_level_changed`
+				// already reach `#handleLifetimeEvent`, which pushes the
+				// `config_option_update`. Pushing again here would make clients
+				// redraw their config UI twice for a single change.
+				if (options?.handledBySessionEvent && record.lifetimeUnsubscribe !== undefined) {
+					await this.#waitForPromptEventHandlers(record);
+					return;
+				}
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});
@@ -1188,7 +1198,7 @@ export class AcpAgent implements Agent {
 			case "_omp/extensions": {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
 				const sm = await Settings.init();
-				const disabledIds = (sm.get("disabledExtensions") as string[] | undefined) ?? [];
+				const disabledIds = cfgDisabledExtensions.get(sm);
 				const extensions = await loadAllExtensions(cwd, disabledIds);
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
@@ -1368,14 +1378,20 @@ export class AcpAgent implements Agent {
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
 			return;
 		}
+		// Config delivery is part of command completion, even though the
+		// subscription lives beyond an individual prompt turn.
+		const delivery = this.#pushConfigOptionUpdate(record);
+		record.promptEventHandlers.add(delivery);
 		try {
-			await this.#pushConfigOptionUpdate(record);
+			await delivery;
 		} catch (error) {
 			logger.warn("Failed to push config_option_update after a lifetime event", {
 				sessionId: record.session.sessionId,
 				eventType: event.type,
 				error,
 			});
+		} finally {
+			record.promptEventHandlers.delete(delivery);
 		}
 	}
 
@@ -1832,7 +1848,7 @@ export class AcpAgent implements Agent {
 
 	#getAvailableModes(session: AgentSession): Array<{ id: string; name: string; description: string }> {
 		const modes = [{ id: ACP_DEFAULT_MODE_ID, name: "Default", description: "Standard ACP headless mode" }];
-		if (session.settings.get("plan.enabled")) {
+		if (cfgPlanEnabled.get(session.settings)) {
 			modes.push({
 				id: ACP_PLAN_MODE_ID,
 				name: "Plan",
@@ -1969,14 +1985,13 @@ export class AcpAgent implements Agent {
 	}
 
 	#resolveAcpPlanFilePath(session: AgentSession, planFilePath: string): string {
-		if (planFilePath.startsWith("local:")) {
-			const normalized = normalizeLocalScheme(planFilePath);
-			return resolveLocalUrlToPath(normalized, {
+		return resolvePlanFilePath(planFilePath, {
+			localProtocolOptions: {
 				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 				getSessionId: () => session.sessionManager.getSessionId(),
-			});
-		}
-		return path.resolve(session.sessionManager.getCwd(), planFilePath);
+			},
+			cwd: session.sessionManager.getCwd(),
+		});
 	}
 
 	async #readAcpPlanFile(session: AgentSession, planFilePath: string): Promise<string | null> {
@@ -2103,9 +2118,20 @@ export class AcpAgent implements Agent {
 				return;
 			}
 			if (!record.lifetimeUnsubscribe) {
-				record.lifetimeUnsubscribe = record.session.subscribe(event => {
+				const unsubscribeEvents = record.session.subscribe(event => {
 					void this.#handleLifetimeEvent(record, event);
 				});
+				// Skills/commands rediscovery (live `skills.*`/`commands.*` edits, MCP
+				// prompts, manage_skill) re-advertises the palette.
+				const unsubscribeCommands = record.session.subscribeCommandMetadataChanged(() => {
+					void this.#emitAvailableCommandsUpdate(record).catch(error => {
+						logger.warn("Failed to emit ACP available commands update", { error: String(error) });
+					});
+				});
+				record.lifetimeUnsubscribe = () => {
+					unsubscribeEvents();
+					unsubscribeCommands();
+				};
 			}
 			void this.#emitBootstrapUpdates(sessionId, record);
 		}, ACP_BOOTSTRAP_RACE_GUARD_MS);
@@ -2154,13 +2180,7 @@ export class AcpAgent implements Agent {
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
-		resetCapabilities();
-		await record.session.refreshSkills();
-		const fileCommands = await loadSlashCommands({
-			cwd,
-			extensionRoots: record.session.effectiveExtensionRoots,
-		});
-		record.session.setSlashCommands(fileCommands);
+		await record.session.refreshSkillsAndCommands();
 		await this.#emitAvailableCommandsUpdate(record);
 	}
 
@@ -2203,6 +2223,7 @@ export class AcpAgent implements Agent {
 			orchestrationCacheRead: usage.orchestrationCacheRead,
 			premiumRequests: usage.premiumRequests,
 			cost: usage.cost,
+			subagentCost: usage.subagentCost,
 		};
 	}
 
@@ -2388,7 +2409,7 @@ export class AcpAgent implements Agent {
 					notifications.push({
 						sessionId,
 						update: {
-							sessionUpdate: "agent_thought_chunk",
+							sessionUpdate: item.narration ? "agent_message_chunk" : "agent_thought_chunk",
 							content: { type: "text", text: thinking },
 							messageId,
 						},
@@ -2607,6 +2628,7 @@ export class AcpAgent implements Agent {
 				shutdown: () => {},
 				getContextUsage: () => record.session.getContextUsage(),
 				getSystemPrompt: () => record.session.systemPrompt,
+				runEphemeralTurn: args => record.session.runEphemeralTurn(args),
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
 			},
 			{

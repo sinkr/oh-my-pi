@@ -55,8 +55,10 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"repetitionPenalty",
 	"stopSequences",
 	"maxTokens",
+	"maxHttpAttempts",
 	"cacheRetention",
 	"cachedContent",
+	"userProfileId",
 	"headers",
 	"initiatorOverride",
 	"maxRetryDelayMs",
@@ -65,6 +67,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"promptCacheKey",
 	"promptCache",
 	"statefulResponses",
+	"storeResponses",
 	"streamFirstEventTimeoutMs",
 	"streamIdleTimeoutMs",
 	"reasoning",
@@ -84,8 +87,8 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"openrouterVariant",
 	"loopGuard",
 	"acceptEmptyResponse",
-	// Anthropic server-side compaction request: the gateway builds the
-	// `compact_20260112` edit itself, so the option must survive the hop.
+	// Anthropic on-demand compaction request: the gateway constructs the
+	// top-level `compaction` parameter, so the option must survive the hop.
 	"anthropicCompaction",
 ] as const satisfies readonly (keyof SimpleStreamOptions)[]);
 

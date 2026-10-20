@@ -17,13 +17,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 function taskResult(asyncState: "running" | "completed" | "failed" | undefined, text: string) {
@@ -36,9 +37,19 @@ function taskResult(asyncState: "running" | "completed" | "failed" | undefined, 
 	return { content: [{ type: "text" as const, text }], details };
 }
 
-function bashResult(text: string) {
+interface BashFrame {
+	content: { type: "text"; text: string }[];
+	details: BashToolDetails;
+}
+
+function bashResult(
+	text: string,
+	state: "running" | "completed" | "failed" | "cancelled" = "running",
+	exitCode?: number,
+): BashFrame {
 	const details: BashToolDetails = {
-		async: { state: "running", jobId: "bash-1", type: "bash" },
+		async: { state, jobId: "bash-1", type: "bash" },
+		...(exitCode === undefined ? {} : { exitCode }),
 	};
 	return { content: [{ type: "text" as const, text }], details };
 }
@@ -226,7 +237,7 @@ describe("EventController async update finalization", () => {
 			type: "tool_execution_end",
 			toolCallId: "tc-bash",
 			toolName: "bash",
-			result: bashResult(formatBackgroundNotice("bash-1")),
+			result: bashResult(formatBackgroundNotice("bash-1", 300)),
 			isError: false,
 		});
 
@@ -234,7 +245,98 @@ describe("EventController async update finalization", () => {
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 
-	it("settles an early Hub wait result while another reported job remains running", async () => {
+	describe("native rendering", () => {
+		let wasNative = false;
+		beforeEach(() => {
+			wasNative = isNativeRendering();
+			setNativeRendering(true);
+		});
+		afterEach(() => setNativeRendering(wasNative));
+
+		async function backgroundBash(controller: EventController, pendingTools: Map<string, ToolExecutionComponent>) {
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				args: { command: "hyperfine bench" },
+			});
+			const component = pendingTools.get("tc-bash")!;
+			sealed.push(component);
+			return component;
+		}
+
+		const jobFrame = (partialResult: BashFrame) => ({
+			type: "tool_execution_update" as const,
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			args: {},
+			partialResult,
+		});
+
+		const rendered = (component: ToolExecutionComponent) => JSON.stringify(component.describe());
+
+		it("keeps filling a backgrounded Bash card with its job's output until the job settles", async () => {
+			const { controller, pendingTools } = createFixture();
+			const component = await backgroundBash(controller, pendingTools);
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				result: bashResult(`Benchmark 1\n\n${formatBackgroundNotice("bash-1", 300)}`),
+				isError: false,
+			});
+			expect(pendingTools.get("tc-bash")).toBe(component);
+
+			await controller.handleEvent(jobFrame(bashResult("Benchmark 1\nBenchmark 2")));
+			expect(rendered(component)).toContain("Benchmark 2");
+			expect(pendingTools.get("tc-bash")).toBe(component);
+
+			await controller.handleEvent(jobFrame(bashResult("Benchmark 1\nBenchmark 2\nSummary", "failed", 1)));
+			expect(rendered(component)).toContain("Summary");
+			expect(rendered(component)).toContain("exit 1");
+			expect(pendingTools.has("tc-bash")).toBe(false);
+			expect(component.isTranscriptBlockFinalized()).toBe(true);
+		});
+
+		it("seals a backgrounded Bash card as cancelled when its job is killed, keeping its output", async () => {
+			const { controller, pendingTools } = createFixture();
+			const component = await backgroundBash(controller, pendingTools);
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				result: bashResult(formatBackgroundNotice("bash-1", 300)),
+				isError: false,
+			});
+			await controller.handleEvent(jobFrame(bashResult("[Command cancelled]\nBenchmark 1", "cancelled")));
+
+			expect(rendered(component)).toContain("Benchmark 1");
+			expect(rendered(component)).toContain('"Cancelled"');
+			expect(rendered(component)).not.toContain("In background");
+			expect(pendingTools.has("tc-bash")).toBe(false);
+			expect(component.isTranscriptBlockFinalized()).toBe(true);
+		});
+
+		it("settles a Bash card whose job finished before the call returned", async () => {
+			const { controller, pendingTools } = createFixture();
+			const component = await backgroundBash(controller, pendingTools);
+			await controller.handleEvent(jobFrame(bashResult("all done", "completed", 0)));
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				result: bashResult(formatBackgroundNotice("bash-1", 300)),
+				isError: false,
+			});
+
+			expect(rendered(component)).toContain("all done");
+			expect(rendered(component)).not.toContain("In background");
+			expect(pendingTools.has("tc-bash")).toBe(false);
+			expect(component.isTranscriptBlockFinalized()).toBe(true);
+		});
+	});
+
+	it("settles an early wait result while another reported job remains running", async () => {
 		const { controller, pendingTools, chatContainer } = createFixture();
 		const details: CoordinationDetails = {
 			op: "wait",
@@ -245,16 +347,16 @@ describe("EventController async update finalization", () => {
 		};
 		await controller.handleEvent({
 			type: "tool_execution_end",
-			toolCallId: "tc-hub",
-			toolName: "hub",
+			toolCallId: "tc-wait",
+			toolName: "wait",
 			result: { content: [{ type: "text", text: "Job1 finished; Job2 is still running." }], details },
 			isError: false,
 		});
 		await controller.handleEvent({
 			type: "tool_execution_start",
-			toolCallId: "tc-hub",
-			toolName: "hub",
-			args: { op: "wait", ids: ["Job1", "Job2"] },
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			args: {},
 		});
 		const component = chatContainer.children.find(
 			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
@@ -262,7 +364,7 @@ describe("EventController async update finalization", () => {
 		sealed.push(component);
 		component.setExpanded(true);
 		expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain("Job1 Finished work");
-		expect(pendingTools.has("tc-hub")).toBe(false);
+		expect(pendingTools.has("tc-wait")).toBe(false);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 
@@ -271,13 +373,13 @@ describe("EventController async update finalization", () => {
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "tc-stale",
-			toolName: "hub",
-			args: { op: "wait", ids: ["job-stale"] },
+			toolName: "wait",
+			args: {},
 		});
 		const component = chatContainer.children.find(
 			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
 		);
-		if (!component) throw new Error("expected stale Hub card");
+		if (!component) throw new Error("expected stale wait card");
 		sealed.push(component);
 		// Model a dropped live completion: the timeline still owns the card but
 		// its pending-map entry is gone, so agent_end cannot find it.

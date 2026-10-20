@@ -26,7 +26,7 @@ import {
 	RemoteAuthCredentialStore,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { refreshBrokerOAuthCredential } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
+import { createBrokerAuthStorage } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -74,12 +74,8 @@ describe("broker-backed MCP OAuth refresh", () => {
 		const tokenUrl = `http://127.0.0.1:${server.port}/token`;
 
 		serverStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
-		// The serve process constructs AuthStorage with this exact override.
-		serverStorage = new AuthStorage(serverStore, {
-			refreshOAuthCredential: (provider, _credentialId, credential, signal) =>
-				refreshBrokerOAuthCredential(provider, credential, signal),
-		});
-		await serverStorage.reload();
+		serverStorage = createBrokerAuthStorage(serverStore);
+		await serverStorage.credentials.reload();
 
 		// Expired MCP OAuth credential with embedded refresh material, as the
 		// vault holds it. Spread bypasses the excess-property check for the
@@ -90,8 +86,8 @@ describe("broker-backed MCP OAuth refresh", () => {
 			// oxlint-disable-next-line unicorn/no-useless-spread -- spread bypasses excess-property checking
 			...{ tokenUrl, clientId: "client-xyz" },
 		};
-		await serverStorage.set(MCP_PROVIDER, credential);
-		const stored = serverStorage.listStoredCredentials(MCP_PROVIDER)[0];
+		await serverStorage.credentials.set(MCP_PROVIDER, credential);
+		const stored = serverStorage.credentials.list(MCP_PROVIDER)[0];
 		if (!stored) throw new Error("broker credential was not persisted");
 		brokerCredentialId = stored.id;
 
@@ -108,7 +104,7 @@ describe("broker-backed MCP OAuth refresh", () => {
 			streamSnapshots: false,
 		});
 		clientStorage = new AuthStorage(remote);
-		await clientStorage.revalidateCredentials();
+		await clientStorage.credentials.revalidate();
 
 		manager = new MCPManager(process.cwd());
 		manager.setAuthStorage(clientStorage);
@@ -124,7 +120,7 @@ describe("broker-backed MCP OAuth refresh", () => {
 	});
 	test("remote MCP token refreshes repeatedly through the broker", async () => {
 		// Sanity: the client only ever sees the redacted refresh token.
-		const stored = clientStorage!.get(MCP_PROVIDER);
+		const stored = clientStorage!.credentials.get(MCP_PROVIDER);
 		expect(stored?.type === "oauth" ? stored.refresh : undefined).toBe(REMOTE_REFRESH_SENTINEL);
 
 		const prepared = await manager!.prepareConfig({

@@ -18,6 +18,12 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
+import {
+	cfgCompaction,
+	cfgCompactionKeepRecentTokens,
+	cfgCompactionThresholdTokens,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 const CONTEXT_WINDOW = 372_000;
 const CACHE_READ_TOKENS = 371_200;
 const INPUT_TOKENS = 200;
@@ -43,7 +49,7 @@ describe("AgentSession advisor context maintenance", () => {
 	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-advisor-context-maintenance-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {
@@ -73,6 +79,7 @@ describe("AgentSession advisor context maintenance", () => {
 			"compaction.enabled": true,
 			"compaction.methodOrder": ["soft"],
 			"contextPromotion.enabled": contextPromotionEnabled,
+			modelRoles: { advisor: "anthropic/claude-sonnet-4-5" },
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -87,7 +94,6 @@ describe("AgentSession advisor context maintenance", () => {
 			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
-		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be active");
@@ -177,7 +183,7 @@ describe("AgentSession advisor context maintenance", () => {
 			throw new Error("Expected bundled compaction models");
 		}
 
-		authStorage.setRuntimeApiKey(nativeModel.provider, "openai-key");
+		authStorage.keys.setRuntime(nativeModel.provider, "openai-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "1",
@@ -235,7 +241,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const advisorCall = advisorMock.calls[0];
 		const update = advisorCall.context.messages.find(message => message.role === "user");
 		if (!update) throw new Error("Expected the advisor's incremental update");
-		const threshold = resolveThresholdTokens(CONTEXT_WINDOW, settings.getGroup("compaction"));
+		const threshold = resolveThresholdTokens(CONTEXT_WINDOW, cfgCompaction.get(settings));
 		const providerAndUpdateTokens =
 			calculateContextTokens(anchor.usage) + advisor.tokenizer.countMessage(update as AgentMessage);
 		expect(calculateContextTokens(anchor.usage)).toBe(CACHE_READ_TOKENS + INPUT_TOKENS + OUTPUT_TOKENS);
@@ -293,7 +299,7 @@ describe("AgentSession advisor context maintenance", () => {
 			advisor.tokenizer.countTokens(advisor.state.systemPrompt) +
 			estimateToolSchemaTokens(advisor.state.tools, advisor.tokenizer);
 		const threshold = storedTokens + Math.floor(fixedPrefixTokens / 2);
-		settings.set("compaction.thresholdTokens", threshold);
+		cfgCompactionThresholdTokens.set(settings, threshold);
 
 		await session.prompt("tiny local-floor update");
 
@@ -304,6 +310,36 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(messagesOnlyTokens).toBeLessThan(threshold);
 		expect(messagesOnlyTokens + fixedPrefixTokens).toBeGreaterThan(threshold);
 		expect(JSON.stringify(advisor.state.messages)).not.toContain("small stored advisor message");
+	});
+
+	it("re-evaluates maintenance after promoting to a model that defers tool schemas", async () => {
+		const promotion = {
+			...createMockModel({
+				id: "deferred-schema-promotion",
+				provider: "anthropic",
+				contextWindow: CONTEXT_WINDOW + 1,
+			}),
+			toolSchemasInContext: false,
+		};
+		const { advisor, advisorMock, modelRegistry, settings } = createHarness(
+			`${promotion.provider}/${promotion.id}`,
+			true,
+		);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([advisor.state.model, promotion]);
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		const seed: AgentMessage = { role: "user", content: "stored advisor message", timestamp: 1 };
+		advisor.state.messages.push(seed);
+		const storedTokens = advisor.tokenizer.countMessage(seed, { excludeEncryptedReasoning: true });
+		const schemaTokens = estimateToolSchemaTokens(advisor.state.tools, advisor.tokenizer);
+		const threshold =
+			storedTokens + advisor.tokenizer.countTokens(advisor.state.systemPrompt) + Math.floor(schemaTokens / 2);
+		cfgCompactionThresholdTokens.set(settings, threshold);
+
+		await session.prompt("update after promotion");
+
+		expect(advisor.state.model.id).toBe(promotion.id);
+		expect(advisorMock.calls).toHaveLength(1);
+		expect(JSON.stringify(advisorMock.calls[0].context.messages)).toContain("stored advisor message");
 	});
 
 	it("ignores retained provider usage that predates the latest advisor compaction", async () => {
@@ -389,6 +425,7 @@ describe("AgentSession advisor context maintenance", () => {
 			"compaction.enabled": true,
 			"compaction.methodOrder": ["soft"],
 			"contextPromotion.enabled": false,
+			modelRoles: { advisor: "anthropic/claude-sonnet-4-5" },
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -403,7 +440,6 @@ describe("AgentSession advisor context maintenance", () => {
 			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
-		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
 		const advisor = session.getAdvisorAgent();
 		if (!advisor?.sessionId) throw new Error("Expected advisor agent with a provider session id");
@@ -475,7 +511,7 @@ describe("AgentSession advisor context maintenance", () => {
 				compactionModel: `${writer.provider}/${writer.id}`,
 			});
 			vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([advisor.state.model, writer]);
-			settings.set("compaction.keepRecentTokens", 1);
+			cfgCompactionKeepRecentTokens.set(settings, 1);
 			const retained = advisor.state.messages.at(-1);
 			if (retained?.role !== "assistant") throw new Error("Expected retained advisor output");
 			retained.content = [{ type: "text", text: "retained-advisor-boundary" }];
@@ -556,7 +592,7 @@ describe("AgentSession advisor context maintenance", () => {
 				compactionModel: `${summarizer.provider}/${summarizer.id}`,
 			};
 			advisor.setModel(active);
-			settings.set("compaction.keepRecentTokens", 1);
+			cfgCompactionKeepRecentTokens.set(settings, 1);
 			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([active, summarizer]);
 			vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
 			advisor.state.messages.push(
@@ -611,7 +647,7 @@ describe("AgentSession advisor context maintenance", () => {
 			remoteCompaction: { ...nativeModel.remoteCompaction, v2StreamingEnabled: false },
 		};
 		advisor.setModel(active);
-		settings.set("compaction.keepRecentTokens", 1);
+		cfgCompactionKeepRecentTokens.set(settings, 1);
 		apiKeySpy.mockResolvedValue("test-key");
 		vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([active, promoted, summarizer]);
 		advisor.state.messages.push({ role: "user", content: "post-promotion-retained-tail", timestamp: Date.now() });
@@ -842,6 +878,35 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(JSON.stringify(advisor.state.messages)).toContain("same-provider native summary");
 	});
 
+	it("replays the kept tail after a native compaction that stopped before it", async () => {
+		const { advisor, nativeModel } = createAdvisorFallbackHarness();
+		const compactionItem = { type: "compaction", encrypted_content: "prefix-only-state" };
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "prefix-only native summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+			preserveData: {
+				openaiRemoteCompaction: {
+					provider: nativeModel.provider,
+					replacementHistory: [compactionItem],
+					compactionItem,
+				},
+			},
+			// The kept tail did not fit the window, so the native payload covers
+			// history only through the entry before it.
+			providerReplayThroughEntryId: preparation.lastSummarizedEntryId,
+		}));
+
+		await session.prompt("small current update");
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const preparation = compactSpy.mock.calls[0]![0];
+		expect(preparation.recentMessages.length).toBeGreaterThan(0);
+		const [summary, ...rest] = advisor.state.messages;
+		expect(summary?.role).toBe("compactionSummary");
+		expect(rest.slice(0, preparation.recentMessages.length)).toEqual(preparation.recentMessages);
+	});
+
 	it("skips unauthenticated advisor candidates before enforcing the native boundary", async () => {
 		const { advisor, apiKeySpy, crossProviderModel, nativeModel, sameProviderModel, settings } =
 			createAdvisorFallbackHarness();
@@ -1021,8 +1086,8 @@ describe("AgentSession advisor context maintenance", () => {
 		// the next request keeps the tail's bound thinking and cached prefix.
 		const retainedTail = advisor.state.messages[1];
 		if (!retainedTail) throw new Error("Expected retained advisor tail");
-		expect(summaryMessage.timestamp).toBeLessThan(retainedTail.timestamp);
-		const firstSummaryTimestamp = summaryMessage.timestamp;
+		expect(summaryMessage.historyRewriteAt).toBeLessThan(retainedTail.timestamp);
+		const firstRewriteMarker = summaryMessage.historyRewriteAt;
 		// ...and the next maintenance round feeds it back into preparation.
 		seedOverflow(Date.now());
 		await session.prompt("second update");
@@ -1036,6 +1101,28 @@ describe("AgentSession advisor context maintenance", () => {
 		const [secondSummary] = advisor.state.messages;
 		expect(secondSummary?.role).toBe("compactionSummary");
 		if (secondSummary?.role !== "compactionSummary") throw new Error("Expected second advisor summary");
-		expect(secondSummary.timestamp).toBe(firstSummaryTimestamp);
+		expect(secondSummary.historyRewriteAt).toBe(firstRewriteMarker);
+	});
+
+	it("ignores usage reported before the newest prune and anchors again on a later report", () => {
+		const { advisor, advisorMock } = createHarness();
+		const anchored = CACHE_READ_TOKENS + INPUT_TOKENS + OUTPUT_TOKENS;
+		const prunedAt = Date.now() - 500;
+		const pruned = {
+			role: "toolResult",
+			toolCallId: "advisor-read-pruned",
+			toolName: "read",
+			content: [{ type: "text", text: "[Stale result elided - 4000 tokens]" }],
+			isError: false,
+			timestamp: Date.now() - 2_000,
+			prunedAt,
+		} as AgentMessage;
+		// This report was made before the rewrite, so it still counts the removed bytes.
+		advisor.state.messages.push(pruned, usageAnchor(advisorMock, prunedAt - 500));
+		expect(session.getAdvisorStats().contextTokens).toBeLessThan(anchored);
+
+		// A report made after the rewrite describes the context as it is now.
+		advisor.state.messages.push(usageAnchor(advisorMock, prunedAt + 500));
+		expect(session.getAdvisorStats().contextTokens).toBeGreaterThanOrEqual(anchored);
 	});
 });

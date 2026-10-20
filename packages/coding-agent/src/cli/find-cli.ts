@@ -2,19 +2,15 @@
  * `omp find`: run the semantic `find` tool's cascade from the shell. Same
  * search as the tool, printed as a ranked, colored digest (or JSON).
  */
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { formatBytes, formatDuration, formatNumber, isEnoent } from "@oh-my-pi/pi-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { ModelRegistry } from "../config/model-registry";
-import { Settings } from "../config/settings";
-import { resolveJudge } from "../judgment";
-import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import { isOmpDocsScope } from "../internal-urls/omp-scope";
-import { expandPath } from "../tools/path-utils";
+import { InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesystem";
+import { openStandaloneJudge } from "../judgment/standalone";
+import { formatPathRelativeToCwd, resolveSearchResultPath } from "../tools/path-utils";
 import { type CascadeResult, runCascade } from "../tools/jfind/cascade";
-import { materializeOmpScope, type OmpScope } from "../tools/jfind/omp-scope";
 import { rankedHeat } from "../tools/jfind/passages";
+import { resolveSearchRoot, type SearchRoot } from "../tools/jfind/tree";
 
 export interface FindCommandArgs {
 	query: string;
@@ -39,17 +35,14 @@ function gauge(p: number): string {
 	return scoreStyle(p)("━".repeat(filled)) + chalk.dim("─".repeat(GAUGE_WIDTH - filled));
 }
 
-function printReport(
-	cmd: FindCommandArgs,
-	root: string,
-	result: CascadeResult,
-	elapsedMs: number,
-	scopeLabel?: string,
-): void {
-	const { hits, stats, threshold } = result;
-	const rel = scopeLabel ?? (path.relative(process.cwd(), root) || ".");
+function printReport(cmd: FindCommandArgs, rel: string, result: CascadeResult, elapsedMs: number): void {
+	const { hits, stats, threshold, coverage } = result;
 	console.log("");
-	if (hits.length === 0) {
+	if (coverage === "unavailable") {
+		console.log(
+			`${chalk.red("find unavailable")} ${chalk.dim(`for "${cmd.query}" in ${rel}: all ${stats.requests} judge requests failed, nothing was judged; use grep`)}`,
+		);
+	} else if (hits.length === 0) {
 		console.log(
 			`${chalk.yellow("no hits")} ${chalk.dim(`for "${cmd.query}" in ${rel} · τ ${threshold.toFixed(2)}`)}`,
 		);
@@ -71,78 +64,70 @@ function printReport(
 			}
 		}
 	}
+	if (coverage === "partial") {
+		console.log(chalk.yellow(`partial: ${stats.failed} of ${stats.requests} judge requests failed`));
+	}
 	console.log("");
 	console.log(
 		chalk.dim(
-			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
+			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests${stats.unanswered > 0 ? ` · ${stats.unanswered} unanswered` : ""} · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
 		),
 	);
 	for (const failure of stats.failures) console.log(chalk.yellow(failure));
 }
 
-/** Run one search and print it. Exits non-zero on a bad root or when every judgment failed. */
+/** Run one search and print it. Exits non-zero on a bad root or when every judge request failed. */
 export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	if (!cmd.query.trim()) {
 		console.error(chalk.red("Error: query is required"));
 		process.exit(1);
 	}
 	const log = cmd.quiet ? () => {} : (message: string) => console.error(chalk.dim(message));
-	let ompScope: OmpScope | undefined;
-	if (isOmpDocsScope(cmd.path)) {
-		log("materializing omp:// docs");
-		ompScope = await materializeOmpScope(cmd.path, { cwd: process.cwd() });
-	}
+	const cwd = process.cwd();
+	// Internal URLs (`omp://`, `local://`, …) are searched in place; `find` only reads.
+	const filesystem = new InternalUrlFilesystem({ context: { cwd }, tier: "read" });
+	let root: SearchRoot;
 	try {
-		const root = ompScope?.dir ?? path.resolve(expandPath(cmd.path));
-		try {
-			if (!(await fs.stat(root)).isDirectory()) {
-				console.error(chalk.red(`Error: not a directory: ${cmd.path}`));
-				process.exit(1);
-			}
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			console.error(chalk.red(`Error: path not found: ${cmd.path}`));
-			process.exit(1);
-		}
+		root = await resolveSearchRoot(filesystem, cmd.path, cwd);
+	} catch (error) {
+		if (!(error instanceof ToolError)) throw error;
+		console.error(chalk.red(`Error: ${error.message}`));
+		process.exit(1);
+	}
 
-		const displayRoot = ompScope?.scopePath ?? root;
-		// An `omp://` scope searches a temp corpus, but settings and extensions
-		// still belong to the caller's project: one base for both, or a docs
-		// scope would silently drop project extensions (and their providers).
-		const baseCwd = ompScope ? process.cwd() : root;
-		log("resolving judge");
-		const settings = await Settings.init({ cwd: baseCwd });
-		const authStorage = await discoverAuthStorage();
-		try {
-			const registry = new ModelRegistry(authStorage);
-			await registry.refresh();
-			await loadCliExtensionProviders(registry, settings, baseCwd);
-			const judge = resolveJudge({ settings, registry, sessionId: Bun.randomUUIDv7() });
-			const started = performance.now();
-			const raw = await runCascade({
-				root,
-				query: cmd.query.trim(),
-				extraKeywords: cmd.keywords,
-				judge,
-				includeHidden: cmd.hidden,
-				onProgress: log,
-			});
-			const result: CascadeResult = ompScope
-				? { ...raw, hits: raw.hits.map(hit => ({ ...hit, rel: ompScope.toOmpRel(hit.rel) })) }
-				: raw;
-			const elapsedMs = performance.now() - started;
-			if (cmd.json) {
-				console.log(JSON.stringify({ query: cmd.query, root: displayRoot, elapsedMs, ...result }, null, 2));
-			} else {
-				printReport(cmd, root, result, elapsedMs, ompScope?.scopePath);
-			}
-			// `exitCode`, not `exit`: process.exit skips the finally blocks below,
-			// orphaning the materialized omp corpus and skipping authStorage.close().
-			if (result.stats.requests > 0 && result.stats.errors === result.stats.requests) process.exitCode = 1;
-		} finally {
-			authStorage.close();
+	// Settings and extensions belong to the searched project; a file or URL
+	// scope has none of its own, so it keeps the caller's.
+	const baseCwd = root.type === "directory" && !isUrlPath(root.path) ? root.path : cwd;
+	log("resolving judge");
+	const { judge, close } = await openStandaloneJudge(baseCwd, "find");
+	try {
+		const started = performance.now();
+		const raw = await runCascade({
+			root,
+			filesystem,
+			query: cmd.query.trim(),
+			extraKeywords: cmd.keywords,
+			judge,
+			includeHidden: cmd.hidden,
+			onProgress: log,
+		});
+		// Hits print as paths usable from the caller's cwd: relative files or URLs.
+		const result: CascadeResult = {
+			...raw,
+			hits: raw.hits.map(hit => ({
+				...hit,
+				rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel), cwd),
+			})),
+		};
+		const elapsedMs = performance.now() - started;
+		if (cmd.json) {
+			console.log(JSON.stringify({ query: cmd.query, root: root.path, elapsedMs, ...result }, null, 2));
+		} else {
+			printReport(cmd, formatPathRelativeToCwd(root.path, cwd), result, elapsedMs);
 		}
+		// `exitCode`, not `exit`: process.exit skips the finally below, and with it close().
+		if (result.coverage === "unavailable") process.exitCode = 1;
 	} finally {
-		await ompScope?.cleanup();
+		close();
 	}
 }

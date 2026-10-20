@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
 import { github } from "../utils/github";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { withRepoLock } from "../utils/repo-lock";
@@ -32,6 +32,8 @@ import { invalidateAllForNumber } from "./github-cache";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
+import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
+
 export const GH_REPO_CLONE_FIELDS = ["nameWithOwner", "sshUrl", "url"];
 export const GH_PR_CHECKOUT_FIELDS = [
 	"baseRefName",
@@ -48,11 +50,7 @@ export const GH_PR_CHECKOUT_FIELDS = [
 const PR_FETCH_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function sanitizeRemoteName(value: string): string {
-	const sanitized = value
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+/g, "")
-		.replace(/-+$/g, "");
+	const sanitized = slugify(value);
 	return sanitized.length > 0 ? `fork-${sanitized}` : "fork";
 }
 
@@ -500,8 +498,8 @@ export async function checkoutPullRequest(
 					localBranch,
 					{
 						detach: false,
-						clone: session.settings.get("worktree.clone"),
-						backend: parseIsolationBackend(session.settings.get("isolation.backend")),
+						clone: cfgWorktreeClone.get(session.settings),
+						backend: parseIsolationBackend(cfgIsolationBackend.get(session.settings)),
 					},
 					signal,
 				);
