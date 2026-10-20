@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { resolveStdioSpawnCommand, StdioTransport, writeFrame } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { trackUnhandled } from "./helpers/rejection";
 
 describe("resolveStdioSpawnCommand", () => {
 	it("resolves bare Windows commands through PATHEXT and wraps .cmd shims with cmd.exe", async () => {
@@ -628,21 +629,6 @@ describe("writeFrame", () => {
 // intentionally avoids requiring subprocess stdout because Bun's test runner can
 // hand stdout-writing child processes an unusable fd on some hosts.
 // ---------------------------------------------------------------------------
-
-function trackUnhandled(): { release: () => unknown[]; capture: () => unknown[] } {
-	const seen: unknown[] = [];
-	const listener = (reason: unknown) => {
-		seen.push(reason);
-	};
-	process.on("unhandledRejection", listener);
-	return {
-		release: () => {
-			process.off("unhandledRejection", listener);
-			return seen.slice();
-		},
-		capture: () => seen.slice(),
-	};
-}
 
 describe("StdioTransport.notify", () => {
 	let transport: StdioTransport | undefined;
