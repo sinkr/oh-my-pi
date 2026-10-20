@@ -134,7 +134,9 @@ Per request:
 - optional `AbortSignal` from caller
 - abort and timeout both reject the pending promise and clean its map entry; a late write rejection is ignored after settlement
 
-Cancellation is local only: transport does not send protocol-level cancellation notification to the server.
+For a request already written to the subprocess and still pending, caller abort or the hard deadline settles the local waiter immediately, then sends one best-effort `notifications/cancelled` notification with the original request ID (preserving its number or string type) and a fixed reason that does not expose the caller's abort reason. The cancellation write is never awaited; failure or backpressure cannot delay settlement, close the transport, or affect sibling requests.
+
+The transport never sends cancellation for `initialize`, pre-aborted requests, requests that were not written or have already settled, or disconnected transports. Cancelling one request does not close or signal the shared server. The server may ignore the notification or may already have finished, so the request's outcome stays unknown.
 
 ## Malformed payload handling
 
@@ -189,6 +191,8 @@ For `request()`:
 - timeout uses `AbortController` via `createMCPTimeout` (`OMP_MCP_TIMEOUT_MS` override, else `config.timeout ?? 30000`; `0` disables)
 - external signal, if provided, is merged via `AbortSignal.any([...])`
 - AbortError handling distinguishes caller abort vs timeout
+
+HTTP cancellation remains local: Streamable HTTP aborts the request's fetch/response stream, and legacy HTTP+SSE aborts the request's POST and pending wait without closing the shared SSE stream. Neither sends `notifications/cancelled`.
 
 For `notify()`:
 
