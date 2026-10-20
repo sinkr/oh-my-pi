@@ -224,6 +224,9 @@ describe("builtin-defaults rule provider", () => {
 			"function f():\nnumber { return value; }",
 			"function f<T extends Record<string, Array<number>>>(x: T) {\n\treturn x;\n}",
 			"async function load(id: string): Promise<Row> {\n\treturn db.get(id);\n}",
+			"class C {\n\tprivate f = (x) => x * 2;\n\t#g = (x) => x + 1;\n}",
+			"const f = async (x) => x * 2;",
+			"const f = (x: number): number => x * 2;",
 		];
 		for (const snippet of hits) {
 			manager.resetBuffer();
@@ -241,6 +244,8 @@ describe("builtin-defaults rule provider", () => {
 			"export function isEmpty(value: string): boolean {\n\treturn value.length === 0;\n}",
 			"export const getName = (u: User) => u.profile.name;",
 			"export default function f() { return 1; }",
+			'const isText = (v: unknown): v is string => typeof v === "string";',
+			"class C {\n\tf = (x) => x * 2;\n}",
 			'function isAssistant(entry: Entry): entry is AssistantEntry {\n\treturn entry.role === "assistant";\n}',
 			"if (!response.ok) {\n\treturn null;\n}",
 			"try {\n\treturn JSON.parse(text);\n} catch {\n\treturn undefined;\n}",
@@ -307,6 +312,8 @@ describe("builtin-defaults rule provider", () => {
 			["await new Promise(requestAnimationFrame);"],
 			["new Promise(executors[0]);"],
 			["new Promise(makeExecutor());"],
+			["new Promise<void>(resolve => setTimeout(resolve, 1));"],
+			["new Promise<() => void>(resolve => resolve(() => {}));"],
 			["await new Promise(", "r => setImmediate(r));"],
 		]) {
 			expect(fires(deltas), deltas.join("")).toEqual(["ts-promise-with-resolvers"]);
@@ -317,6 +324,7 @@ describe("builtin-defaults rule provider", () => {
 			["await new Promise(() => {});"],
 			["new Promise(function hang() {});"],
 			["new Promise(async () => {});"],
+			["new Promise<string>(() => {});"],
 			["new Promise(/* never */ () => {});"],
 			["await new Promise(", "() => {});"],
 			["await new Promise(func", "tion () {});"],
