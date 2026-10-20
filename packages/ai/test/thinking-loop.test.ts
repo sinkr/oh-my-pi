@@ -330,10 +330,12 @@ describe("ThinkingLoopDetector", () => {
 	});
 
 	test("does not trip on legitimate repetitive numeric output", () => {
-		// A zero-page hexdump is highly repetitive but legitimate: a unit with no
-		// letter or pictograph must never count as a loop.
+		// Zero-page hexdumps and zero-padded literals are highly repetitive but
+		// legitimate: a unit of only digits and whitespace never counts as a loop,
+		// even past the punctuation floor.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("00 ".repeat(200))).toBeNull();
+		expect(detector.push(`0x${"0".repeat(1100)}`)).toBeNull();
 	});
 
 	test("does not trip on structurally repetitive code that differs only in literals", () => {
@@ -372,6 +374,10 @@ describe("ThinkingLoopDetector", () => {
 		// Dingbats but not Extended_Pictographic, so it was invisible to the old
 		// gate for the same reason `?!` was.
 		expect(feed(`${PUNCTUATION_RUN_PREFIX}${"✓".repeat(2000)}`, 4)).toContain("back-to-back");
+	});
+
+	test("trips on a space-separated punctuation runaway", () => {
+		expect(feed(`${PUNCTUATION_RUN_PREFIX}${"?! ".repeat(800)}`, 4)).toContain("back-to-back");
 	});
 
 	test("does not trip on a punctuation run below the repeated-char floor", () => {

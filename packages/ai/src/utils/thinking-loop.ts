@@ -544,8 +544,8 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
  * A unit carrying a letter or an emoji matches at those thresholds. A unit with
  * neither, such as the `?!?!` run a stuck model emits, matches only once it has
  * repeated for {@link EXACT_PUNCTUATION_MIN_REPEATED_CHARS} characters, and never
- * when it contains whitespace, since padding and indentation runs are ordinary
- * in tables, diffs, and ASCII art.
+ * when it holds only digits and whitespace: padding, indentation and zero-filled
+ * hexdumps or literals are ordinary output at any length.
  */
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	const n = text.length;
@@ -575,7 +575,7 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 			if (len * count >= minChars) return [unit, count];
 			continue;
 		}
-		if (/\s/u.test(unit)) continue;
+		if (/^[\p{N}\s]*$/u.test(unit)) continue;
 		if (len * count >= EXACT_PUNCTUATION_MIN_REPEATED_CHARS) return [unit, count];
 	}
 	return null;
