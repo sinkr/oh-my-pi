@@ -13,6 +13,8 @@ const PDF_RENDER_TIMEOUT_MS = 30_000;
 // Chromium's PDF plugin paints in an out-of-process frame after navigation has
 // completed. Wait for document dimensions, then cross compositor boundaries
 // before capturing; otherwise the screenshot can contain only the viewer shell.
+// Capture the viewport: the viewer fits the page into it, and a full-page
+// capture (beyond the viewport) often comes back without the plugin's frame.
 const PDF_SCREENSHOT_CODE = `
 let viewerFrame;
 await wait(async () => {
@@ -49,7 +51,7 @@ await viewerFrame.evaluate(() => {
 	);
 	return promise;
 });
-return await tab.screenshot({ fullPage: true, silent: true });
+return await tab.screenshot({ silent: true });
 `;
 
 /** A legacy PDF image-member path interpreted as a page screenshot request. */
