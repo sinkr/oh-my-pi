@@ -1,34 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a `_session/steering` ACP extension (advertised as `_meta.steering.supported`) so clients like agent-shell can steer a running turn mid-flight: a steer that lands while a prompt is still dispatching parks and injects once that turn goes live, a steer that arrives while a permission dialog is open supersedes only that dialog, and `queue: "followUp"` targets the follow-up queue ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
+### Fixed
+
+- Fixed ACP `session/cancel` being silently dropped when no client turn is live: a prompt queued or still dispatching now resolves `cancelled` without ever starting, and an autonomous run keeps being aborted instead of streaming on ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
+- Fixed malformed `_session/steering` resource fields (a non-string `mimeType`, `description`, or `size`) being accepted instead of rejected with `-32602` ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 
 ## [18.12.4] - 2026-10-20
 
-- Fixed auto-QA reports whose tool is a URI (`xd://tui: …`) being filed under the wrong tool name; a one-line report without `: ` after its tool name is now refused with the format hint ([#16278](https://github.com/can1357/oh-my-pi/pull/16278) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed agents guessing `conflict://<N>` ids for merge conflicts a ranged `read` didn't show: the warning and the not-found error now point to `<path>:conflicts` to register them ([#16269](https://github.com/can1357/oh-my-pi/pull/16269) by [@will-bogusz](https://github.com/will-bogusz))
-### Changed
-
-- An agent that messages another agent can now `wait` for the reply instead of erroring; the wait ends early, without an error, once the agent asked finishes its turn without replying or is itself waiting on the caller's result ([#16445](https://github.com/can1357/oh-my-pi/pull/16445) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- Fixed `session/request_cancel` over ACP silently dropping a stop in three windows: a prompt queued (or still dispatching) behind the running turn now resolves `cancelled` without ever starting, a cancel landing on a settled turn with an autonomous run still streaming aborts that run with the same interrupt bound, and queued prompts can no longer stream after the client believes it stopped the session ([#15885](https://github.com/can1357/oh-my-pi/pull/15885))
-- Fixed agents opening your own Chrome through the relay (with `browser.relay` on) when they asked the `browser` tool for Chromium with `app.tern: false`; the tool now points them to `app.relay: false` ([#16294](https://github.com/can1357/oh-my-pi/pull/16294) by [@will-bogusz](https://github.com/will-bogusz))
-### Changed
-
-- Built-in style rule reminders no longer tell the model a user-defined rule matched and it MUST comply; they ask it to check its code against the rule and its exceptions, so models rewrite code a built-in rule allows less often ([#16420](https://github.com/can1357/oh-my-pi/pull/16420) by [@will-bogusz](https://github.com/will-bogusz))
-- `read` of a SQLite `?q=SELECT …` query now accepts `&limit=` and `&offset=` and pages the query's rows, as table reads and JSON `?q=` reads already do, instead of rejecting the read ([#16444](https://github.com/can1357/oh-my-pi/pull/16444) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed `%pip install` in Python eval failing with "No module named pip" when the kernel's interpreter is a venv without pip, such as one made by `uv venv`: it now installs pip into that venv first, with `ensurepip` or, where that is unavailable, `uv` ([#16300](https://github.com/can1357/oh-my-pi/pull/16300) by [@will-bogusz](https://github.com/will-bogusz))
-- Reduced HTTP 413 failures on Factory Droid once a session's screenshots and pasted images pass Factory's 4.5 MB request limit: older inline images are now dropped to keep them under 3.5 MB, while the newest message's and newest tool result's images stay when they alone fit the limit; a custom gateway `baseUrl` is left alone ([#16288](https://github.com/can1357/oh-my-pi/pull/16288) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed hashline edits under an older tag overwriting the wrong line when their line numbers came from `grep -n`, `sed -n` or a `:raw` read: a shifted edit whose body matches the current line at those numbers, or that breaks the file's syntax, is now rejected with the current tag and lines ([#16383](https://github.com/can1357/oh-my-pi/pull/16383) by [@will-bogusz](https://github.com/will-bogusz))
-### Added
-
-- Added `_session/steering` ACP extension method (advertised as `_meta.steering.supported`) so clients like agent-shell steer running turns through omp's native steer/follow-up queues: idle, autonomous-wake, and abort-window steers answer `promptRequired` so the host keeps owning new turns, a steer that lands mid-dispatch parks until the owning prompt goes live and then injects into that run, a steer that supersedes an open permission dialog rides the agent loop's own steering signal (honouring `interruptMode`) and ends only the client's dialog, `_meta.steering.queue: "followUp"` targets the follow-up queue, and `$`-level `$/cancel_request` carries the ACP v1 `requestId` parameter and always answers a cancelled request with `-32800` on the wire ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
-### Changed
-
-- The pinned Subagents list shows how many agents are running and the agent hub key, and previews an agent's assignment at full width instead of the first 40 characters of its prompt template ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
 ### Added
 
 - `bash` tool commands now see `PI_SESSION_ID` and `PI_SESSION_FILE`, so a script can find the running session's ID and transcript path ([#16442](https://github.com/can1357/oh-my-pi/pull/16442) by [@johnrichardrinehart](https://github.com/johnrichardrinehart) and [@will-bogusz](https://github.com/will-bogusz))

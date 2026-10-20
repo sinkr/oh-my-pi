@@ -355,7 +355,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("joinActiveTurn answers not-admitted during a prompt's pre-dispatch window instead of queueing behind it", async () => {
+	it("joinActiveTurn parks during a prompt's pre-dispatch window and injects into that turn", async () => {
 		const normalization = holdImageNormalization();
 		const turnStarted = Promise.withResolvers<void>();
 		const releaseTurn = Promise.withResolvers<void>();
@@ -370,20 +370,91 @@ describe("AgentSession prompt admission racing abort", () => {
 		]);
 
 		// A prompt is admitted but still dispatching (normalization held,
-		// `#beginInFlight` not yet reached): the session is not streaming and
-		// there is no pending action to ask about yet. The steer classifies
-		// as not-admitted so the host queues its own prompt behind the
-		// dispatching one — never an invisible mid-dispatch injection.
+		// `#beginInFlight` not yet reached): the client claim is already
+		// reserved, so the steer parks until the owning run goes live — the
+		// host never needs to resubmit (whose session/prompt would implicitly
+		// cancel the still-dispatching prompt), and the admission injects
+		// into the run the steer targeted.
 		const dispatching = session.prompt("start", { images: [IMAGE] });
 		await withTimeout(normalization.started, 2_000, "Normalization never started");
-		expect(await session.joinActiveTurn("steer during dispatch")).toBe(false);
+		const steer = session.joinActiveTurn("steer during dispatch");
+		const early = await Promise.race([steer.then(() => "settled"), Bun.sleep(50).then(() => "parked")]);
+		expect(early).toBe("parked");
 
 		normalization.release();
 		await withTimeout(turnStarted.promise, 2_000, "Held turn never started");
 		releaseTurn.resolve();
+		expect(await steer).toBe(true);
 		await dispatching;
 		await session.waitForIdle();
 		expect(calls).toBe(1);
+		// The admission really enqueued onto the live run: the steer text
+		// sits on the steering queue (the turn's single response ended it
+		// before the next boundary could deliver).
+		// The admission really injected into the owning run: the steer text
+		// lands in the run's message history after its first response.
+		const messages = session.agent.state.messages;
+		const firstResponseIndex = messages.findIndex(
+			message => message.role === "assistant" && JSON.stringify(message.content).includes("first turn"),
+		);
+		const steerIndex = messages.findIndex(
+			message => message.role === "user" && JSON.stringify(message.content).includes("steer during dispatch"),
+		);
+		expect(steerIndex).toBeGreaterThan(firstResponseIndex);
+	});
+
+	it("refuses a steer whose owning turn settled while the steer's preprocessing ran", async () => {
+		const normalization = holdImageNormalization();
+		let calls = 0;
+		const turnStarted = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		const wakeStarted = Promise.withResolvers<void>();
+		const releaseWake = Promise.withResolvers<void>();
+		const { session } = await createSession([
+			async () => {
+				calls++;
+				turnStarted.resolve();
+				await releaseTurn.promise;
+				return { content: ["turn a"] };
+			},
+			async () => {
+				calls++;
+				wakeStarted.resolve();
+				await releaseWake.promise;
+				return { content: ["wake turn"] };
+			},
+		]);
+
+		// Client turn A goes live.
+		const turnA = session.prompt("start");
+		await withTimeout(turnStarted.promise, 2_000, "Turn A never started");
+
+		// An image-bearing steer begins admission while A is live; its image
+		// normalization is held, so the post-preprocessing admission check
+		// runs only after the release below.
+		const steer = session.joinActiveTurn("steer with an image", [IMAGE]);
+		await withTimeout(normalization.started, 2_000, "Steer normalization never started");
+
+		// Turn A settles while the steer is mid-preprocessing, and an
+		// agent-initiated turn takes the agent: streaming, but not
+		// client-owned.
+		releaseTurn.resolve();
+		await turnA;
+		const wake = session.sendCustomMessage("wake up", { deliverAs: "nextTurn", triggerTurn: true });
+		await withTimeout(wakeStarted.promise, 2_000, "Wake turn never started");
+
+		// The admission must recheck client ownership after preprocessing:
+		// general `isStreaming` is true (the wake) but no client prompt owns
+		// it, so the steer is refused and its content stays with the caller
+		// instead of injecting into a run with no client forwarder.
+		normalization.release();
+		expect(await steer).toBe(false);
+		expect(session.getQueuedMessages().steering).toEqual([]);
+
+		releaseWake.resolve();
+		await wake;
+		await session.waitForIdle();
+		expect(calls).toBe(2);
 	});
 
 	it("refuses a steer whose owning prompt fails in setup, under an ACP client", async () => {

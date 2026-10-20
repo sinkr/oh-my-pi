@@ -99,6 +99,14 @@ export interface SessionToolsHost {
 	 * earlier pre-dialog steer must not be re-promoted by a later dialog.
 	 */
 	steeringArrivalAdmitted(since?: number): readonly AgentMessage[] | undefined;
+	/**
+	 * Release a park snapshot taken by {@link steeringArrivalSeq} once its
+	 * dialog ends without superseding (the read in
+	 * {@link steeringArrivalAdmitted} releases it on the supersede path).
+	 * Without this, sessions that steer often but rarely supersede a dialog
+	 * would pin every arrival group since that stale snapshot forever.
+	 */
+	steeringArrivalRelease(seq: number): void;
 	queuedMessageCount(): number;
 	planModeEnabled(): boolean;
 	model(): Model | undefined;
@@ -1058,6 +1066,10 @@ export class SessionTools {
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
 						steeringSignal.removeEventListener("abort", onSteer);
+						// The dialog is over; its park window can no longer
+						// read. Idempotent when onSteer's drain already
+						// released it.
+						this.#host.steeringArrivalRelease(arrivalParkSeq);
 					}
 					if (raced.kind === "steered") {
 						throw new ToolAbortError("Permission request superseded by user steering");

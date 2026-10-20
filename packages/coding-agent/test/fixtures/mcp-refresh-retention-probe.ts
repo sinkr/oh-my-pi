@@ -53,6 +53,7 @@ const host: SessionToolsHost = {
 	steeringArrivalSignal: () => new AbortController().signal,
 	steeringArrivalSeq: () => 0,
 	steeringArrivalAdmitted: () => undefined,
+	steeringArrivalRelease: () => {},
 	queuedMessageCount: () => 0,
 	planModeEnabled: () => false,
 	model: () => undefined,

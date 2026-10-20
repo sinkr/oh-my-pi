@@ -1562,9 +1562,19 @@ describe("ACP agent", () => {
 			// its own row.
 			[{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", mimeType: "image/png", text: 7 } }],
 			[{ type: "resource", resource: { uri: "file:///x", text: 7 } }],
+			// Optional resource.mimeType is typed string (never null): a
+			// present non-string value must reject instead of slipping into
+			// the converter's image arm.
+			[{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", mimeType: 7 } }],
 			[{ type: "nope", text: "hi" }],
 			[{ type: "constructor" }],
 			[{ type: "resource_link", uri: "file:///x", title: 5 }],
+			// resource_link optional fields per the ACP schema: mimeType and
+			// description are string|null, size is number|null — anything
+			// else present rejects.
+			[{ type: "resource_link", uri: "file:///x", mimeType: 7 }],
+			[{ type: "resource_link", uri: "file:///x", description: 7 }],
+			[{ type: "resource_link", uri: "file:///x", size: "large" }],
 		] as unknown[]) {
 			const error = await harness.agent
 				.extMethod("_session/steering", { sessionId: created.sessionId, prompt })
@@ -2628,6 +2638,56 @@ describe("ACP agent", () => {
 
 		expect(abortReasons).toEqual([USER_INTERRUPT_LABEL]);
 		expect(session.isStreaming).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("closes the session when a cancelled pre-start prompt's cleanup times out", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		harness.agent.setCancelCleanupTimeoutForTesting(10);
+		// The live turn's cancel abort resolves so the queued prompt can
+		// start; the second abort — the queued prompt's own pre-start
+		// cleanup — hangs so its barrier rejects at the timeout.
+		let abortCalls = 0;
+		session.abort = async () => {
+			abortCalls++;
+			session.isStreaming = false;
+			if (abortCalls >= 2) {
+				return new Promise<void>(() => undefined);
+			}
+		};
+		const finishPrompt = holdPromptStreaming(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000050",
+			prompt: [{ type: "text", text: "long running" }],
+		} as PromptRequest);
+		for (let i = 0; i < 20 && session.promptCalls.length === 0; i++) {
+			await Bun.sleep(0);
+		}
+		const secondPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000051",
+			prompt: [{ type: "text", text: "queued behind the running turn" }],
+		} as PromptRequest);
+
+		await harness.agent.cancel({ sessionId: created.sessionId });
+		finishPrompt();
+
+		const firstResponse = await firstPrompt;
+		expect(firstResponse.stopReason).toBe("cancelled");
+		const secondResponse = await secondPrompt;
+		expect(secondResponse.stopReason).toBe("cancelled");
+		// The pre-start cleanup's rejection is observed: the session closes
+		// instead of the rejection surfacing unhandled.
+		for (let i = 0; i < 40 && !session.disposed; i++) {
+			await Bun.sleep(5);
+		}
+		expect(session.disposed).toBe(true);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

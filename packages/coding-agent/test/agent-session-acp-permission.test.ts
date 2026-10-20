@@ -1334,3 +1334,22 @@ it("delivers two steers admitted in one dialog window first-arrival-first", asyn
 
 	permissionPending.resolve({ outcome: "cancelled" });
 });
+
+it("parks a steer submitted before the owning prompt's dispatch preprocessing", async () => {
+	const session = await createSessionWithMockModel([makeFakeTool("noop")], makeBridge({ outcome: "cancelled" }), [
+		{ content: ["ok"] },
+	]);
+
+	// The submission's synchronous prefix must reserve the client claim
+	// before any dispatch preprocessing await (maintenance wait, command
+	// expansion, image normalization): a steer landing in that window parks
+	// until the run goes live and injects into it, instead of being declined
+	// (the pre-fix claim appeared only after normalization, so this steer
+	// answered false and the host's resubmission implicitly cancelled the
+	// still-dispatching prompt).
+	const dispatched = session.prompt("hello there");
+	const steer = session.joinActiveTurn("steer the dispatching prompt");
+	expect(await steer).toBe(true);
+	expect(await dispatched).toBe(true);
+	await session.waitForIdle();
+});

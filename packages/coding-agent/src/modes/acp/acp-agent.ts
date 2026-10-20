@@ -273,9 +273,18 @@ function toSteeringPromptBlocks(prompt: unknown): PromptRequest["prompt"] {
 					"resource block requires string text or string blob",
 				);
 			}
+			// The embedded-resource schema types `mimeType` as an optional
+			// string (never null): reject a present non-string value instead
+			// of letting it slip into the converter's image arm.
+			if (Object.hasOwn(resourceFields, "mimeType") && typeof resourceFields.mimeType !== "string") {
+				throw RequestError.invalidParams(
+					{ method: SESSION_STEERING_METHOD },
+					"resource block mimeType must be a string when present",
+				);
+			}
 		}
 		if (record.type === "resource_link") {
-			for (const field of ["title", "name"] as const) {
+			for (const field of ["title", "name", "mimeType", "description"] as const) {
 				// `null` is a legal value (the ACP schema types these
 				// `string | null`): treat it exactly like an absent field —
 				// the converter's `title ?? name ?? uri` fallback already
@@ -286,6 +295,12 @@ function toSteeringPromptBlocks(prompt: unknown): PromptRequest["prompt"] {
 						`resource_link ${field} must be a string or null when present`,
 					);
 				}
+			}
+			if (record.size !== undefined && record.size !== null && typeof record.size !== "number") {
+				throw RequestError.invalidParams(
+					{ method: SESSION_STEERING_METHOD },
+					"resource_link size must be a number or null when present",
+				);
 			}
 		}
 	}
@@ -1051,7 +1066,19 @@ export class AcpAgent implements Agent {
 				// response cancelled instead of starting a run the client
 				// has already stopped.
 				if (cancellation.cancelled) {
-					this.#beginCancelCleanup(record, record.promptTurn);
+					const cleanup = this.#beginCancelCleanup(record, record.promptTurn);
+					// The wire response already says cancelled, but the cleanup
+					// barrier must still be observed: an abort that hangs past
+					// the timeout closes the managed session here instead of
+					// surfacing an unhandled rejection (mirrors cancel() and
+					// the implicit-cancel guard above).
+					cleanup.catch(async (error: unknown) => {
+						logger.warn("ACP cancel cleanup timed out; closing session", {
+							sessionId: record.session.sessionId,
+							error,
+						});
+						await this.#closeManagedSession(record.session.sessionId, record);
+					});
 					return await pendingPrompt.promise;
 				}
 

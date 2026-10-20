@@ -1140,13 +1140,16 @@ export class AgentSession implements SettingsScope {
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
 	/**
-	 * Brackets owned by a client prompt (`#promptWithMessage`) only. Autonomous
-	 * in-flight runs — IRC wakes (`#wakeForIrc`), idle yield injections, scheduler
-	 * continuations, agent-initiated turns — raise `#promptInFlightCount` but not
-	 * this, so steer admission (`joinActiveTurn`), the dispatch-live park, and the
-	 * defer-client drain gate can key on real client ownership: a steer must
-	 * never inject into a run whose output the client has no prompt turn for
-	 * (its events would be dropped by the ACP host).
+	 * Brackets owned by a client-submitted prompt (`#prompt`) only: claimed
+	 * synchronously at submission, before any dispatch preprocessing await, and
+	 * released when the dispatched turn settles. Autonomous in-flight runs —
+	 * IRC wakes (`#wakeForIrc`), idle yield injections, scheduler continuations,
+	 * agent-initiated turns, auto-continues, queued-hidden drains — raise
+	 * `#promptInFlightCount` but not this, so steer admission
+	 * (`joinActiveTurn`), the dispatch-live park, and the defer-client drain
+	 * gate can key on real client ownership: a steer must never inject into a
+	 * run whose output the client has no prompt turn for (its events would be
+	 * dropped by the ACP host).
 	 */
 	#clientPromptInFlightCount = 0;
 	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
@@ -2218,6 +2221,7 @@ export class AgentSession implements SettingsScope {
 			steeringArrivalSignal: () => this.#steeringArrivalSignal(),
 			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
 			steeringArrivalAdmitted: since => this.#steeringArrivalAdmitted(since),
+			steeringArrivalRelease: seq => this.#steeringArrivalRelease(seq),
 			queuedMessageCount: () => this.queuedMessageCount,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			model: () => this.model,
@@ -7673,18 +7677,44 @@ export class AgentSession implements SettingsScope {
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
 		const submittedAt = Date.now();
-		// A manual `/compact` disconnects the agent until its cleanup re-drains
-		// preserved queues; `/handoff` commits a new history after its side request.
-		// Neither may overlap an ordinary turn. A prompt parked by `/compact`
-		// supersedes its interrupted-turn resume only if it claims the session;
-		// locally handled commands and failed dispatches release that claim.
-		const release = await this.#maintenance.waitForManualMaintenanceCleanup();
-		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-		if (!release) return this.#dispatchPrompt(text, options, submittedAt, outcome);
+		// Client-ownership reservation: claimed before the first await so a
+		// steer landing anywhere in dispatch preprocessing (maintenance wait,
+		// command expansion, image normalization) parks instead of being
+		// declined — before this, the claim first appeared in
+		// #promptWithMessage, past those awaits. Released when the dispatched
+		// turn settles (this bracket spans dispatch + run, matching
+		// #promptWithMessage's awaited lifetime) or on every path that never
+		// starts a turn. The epoch guard keeps an aborted prompt's finally
+		// from eating a later prompt's claim after #resetInFlight zeroed the
+		// count.
+		const claimEpoch = this.#inFlightEpoch;
+		this.#clientPromptInFlightCount++;
 		try {
-			return await this.#dispatchPrompt(text, options, submittedAt, outcome);
+			// A manual `/compact` disconnects the agent until its cleanup re-drains
+			// preserved queues; `/handoff` commits a new history after its side request.
+			// Neither may overlap an ordinary turn. A prompt parked by `/compact`
+			// supersedes its interrupted-turn resume only if it claims the session;
+			// locally handled commands and failed dispatches release that claim.
+			const release = await this.#maintenance.waitForManualMaintenanceCleanup();
+			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
+			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome);
+			try {
+				return await this.#dispatchPrompt(text, options, submittedAt, outcome);
+			} finally {
+				release(outcome.sessionClaimed);
+			}
 		} finally {
-			release(outcome.sessionClaimed);
+			if (claimEpoch === this.#inFlightEpoch) {
+				this.#clientPromptInFlightCount = Math.max(0, this.#clientPromptInFlightCount - 1);
+				// Dropped after the settle wake inside #endInFlight (this
+				// frame settles after #promptWithMessage returns): wake the
+				// parked steers again so they re-check against zero and
+				// refuse (keeping their content) instead of admitting after
+				// settle, mirroring #resetInFlight's wake.
+				if (this.#clientPromptInFlightCount === 0) {
+					this.#wakeDispatchLiveWaiters();
+				}
+			}
 		}
 	}
 
@@ -8291,7 +8321,10 @@ export class AgentSession implements SettingsScope {
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
 		const inFlightEpoch = this.#beginInFlight();
-		this.#clientPromptInFlightCount++;
+		// Client ownership is reserved by #prompt before dispatch preprocessing
+		// and released when its bracket settles; callers that reach this
+		// directly (auto-continue, queued-hidden drain) are autonomous and
+		// deliberately do not claim it.
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
@@ -8540,12 +8573,9 @@ export class AgentSession implements SettingsScope {
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
-			// Drop the client-owned bracket before the settle wake inside
-			// #endInFlight, so a parked steer re-checks against zero and
-			// refuses (keeps its content) instead of admitting after settle.
-			if (inFlightEpoch === this.#inFlightEpoch) {
-				this.#clientPromptInFlightCount = Math.max(0, this.#clientPromptInFlightCount - 1);
-			}
+			// Client ownership is released by #prompt's bracket, which settles
+			// after this frame returns; its wake re-checks parked steers
+			// against zero.
 			this.#endInFlight(inFlightEpoch);
 			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
 		}
@@ -8829,16 +8859,17 @@ export class AgentSession implements SettingsScope {
 		// unsubscribed) — refuse instead so the caller keeps its content.
 		if (this.#abortInProgress) return false;
 		// A client-owned prompt must own the run: `#clientPromptInFlightCount`
-		// is raised only by `#promptWithMessage` (the session.prompt — ACP
-		// session/prompt — path) and held across setup (commands,
-		// normalization, vision description) and the live run. Autonomous
-		// in-flight brackets (IRC wakes, idle yield injections, scheduler
-		// continuations, agent-initiated turns) raise the general
-		// `#promptInFlightCount` but never this one: their output has no
-		// client forwarder (`#handlePromptEvent` drops events with no
-		// promptTurn), so a steer admitted into one would answer
-		// invisibly and be reported `injected`. Refuse instead — the host
-		// keeps its content and resubmits through session/prompt.
+		// is raised by `#prompt` (the session.prompt — ACP session/prompt —
+		// path) synchronously at submission, before any dispatch
+		// preprocessing (commands, normalization, vision description), and
+		// held across setup and the live run. Autonomous in-flight brackets
+		// (IRC wakes, idle yield injections, scheduler continuations,
+		// agent-initiated turns, auto-continues, queued-hidden drains) raise
+		// the general `#promptInFlightCount` but never this one: their output
+		// has no client forwarder (`#handlePromptEvent` drops events with no
+		// promptTurn), so a steer admitted into one would answer invisibly
+		// and be reported `injected`. Refuse instead — the host keeps its
+		// content and resubmits through session/prompt.
 		if (this.#clientPromptInFlightCount === 0) return false;
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
@@ -8994,11 +9025,17 @@ export class AgentSession implements SettingsScope {
 		// `joinActiveTurn` admission: after every await above, the run that was
 		// live at call time may have settled — or `abort()` may have started
 		// (its `#abortInProgress` flag is raised synchronously at entry, while
-		// `isStreaming` can stay true until cleanup drains). Classify either as
+		// `isStreaming` can stay true until cleanup drains) — or, with
+		// `requireActiveRun`, the CLIENT turn that admitted this steer may
+		// have settled during the preprocessing awaits while an autonomous
+		// wake (IRC, scheduler) took over `isStreaming`. Classify either as
 		// not-admitted so the caller (the ACP bridge) keeps its content for the
 		// host; the enqueue below is synchronous, so nothing interleaves
 		// between this check and the message landing on the queue.
-		if (options?.requireActiveRun && (this.#abortInProgress || !this.isStreaming)) {
+		if (
+			options?.requireActiveRun &&
+			(this.#abortInProgress || !this.isStreaming || this.#clientPromptInFlightCount === 0)
+		) {
 			return false;
 		}
 		if (mode === "aside") {
@@ -9135,6 +9172,16 @@ export class AgentSession implements SettingsScope {
 	#steeringArrivalPendingGroups: { seq: number; group: readonly AgentMessage[] }[] = [];
 	/** Monotonic count of steering arrivals fired so far; see the field above. */
 	#steeringArrivalFireCount = 0;
+	/**
+	 * Park snapshots taken by live permission gates (via `#steeringArrivalSeq`)
+	 * that have not read yet. Only a gate whose snapshot precedes an arrival
+	 * can promote it, so an entry is inert once every live snapshot is at or
+	 * above it — `#fireSteeringArrival` prunes those instead of retaining one
+	 * group per steer for sessions that steer often but rarely supersede a
+	 * dialog. Released by the gate's read (`#steeringArrivalAdmitted`) or its
+	 * dialog-end release hook.
+	 */
+	#steeringArrivalParkSnapshots = new Set<number>();
 
 	/** Current {@link #steeringArrivalController} signal; see that field. */
 	#steeringArrivalSignal(): AbortSignal {
@@ -9143,7 +9190,14 @@ export class AgentSession implements SettingsScope {
 
 	/** Snapshot of {@link #steeringArrivalFireCount} for a parking listener's window. */
 	#steeringArrivalSeq(): number {
-		return this.#steeringArrivalFireCount;
+		const seq = this.#steeringArrivalFireCount;
+		this.#steeringArrivalParkSnapshots.add(seq);
+		return seq;
+	}
+
+	/** Release a gate's park snapshot: its dialog ended without a read. */
+	#steeringArrivalRelease(seq: number): void {
+		this.#steeringArrivalParkSnapshots.delete(seq);
 	}
 
 	/**
@@ -9159,6 +9213,9 @@ export class AgentSession implements SettingsScope {
 	 */
 	#steeringArrivalAdmitted(since?: number): readonly AgentMessage[] | undefined {
 		const boundary = since ?? 0;
+		if (since !== undefined) {
+			this.#steeringArrivalParkSnapshots.delete(since);
+		}
 		const pending = this.#steeringArrivalPendingGroups;
 		this.#steeringArrivalPendingGroups = [];
 		// Entries at or below the boundary are consumed-or-stale for every
@@ -9171,6 +9228,21 @@ export class AgentSession implements SettingsScope {
 	/** Record an admitted steering group and arm the next arrival signal. */
 	#fireSteeringArrival(admitted: readonly AgentMessage[]): void {
 		const previous = this.#steeringArrivalController;
+		// Prune inert history before recording: only a gate whose snapshot
+		// precedes an arrival can promote it, so with no live gate every
+		// prior entry is inert, and with live gates everything at or below
+		// the oldest live snapshot is inert for all of them. Without this,
+		// a session that steers often but rarely opens a dialog retains one
+		// group per steer for its lifetime.
+		if (this.#steeringArrivalParkSnapshots.size === 0) {
+			this.#steeringArrivalPendingGroups.length = 0;
+		} else {
+			let oldest = Infinity;
+			for (const snapshot of this.#steeringArrivalParkSnapshots) {
+				if (snapshot < oldest) oldest = snapshot;
+			}
+			this.#steeringArrivalPendingGroups = this.#steeringArrivalPendingGroups.filter(entry => entry.seq > oldest);
+		}
 		this.#steeringArrivalPendingGroups.push({ seq: ++this.#steeringArrivalFireCount, group: admitted });
 		this.#steeringArrivalController = new AbortController();
 		previous.abort();
