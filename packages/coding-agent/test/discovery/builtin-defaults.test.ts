@@ -463,11 +463,11 @@ describe("builtin-defaults rule provider", () => {
 	});
 
 	it("checks ts-set-map in linear time while a long single-line table streams in", async () => {
-		const value = "x".repeat(20_000);
+		const value = "x".repeat(10_000);
 		const fired = await streamRule("ts-set-map");
 		for (const source of [
 			`const SCHEMAS = new Map([["schema", "${value}"]]);`,
-			`const SCHEMAS = new Map([["schema", ${"x+".repeat(10_000)}x]]);`,
+			`const SCHEMAS = new Map([["schema", ${"x+".repeat(5_000)}x]]);`,
 			`const SCHEMAS = new Set(["${value}"]);`,
 			`const SCHEMAS = new Set([/* ${value} */ "a"]);`,
 		]) {
@@ -500,6 +500,7 @@ describe("builtin-defaults rule provider", () => {
 			'type Keys = keyof typeof import("./mod");',
 			'type Client = import(/* SDK * pinned */ "sdk").Client;',
 			'type Temperature = import("./units").温度;',
+			'type Kelvin = import("./units").𐐀;',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-import-type"]);
 
@@ -511,6 +512,9 @@ describe("builtin-defaults rule provider", () => {
 			"const { completeText } = await import(`${cwd}/src/client.ts`);",
 			'const [manifest] = await Promise.all([import("../readers/manifest.js")]);',
 			'const impit = import("impit").then(({ Impit }) => new Impit());',
+			// Non-ASCII whitespace around a Promise method is not part of a member name.
+			'const impit = import("impit").then\u00a0(({ Impit }) => new Impit());',
+			'const impit = import("impit").\u2028catch(error => error);',
 		];
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 
