@@ -8,6 +8,7 @@ import * as mcpTimeout from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { StdioTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import type { JsonRpcNotification, JsonRpcRequest, MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { trackUnhandled } from "./helpers/rejection";
 
 type Frame = JsonRpcRequest | JsonRpcNotification;
 const FIXTURE = path.join(import.meta.dir, "fixtures", "cancellable-mcp.ts");
@@ -25,19 +26,6 @@ async function within<T>(promise: Promise<T>, ms = 500): Promise<T> {
 	} finally {
 		clearTimeout(timer);
 	}
-}
-
-function trackUnhandled(): { release: () => unknown[]; capture: () => unknown[] } {
-	const seen: unknown[] = [];
-	const listener = (reason: unknown) => seen.push(reason);
-	process.on("unhandledRejection", listener);
-	return {
-		release: () => {
-			process.off("unhandledRejection", listener);
-			return seen.slice();
-		},
-		capture: () => seen.slice(),
-	};
 }
 
 describe("StdioTransport cancellation", () => {
@@ -370,10 +358,11 @@ describe("StdioTransport cancellation", () => {
 
 	it("rejects promptly under stdin backpressure without an unhandled rejection or transport teardown", async () => {
 		const client = await start({}, "no-read");
-		const ready = Bun.file(`${logPath}.ready`);
+		// A fresh BunFile per poll: a reused handle can keep reporting a stale `exists()`.
+		const readyPath = `${logPath}.ready`;
 		const deadline = performance.now() + OBSERVE_MS;
-		while (!(await ready.exists()) && performance.now() < deadline) await Bun.sleep(POLL_MS);
-		expect(await ready.exists()).toBe(true);
+		while (!(await Bun.file(readyPath).exists()) && performance.now() < deadline) await Bun.sleep(POLL_MS);
+		expect(await Bun.file(readyPath).exists()).toBe(true);
 		let closes = 0;
 		client.onClose = () => closes++;
 		const tracker = trackUnhandled();
