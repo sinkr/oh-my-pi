@@ -77,7 +77,7 @@ console.log(await computer.displays());
 console.log(await computer.capabilities());
 ```
 
-`computer.windows({ app?, title? })` returns window IDs, app/title, PID, logical bounds, and focus state for up to 48 matching windows. Select exactly one target with `computer.window(idOrFilter)`; an ambiguous filter throws and lists candidates. `computer.focusedWindow()` returns the current target or `null`.
+`computer.windows({ app?, title? })` returns up to 48 matching windows as plain records `{ id, app, title, pid?, x, y, width, height, focused }`: the position and size are flat fields, not a `bounds` object, and the records have no handle methods. In Python each is a dict (`w["x"]`, `w.get("pid")`). Select exactly one target with `computer.window(idOrFilter)`, such as `await computer.window(w.id)` in JavaScript or `await computer.window(w["id"])` in Python; an ambiguous filter throws and lists candidates. `computer.focusedWindow()` returns the current target or `null`.
 
 ### Applications and live display targets
 
