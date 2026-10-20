@@ -83,19 +83,20 @@ const reminder = (): DeveloperMessage => ({
 });
 
 function failedReply(): AssistantMessage {
-	return { ...answer(""), content: [], stopReason: "error", errorMessage: "Claude does not accept image/heic" };
+	return { ...answer(""), content: [], stopReason: "error", errorMessage: "image/heic attachments are not supported" };
 }
 
+/** The stub history keeps for such an attachment: unchanged bytes, so replayed prefixes still match. */
 const omitted = (mimeType: string) => ({
 	type: "text" as const,
-	text: `[${mimeType} attachment omitted: not supported by this model]`,
+	text: `[unsupported image: ${mimeType}]`,
 });
+
+const rejection = (mimeType: string) => `${mimeType} attachments are not supported here`;
 
 describe("anthropic media Claude cannot read", () => {
 	it.each(["video/mp4", "application/pdf", "image/heic"])("fails the turn that attached %s", mimeType => {
-		expect(() => convertAnthropicMessages([withAttachment(mimeType)], MODEL, false)).toThrow(
-			`Claude does not accept ${mimeType} attachments`,
-		);
+		expect(() => convertAnthropicMessages([withAttachment(mimeType)], MODEL, false)).toThrow(rejection(mimeType));
 	});
 
 	it("still sends the image types Claude reads", () => {
@@ -112,24 +113,21 @@ describe("anthropic media Claude cannot read", () => {
 			MODEL,
 			false,
 		);
-		expect(params[0]?.content).toContainEqual({
-			type: "text",
-			text: "[video/mp4 attachment omitted: not supported by this model]",
-		});
+		expect(params[0]?.content).toContainEqual(omitted("video/mp4"));
 	});
 
 	it("fails a guided-goal kickoff that attached HEIC, first turn or later", () => {
 		expect(() => convertAnthropicMessages([kickoffWithAttachment("image/heic")], MODEL, false)).toThrow(
-			"Claude does not accept image/heic attachments",
+			rejection("image/heic"),
 		);
 		expect(() =>
 			convertAnthropicMessages([followUp(), answer("ok"), kickoffWithAttachment("image/heic")], MODEL, false),
-		).toThrow("Claude does not accept image/heic attachments");
+		).toThrow(rejection("image/heic"));
 	});
 
 	it("still fails the user's turn when a reminder follows it", () => {
 		expect(() => convertAnthropicMessages([withAttachment("image/heic"), reminder()], MODEL, false)).toThrow(
-			"Claude does not accept image/heic attachments",
+			rejection("image/heic"),
 		);
 	});
 
@@ -190,7 +188,7 @@ describe("anthropic media Claude cannot read", () => {
 			},
 		).result();
 		expect(message.stopReason).toBe("error");
-		expect(message.errorMessage).toContain("Claude does not accept video/mp4 attachments");
+		expect(message.errorMessage).toContain(rejection("video/mp4"));
 		expect(sent).toBe(false);
 	});
 });

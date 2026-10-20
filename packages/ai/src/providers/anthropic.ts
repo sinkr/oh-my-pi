@@ -993,17 +993,19 @@ type AnthropicToolResultContent =
 /**
  * Convert content blocks to Anthropic API format.
  *
- * Inline media Claude cannot read (video, PDF, HEIC, …) fails the request when
- * `rejectUnsupportedMedia` is set, so the turn that attached it errors instead
- * of being answered as if nothing were attached. Elsewhere it becomes a text
- * note: an older turn has already been answered, and failing on it would fail
- * every later request of the conversation.
+ * Inline media this path cannot send as an `image` block (video, PDF, HEIC, …)
+ * fails the request when `rejectUnsupportedMedia` is set, so the turn that
+ * attached it errors instead of being answered as if nothing were attached.
+ * Elsewhere it keeps its `[unsupported image: …]` stub: an older turn has
+ * already been answered, failing on it would fail every later request of the
+ * conversation, and changing the stub's bytes would break the replayed prefix
+ * that signed thinking is bound to.
  */
 function convertContentBlocks(
 	content: (TextContent | ImageContent)[],
-	supportsImages = true,
-	rejectUnsupportedMedia = false,
+	options: { supportsImages: boolean; rejectUnsupportedMedia?: boolean },
 ): AnthropicToolResultContent {
+	const { supportsImages, rejectUnsupportedMedia = false } = options;
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
 	let sawText = false;
 	let sawImage = false;
@@ -1032,10 +1034,10 @@ function convertContentBlocks(
 			if (!mediaType) {
 				if (rejectUnsupportedMedia) {
 					throw new AIError.ValidationError(
-						`Claude does not accept ${block.mimeType} attachments; send JPEG, PNG, GIF or WebP images instead`,
+						`${block.mimeType} attachments are not supported here; send JPEG, PNG, GIF or WebP images instead`,
 					);
 				}
-				blocks.push({ type: "text", text: `[${block.mimeType} attachment omitted: not supported by this model]` });
+				blocks.push({ type: "text", text: `[unsupported image: ${block.mimeType}]` });
 				continue;
 			}
 			source = { type: "base64", media_type: mediaType, data: block.data };
@@ -5676,7 +5678,7 @@ function buildToolResultBlock(
 	msg: ToolResultMessage,
 	hoistedImages: ContentBlockParam[],
 ): ContentBlockParam {
-	let content = convertContentBlocks(msg.content, model.input.includes("image"));
+	let content = convertContentBlocks(msg.content, { supportsImages: model.input.includes("image") });
 	// Anthropic rejects images inside error tool results ("all content must be
 	// type `text` if `is_error` is true") — keep the text in the block and
 	// hoist the images after the message's tool_result run.
@@ -5939,11 +5941,10 @@ export function convertAnthropicMessages(
 					content = msg.content.toWellFormed();
 				}
 			} else {
-				const contentBlocks = convertContentBlocks(
-					msg.content,
-					model.input.includes("image"),
-					i === unansweredUserIndex,
-				);
+				const contentBlocks = convertContentBlocks(msg.content, {
+					supportsImages: model.input.includes("image"),
+					rejectUnsupportedMedia: i === unansweredUserIndex,
+				});
 				if (typeof contentBlocks === "string") {
 					if (contentBlocks.trim().length === 0) {
 						if (!hasProviderControls) continue;
