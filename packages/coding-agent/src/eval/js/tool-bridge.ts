@@ -1,4 +1,9 @@
-import { type AgentTool, type AgentToolResult, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentTool,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	validateAgentToolArguments,
+} from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -298,11 +303,44 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		options.signal?.throwIfAborted();
 		if (claimed) return bridgeValueFromToolResult(name, validatedArgs, claimed, options.emitStatus);
 	}
+	let settled = false;
+	const onUpdate: AgentToolUpdateCallback | undefined =
+		options.emitStatus && "mcpServerName" in tool && typeof tool.mcpServerName === "string"
+			? partial => {
+					if (settled || !isRecord(partial.details)) return;
+					const progress = partial.details.progress;
+					if (!isRecord(progress) || typeof progress.progress !== "number" || !Number.isFinite(progress.progress))
+						return;
+					options.emitStatus?.({
+						op: "mcp_progress",
+						id: toolCallId,
+						tool: name,
+						progress: progress.progress,
+						...(typeof progress.total === "number" && Number.isFinite(progress.total)
+							? { total: progress.total }
+							: {}),
+						...(typeof progress.message === "string" ? { message: progress.message } : {}),
+					});
+				}
+			: undefined;
 	try {
 		// A delegated-work tool pauses only the cell's runtime-work watchdog; the turn's
 		// signal still reaches it. Without a status sink the pause wrapper is a no-op.
-		const result = await withBridgeTimeoutPause(DELEGATED_WORK_TOOLS.has(name) ? options.emitStatus : undefined, () =>
-			tool.execute(toolCallId, validatedArgs, options.signal, undefined, options.session.getToolContext?.()),
+		const result = await withBridgeTimeoutPause(
+			DELEGATED_WORK_TOOLS.has(name) ? options.emitStatus : undefined,
+			async () => {
+				try {
+					return await tool.execute(
+						toolCallId,
+						validatedArgs,
+						options.signal,
+						onUpdate,
+						options.session.getToolContext?.(),
+					);
+				} finally {
+					settled = true;
+				}
+			},
 		);
 		if (name === "todo") {
 			// A bridged call emits no `todo` toolResult entry, the only thing branch

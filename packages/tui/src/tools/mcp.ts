@@ -7,6 +7,7 @@
 import { type Component, Markdown } from "../index";
 
 import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { ansi, md } from "../native/describe";
 import type { NativeChild } from "../native/node";
@@ -26,7 +27,7 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
-import { clipCollapsed, formatExpandHint } from "../render/render-utils";
+import { clipCollapsed, formatExpandHint, previewLine } from "../render/render-utils";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
 import type { StatusLineOptions } from "../render/status-line";
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
@@ -388,6 +389,25 @@ export interface MCPResourceContent {
 /** Supported MCP result content blocks retained in display metadata. */
 export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;
 
+/** Server-reported progress of an in-flight MCP request. */
+export interface MCPProgress {
+	progress: number;
+	total?: number;
+	message?: string;
+}
+
+/**
+ * One-line display text for MCP progress: the message, with `progress/total`
+ * when the server reports a total. The bare progress value appears only when
+ * there is no message: without a total it is an opaque counter, not a percentage.
+ */
+export function formatMCPProgress(progress: MCPProgress, maxWidth = 200): string {
+	const message = progress.message === undefined ? "" : previewLine(sanitizeText(progress.message), maxWidth);
+	const amount = progress.total === undefined ? `${progress.progress}` : `${progress.progress}/${progress.total}`;
+	if (!message) return amount;
+	return progress.total === undefined ? message : `${message} (${amount})`;
+}
+
 /** MCP result details shared by renderers and programmatic tool consumers. */
 export interface MCPToolDetails {
 	/** Server name */
@@ -406,6 +426,8 @@ export interface MCPToolDetails {
 	provider?: string;
 	/** Provider display name (e.g., "Claude Code", "MCP Config") */
 	providerName?: string;
+	/** Latest progress of a running call; present only on partial updates. */
+	progress?: MCPProgress;
 	/** Structured output metadata (set by the spill wrapper when output is truncated to an artifact). */
 	meta?: OutputMeta;
 }
