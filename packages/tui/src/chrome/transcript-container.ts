@@ -120,11 +120,12 @@ interface RowSplit {
 	readonly hash: number | bigint;
 	readonly text: string;
 	/**
-	 * The committed rows end with an inline image row. Its reserved rows carry
-	 * no content, so relocating by `text` alone would stop above the image and
-	 * make the archived image live again at another width.
+	 * Image payload of the inline image row the committed rows end with. Its
+	 * reserved rows carry no content, so relocating by `text` alone would stop
+	 * above the image and make the archived image live again at another width;
+	 * the payload tells that image apart from a replacement drawn in its place.
 	 */
-	readonly endsWithImage: boolean;
+	readonly endImage: string | undefined;
 	/** Seam of the last render it was located in; renders are memoized per frame. */
 	located?: { readonly rendered: readonly string[]; readonly count: number };
 }
@@ -179,6 +180,12 @@ function contentOf(rows: readonly string[]): string {
 	return text;
 }
 
+/** The encoded image of an inline-image row, without the size parameters a rewrap changes. */
+function imagePayload(row: string): string {
+	const match = /\x1b\]1337;File=[^:\x07]*:([^\x07\x1b]*)/.exec(row);
+	return match?.[1] ?? row;
+}
+
 /**
  * Split committing the first `rows` rows of `scrollback` at `width`. The
  * fingerprint covers the scrollback bytes history receives, which can differ
@@ -193,7 +200,7 @@ function rowSplit(scrollback: readonly string[], rows: number, width: number): R
 		width,
 		hash: Bun.hash(committed.join("\n")),
 		text: contentOf(committed),
-		endsWithImage: last !== undefined && TERMINAL.isImageLine(last),
+		endImage: last !== undefined && TERMINAL.isImageLine(last) ? imagePayload(last) : undefined,
 	};
 }
 
@@ -1151,11 +1158,13 @@ export class TranscriptContainer extends Container {
 			}
 			// The image after the committed text was archived too: carry the seam
 			// through its reserved rows to the image row, whatever its height here.
-			if (split.endsWithImage && consumed === split.text.length) {
+			if (split.endImage !== undefined && consumed === split.text.length) {
 				let index = count;
 				while (index < rendered.length && contentOf([rendered[index]!]).length === 0) {
-					if (TERMINAL.isImageLine(rendered[index]!)) {
-						count = index + 1;
+					const row = rendered[index]!;
+					if (TERMINAL.isImageLine(row)) {
+						// A different image in its place is new content history never received.
+						if (imagePayload(row) === split.endImage) count = index + 1;
 						break;
 					}
 					index++;

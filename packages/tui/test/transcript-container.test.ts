@@ -276,6 +276,26 @@ describe("TranscriptContainer row split", () => {
 			setTerminalImageProtocol(previous);
 		}
 	});
+
+	it("keeps a replacement image live when the archived one is swapped before a width change", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// A parked tool card redraws a different image over the archived one.
+			block.finalize(block.render().map(row => row.replace(":AAAA", ":BBBB")));
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => row.includes(":BBBB"))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
 	it("resumes a split block at the same content after a width change, repeating at most one row", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(prose);
