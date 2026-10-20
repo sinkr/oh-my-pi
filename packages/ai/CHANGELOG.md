@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Turns stopped for a thinking loop now keep the tokens and cost the provider had reported, the response id, the request's start time, and its time to first token and duration, instead of recording zero usage and no timing
+- Turns stopped for a thinking loop now keep the tokens and cost the provider had reported, the response id, the request's start time, and its time to first token and duration, instead of recording zero usage and no timing ([#16437](https://github.com/can1357/oh-my-pi/pull/16437) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.3] - 2026-10-19
 
