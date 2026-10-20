@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's `rg -c` and `rg --count-matches` printing `path:0` for every file without a match; zero counts are now printed only with `--include-zero`, as in ripgrep
+- Fixed the bash tool's `rg -c` and `rg --count-matches` printing `path:0` for every file without a match; zero counts are now printed only with `--include-zero`, as in ripgrep ([#16432](https://github.com/can1357/oh-my-pi/pull/16432) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.3] - 2026-10-19
 
