@@ -120,12 +120,13 @@ interface RowSplit {
 	readonly hash: number | bigint;
 	readonly text: string;
 	/**
-	 * Payloads of the inline images in the committed rows, in order. Their
-	 * reserved rows carry no content, so relocating by `text` alone would stop
-	 * above an image and make the archived image live again at another width;
-	 * the payload tells each image apart from a replacement drawn in its place.
+	 * Inline images in the committed rows, in order, each with its payload and
+	 * the length of `text` before it. Their reserved rows carry no content, so
+	 * relocating by `text` alone would stop above an image and make the
+	 * archived image live again at another width; payload and offset tell the
+	 * archived image apart from a replacement or one moved elsewhere.
 	 */
-	readonly images: readonly string[];
+	readonly images: readonly { readonly payload: string; readonly offset: number }[];
 	/** Seam of the last render it was located in; renders are memoized per frame. */
 	located?: { readonly rendered: readonly string[]; readonly count: number };
 }
@@ -188,13 +189,13 @@ function contentOf(rows: readonly string[]): string {
  */
 function rowSplit(scrollback: readonly string[], rows: number, width: number): RowSplit {
 	const committed = scrollback.slice(0, rows);
-	return {
-		rows,
-		width,
-		hash: Bun.hash(committed.join("\n")),
-		text: contentOf(committed),
-		images: committed.filter(row => TERMINAL.isImageLine(row)).map(row => iterm2ImagePayload(row) ?? row),
-	};
+	const images: { payload: string; offset: number }[] = [];
+	let text = "";
+	for (const row of committed) {
+		if (TERMINAL.isImageLine(row)) images.push({ payload: iterm2ImagePayload(row) ?? row, offset: text.length });
+		text += contentOf([row]);
+	}
+	return { rows, width, hash: Bun.hash(committed.join("\n")), text, images };
 }
 
 /**
@@ -1167,7 +1168,8 @@ export class TranscriptContainer extends Container {
 				if (
 					imageRow === undefined ||
 					!TERMINAL.isImageLine(imageRow) ||
-					(iterm2ImagePayload(imageRow) ?? imageRow) !== split.images[image] ||
+					(iterm2ImagePayload(imageRow) ?? imageRow) !== split.images[image]?.payload ||
+					consumed !== split.images[image]?.offset ||
 					index - count !== directPlacementLift(imageRow)
 				) {
 					break;

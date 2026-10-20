@@ -339,6 +339,26 @@ describe("TranscriptContainer row split", () => {
 		}
 	});
 
+	it("keeps an archived image live when the block moves it to another place in its text", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// A layout update draws the same image between the two text rows above it.
+			const [above1, above2, ...image] = block.render().slice(0, 6);
+			block.finalize([above1!, ...image, above2!, "below 1", "below 2"]);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
 	it("resumes a split block at the same content after a width change, repeating at most one row", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(prose);
