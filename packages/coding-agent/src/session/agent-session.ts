@@ -1028,6 +1028,8 @@ export class AgentSession implements SettingsScope {
 	#ircWakeTurnObserver:
 		| ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
+	/** Active {@link holdIrcWakes} holds. */
+	#ircWakeHolds = 0;
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1404,6 +1406,7 @@ export class AgentSession implements SettingsScope {
 		// non-streaming session, so without this guard it would wake/fold into the still-old context
 		// and race the transition's own reset — same rationale as #drainStrandedQueuedMessages.
 		if (this.#unsubscribeAgent === undefined) return;
+		if (this.#ircWakeHolds > 0 && !this.hasPendingAsyncWork()) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		// Parked wake records resume alongside ordinary stranded asides; they were
 		// already decided wake-intended at deferral time.
@@ -1470,7 +1473,7 @@ export class AgentSession implements SettingsScope {
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
 	#wakeForIrc(records: AgentMessage[]): void {
-		if (this.#modeExitDrainSuppressionDepth > 0) {
+		if (this.#modeExitDrainSuppressionDepth > 0 || (this.#ircWakeHolds > 0 && !this.hasPendingAsyncWork())) {
 			this.#irc.queueAside(records);
 			return;
 		}
@@ -2199,8 +2202,12 @@ export class AgentSession implements SettingsScope {
 		// instead of sitting behind it. Deferred wakes are not peeked: no
 		// boundary injection would drain them. Foreground tools are unaffected.
 		this.agent.hasQueuedAsides = () => this.#irc.hasAsides();
-		this.agent.setAsideMessageProvider(() => {
-			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => record);
+		this.agent.setAsideMessageProvider(boundary => {
+			// A subagent answers a peer in its own wake turn, never by extending a
+			// turn that already ended: that turn's text is its result.
+			const thunks: AsideMessage[] = this.#irc
+				.drainPending({ keepPeerMessages: boundary === "stop" })
+				.map(record => () => record);
 			thunks.push(...this.yieldQueue.drainLazy());
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
@@ -12021,6 +12028,24 @@ export class AgentSession implements SettingsScope {
 		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
 		this.#ircWakeTurnObserver = observer;
+	}
+
+	/**
+	 * Holds IRC wake turns while the task executor drives this session's run:
+	 * once the session idles with no owned async work, the run is finishing and
+	 * a wake turn would replace its result. Held records stay queued (a later
+	 * turn of the run takes them at a step boundary) and wake once every hold
+	 * is released. Returns the release.
+	 */
+	holdIrcWakes(): () => void {
+		this.#ircWakeHolds++;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.#ircWakeHolds--;
+			this.#resumeStrandedIrcAsides();
+		};
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

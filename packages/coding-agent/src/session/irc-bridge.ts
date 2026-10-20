@@ -24,6 +24,9 @@ export interface IrcBridgeHost {
 export class IrcBridge {
 	/** Tracks parent IRC steers by object identity without trusting prompt text or publication on receipt. */
 	readonly #parentSteers = new WeakSet<AgentMessage>();
+	/** A subagent's records from anyone but its parent: answered in their own turn, never by
+	 *  extending a finished one (whose text is the subagent's result). */
+	readonly #peerMessages = new WeakSet<AgentMessage>();
 
 	readonly #host: IrcBridgeHost;
 	#interrupts: AgentMessage[] = [];
@@ -72,8 +75,16 @@ export class IrcBridge {
 		void pending.finally(() => this.#pendingReplies.delete(pending));
 	}
 
-	/** Takes every queued IRC record in interrupt-before-aside order. */
-	drainPending(): AgentMessage[] {
+	/** Takes queued IRC records in interrupt-before-aside order; `keepPeerMessages` leaves a
+	 *  subagent's non-parent messages queued for their own wake turn. */
+	drainPending(options?: { keepPeerMessages?: boolean }): AgentMessage[] {
+		if (options?.keepPeerMessages) {
+			const isPeer = (record: AgentMessage) => this.#peerMessages.has(record);
+			const records = [...this.#interrupts, ...this.#asides].filter(record => !isPeer(record));
+			this.#interrupts = this.#interrupts.filter(isPeer);
+			this.#asides = this.#asides.filter(isPeer);
+			return records;
+		}
 		const records = [...this.#interrupts, ...this.#asides];
 		this.#interrupts = [];
 		this.#asides = [];
@@ -192,7 +203,11 @@ export class IrcBridge {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
+		const parentId = AgentRegistry.global().get(msg.to)?.parentId;
+		const fromParent = parentId === msg.from;
+		// A subagent's result answers its parent. Anyone else's message, or a
+		// broadcast leg (which asks no one in particular), gets its own turn.
+		const peerMessage = parentId !== undefined && (!fromParent || msg.broadcast === true);
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent, mid-turn asides, relays and broadcast legs have no such relay.
@@ -226,9 +241,10 @@ export class IrcBridge {
 			attribution: "agent",
 			timestamp: msg.ts,
 		};
+		if (peerMessage) this.#peerMessages.add(record);
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			if (fromParent) {
+			if (fromParent && !peerMessage) {
 				const steer: AgentMessage = {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
@@ -236,8 +252,7 @@ export class IrcBridge {
 					timestamp: msg.ts,
 					steering: true,
 				};
-				// A broadcast leg asks no one in particular: consuming it never makes the turn the parent's.
-				if (msg.broadcast !== true) this.#parentSteers.add(steer);
+				this.#parentSteers.add(steer);
 				this.#host.agent.steer(steer);
 			} else {
 				this.#interrupts.push(record);

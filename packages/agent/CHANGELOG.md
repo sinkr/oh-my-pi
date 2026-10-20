@@ -5,6 +5,9 @@
 ### Fixed
 
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
+### Added
+
+- Aside providers (`AgentLoopConfig.getAsideMessages`, `Agent.setAsideMessageProvider`) now receive which boundary is polled, `"work"` after tool calls or `"stop"` at the end of a turn, so they can keep a message out of a finished turn
 
 ## [18.12.4] - 2026-10-20
 

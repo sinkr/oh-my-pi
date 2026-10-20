@@ -4320,6 +4320,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
+	// Until the run's result is final, an IRC message waits for its own wake
+	// turn instead of one this run's monitor would take as the result.
+	let releaseIrcWakes: (() => void) | undefined;
 	let registryAbortUnsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
 	let pendingSessionManager: Promise<SessionManager> | undefined;
@@ -4891,6 +4894,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			unsubscribe = monitor.attach(session);
+			releaseIrcWakes = session.holdIrcWakes();
 
 			checkAbort();
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
@@ -5142,32 +5146,37 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		};
 	};
 
-	const done = await runSubagent();
-	monitor.finish();
+	try {
+		const done = await runSubagent();
+		monitor.finish();
 
-	const result = await finalizeRunResult({
-		monitor,
-		done,
-		index,
-		id,
-		agent,
-		task,
-		assignment,
-		modelOverride,
-		modelRole,
-		structured,
-		outputSchema,
-		outputSchemaMode: options.outputSchemaMode,
-		outputSchemaSource: options.outputSchemaSource,
-		signal,
-		artifactsDir: options.artifactsDir,
-		eventBus: options.eventBus,
-		subagentEventBus: options.subagentEventBus,
-		parentToolCallId: options.parentToolCallId,
-		detached: options.detached,
-		sessionFile: subtaskSessionFile,
-		startTime,
-	});
-	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
-	return result;
+		const result = await finalizeRunResult({
+			monitor,
+			done,
+			index,
+			id,
+			agent,
+			task,
+			assignment,
+			modelOverride,
+			modelRole,
+			structured,
+			outputSchema,
+			outputSchemaMode: options.outputSchemaMode,
+			outputSchemaSource: options.outputSchemaSource,
+			signal,
+			artifactsDir: options.artifactsDir,
+			eventBus: options.eventBus,
+			subagentEventBus: options.subagentEventBus,
+			parentToolCallId: options.parentToolCallId,
+			detached: options.detached,
+			sessionFile: subtaskSessionFile,
+			startTime,
+		});
+		AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
+		return result;
+	} finally {
+		// The result is published: messages held during the run get their own turns.
+		releaseIrcWakes?.();
+	}
 }
