@@ -263,7 +263,7 @@ export function normalizeMCPTransportError(
 
 function nextStep(error: MCPTransportError): string {
 	if (!error.retryable && (error.failure === "eof" || error.failure === "reset" || error.failure === "closed")) {
-		return "The request reached the server before the connection was lost and may already have run; check its effect before retrying.";
+		return "The connection was lost after the request was sent, so it may already have run; check its effect before retrying.";
 	}
 	switch (error.failure) {
 		case "connect":

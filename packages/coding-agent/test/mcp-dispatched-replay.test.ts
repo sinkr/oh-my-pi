@@ -2,25 +2,40 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { DeferredMCPTool, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const TOOL_DEF = { name: "record_effect", inputSchema: { type: "object" as const } };
-const noCtx = {} as Parameters<MCPTool["execute"]>[3];
 const connections: MCPServerConnection[] = [];
 let tempDir: string;
 let effectsPath: string;
+let auth: AuthStorage;
+let context: CustomToolContext;
 
 beforeEach(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-no-replay-"));
 	effectsPath = path.join(tempDir, "effects.txt");
+	auth = await AuthStorage.create(":memory:");
+	context = {
+		sessionManager: SessionManager.inMemory(),
+		modelRegistry: new ModelRegistry(auth),
+		model: undefined,
+		isIdle: () => true,
+		hasQueuedMessages: () => false,
+		abort: () => {},
+	};
 });
 
 afterEach(async () => {
 	for (const connection of connections) await connection.transport.close();
 	connections.length = 0;
+	auth.close();
 	await removeWithRetries(tempDir);
 });
 
@@ -47,7 +62,7 @@ describe("MCP tool calls after dispatch", () => {
 			return openConnection();
 		});
 
-		const failed = await tool.execute("crash", { crash: true }, undefined, noCtx);
+		const failed = await tool.execute("crash", { crash: true }, undefined, context);
 
 		expect(failed.details?.isError).toBe(true);
 		const diagnostic = failed.content[0];
@@ -57,7 +72,7 @@ describe("MCP tool calls after dispatch", () => {
 		expect(reconnects).toBe(0);
 		expect(await effects()).toEqual(["record_effect"]);
 
-		const recovered = await tool.execute("recover", {}, undefined, noCtx);
+		const recovered = await tool.execute("recover", {}, undefined, context);
 
 		expect(recovered.details?.isError).toBeFalsy();
 		expect(recovered.content).toEqual([{ type: "text", text: "effect recorded" }]);
@@ -79,7 +94,7 @@ describe("MCP tool calls after dispatch", () => {
 			},
 		);
 
-		const result = await tool.execute("crash", { crash: true }, undefined, noCtx);
+		const result = await tool.execute("crash", { crash: true }, undefined, context);
 
 		expect(result.details?.isError).toBe(true);
 		expect(result.content[0]).toMatchObject({
@@ -99,7 +114,7 @@ describe("MCP tool calls after dispatch", () => {
 		});
 		await connection.transport.close();
 
-		const result = await tool.execute("unsent", {}, undefined, noCtx);
+		const result = await tool.execute("unsent", {}, undefined, context);
 
 		expect(result.details?.isError).toBeFalsy();
 		expect(result.content).toEqual([{ type: "text", text: "effect recorded" }]);
