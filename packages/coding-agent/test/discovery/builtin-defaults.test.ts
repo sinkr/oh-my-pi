@@ -462,6 +462,25 @@ describe("builtin-defaults rule provider", () => {
 		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
 	});
 
+	it("checks ts-set-map in linear time while a long single-line table streams in", async () => {
+		const value = "x".repeat(20_000);
+		const fired = await streamRule("ts-set-map");
+		for (const source of [
+			`const SCHEMAS = new Map([["schema", "${value}"]]);`,
+			`const SCHEMAS = new Map([["schema", ${"x+".repeat(10_000)}x]]);`,
+			`const SCHEMAS = new Set(["${value}"]);`,
+			`const SCHEMAS = new Set([/* ${value} */ "a"]);`,
+		]) {
+			const deltas = source.match(/[\s\S]{1,20}/g) ?? [];
+			// Each delta rescans the whole unfinished line; a per-character backtrack there made this take seconds.
+			const start = performance.now();
+			const names = fired(...deltas);
+			const elapsed = performance.now() - start;
+			expect(new Set(names), source.slice(0, 40)).toEqual(new Set(["ts-set-map"]));
+			expect(elapsed, source.slice(0, 40)).toBeLessThan(500);
+		}
+	});
+
 	it("fires ts-import-type on inline type imports but not on runtime import() calls", async () => {
 		const fired = await streamRule("ts-import-type");
 		const hits = [

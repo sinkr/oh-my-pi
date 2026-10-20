@@ -2,7 +2,7 @@
 description: "Use `import type`, not `import('pkg').Type` in type positions"
 condition:
   - "\\btypeof\\s+import\\("
-  - "\\bimport\\((?:\\s|//.*|/\\*(?:[^*]|\\*(?!/))*\\*/)*(?:\"[^\"\\n]*\"|'[^'\\n]*'|\\x60[^\\x60]*\\x60)(?:\\s|//.*|/\\*(?:[^*]|\\*(?!/))*\\*/)*(?:,[^()]*)?\\)\\s*(?:\\[\\s*[\"']|\\.\\s*(?!(?:then|catch|finally)(?![\\w$\\u0080-\\uffff]))[A-Za-z_$\\u0080-\\uffff][\\w$\\u0080-\\uffff]*(?=[^\\w$\\u0080-\\uffff]))"
+  - "\\bimport\\((?:\\s|//.*|/\\*(?:[^*]|\\*(?!/))*\\*/)*(?:\"[^\"\\n]*\"|'[^'\\n]*'|\\x60[^\\x60]*\\x60)(?:\\s|//.*|/\\*(?:[^*]|\\*(?!/))*\\*/)*(?:,[^()]*)?\\)\\s*(?:\\[\\s*[\"']|\\.\\s*(?!(?:then|catch|finally)(?![\\w$\\u0080-\\uFFFF]))[A-Za-z_$\\u0080-\\uFFFF][\\w$\\u0080-\\uFFFF]*(?=[^\\w$\\u0080-\\uFFFF]))"
 scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
 interruptMode: never
 ---
