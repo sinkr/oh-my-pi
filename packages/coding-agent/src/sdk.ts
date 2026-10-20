@@ -292,6 +292,7 @@ import {
 	xdevEntries,
 } from "./tools";
 import { resolveYieldReportText } from "./tools/yield";
+import { createModelJobWidgetAuthor, type JobWidgetAuthor, JobWidgets, resolveToolCallIntent } from "./job-widgets";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
@@ -320,6 +321,7 @@ import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import {
 	cfgArchiveEnabled,
 	cfgAsyncMaxJobs,
+	cfgAsyncWidgets,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
 	cfgGenerateImageEnabled,
@@ -809,7 +811,7 @@ export interface CreateAgentSessionOptions {
 	taskDepth?: number;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionState;
-	/** Parent Mnemopi state to alias for subagent memory tools. */
+	/** Parent Mnemopi state: subagents alias it; a top-level fork (`/tan`) inherits its delivered recall. */
 	parentMnemopiSessionState?: MnemopiSessionState;
 	/** Pre-allocated agent identity for IRC routing. Default: "Main" for top-level, parentTaskPrefix-derived for sub. */
 	agentId?: string;
@@ -833,6 +835,12 @@ export interface CreateAgentSessionOptions {
 	parentTaskPrefix?: string;
 	/** Parent's async jobs and delivery sinks; child sessions never resolve a process-global manager. */
 	asyncJobManager?: AsyncJobManager;
+	/**
+	 * Writes the specs of the root session's live job widgets. Defaults to the
+	 * `widget` model role; tests inject a fake. Ignored for child sessions,
+	 * which share their root's widgets.
+	 */
+	jobWidgetAuthor?: JobWidgetAuthor;
 	/**
 	 * Registry id of the spawning agent, recorded as this subagent's parent in
 	 * the agent registry. Distinct from `parentTaskPrefix`, which is this agent's
@@ -1413,6 +1421,11 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		deferrable: tool.deferrable,
 		readsSkillUris: tool.readsSkillUris,
 		approval: typeof tool.approval === "function" ? tool.approval.bind(tool) : tool.approval,
+		// Extension tools take part in Ask-and-remember grants through the same bridge.
+		approvalCacheTargets:
+			typeof tool.approvalCacheTargets === "function"
+				? tool.approvalCacheTargets.bind(tool)
+				: tool.approvalCacheTargets,
 		// Preserved through RegisteredToolAdapter so MCP-backed tools' explicit
 		// `strict: false` (#4336/#4340) survives the custom-tool → definition bridge.
 		strict: tool.strict,
@@ -2078,9 +2091,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Resolves the session/agent thinking level using the same precedence we
 	// apply at startup: explicit option → persisted session entry → restored
 	// model selector suffix → default role's explicit selector → selected
-	// model's defaultLevel → global settings default. Run again after extension
-	// role reclaim so the final model's own defaults aren't masked by an earlier
-	// fallback model's.
+	// model's defaultLevel → global settings default. A global `auto` is always
+	// an explicit user choice (the setting defaults to a concrete level), so it
+	// outranks the model's defaultLevel. Run again after extension role reclaim
+	// so the final model's own defaults aren't masked by an earlier fallback
+	// model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
 		let level = options.thinkingLevel;
 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
@@ -2094,14 +2109,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
 			level = defaultRoleSpec.thinkingLevel;
 		}
-		if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
+		const configuredDefaultLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings));
+		if (
+			level === undefined &&
+			configuredDefaultLevel !== AUTO_THINKING &&
+			selectedModel?.thinking?.defaultLevel !== undefined
+		) {
 			level = selectedModel.thinking.defaultLevel;
 		}
 		if (level === undefined) {
-			level = automaticThinkingLevel(
-				selectedModel,
-				parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings)),
-			);
+			level = automaticThinkingLevel(selectedModel, configuredDefaultLevel);
 		}
 		return level;
 	};
@@ -2242,6 +2259,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
 			})
 		: undefined;
+	if (asyncJobManager) {
+		asyncJobManager.widgets = new JobWidgets({
+			enabled: () => cfgAsyncWidgets.get(settings),
+			author:
+				options.jobWidgetAuthor ??
+				createModelJobWidgetAuthor({
+					settings,
+					modelRegistry,
+					sessionId: () => sessionManager.getSessionId(),
+					telemetry: () => agent?.telemetry,
+					obfuscate: () => (obfuscator?.hasSecrets() ? text => obfuscator?.obfuscate(text) ?? text : undefined),
+					onUsage: message => {
+						if (!message.usage) return;
+						sessionManager.appendModelUsage(
+							{
+								purpose: "job-widget",
+								api: message.api,
+								provider: message.provider,
+								model: message.model,
+								usage: message.usage,
+								stopReason: message.stopReason,
+							},
+							{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
+						);
+					},
+				}),
+		});
+	}
 	const scopedAsyncJobManager = asyncJobManager ?? options.asyncJobManager;
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
@@ -2416,6 +2461,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			getLastAssistantText: () => session?.getLastAssistantText(),
 			getYieldReportText: toolCallId => resolveYieldReportText(session?.messages ?? [], toolCallId),
+			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),

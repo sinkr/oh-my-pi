@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced native Git diff allocation overhead ([#16349](https://github.com/can1357/oh-my-pi/pull/16349) by [@kyle-elliott](https://github.com/kyle-elliott))
+- Reduced native memory-reranking allocations when candidate text contains repeated words ([#16348](https://github.com/can1357/oh-my-pi/pull/16348) by [@kyle-elliott](https://github.com/kyle-elliott))
+- Reduced allocation overhead when collecting directory grep results, including paginated searches ([#16226](https://github.com/can1357/oh-my-pi/pull/16226) by [@kyle-elliott](https://github.com/kyle-elliott))
+
+### Fixed
+
+- Fixed the bash tool's `rg -c` and `rg --count-matches` printing `path:0` for every file without a match; zero counts are now printed only with `--include-zero`, as in ripgrep ([#16432](https://github.com/can1357/oh-my-pi/pull/16432) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
+- Added a `hiddenContent` option to `htmlToMarkdown`: `"drop"` (default) omits hidden content, `"reachable"` keeps content the page can reveal such as collapsed sections and inactive tab panels, and `"all"` also keeps `<template>` and `<noscript>` content; other values throw ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
+- Added `normalizePtyDimensions(cols, rows)` to size screen emulators with the same effective dimensions as native PTY sessions ([#16192](https://github.com/can1357/oh-my-pi/pull/16192) by [@C-W-Z](https://github.com/C-W-Z))
+- Added `LineMatcher`, a native multi-pattern line matcher: `matchLines` returns a batch's matches column-wise as typed arrays (line, pattern, and the UTF-16 span of each named group in `groupNames()` order)
+- Added `PipeStreams` and the `streams` option of `Shell.run`: every pipe the run opens keeps a readable copy of its newest megabyte, so a stage's output stays visible while a later stage (`| tail`) holds it back
+
+### Fixed
+
+- Fixed the output minimizer altering what `ssh` commands print in the bash tool: remote lines were cut to 120 characters and blank lines dropped; ssh's own login and connection notices are still stripped ([#16314](https://github.com/can1357/oh-my-pi/pull/16314) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 background shortcuts and typing reporting `Cancelled` when you stopped them right after the last key went down: the key releases now always go out and the call succeeds ([#16235](https://github.com/can1357/oh-my-pi/pull/16235) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `wrapTextWithAnsi` leaving rows half-empty in Chinese and Japanese text: CJK runs now break between characters to fill each row, closing punctuation such as `，。！」` never starts a row, and opening brackets never end one ([#16219](https://github.com/can1357/oh-my-pi/issues/16219))
+- Fixed a cancelled or timed-out macOS `computer` call finishing its lookup of a sheet, popover or menu window, up to 5,000 accessibility elements, before it stopped and let the next request run ([#16233](https://github.com/can1357/oh-my-pi/pull/16233) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
