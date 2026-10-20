@@ -2102,12 +2102,29 @@ function reportedDropKey(params: MessageCreateParamsStreaming, path: string | un
 }
 
 /**
+ * Warn once for the signed thinking blocks the API dropped from one request
+ * after the conversation prefix changed: the count and first path at warn,
+ * every path at debug. One prefix change can drop hundreds of blocks in a
+ * single request, which would otherwise flood the log one line per block.
+ */
+export function logDroppedThinking(provider: string, model: string, paths: Array<string | undefined>): void {
+	if (paths.length === 0) return;
+	logger.warn(`${provider}: dropped thinking block after conversation prefix changed`, {
+		model,
+		count: paths.length,
+		path: paths[0],
+	});
+	if (paths.length > 1) logger.debug(`${provider}: dropped thinking block paths`, { model, paths });
+}
+
+/**
  * Record server-reported input rewrites on the response. A `drop_block`
  * request keeps replaying the transcript verbatim afterwards: the API drops
  * the same invalid blocks again on every later request (unbilled), while
  * omitting them client-side would change the bytes the drop request just
  * cached and can cost another message-prefix cache miss from the first
- * dropped block on. Repeat reports of an already-warned drop log at debug.
+ * dropped block on. Newly dropped blocks warn once per report (see
+ * {@link logDroppedThinking}); repeats of already-warned drops log at debug.
  */
 function applyReportedInputTransformations(
 	output: AssistantMessage,
@@ -2131,6 +2148,7 @@ function applyReportedInputTransformations(
 	}
 	if (fresh.length === 0) return;
 	output.inputTransformations = [...(output.inputTransformations ?? []), ...fresh];
+	const dropped: Array<string | undefined> = [];
 	let repeated = 0;
 	for (const transformation of fresh) {
 		if (transformation.reason !== "prefix_binding_mismatch") continue;
@@ -2142,11 +2160,9 @@ function applyReportedInputTransformations(
 			}
 			state.reportedPrefixDroppedThinking.add(dropKey);
 		}
-		logger.warn("anthropic: dropped thinking block after conversation prefix changed", {
-			model: output.model,
-			path: transformation.path,
-		});
+		dropped.push(transformation.path);
 	}
+	logDroppedThinking("anthropic", output.model, dropped);
 	if (repeated > 0) {
 		logger.debug("anthropic: API re-dropped previously reported thinking blocks", {
 			model: output.model,
