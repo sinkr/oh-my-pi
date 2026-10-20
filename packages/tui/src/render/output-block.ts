@@ -159,11 +159,25 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 		}
 	}
 
+	// Footer facts ride the bottom border only when they fit whole; a clipped
+	// border would silently drop trailing facts (exit code, artifact id), so an
+	// overflowing footer wraps into body rows above a plain border instead.
+	const footerMeta = options.footerMeta;
+	const footerFits =
+		footerMeta === undefined ||
+		visibleWidth(` ${footerMeta} `) <=
+			lineWidth - visibleWidth(`${theme.boxRound.bottomLeft}${cap}`) - visibleWidth(theme.boxRound.bottomRight);
+	if (footerMeta !== undefined && !footerFits) {
+		for (const wrappedLine of wrapTextWithAnsi(footerMeta, contentWidth)) {
+			const innerPadding = padding(Math.max(0, contentWidth - visibleWidth(wrappedLine)));
+			rows.push({ kind: "content", inner: `${wrappedLine}${innerPadding}` });
+		}
+	}
 	rows.push({
 		kind: "bottom",
 		leftChar: theme.boxRound.bottomLeft,
 		rightChar: theme.boxRound.bottomRight,
-		meta: options.footerMeta,
+		meta: footerFits ? footerMeta : undefined,
 	});
 
 	const H = rows.length;

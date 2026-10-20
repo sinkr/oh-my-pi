@@ -52,6 +52,20 @@ describe("renderOutputBlock", () => {
 		expect(lines.some(line => line.startsWith("│") && line.includes("Wall"))).toBe(false);
 	});
 
+	it("wraps footer meta that overflows the border into body rows instead of clipping it", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const meta = "Wall: 1.20s · Timeout: 300s · Artifact: a123 · Exit: 7";
+		const lines = renderOutputBlock(
+			{ width: 40, applyBg: false, footerMeta: meta, sections: [{ lines: ["out"] }] },
+			theme,
+		).map(line => stripVTControlCharacters(line));
+
+		expect(lines.at(-1)).toBe(`╰${"─".repeat(38)}╯`);
+		const body = lines.filter(line => line.startsWith("│")).join(" ");
+		expect(body).toContain("Artifact: a123");
+		expect(body).toContain("Exit: 7");
+	});
+
 	it("keeps explicitly flush content flush on both sides", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const lines = renderOutputBlock(

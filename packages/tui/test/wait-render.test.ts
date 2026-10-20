@@ -222,11 +222,7 @@ describe("job renderer task-result preview", () => {
 				content: [{ type: "text" as const, text: "" }],
 				details: { op: "wait" as const, jobs: jobsData },
 			};
-			const component = waitToolRenderer.renderResult(
-				result,
-				{ expanded: false, isPartial: false } as Parameters<typeof waitToolRenderer.renderResult>[1],
-				theme,
-			);
+			const component = waitToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
 			const lines = (component.render(120) as readonly string[]).map(line => Bun.stripANSI(line));
 			// Job2 settled: one completion row. The running jobs collapse into a count,
 			// so the next poll's card does not repeat them.
@@ -241,14 +237,33 @@ describe("job renderer task-result preview", () => {
 				content: [{ type: "text" as const, text: "" }],
 				details: { op: "wait" as const, jobs: [jobsData[0]!, jobsData[2]!] },
 			};
-			const component = waitToolRenderer.renderResult(
-				result,
-				{ expanded: false, isPartial: true } as Parameters<typeof waitToolRenderer.renderResult>[1],
-				theme,
-			);
+			const component = waitToolRenderer.renderResult(result, { expanded: false, isPartial: true }, theme);
 			const lines = (component.render(120) as readonly string[]).map(line => Bun.stripANSI(line));
 			expect(lines).toHaveLength(1);
 			expect(lines[0]).toContain("waiting on 2 jobs");
+		});
+
+		it("keeps a failed job's outcome visible when its id overflows the row", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: {
+					op: "wait" as const,
+					jobs: [
+						{
+							id: "long-agent-assignment-identifier-1234567890",
+							type: "bash" as const,
+							status: "failed" as const,
+							label: "make",
+							durationMs: 62_000,
+							exitCode: 2,
+						},
+					],
+				},
+			};
+			const component = waitToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
+			const [row] = (component.render(40) as readonly string[]).map(line => Bun.stripANSI(line));
+			expect(row).toContain("failed · exit 2 · 1m2s");
+			expect(Bun.stringWidth(row!)).toBeLessThanOrEqual(40);
 		});
 
 		it("retains the running job in the sealed native wait card", () => {

@@ -367,8 +367,15 @@ function jobsRenderResult(
 				job.exitCode !== undefined && job.exitCode !== 0
 					? `${uiTheme.sep.dot}${uiTheme.fg("error", `exit ${job.exitCode}`)}`
 					: "";
-			const id = replaceTabs(job.id).replace(/\s+/g, " ");
-			let line = `${icon} ${uiTheme.fg("accent", id)} ${uiTheme.fg(statusToColor(job.status), word)}${exit}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+			// The outcome (status, exit, duration) is reserved first; a long id
+			// gives way so a failure is never cut off the row.
+			const outcome = ` ${uiTheme.fg(statusToColor(job.status), word)}${exit}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+			const id = truncateToWidth(
+				replaceTabs(job.id).replace(/\s+/g, " "),
+				Math.max(1, width - visibleWidth(`${icon} `) - visibleWidth(outcome)),
+				Ellipsis.Unicode,
+			);
+			let line = `${icon} ${uiTheme.fg("accent", id)}${outcome}`;
 			const label = replaceTabs(jobRowLabel(job).split(/\r?\n/)[0] ?? "").trim();
 			const labelBudget = width - visibleWidth(line) - 2;
 			if (label && label !== job.id && labelBudget >= 8) {

@@ -197,6 +197,11 @@ export interface ToolRenderer<TArgs = unknown, TDetails = unknown> {
 	 */
 	animatedPartialResult?: boolean | ((args: TArgs) => boolean);
 	/**
+	 * Repaint the block once a second while its call executes, for renderers
+	 * that show live `options.elapsedMs` without consuming the spinner frame.
+	 */
+	tickElapsed?: boolean;
+	/**
 	 * Whether replacing a pending call render with the first result requires a
 	 * full viewport repaint. Use for merged renderers whose pending rows can be
 	 * re-anchored instead of preserved by the result render.

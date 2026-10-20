@@ -1215,7 +1215,10 @@ export function renderSubagentHudLines(
 				} else {
 					// No spawn description: fall back to a muted preview of the raw
 					// assignment — never the rendered prompt, whose fixed template
-					// preamble would fill the row instead of the work.
+					// preamble would fill the row instead of the work. Every spawn
+					// that renders the template (task tool, structured/eval spawns)
+					// also records `assignment`; `task` alone is a raw message
+					// (IRC-woken or direct sends), so it is safe to preview as is.
 					const preview = (session.progress?.assignment ?? session.progress?.task)?.trim();
 					if (preview && !labelEchoesHandle(session.id, preview)) {
 						const formatted = replaceTabs(preview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
