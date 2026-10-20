@@ -16,8 +16,10 @@ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 /**
  * Largest output inlined whole. A cut output costs the parent a
  * `read agent://<id>` turn plus the preview it then holds twice, which parents
- * pay for most outputs past ~8k chars. Sized so the whole envelope still passes
- * async delivery uncut: a background task result arrives as an async follow-up.
+ * pay for most outputs past ~8k chars. A background task result arrives as an
+ * async follow-up, which cuts anything over {@link ASYNC_INLINE_RESULT_MAX_CHARS};
+ * an envelope whose `<error>` or `<merge-summary>` would push it over falls back
+ * to the preview instead.
  */
 export const INLINE_OUTPUT_CHARS = ASYNC_INLINE_RESULT_MAX_CHARS - 500;
 /** Head shown for an output over {@link INLINE_OUTPUT_CHARS}, with a pointer to `agent://<id>`. */
@@ -65,28 +67,31 @@ export function formatTaskResultSummary(
 	// <abort-reason>; an empty output already previews the error itself.
 	const error = result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 ? result.error : undefined;
 	const outputCharCount = result.outputMeta?.charCount ?? output.length;
-	const truncated = outputCharCount > INLINE_OUTPUT_CHARS && result.outputPath !== undefined;
-	const preview = truncated ? previewHead(output) : output;
 	// A stopped agent stays messageable; tell the parent so it can resume via
 	// irc instead of redoing the work. Isolated runs are parked without a
 	// reviver (their worktree is gone), so they must not read as resumable.
 	const resumable = result.aborted && !result.isolated && isResumable(AgentRegistry.global().get(result.id));
-	return prompt.render(taskSummaryTemplate, {
-		agentName: result.agent,
-		id: result.id,
-		status,
-		duration: formatDuration(options.totalDurationMs),
-		abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
-		error: error === undefined ? undefined : escapeHarnessTags(error),
-		resumable,
-		preview: escapeHarnessTags(preview),
-		truncated,
-		meta: result.outputMeta
-			? {
-					lineCount: result.outputMeta.lineCount,
-					charSize: formatBytes(result.outputMeta.charCount),
-				}
-			: undefined,
-		mergeSummary: options.mergeSummary === undefined ? "" : escapeHarnessTags(options.mergeSummary),
-	});
+	const render = (truncated: boolean): string =>
+		prompt.render(taskSummaryTemplate, {
+			agentName: result.agent,
+			id: result.id,
+			status,
+			duration: formatDuration(options.totalDurationMs),
+			abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
+			error: error === undefined ? undefined : escapeHarnessTags(error),
+			resumable,
+			preview: escapeHarnessTags(truncated ? previewHead(output) : output),
+			truncated,
+			meta: result.outputMeta
+				? {
+						lineCount: result.outputMeta.lineCount,
+						charSize: formatBytes(result.outputMeta.charCount),
+					}
+				: undefined,
+			mergeSummary: options.mergeSummary === undefined ? "" : escapeHarnessTags(options.mergeSummary),
+		});
+	if (result.outputPath === undefined) return render(false);
+	if (outputCharCount > INLINE_OUTPUT_CHARS) return render(true);
+	const whole = render(false);
+	return whole.length > ASYNC_INLINE_RESULT_MAX_CHARS && outputCharCount > PREVIEW_CHARS ? render(true) : whole;
 }

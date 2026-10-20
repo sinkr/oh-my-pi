@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
+import { ASYNC_INLINE_RESULT_MAX_CHARS } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import { formatTaskResultSummary, INLINE_OUTPUT_CHARS } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
 function settledResult(output: string): SingleResult {
@@ -73,6 +74,28 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain(`<output>\n${output}\n</output>`);
 		expect(summary).not.toContain("<preview");
 		expect(summary).not.toContain("<meta");
+	});
+
+	it("previews an inline-sized report whose merge notice or error would overflow async delivery", () => {
+		// Async delivery cuts an envelope over its cap to a 4k head, which would drop
+		// the <merge-summary> after <output>: the parent's only pointer to an isolated
+		// task's patch. Such an envelope previews the output instead.
+		const output = "x".repeat(INLINE_OUTPUT_CHARS);
+		const mergeSummary = `Merge failed; patch kept at /tmp/patch.diff ${"conflict detail ".repeat(60).trimEnd()}`;
+		const merged = formatTaskResultSummary(settledResult(output), { totalDurationMs: 5, mergeSummary });
+		expect(merged.length).toBeLessThanOrEqual(ASYNC_INLINE_RESULT_MAX_CHARS);
+		expect(merged).toContain('<preview full-output="agent://Scout">');
+		expect(merged).toContain(mergeSummary);
+		expect(merged).toContain("</task-result>");
+
+		const error = "provider stream error: ".repeat(20).trimEnd();
+		const failed = formatTaskResultSummary(
+			{ ...settledResult(output), exitCode: 1, stderr: error, error },
+			{ totalDurationMs: 5 },
+		);
+		expect(failed.length).toBeLessThanOrEqual(ASYNC_INLINE_RESULT_MAX_CHARS);
+		expect(failed).toContain('<preview full-output="agent://Scout">');
+		expect(failed).toContain(`<error>${error}</error>`);
 	});
 
 	it("names the failure when the preview is the text streamed before it", () => {
