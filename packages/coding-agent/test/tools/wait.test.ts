@@ -325,6 +325,19 @@ describe("wait", () => {
 			await expect(childWait()).rejects.toThrow("no agent you messaged this run owes a reply");
 		});
 
+		test("blocks for a second question asked in the same millisecond its first was answered", async () => {
+			registerParentAndChild();
+			vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+			await ask();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			await IrcBus.global().send({ from: "Child", to: "Main", body: "and the second word?" });
+			const waiting = childWait();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "vermilion" });
+			const result = await waiting;
+			expect(result.isError).toBeUndefined();
+			expect(result.details?.waited).toMatchObject({ from: "Main", body: "vermilion" });
+		});
+
 		test("ends once the agent asked starts waiting on the caller's result instead of answering", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
