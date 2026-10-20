@@ -1,6 +1,6 @@
 import type { LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { parseTailCount } from "./path-utils";
-import { parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { mergeLineRanges, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 /** Parsed representation of a path-embedded selector. */
 export type ParsedSelector =
@@ -47,18 +47,7 @@ export function resolveTailSelector(parsed: ParsedSelector, totalLines: number):
 	const startLine = Math.max(1, totalLines - parsed.count + 1);
 	const endLine = Math.max(startLine, totalLines);
 	if (!parsed.ranges) return { kind: "lines", ranges: [{ startLine, endLine }], raw: parsed.raw };
-	const sorted = [...parsed.ranges, { startLine, endLine }].sort((a, b) => a.startLine - b.startLine);
-	const merged: LineRange[] = [sorted[0]];
-	for (const range of sorted.slice(1)) {
-		const last = merged[merged.length - 1];
-		// An open-ended range already reaches EOF and absorbs every later one.
-		if (last.endLine === undefined) break;
-		if (range.startLine > last.endLine + 1) merged.push(range);
-		else if (range.endLine === undefined || range.endLine > last.endLine) {
-			merged[merged.length - 1] = { startLine: last.startLine, endLine: range.endLine };
-		}
-	}
-	return { kind: "lines", ranges: merged as [LineRange, ...LineRange[]], raw: parsed.raw };
+	return { kind: "lines", ranges: mergeLineRanges([...parsed.ranges, { startLine, endLine }]), raw: parsed.raw };
 }
 
 function selectorChunkLooksReadLike(chunk: string): boolean {
@@ -90,10 +79,11 @@ function parseRangeOrTail(chunk: string, raw: boolean): ParsedSelector | null {
 	for (const part of parts) {
 		const partCount = parseTailCount(part);
 		if (partCount !== null) count = Math.max(count, partCount);
-		else listed.push(parts.length > 1 && /^L?\d+$/i.test(part) ? `${part}-${part}` : part);
+		else listed.push(part);
 	}
 	if (count === 0) return null;
-	const listedRanges = listed.length > 0 ? parseLineRanges(listed.join(",")) : undefined;
+	// Beside a tail the list has several chunks, so a lone listed `N` is still one line.
+	const listedRanges = listed.length > 0 ? parseLineRanges(listed.join(","), "single") : undefined;
 	if (listedRanges === null) return null;
 	return { kind: "tail", count, ...(listedRanges && { ranges: listedRanges }), ...(raw && { raw }) };
 }
