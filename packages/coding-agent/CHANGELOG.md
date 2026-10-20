@@ -5,13 +5,64 @@
 ### Added
 
 - Added GitLab merge request support to `/review` and `/annotate code-review`: pass an MR URL, pick one mentioned in the conversation, or choose "Review a specific PR/MR" in a GitLab checkout to list open MRs (requires `glab`); large MRs link per-file diffs through the new `mr://<host>/<group>/<project>/<iid>/diff` URLs ([#16361](https://github.com/can1357/oh-my-pi/pull/16361) by [@Shadorain](https://github.com/Shadorain))
+- Added MCP tool progress: `tools/call` requests ask the server for `notifications/progress` when the progress can be shown, and updates appear in the running tool card and as an in-place `mcp_progress` status line in Eval cells, including after auto-backgrounding; request deadlines and Eval timeouts are unchanged ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
+
+### Changed
+
+- Agents using the `browser` tool are steered to wait for the text, URL or element they need after a click or navigation instead of sleeping a fixed time, which can finish steps sooner on pages that load content after a variable delay ([#16404](https://github.com/can1357/oh-my-pi/pull/16404) by [@will-bogusz](https://github.com/will-bogusz))
+- The pinned Subagents list shows how many agents are running and the agent hub key, and previews an agent's assignment at full width instead of the first 40 characters of its prompt template ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed plugin settings marked `secret` being readable by other local users in `omp-plugins.lock.json`; the lockfile is now written owner-only (0600) ([#12999](https://github.com/can1357/oh-my-pi/issues/12999), [#16368](https://github.com/can1357/oh-my-pi/pull/16368) by [@jonasboos](https://github.com/jonasboos))
+- Fixed agents misreading `computer.windows()` results on their first call ([#16299](https://github.com/can1357/oh-my-pi/pull/16299) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed GitLab merge request reads rendering `[object Promise]` instead of the description ([#16477](https://github.com/can1357/oh-my-pi/pull/16477) by [@adi-IL](https://github.com/adi-IL))
+- Fixed `/restart` losing the active named profile and failing to resume its session ([#15742](https://github.com/can1357/oh-my-pi/pull/15742) by [@sapran](https://github.com/sapran))
+- Fixed aborted and timed-out stdio MCP requests continuing to run on the server: OMP now sends `notifications/cancelled` with the original request id, once and never for `initialize`, after settling the call and without waiting on the pipe ([#16430](https://github.com/can1357/oh-my-pi/pull/16430) by [@alphastorm](https://github.com/alphastorm))
+- Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
+- Fixed MCP tools running a call twice when the server connection dropped mid-request: a stdio request already written to the server, or an HTTP or legacy SSE request whose connection reset or closed after it was sent, now fails as non-retryable with a diagnostic saying it may have run, instead of being replayed after a reconnect; requests that never left OMP, including refused connections, still reconnect and retry once ([#16429](https://github.com/can1357/oh-my-pi/pull/16429) by [@alphastorm](https://github.com/alphastorm))
+- Fixed `/move` path completion jumping into a subfolder on Tab: `..`, `.`, and `~` now complete to `../`, `./`, and `~/` before listing their children, a trailing `\` lists a folder on Windows, absolute Windows paths (`C:/…`) are no longer rewritten as relative paths, and the project directory is offered as `./` instead of `/`
+- Line range reads of `ssh://`, URLs and other in-memory resources no longer return only the line above the range when that line fills the 50KB budget; the page now starts at the requested line, and byte-limit notices state the 50KB limit instead of the bytes shown ([#16391](https://github.com/can1357/oh-my-pi/pull/16391) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Auto-QA grievances sharing your home directory and login name with the qa.omp.sh collector; paths under your home are sent as `~/…`, and the login name inside labels and paths as `<user>`, including reports recorded before this fix ([#16409](https://github.com/can1357/oh-my-pi/pull/16409) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the `computer` tool's `control.acquire` prompt, left unanswered, failing the whole call with "Computer code execution timed out"; the prompt now expires shortly before the timeout and the call returns `reason: "unanswered"` ([#16388](https://github.com/can1357/oh-my-pi/pull/16388) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed reads whose optional leading context line exceeded the byte budget returning only the oversized-line notice or a preview of that context line and hiding the requested lines; the read now retries from the requested start without leading context ([#16485](https://github.com/can1357/oh-my-pi/pull/16485) by [@adi-IL](https://github.com/adi-IL)).
+- Fixed `read path:N:raw` (and `:raw:N`, URLs included) returning a page from line `N` instead of the one line `N`; `grep` on internal and web URLs now filters `:N:raw` to that line too, and `:N-:raw` still runs on from `N` ([#16438](https://github.com/can1357/oh-my-pi/pull/16438) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Anthropic web search answers breaking into separate paragraphs at every citation, with sentences split mid-way and lines starting with `.` ([#16396](https://github.com/can1357/oh-my-pi/pull/16396) by [@a-glapinski](https://github.com/a-glapinski))
+- Fixed custom tools that import an `@oh-my-pi/*` package (such as `@oh-my-pi/pi-natives` or `@oh-my-pi/pi-utils`) failing to load with "Cannot find package" in the installed `omp` binary; they now get the host's copy, as extensions already did ([#16421](https://github.com/can1357/oh-my-pi/pull/16421) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed resuming a session selecting an abandoned branch after a late off-branch entry such as a background bash result; off-branch entries now record the active leaf they interrupted and replay restores it ([#16483](https://github.com/can1357/oh-my-pi/pull/16483) by [@adi-IL](https://github.com/adi-IL)).
+- Fixed hashline `REM` deleting and `MV` moving a file under an invented or stale tag; a bare file op now needs the file's current tag, like a line edit ([#16381](https://github.com/can1357/oh-my-pi/pull/16381) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `write` deleting the leading numbers of every line in content such as hex dumps, disassembly and timestamped logs; it now removes copied `read` line numbers only when they count up by one, as `read` and `grep` print them ([#16441](https://github.com/can1357/oh-my-pi/pull/16441) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `auto` thinking chosen for the DEFAULT role in the `/model` hub reverting to the model's default effort (e.g. `max` on Z.AI `glm-5.3`) on the next launch ([#16370](https://github.com/can1357/oh-my-pi/issues/16370), [#16398](https://github.com/can1357/oh-my-pi/pull/16398) by [@alvadorn](https://github.com/alvadorn))
+- Fixed Google Antigravity web search failing with false 429 quota-exhausted errors ([#11849](https://github.com/can1357/oh-my-pi/pull/11849) by [@jotafurtado](https://github.com/jotafurtado))
+- Fixed omp exiting to the shell when the model picker (Alt+P) or model hub opened after compatibility extensions loaded ([#12293](https://github.com/can1357/oh-my-pi/issues/12293), [#12653](https://github.com/can1357/oh-my-pi/pull/12653) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed todo lists set over RPC `set_todos` disappearing when the session is reloaded, resumed, or compacted; `RpcClient.setTodos()` sends the command ([#12590](https://github.com/can1357/oh-my-pi/pull/12590) by [@anthonyrisinger](https://github.com/anthonyrisinger))
+- Fixed batch `task` calls silently running the default agent when a specialist such as `reviewer`, `scout`, or a custom agent was set at the top level instead of in `tasks[].agent`; the call is now rejected with that guidance ([#12610](https://github.com/can1357/oh-my-pi/pull/12610) by [@dbc-hbin](https://github.com/dbc-hbin))
+- Fixed sessions started before an omp upgrade losing word completion and restarting the shared word-completion daemon every 30 seconds, which reloaded its model for every session on the new version; they now use the newer daemon ([#15610](https://github.com/can1357/oh-my-pi/issues/15610)) ([#16380](https://github.com/can1357/oh-my-pi/pull/16380) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed supported Bedrock Claude models falling back to soft instead of remote compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
 - Added the **Ask and remember** approval mode (`tools.approvalMode: always-ask-cached`, `--approval-mode always-ask-cached`): it also asks before file reads, and file prompts can remember the folder or the file, for this session or across sessions, through `approval-cache.db` ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - Added `/forget-approvals` to forget every file and folder approval Ask and remember has recorded ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - Extension `ui.approve()` hosts can render the new `prompt.grants` choices and answer `{ grant, always }`; hosts that ignore them keep answering `once`/`session`/`deny` ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - Extension and custom tools can declare `approvalCacheTargets` to take part in Ask and remember grants ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
+- Added `proc://<id>/streams` for bash jobs: it lists the command's pipes, and `proc://<id>/streams/<n>` shows what has crossed pipe `n` so far, so `cmd | tail -5` can be followed live without rerunning `cmd`
+- Background job widgets are designed per job by the new `widget` model role (resolves like `smol` until you assign it): one request writes rules that read the job's output and its pipes (`cmd | tail` included), and every later update is computed locally with no further model calls or messages to the agent; a subagent gets a widget only once it says which output shows its progress, and a job with nothing worth charting gets none; turn them off with `async.widgets: false`
+- Running subagents now show their current step, in their own words, on the task card; the periodic completion check also asks the subagent which output shows its progress, so the job widget knows what to chart
+- The `wait` card shows the watched jobs as a row of tiles, each with its status, name (a subagent's in full), what it is doing, and its headline figure and live widget when it has one (a throughput chart with its target line, per-model bars, CI job status, trial progress), and a subagent's own completion estimate as a ring that turns from blue to green as it fills (hover the tile for the percentage); the HUD jobs pill shows the freshest job's headline and a mini chart, and hovering it opens a card with the running jobs as tiles; the jobs sheet shows the selected job's widget above its output, and the terminal status line appends the headline to the jobs count
+
+### Changed
+
+- While a subagent is focused, `/model`, `/switch`, `/effort`, `Alt+P`, `Ctrl+P`, and `Shift+Tab` change that subagent's model and thinking level (session-only) instead of telling you to return to the main session; `/model` and `Alt+M` open the session-only picker there, since role assignments configure the main session
 
 ### Fixed
 
+- Fixed `omp skill list` omitting skills from a `skills.customDirectories` entry that starts with `~`; such an entry now resolves against your home directory, matching the skill loader ([#16347](https://github.com/can1357/oh-my-pi/pull/16347) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed `grep` treating a `;`-separated list of internal URLs (e.g. `artifact://44;artifact://43`) as one URI and refusing to search it; every listed resource is now searched ([#14091](https://github.com/can1357/oh-my-pi/issues/14091))
+- Fixed `grep` refusing a web URL that carries a `:raw` (or `:conflicts`) selector before the page was fetched; the selector now reaches the fetch, so `:raw` searches the verbatim response body ([#14092](https://github.com/can1357/oh-my-pi/issues/14092))
+- Fixed browser `role/<role>[name="…" exact]` selectors in Chromium and Tern tabs matching nothing for many names copied from `observe()`; a button or link with visible text is no longer matched by its `title` ([#16252](https://github.com/can1357/oh-my-pi/pull/16252) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `/tan` clones with Mnemopi auto-recall re-sending the parent's recalled memories as an extra system-prompt block, which duplicated them and missed the parent's prompt cache ([#16337](https://github.com/can1357/oh-my-pi/issues/16337))
 - Fixed legacy pi extensions that import `contentText` from pi-ai or `formatSkillsForPrompt` from pi-coding-agent, such as `pi-claude-bridge`, failing to load ([#16313](https://github.com/can1357/oh-my-pi/pull/16313) by [@Jerryx333](https://github.com/Jerryx333))
 - Fixed legacy Pi plugins such as `pi-ssh-remote` crashing at session start when reading shell settings through `SettingsManager` ([#16256](https://github.com/can1357/oh-my-pi/issues/16256))
@@ -37,13 +88,18 @@
 - Fixed Enter on an unknown slash command such as `/not-a-command` running a command whose description happened to match it (e.g. `/loop`, which then resent every later prompt after each turn); Enter now sends what you typed, including as the deny-and-steer message for a pending tool approval, unless you select a suggestion first ([#16265](https://github.com/can1357/oh-my-pi/issues/16265))
 - Fixed `read` of web pages dropping collapsed sections such as accordion and expander panels (e.g. a product page's "Item details" table); content in `<template>`, `<noscript>` and scripts stays out ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
 - Fixed `/mcp reauth` and `/mcp add` opening an unrelated origin-root authorization server's login page when the authorization server an MCP server advertises in its protected-resource metadata has invalid metadata; discovery now uses only the advertised servers and reports the issuer mismatch naming the server ([#16339](https://github.com/can1357/oh-my-pi/issues/16339))
+- Fixed auto thinking offering the judge effort levels the current model does not support, which could leave a sparse-ladder model on the wrong level; with at most one usable level under the ceiling it now skips the judge call ([#16327](https://github.com/can1357/oh-my-pi/pull/16327) by [@savanne-kham](https://github.com/savanne-kham))
+- Fixed subagents that were cancelled, interrupted, timed out, or killed refusing messages as "hard-aborted and cannot be messaged or revived": a message (or Agent Hub revive/focus) now resumes them from their transcript with full context
+- Fixed interrupting a focused subagent to send it a queued message (empty Enter) sometimes ending its run as cancelled before it read the message; the subagent now answers the message and keeps working
+- Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
+- Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
+- Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 
 ## [18.12.2] - 2026-10-18
 
 ### Added
 
 - Added `computer.backgroundFallback` (`takeover` by default, or `refuse`): when a `computer` window input call has no background route, the tool reruns that one call in takeover, hands focus back to your app and says so in its result; `refuse` fails the call instead and also refuses the agent's own foreground requests (`takeover: true`, `raise()`, an activating `apps.open`, desktop input, and on macOS menus and `AXOpen`) ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
-- Added `proc://<id>/streams` for bash jobs: it lists the command's pipes, and `proc://<id>/streams/<n>` shows what has crossed pipe `n` so far, so `cmd | tail -5` can be followed live without rerunning `cmd`
 - Added DeepSeek as a web search engine (`web/deepseek`), using DeepSeek's new Search API with your existing `DEEPSEEK_API_KEY` or stored `deepseek` credential
 - Added `el.selectText(text, { prefix?, suffix?, select? })` to the macOS `computer` tool: it selects text (or places a caret) in a background app's text field without taking focus, moving the pointer or sending keys, so typing into that field replaces it ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `{ takeover: true }` to computer-use `win.move`, so a hover that a window refuses in the background can be retried in the foreground ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
@@ -52,14 +108,10 @@
 - Added: pressing Escape during takeover input now stops computer use for the rest of the turn, and that session's later `computer` calls are refused, unsent, until your next message ([#15564](https://github.com/can1357/oh-my-pi/pull/15564) by [@will-bogusz](https://github.com/will-bogusz))
 - Added the `computer` tool's `UserIntervened` error on macOS: input into an app you have used since the agent last read its window fails without sending, and the agent is told to read the window again and keep your edits ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `tui.completeScrollback`: rows a growing HUD or dialog pushes off screen go straight to scrollback instead of missing from it until it shrinks ([#15692](https://github.com/can1357/oh-my-pi/pull/15692) by [@Ilm-Alan](https://github.com/Ilm-Alan))
-- Background job widgets are designed per job by the new `widget` model role (resolves like `smol` until you assign it): one request writes rules that read the job's output and its pipes (`cmd | tail` included), and every later update is computed locally with no further model calls or messages to the agent; a subagent gets a widget only once it says which output shows its progress, and a job with nothing worth charting gets none; turn them off with `async.widgets: false`
-- Running subagents now show their current step, in their own words, on the task card; the periodic completion check also asks the subagent which output shows its progress, so the job widget knows what to chart
-- The `wait` card shows the watched jobs as a row of tiles, each with its status, name (a subagent's in full), what it is doing, and its headline figure and live widget when it has one (a throughput chart with its target line, per-model bars, CI job status, trial progress), and a subagent's own completion estimate as a ring that turns from blue to green as it fills (hover the tile for the percentage); the HUD jobs pill shows the freshest job's headline and a mini chart, and hovering it opens a card with the running jobs as tiles; the jobs sheet shows the selected job's widget above its output, and the terminal status line appends the headline to the jobs count
 
 ### Changed
 
 - The `computer` tool and its errors no longer tell the model to retry with `takeover: true`, and its instructions tell it never to call `raise()` or `apps.open(…, { activate: true })` to make input work ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
-- While a subagent is focused, `/model`, `/switch`, `/effort`, `Alt+P`, `Ctrl+P`, and `Shift+Tab` change that subagent's model and thinking level (session-only) instead of telling you to return to the main session; `/model` and `Alt+M` open the session-only picker there, since role assignments configure the main session
 - Computer-use window input with `takeover` omitted now stays in the background after `computer.control.acquire`, so an acquired grant no longer activates the target app or moves the user's pointer; pass `takeover: true` for foreground input ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
 - Pressing Escape in your own app no longer stops the `computer` tool's background window input unless task control is held; Escape in omp still interrupts it, and physical Escape still stops takeover input ([#15176](https://github.com/can1357/oh-my-pi/pull/15176) by [@will-bogusz](https://github.com/will-bogusz))
 - Added Box questions to `ChainJudge`: they go only to Jev judges that answer them, and the box edges measure the image you passed even when it was padded to fit Jev's size bounds
@@ -77,12 +129,7 @@
 - Fixed Ollama Cloud sessions compacting too early on stripped thinking or too late after switching from another model ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
 - Fixed Google sign-in rejecting the `/login perplexity` SSO browser window with "This browser or app may not be secure"; the sign-in browser no longer runs in automation mode ([#16141](https://github.com/can1357/oh-my-pi/issues/16141))
 - Fixed `task.softRequestBudget` never stopping Cursor subagents ([#16182](https://github.com/can1357/oh-my-pi/pull/16182) by [@joseotaviorf](https://github.com/joseotaviorf))
-- Fixed subagents that were cancelled, interrupted, timed out, or killed refusing messages as "hard-aborted and cannot be messaged or revived": a message (or Agent Hub revive/focus) now resumes them from their transcript with full context
-- Fixed interrupting a focused subagent to send it a queued message (empty Enter) sometimes ending its run as cancelled before it read the message; the subagent now answers the message and keeps working
 - Fixed image judgments (`judge()`/`judge_batch()` with images) leaving TypeSafe Jev for the local `tiny` model whenever an image fell outside Jev's 280–1568 px bounds, which most screenshots do: images are now resized into the bounds, and strips padded, before Jev sees them
-- Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
-- Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
-- Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 - Fixed a Codex turn stopping on "Request failed … unsupported_native_inflight_message" when you sent a message while the response was writing text; the session now keeps the partial reply and continues with your message
 - Fixed the `bash` tool dropping variables, functions, and shell options between calls whenever auto-background was on (the default): a call that starts in the foreground now runs in the session's persistent shell, a failing command under `set -e` or an `exit` no longer resets that shell, and a call that overlaps a still-running one says it ran in a temporary shell ([#16153](https://github.com/can1357/oh-my-pi/pull/16153) by [@alphastorm](https://github.com/alphastorm))
 - Fixed the macOS `computer` tool's `StaleRef` for an element the app rebuilt in place, such as an Automator rule popup after its neighbour changed, leaving the agent to re-read the window: it now names the one element of the window with the fields the ref was read with, for the agent to check before acting on it ([#15574](https://github.com/can1357/oh-my-pi/pull/15574) by [@will-bogusz](https://github.com/will-bogusz))
@@ -1577,61 +1624,4 @@
 - Fixed agents looping for hours when every turn spends the whole output limit on reasoning: length-stop retries now tell the model its reasoning was discarded and to act in smaller steps, and a subagent whose length-stop recovery gives up now fails with that error instead of being re-prompted into the same loop
 - Fixed tagging a model with `^` mid-session dropping the provider prompt cache for every following turn: new `m<N>` pseudonyms now arrive as a hidden session notice instead of rewriting the `task` description, which only absorbs them at a base-prompt rebuild
 
-## [18.3.3] - 2026-09-27
-
-### Added
-
-- Added a unified predictive text engine with N-gram, SmolLM2, and macOS native providers, including cross-engine blending, background model downloads, and a cross-process prediction daemon.
-- Added the `omp predict` command for evaluating completion performance and support for ingesting existing Claude Code and Codex prompt histories to bootstrap predictions on new installations.
-- Added `omp skill list [dir] [--json]` to report skills resolved for a session directory, including discovery warnings in JSON output.
-- Added a centralized progress display for background tool and model downloads, including support for downloading the SmolLM2-135M word-completion model.
-- Added dynamic evaluation guidance through hidden session notices.
-- Added a required `complexity` rationale to the `task` tool to improve automatic thinking-depth selection.
-- Agents using `task` or `bash` now receive the `wait` tool for background-process coordination, and subagents can receive it when explicitly requested.
-- Added context-aware suggestions to empty composers based on agent activity and effort.
-- Added optional global or per-project memory scopes to the `retain` and `learn` tools when Mnemopi scoping is enabled.
-- Added `/btw` to focused subagent views for asking questions about that agent's transcript with separate side-conversation history.
-
-### Changed
-
-- Completion behavior now uses the N-gram engine for standard `auto` completion across platforms, with blended N-gram and SmolLM confidence scoring where applicable; the SmolLM2 model uses a 145 MB GGUF (Q8_0) download and is prefetched only when explicitly activated.
-- Updated `spelling.autocomplete` to use an enum-based engine configuration.
-- Completion ghost text is now preserved through manual keystrokes.
-- Window input actions now default to background execution; set `takeover: true` to opt into foreground activation, with clarified cross-platform coordinate and activation behavior.
-- `omp tiny-models download` can now download the word-completion model.
-- Updated `/play` help, read-tool summaries, platform-aware shortcut labels, and other UI hints for clearer interaction guidance.
-- Updated the empty-submit behavior to account for live-steered messages and surface pending live-steering status in the UI.
-- `ps --all` now includes exited global services, while the default view shows live global services.
-- Orchestrator task documentation now follows a Target/Change/Acceptance format.
-- Slash-command and hint usage tracking is now persistent and namespaced.
-
-### Fixed
-
-- Preserved MCP `structuredContent` in live tool-result details so evaluation callers can consume server data without reparsing model-facing JSON; spilled results continue to retain an artifact reference without duplicating the payload in session history.
-- Fixed Collab hosts becoming unable to reclaim a room after a brief network interruption; hosts now retry room recovery without losing guests or queued updates.
-- Fixed one-shot commands that stopped before completing, such as `omp config set` on a fresh Windows profile, incorrectly exiting successfully without output; they now report failure with diagnostic guidance.
-
-## [18.3.2] - 2026-09-25
-
-### Added
-
-- Added `ctx.agent` to the extension context, reporting whether the session is the top-level agent or a subagent, plus its registry id, agent definition name, task depth and parent id, so handlers rebound to subagent sessions can tell which agent they serve ([#13314](https://github.com/can1357/oh-my-pi/pull/13314) by [@andrebrait](https://github.com/andrebrait))
-- Added tracking of Anthropic's usage-limit wrap-up allowance for Claude subscription accounts: after the 5-hour or weekly limit is reached, the status line and `/slow status` show `limit reached · wrapping up · resets HH:MM`, and the agent is told to wrap up when neither low priority nor extra usage will continue the work ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
-
-### Changed
-
-- `providers.anthropic.slowMode` now controls only the low-priority lane; the usage-limit wrap-up allowance is tracked for every first-party Claude subscription account ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
-- Enter on the `/model` hub sidebar now moves focus to the model list (like →) instead of acting on the highlighted row ([#13347](https://github.com/can1357/oh-my-pi/pull/13347) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed the Windows bash tool exporting `TEMP`, `TMP`, and `TMPDIR` with 8.3 short names such as `ADMINI~1`, so they now match the long-form `pwd`/`$PWD` after `cd "$TEMP"` ([#13265](https://github.com/can1357/oh-my-pi/pull/13265) by [@CoderTCY](https://github.com/CoderTCY))
-- `edit` and `write` no longer refuse handwritten files named `generated.go`, `generated.ts`, `generated.js`, or `generated.py`; these are treated as auto-generated only when their header carries a generated-code marker ([#13138](https://github.com/can1357/oh-my-pi/issues/13138), [#13139](https://github.com/can1357/oh-my-pi/pull/13139) by [@radkawar](https://github.com/radkawar))
-- Fixed the `edit` tool warning that valid Go 1.26 `new(expr)` calls (e.g. `new(f(x))`) introduced a syntax error, and `ast_grep`/`ast_edit` reporting parse errors on them ([#13148](https://github.com/can1357/oh-my-pi/issues/13148), [#13149](https://github.com/can1357/oh-my-pi/pull/13149) by [@radkawar](https://github.com/radkawar))
-- Fixed hashline `PUT N*` / `CUT N*` on the first statement of a block (for example a Go or Python function that opens with an `if`) also replacing or deleting every statement after it ([#13153](https://github.com/can1357/oh-my-pi/issues/13153), [#13154](https://github.com/can1357/oh-my-pi/pull/13154) by [@radkawar](https://github.com/radkawar))
-- Fixed the `Full output: artifact://` link on large background bash and eval results pointing at a truncated copy with `[…elided…]` gaps instead of the complete output ([#13142](https://github.com/can1357/oh-my-pi/issues/13142), [#13143](https://github.com/can1357/oh-my-pi/pull/13143) by [@radkawar](https://github.com/radkawar))
-- Fixed `grep` paths like `dir/*.go` also matching files in subdirectories of `dir` ([#13146](https://github.com/can1357/oh-my-pi/issues/13146), [#13150](https://github.com/can1357/oh-my-pi/pull/13150) by [@radkawar](https://github.com/radkawar))
-- Fixed auto-compaction re-sending a failed native (server-side) compaction on every turn, re-reading the full context each time; after a failure a retry would repeat, the next configured method runs instead until a compaction succeeds ([#13310](https://github.com/can1357/oh-my-pi/pull/13310) by [@alphastorm](https://github.com/alphastorm))
-- Fixed a `/slow off` session resending requests indefinitely when another session had activated the shared Anthropic low-priority lane ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@04d4ab14b45f](https://github.com/can1357/oh-my-pi/blob/04d4ab14b45f8dbd4055b675519f8815a1eb1841/packages/coding-agent/CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@3faa7ce5154a](https://github.com/can1357/oh-my-pi/blob/3faa7ce5154a0a1e29561772048dac6dcab1c5cf/packages/coding-agent/CHANGELOG.md).
