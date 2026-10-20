@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -9,9 +9,11 @@ import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
-import { createMCPProxyTools, createSubagentSettings } from "../../task/executor";
+import { createMCPProxyTools, createSubagentSettings, followMCPTools } from "../../task/executor";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
+
+import { cfgTaskEnableLsp } from "../../task/settings";
 
 const TAN_LABEL_PREVIEW_LENGTH = 80;
 
@@ -68,14 +70,18 @@ export class TanCommandController {
 		}
 
 		const parentSessionId = session.sessionId;
-		// Providers route on `promptCacheKey ?? sessionId`, so the parent's live
-		// requests may cache under a pinned key that differs from its session id
-		// (the parent being itself a fork/tan). Mirror exactly what the parent
-		// populated the cache under — same rule as advisor and handoff calls.
-		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
+		// Explicit keys stay pinned; automatic candidates must remain model-gated
+		// if the clone later switches models or falls back during authentication.
+		const taskPromptCacheKey = this.ctx.sessionManager.getHeader()?.taskPromptCacheKey;
+		const parentPromptCacheKey =
+			session.agent.promptCacheKey ?? (taskPromptCacheKey === undefined ? parentSessionId : undefined);
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
+		// The copied prompt carries the parent's memory recall; the clone inherits it as delivered.
+		const parentMnemopiSessionState = session.getMnemopiSessionState?.();
 		const toolNames = session.getEnabledToolNames();
+		const activeToolNames = session.getActiveToolNames();
+		const mountedToolNames = session.getMountedXdevToolNames();
 		const modelRegistry = session.modelRegistry;
 		// Snapshot the parent's rebindable extensions and root policy at dispatch.
 		// The child rebinds these (skipping discovery) so it re-registers the
@@ -109,8 +115,7 @@ export class TanCommandController {
 		// artifacts in place — no copy needed.
 		const sessionDir = parentFile.slice(0, -6);
 		const settings = createSubagentSettings(this.ctx.settings);
-		const customTools = mcpManager ? createMCPProxyTools(mcpManager) : undefined;
-		const enableLsp = this.ctx.settings.get("task.enableLsp") !== false;
+		const enableLsp = cfgTaskEnableLsp.get(this.ctx.settings) !== false;
 		const agentRegistry = AgentRegistry.global();
 		const cloneId = `Tan-${Snowflake.next()}`;
 		const cloneFile = path.join(sessionDir, `${cloneId}.jsonl`);
@@ -129,6 +134,11 @@ export class TanCommandController {
 				// context; its cost must reflect its own work, not the parent's
 				// accumulated spend that session cost is otherwise derived from.
 				resetInheritedCost: true,
+				// The parent may be mid-turn: pair any tool call it left unresolved
+				// with an unknown-outcome result (the parent may still be running it)
+				// so the clone inherits a terminal transcript instead of rendering the
+				// parent's in-flight call as its own pending work (issue #11118).
+				repairInterruptedTail: true,
 			});
 
 			jobId = manager.register(
@@ -138,41 +148,56 @@ export class TanCommandController {
 					if (signal.aborted) throw new Error("Aborted before execution");
 
 					let clone: AgentSession | undefined;
+					// Mint proxies at clone time (not dispatch time) and subscribe first,
+					// so the clone follows MCP reloads for its whole run.
+					const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
 					try {
-						const created = await sdk.createAgentSession({
-							cwd,
-							sessionManager: cloneManager,
-							model,
-							thinkingLevel,
-							systemPrompt,
-							toolNames,
-							providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
-							providerPromptCacheKey: parentPromptCacheKey,
-							modelRegistry,
-							authStorage: modelRegistry.authStorage,
-							settings,
-							hasUI: false,
-							enableMCP: false,
-							customTools,
-							enableLsp,
-							agentId: cloneId,
-							agentDisplayName: "tan",
-							parentTaskPrefix: cloneId,
-							parentAgentId: ownerId,
-							agentRegistry,
-							disableExtensionDiscovery: true,
-							// `[]` is truthy and would make the child pick bindPreparedExtensions([])
-							// over a populated path fallback, so collapse an empty list to undefined.
-							preloadedPreparedExtensions: parentPreparedExtensions?.length
-								? parentPreparedExtensions
-								: undefined,
-							preloadedExtensionPaths: parentExtensionPaths?.length ? [...parentExtensionPaths] : undefined,
-							extensionRoots: () => parentExtensionRoots,
-							localProtocolOptions,
-						});
-						clone = created.session;
+						try {
+							const created = await sdk.createAgentSession({
+								cwd,
+								sessionManager: cloneManager,
+								model,
+								thinkingLevel,
+								systemPrompt,
+								toolNames,
+								mountedToolNames,
+								advertiseHeadlessAsk: activeToolNames.includes("ask"),
+								providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
+								providerPromptCacheKey: parentPromptCacheKey,
+								taskPromptCacheKey,
+								modelRegistry,
+								authStorage: modelRegistry.authStorage,
+								settings,
+								hasUI: false,
+								enableMCP: false,
+								mcpTools: mcpManager ? createMCPProxyTools(mcpManager) : undefined,
+								enableLsp,
+								agentId: cloneId,
+								agentDisplayName: "tan",
+								parentTaskPrefix: cloneId,
+								asyncJobManager: manager,
+								parentAgentId: ownerId,
+								agentRegistry,
+								disableExtensionDiscovery: true,
+								// `[]` is truthy and would make the child pick bindPreparedExtensions([])
+								// over a populated path fallback, so collapse an empty list to undefined.
+								preloadedPreparedExtensions: parentPreparedExtensions?.length
+									? parentPreparedExtensions
+									: undefined,
+								preloadedExtensionPaths: parentExtensionPaths?.length ? [...parentExtensionPaths] : undefined,
+								extensionRoots: () => parentExtensionRoots,
+								localProtocolOptions,
+								parentMnemopiSessionState,
+							});
+							clone = created.session;
+							await clone.setActiveToolPresentation(toolNames, mountedToolNames);
+						} catch (error) {
+							mcpFollower?.dispose();
+							throw error;
+						}
+						mcpFollower?.bind(clone);
 						clone.sessionManager?.appendSessionInit?.({
-							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
+							systemPrompt: clone.systemPrompt ?? systemPrompt,
 							task: trimmedWork,
 							tools: clone.getEnabledToolNames(),
 						});
@@ -193,14 +218,45 @@ export class TanCommandController {
 								timestamp: Date.now(),
 							});
 						};
-						// Compaction summarizes the fork notice away with the rest of the
-						// history, after which the clone re-adopts the parent's task as its
-						// own (the summary blends both). Re-inject after every successful
-						// compaction so the fork boundary survives summarization.
+						// The fork's request enters the transcript only once the initial
+						// prompt dispatches (its first `agent_start`). Compaction that
+						// fires before then is the pre-prompt pass on the inherited
+						// context: the pending request has not been appended yet and the
+						// dispatch adds it immediately after, so restoring it here would
+						// send the assignment twice — re-inject only the notice above it.
+						// Once the request is in history, restore the notice and request
+						// together only when summarization actually dropped the request:
+						// the notice must never claim a request that no longer follows it,
+						// and a request the summarizer kept (a recent turn within
+						// `compaction.keepRecentTokens`, or a prior re-injection still
+						// live) must not be duplicated onto the tail, which would present
+						// the same assignment again and risk restarting completed work.
+						let requestDispatched = false;
 						const unsubscribeCompaction = clone.subscribe(event => {
-							if (event.type === "auto_compaction_end" && event.result && !event.aborted) {
-								injectContextSwitch();
+							if (event.type === "agent_start") {
+								requestDispatched = true;
+								return;
 							}
+							if (event.type !== "auto_compaction_end" || !event.result || event.aborted) return;
+							if (!requestDispatched) {
+								injectContextSwitch();
+								return;
+							}
+							const requestRetained = (clone?.agent.state.messages ?? []).some(message => {
+								if (message.role !== "user") return false;
+								const content = message.content;
+								return typeof content === "string"
+									? content === trimmedWork
+									: content.some(part => part.type === "text" && part.text === trimmedWork);
+							});
+							if (requestRetained) return;
+							injectContextSwitch();
+							clone?.agent.appendMessage({
+								role: "user",
+								content: [{ type: "text", text: trimmedWork }],
+								attribution: "user",
+								timestamp: Date.now(),
+							});
 						});
 						try {
 							if (signal.aborted) {
@@ -213,6 +269,10 @@ export class TanCommandController {
 							injectContextSwitch();
 							await clone.prompt(trimmedWork, { attribution: "user" });
 							await clone.waitForIdle();
+							while (clone.hasPendingAsyncWork()) {
+								if (signal.aborted) throw new Error("Aborted while settling descendant work");
+								await untilAborted(signal, clone.settleAsyncWork());
+							}
 							return extractAssistantText(clone.getLastAssistantMessage()) || "(no output)";
 						} finally {
 							unsubscribeCompaction();

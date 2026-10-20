@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { type AssistantMessage, validateToolArguments } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { validateAgentToolArguments } from "./tool-arguments";
 import type {
 	AgentContext,
 	AgentLoopConfig,
@@ -10,6 +11,7 @@ import type {
 	SpeculativeChildDefinition,
 	SpeculativeChildHandle,
 	SpeculativeCommitContext,
+	SpeculativeLaunchContext,
 	SpeculativeOperationContext,
 	SpeculativePhysicalOutcome,
 	SpeculativeResourceAccess,
@@ -502,6 +504,7 @@ export class SpeculativeOperationCoordinator {
 				await this.#discardCandidate(candidate, "fingerprint_mismatch", "final tool call changed");
 			}
 		}
+		// oxlint-disable-next-line unicorn/no-useless-spread -- discardStreamSession mutates the map during iteration
 		for (const toolCallId of [...this.#streamSessions.keys()]) {
 			const finalCall = calls.get(toolCallId);
 			if (!finalCall) {
@@ -516,6 +519,17 @@ export class SpeculativeOperationCoordinator {
 			if (session && args !== undefined && !session.matchesFinalArgs(args as Record<string, unknown>)) {
 				await this.discardStreamSession(toolCallId, "final outer tool call arguments changed");
 			}
+		}
+	}
+
+	async authorizeLaunch(context: SpeculativeLaunchContext): Promise<SpeculativeAuthorization> {
+		if (this.#closed) return { allowed: false, reason: "speculation coordinator is closed" };
+		const authorize = this.config.host?.authorizeLaunch;
+		if (!authorize) return { allowed: false, reason: "host does not authorize speculative launches" };
+		try {
+			return await authorize.call(this.config.host, context);
+		} catch {
+			return { allowed: false, reason: "host launch authorization failed" };
 		}
 	}
 
@@ -699,15 +713,10 @@ export class SpeculativeOperationCoordinator {
 		}
 		let validatedArgs: Record<string, unknown>;
 		try {
-			validatedArgs = validateToolArguments(tool, toolCall);
+			validatedArgs = validateAgentToolArguments(tool, toolCall);
 		} catch {
-			if (!tool.lenientArgValidation) {
-				this.ineligible(toolCall, "tool arguments are not valid", source, parentToolCallId);
-				return undefined;
-			}
-			validatedArgs = { ...(toolCall.arguments as Record<string, unknown>) };
-			delete validatedArgs.__parseError;
-			delete validatedArgs.__rawJson;
+			this.ineligible(toolCall, "tool arguments are not valid", source, parentToolCallId);
+			return undefined;
 		}
 		let executionArgs: Record<string, unknown>;
 		try {

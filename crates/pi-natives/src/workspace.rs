@@ -2,12 +2,12 @@
 //!
 //! Walks a project tree once and returns the bounded entries needed to render
 //! the workspace tree plus directory-scoped AGENTS.md files. AGENTS.md files
-//! are checked directly in every traversed directory so a file-level gitignore
-//! rule cannot hide them, while ignored directories are still pruned by the
-//! walker.
+//! are read from each traversed directory's listing with ignore rules waived
+//! for that name, so a file-level gitignore rule cannot hide them, while
+//! ignored directories are still pruned by the walker.
 
 use std::{
-	collections::HashSet,
+	collections::{BTreeMap, BTreeSet, HashSet},
 	path::{Path, PathBuf},
 	sync::LazyLock,
 };
@@ -50,42 +50,85 @@ static EXCLUDED_DIR_SET: LazyLock<HashSet<&'static str>> =
 #[napi(object)]
 pub struct ListWorkspaceOptions<'env> {
 	/// Directory to scan.
-	pub path:              String,
+	pub path:                    String,
 	/// Maximum depth for returned tree entries. Root children are depth 1.
-	pub max_depth:         u32,
+	pub max_depth:               u32,
 	/// Include hidden files and directories. Default: false.
-	pub hidden:            Option<bool>,
+	pub hidden:                  Option<bool>,
 	/// Respect .gitignore files. Default: true.
-	pub gitignore:         Option<bool>,
+	pub gitignore:               Option<bool>,
 	/// Also surface AGENTS.md files in directories at depth 1..=4, even when
 	/// gitignore would otherwise hide the file. Walks deeper than `maxDepth`
 	/// to find them. Default: false.
-	pub collect_agents_md: Option<bool>,
+	pub collect_agents_md:       Option<bool>,
+	/// Report unreadable directories instead of silently skipping them: an
+	/// unreadable root fails the scan, and unreadable subdirectories are
+	/// returned in `unreadableDirectories` while the walk continues. Default:
+	/// false (startup discovery stays best-effort).
+	pub report_directory_errors: Option<bool>,
 	/// Timeout in milliseconds for the operation.
-	pub timeout_ms:        Option<u32>,
+	pub timeout_ms:              Option<u32>,
 	/// Abort signal for cancelling the operation.
-	pub signal:            Option<Unknown<'env>>,
+	pub signal:                  Option<Unknown<'env>>,
 }
 
 /// Result payload returned by a workspace scan.
 #[napi(object)]
 pub struct ListWorkspaceResult {
 	/// Entries within `maxDepth`, with mtime and regular-file size metadata.
-	pub entries:         Vec<GlobMatch>,
+	pub entries:                Vec<GlobMatch>,
 	/// Directory-scoped AGENTS.md files within depth 1..=4 (capped at 200).
 	/// Always empty when `collectAgentsMd` is false.
-	pub agents_md_files: Vec<String>,
+	pub agents_md_files:        Vec<String>,
 	/// True when any output cap was hit.
-	pub truncated:       bool,
+	pub truncated:              bool,
+	/// Subdirectories whose contents could not be listed. Always empty unless
+	/// `reportDirectoryErrors` is set.
+	pub unreadable_directories: Vec<WorkspaceDirectoryError>,
+}
+
+/// A subdirectory the scan could not list.
+#[napi(object)]
+pub struct WorkspaceDirectoryError {
+	/// Forward-slash path relative to the scan root.
+	pub path:    String,
+	/// Platform error, e.g. `Permission denied (os error 13)`.
+	pub message: String,
 }
 
 struct WorkspaceConfig {
-	root:              PathBuf,
-	max_depth:         usize,
-	walk_max_depth:    usize,
-	include_hidden:    bool,
-	use_gitignore:     bool,
-	collect_agents_md: bool,
+	root:                    PathBuf,
+	max_depth:               usize,
+	walk_max_depth:          usize,
+	include_hidden:          bool,
+	use_gitignore:           bool,
+	collect_agents_md:       bool,
+	report_directory_errors: bool,
+}
+
+#[derive(Default)]
+struct WorkspaceResults {
+	entries:         BTreeMap<String, GlobMatch>,
+	agents_md_files: BTreeSet<String>,
+	truncated:       bool,
+}
+
+impl WorkspaceResults {
+	fn insert_entry(&mut self, entry: GlobMatch) {
+		self.entries.entry(entry.path.clone()).or_insert(entry);
+		if self.entries.len() > MAX_ENTRIES {
+			self.entries.pop_last();
+			self.truncated = true;
+		}
+	}
+
+	fn insert_agents_md(&mut self, path: String) {
+		self.agents_md_files.insert(path);
+		if self.agents_md_files.len() > AGENTS_MD_LIMIT {
+			self.agents_md_files.pop_last();
+			self.truncated = true;
+		}
+	}
 }
 
 fn build_workspace_walk_request(config: &WorkspaceConfig) -> pi_walker::WalkRequest {
@@ -96,25 +139,20 @@ fn build_workspace_walk_request(config: &WorkspaceConfig) -> pi_walker::WalkRequ
 		.skip_node_modules(true)
 		.follow_links(pi_walker::FollowLinks::Never)
 		.detail(pi_walker::WalkDetail::Full)
+		// Entries past `max_depth` are walked only to find AGENTS.md, so they need
+		// names, not per-entry metadata syscalls.
+		.detail_max_depth(config.max_depth)
+		// File-level ignore rules must not hide AGENTS.md.
+		.unignored_file_name(config.collect_agents_md.then_some(AGENTS_MD_FILENAME))
 		.order(pi_walker::WalkOrder::Path)
 		.emit_root(false)
 		.depth(1, config.walk_max_depth)
-		.directory_errors(pi_walker::DirectoryErrorMode::SkipSkippable)
+		.directory_errors(if config.report_directory_errors {
+			pi_walker::DirectoryErrorMode::Visit
+		} else {
+			pi_walker::DirectoryErrorMode::SkipSkippable
+		})
 		.cache(false)
-}
-
-fn glob_match_from_path(root: &Path, path: &Path) -> Option<GlobMatch> {
-	let relative = pi_walker::normalize_relative_path(root, path);
-	if relative.is_empty() {
-		return None;
-	}
-	let (file_type, mtime, size) = pi_walker::classify_file_type(path)?;
-	Some(GlobMatch {
-		path: relative.into_owned(),
-		file_type: crate::iofs::from_walker_file_type(file_type),
-		mtime,
-		size: size.map(|value| value as f64),
-	})
 }
 
 fn is_file_or_file_symlink(path: &Path, file_type: FileType) -> bool {
@@ -143,95 +181,91 @@ fn is_excluded_workspace_entry(relative: &str, file_type: FileType) -> bool {
 	false
 }
 
-fn collect_agents_md_in_directory(
+/// Probe `<directory>/AGENTS.md` for a directory at the walk depth limit, whose
+/// listing the walker never reads. Such directories sit at or below
+/// `max_depth`, so the file is only an AGENTS.md candidate, never a tree entry.
+fn probe_agents_md_at_walk_limit(
 	config: &WorkspaceConfig,
 	directory: &Path,
 	directory_depth: usize,
-	entries: &mut Vec<GlobMatch>,
-	agents_md_files: &mut Vec<String>,
+	results: &mut WorkspaceResults,
 ) {
-	if !config.collect_agents_md {
+	if !(AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&directory_depth) {
 		return;
 	}
 	let candidate = directory.join(AGENTS_MD_FILENAME);
-	let Some(entry) = glob_match_from_path(&config.root, &candidate) else {
-		return;
-	};
-	if !is_file_or_file_symlink(&candidate, entry.file_type) {
-		return;
+	if std::fs::metadata(&candidate).is_ok_and(|metadata| metadata.is_file()) {
+		results.insert_agents_md(
+			pi_walker::normalize_relative_path(&config.root, &candidate).into_owned(),
+		);
 	}
-	let tree_depth = directory_depth + 1;
-	if tree_depth <= config.max_depth {
-		entries.push(entry.clone());
-	}
-	// AGENTS.md directory depth: root AGENTS.md is depth 0, child dir AGENTS.md
-	// is depth 1, and so on. We only surface files in depth 1..=4.
-	if (AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&directory_depth) {
-		agents_md_files.push(entry.path);
-	}
-}
-
-fn sort_dedup_entries(entries: &mut Vec<GlobMatch>) {
-	entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-	entries.dedup_by(|a, b| a.path == b.path);
-}
-
-fn sort_dedup_paths(paths: &mut Vec<String>) {
-	paths.sort_unstable();
-	paths.dedup();
 }
 
 fn run_list_workspace(
 	config: WorkspaceConfig,
 	ct: task::CancelToken,
 ) -> Result<ListWorkspaceResult> {
-	let mut entries = Vec::new();
-	let mut agents_md_files = Vec::new();
-	collect_agents_md_in_directory(&config, &config.root, 0, &mut entries, &mut agents_md_files);
-
-	let outcome = build_workspace_walk_request(&config)
-		.collect_with_heartbeat(|| ct.heartbeat())
+	let mut results = WorkspaceResults::default();
+	let mut unreadable_directories = Vec::new();
+	build_workspace_walk_request(&config)
+		.for_each_entry_with_heartbeat(
+			|| ct.heartbeat(),
+			|entry| {
+				let file_type = iofs::from_walker_file_type(entry.file_type);
+				if is_excluded_workspace_entry(entry.relative_path, file_type) {
+					return Ok(pi_walker::WalkDecision::SkipDescend);
+				}
+				if file_type == FileType::Dir {
+					if config.collect_agents_md && entry.depth == config.walk_max_depth {
+						probe_agents_md_at_walk_limit(
+							&config,
+							&entry.absolute_path,
+							entry.depth,
+							&mut results,
+						);
+					}
+				} else if config.collect_agents_md
+					&& entry.relative_path.rsplit('/').next() == Some(AGENTS_MD_FILENAME)
+					// AGENTS.md directory depth: root AGENTS.md is depth 0, child dir
+					// AGENTS.md is depth 1, and so on. Only depths 1..=4 are surfaced.
+					&& (AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&(entry.depth - 1))
+					&& is_file_or_file_symlink(&entry.absolute_path, file_type)
+				{
+					results.insert_agents_md(entry.relative_path.to_owned());
+				}
+				if entry.depth <= config.max_depth {
+					results.insert_entry(GlobMatch {
+						path: entry.relative_path.to_owned(),
+						file_type,
+						mtime: entry.mtime,
+						size: entry.size,
+					});
+				}
+				Ok(pi_walker::WalkDecision::Include)
+			},
+			|error| {
+				let relative = pi_walker::normalize_relative_path(&config.root, error.path);
+				if relative.is_empty() {
+					return Err(Error::from_reason(format!(
+						"Native directory scan failed for {}: {}",
+						error.path.display(),
+						error.error
+					)));
+				}
+				unreadable_directories.push(WorkspaceDirectoryError {
+					path:    relative.into_owned(),
+					message: error.error.to_string(),
+				});
+				Ok(pi_walker::WalkDecision::Skip)
+			},
+		)
 		.map_err(iofs::map_walker_error)?;
 
-	for entry in outcome.entries {
-		let file_type = iofs::from_walker_file_type(entry.file_type);
-		if is_excluded_workspace_entry(&entry.path, file_type) {
-			continue;
-		}
-
-		let entry_depth = entry.depth();
-		if file_type == FileType::Dir {
-			let directory = entry.absolute_path(&config.root);
-			collect_agents_md_in_directory(
-				&config,
-				&directory,
-				entry_depth,
-				&mut entries,
-				&mut agents_md_files,
-			);
-		}
-
-		if entry_depth <= config.max_depth {
-			entries.push(entry.into());
-		}
-	}
-
-	sort_dedup_entries(&mut entries);
-	sort_dedup_paths(&mut agents_md_files);
-
-	let entries_truncated = entries.len() > MAX_ENTRIES;
-	if entries_truncated {
-		entries.truncate(MAX_ENTRIES);
-	}
-	let agents_md_truncated = agents_md_files.len() > AGENTS_MD_LIMIT;
-	if agents_md_truncated {
-		agents_md_files.truncate(AGENTS_MD_LIMIT);
-	}
-
 	Ok(ListWorkspaceResult {
-		entries,
-		agents_md_files,
-		truncated: entries_truncated || agents_md_truncated,
+		entries: results.entries.into_values().collect(),
+		agents_md_files: results.agents_md_files.into_iter().collect(),
+		truncated: results.truncated,
+		unreadable_directories,
 	})
 }
 
@@ -248,6 +282,7 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 		hidden,
 		gitignore,
 		collect_agents_md,
+		report_directory_errors,
 		timeout_ms,
 		signal,
 	} = options;
@@ -256,8 +291,14 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 	task::blocking("listWorkspace", ct, move |ct| {
 		let max_depth = max_depth as usize;
 		let collect_agents_md = collect_agents_md.unwrap_or(false);
+		let report_directory_errors = report_directory_errors.unwrap_or(false);
 		let walk_max_depth = if collect_agents_md {
 			max_depth.max(AGENTS_MD_MAX_DEPTH)
+		} else if report_directory_errors {
+			// A depth-0 walk never opens the root, so an unreadable root would
+			// resolve empty. Walk one level so its listing error surfaces; the
+			// returned entries stay bounded by `max_depth`.
+			max_depth.max(1)
 		} else {
 			max_depth
 		};
@@ -269,8 +310,53 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 				include_hidden: hidden.unwrap_or(false),
 				use_gitignore: gitignore.unwrap_or(true),
 				collect_agents_md,
+				report_directory_errors,
 			},
 			ct,
 		)
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn file(path: String) -> GlobMatch {
+		GlobMatch { path, file_type: FileType::File, mtime: None, size: None }
+	}
+
+	#[test]
+	fn workspace_entry_cap_deduplicates_and_keeps_late_lexical_winners() {
+		let mut results = WorkspaceResults::default();
+		for index in (1..=MAX_ENTRIES).rev() {
+			let path = format!("{index:06}");
+			results.insert_entry(file(path.clone()));
+			results.insert_entry(file(path));
+		}
+		assert!(!results.truncated);
+		results.insert_entry(file("000000".to_owned()));
+		assert!(results.truncated);
+		assert_eq!(results.entries.len(), MAX_ENTRIES);
+		assert_eq!(results.entries.first_key_value().unwrap().0, "000000");
+		assert_eq!(results.entries.last_key_value().unwrap().0, "099999");
+		results.insert_entry(file("zzzzzz".to_owned()));
+		assert_eq!(results.entries.len(), MAX_ENTRIES);
+		assert_eq!(results.entries.last_key_value().unwrap().0, "099999");
+	}
+
+	#[test]
+	fn workspace_agents_cap_deduplicates_and_keeps_late_lexical_winners() {
+		let mut results = WorkspaceResults::default();
+		for index in (1..=AGENTS_MD_LIMIT).rev() {
+			let path = format!("{index:03}/AGENTS.md");
+			results.insert_agents_md(path.clone());
+			results.insert_agents_md(path);
+		}
+		assert!(!results.truncated);
+		results.insert_agents_md("000/AGENTS.md".to_owned());
+		assert!(results.truncated);
+		assert_eq!(results.agents_md_files.len(), AGENTS_MD_LIMIT);
+		assert_eq!(results.agents_md_files.first().unwrap(), "000/AGENTS.md");
+		assert_eq!(results.agents_md_files.last().unwrap(), "199/AGENTS.md");
+	}
 }

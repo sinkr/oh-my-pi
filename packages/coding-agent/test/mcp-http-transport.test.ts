@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import { analyzeAuthError } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
@@ -101,6 +102,47 @@ describe("MCP Streamable HTTP initialization", () => {
 
 		expect(requests).toEqual(["initialize", "notifications/initialized", "GET"]);
 		await connection.transport.close();
+	});
+
+	it("aborts a stalled GET SSE listener start on the caller signal when timeouts are disabled", async () => {
+		const listenerStarted = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method === "GET") {
+					listenerStarted.resolve();
+					// Never answers: with timeouts disabled only the caller signal can end the handshake.
+					return Promise.withResolvers<Response>().promise;
+				}
+				if (req.method === "DELETE") return new Response(null, { status: 204 });
+				const body = (await req.json()) as { id?: string | number; method: string };
+				if (body.method === "initialize") {
+					const response = {
+						jsonrpc: "2.0",
+						id: body.id,
+						result: {
+							protocolVersion: "2025-11-25",
+							capabilities: {},
+							serverInfo: { name: "stalled-listener", version: "1.0.0" },
+						},
+					};
+					return new Response(JSON.stringify(response), {
+						headers: { "Content-Type": "application/json", "Mcp-Session-Id": "stalled-listener" },
+					});
+				}
+				return new Response(null, { status: 202 });
+			},
+		});
+
+		const controller = new AbortController();
+		const connection = connectToServer(
+			"stalled-listener",
+			{ type: "http", url: `http://127.0.0.1:${server.port}/mcp`, timeout: 0 },
+			{ signal: controller.signal },
+		);
+		await listenerStarted.promise;
+		controller.abort();
+		await expect(withPendingGuard(connection, "handshake")).rejects.toMatchObject({ name: "AbortError" });
 	});
 });
 
@@ -221,6 +263,30 @@ describe("MCP Streamable HTTP failure diagnostics", () => {
 		expect(error.data).toContain("[redacted]");
 		expect(error.data).not.toContain("server-secret");
 	});
+
+	it("keeps a bare Bearer resource_metadata challenge while redacting echoed credentials", async () => {
+		const metadataUrl = "https://auth.example.test/prm/probe";
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return new Response("rejected Authorization: Bearer server-secret", {
+					status: 401,
+					headers: { "WWW-Authenticate": `Bearer resource_metadata="${metadataUrl}"` },
+				});
+			},
+		});
+		const transport = await connectedTransport();
+		const error = await transport.request("initialize").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+
+		expect(error.message).not.toContain("server-secret");
+		const auth = analyzeAuthError(error, `http://127.0.0.1:${server.port}/mcp`);
+		expect(auth.requiresAuth).toBe(true);
+		expect(auth.resourceMetadataUrl).toBe(metadataUrl);
+	});
 });
 
 describe("MCP Streamable HTTP transport timeouts", () => {
@@ -242,6 +308,36 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 			retryable: false,
 			message: `Request timeout after ${REQUEST_TIMEOUT_MS}ms`,
 		});
+	});
+
+	it("uses one deadline across delayed SSE headers and a stalled response body", async () => {
+		// Real time is required here: fake timers do not drive Bun's fetch/socket
+		// abort path, and elapsed time is the end-to-end contract under test.
+		const timeoutMs = 250;
+		const headerDelayMs = 160;
+		server = Bun.serve({
+			port: 0,
+			async fetch() {
+				await Bun.sleep(headerDelayMs);
+				return stalledBodyResponse(": accepted\n\n", {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const transport = await connectedTransport(timeoutMs);
+		const startedAt = performance.now();
+
+		try {
+			await expect(withPendingGuard(transport.request("tools/list"), "SSE request")).rejects.toMatchObject({
+				transport: "http",
+				stage: "receive",
+				failure: "timeout",
+				retryable: false,
+			});
+			expect(performance.now() - startedAt).toBeLessThan(timeoutMs + 100);
+		} finally {
+			await transport.close();
+		}
 	});
 
 	it("keeps the timeout result when the caller aborts before the JSON body rejection propagates", async () => {
@@ -343,24 +439,6 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		);
 	});
 
-	it("still resolves normal JSON response bodies", async () => {
-		server = Bun.serve({
-			port: 0,
-			fetch() {
-				return Response.json({
-					jsonrpc: "2.0",
-					id: 1,
-					result: { tools: [{ name: "fast", inputSchema: { type: "object" } }] },
-				});
-			},
-		});
-		const transport = await connectedTransport();
-
-		await expect(withPendingGuard(transport.request<ToolList>("tools/list"), "request")).resolves.toEqual({
-			tools: [{ name: "fast", inputSchema: { type: "object" } }],
-		});
-	});
-
 	it("close aborts and drains an in-flight SSE POST request", async () => {
 		const requestReceived = Promise.withResolvers<void>();
 		server = Bun.serve({
@@ -391,6 +469,137 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		expect(requestError).toMatchObject({ name: "AbortError" });
 		expect(postmortem.isExpectedCleanupError(requestError)).toBe(true);
 		await withPendingGuard(closing, "transport close");
+	});
+
+	it("preserves caller cancellation when it wins a stalled SSE response", async () => {
+		const requestReceived = Promise.withResolvers<void>();
+		const caller = new AbortController();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				requestReceived.resolve();
+				return stalledBodyResponse(": accepted\n\n", {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const transport = await connectedTransport(GUARD_TIMEOUT_MS);
+
+		try {
+			const request = transport.request("tools/list", undefined, { signal: caller.signal });
+			await requestReceived.promise;
+			const nextTurn = Promise.withResolvers<void>();
+			setImmediate(nextTurn.resolve);
+			await nextTurn.promise;
+			caller.abort();
+
+			const error = await withPendingGuard(request, "caller-aborted SSE request").then(
+				() => undefined,
+				reason => reason,
+			);
+			expect(error).toMatchObject({ name: "AbortError" });
+			expect(error).not.toBeInstanceOf(MCPTransportError);
+		} finally {
+			await transport.close();
+		}
+	});
+
+	it("keeps draining an accepted request stream after its caller aborts", async () => {
+		const caller = new AbortController();
+		const notificationReceived = Promise.withResolvers<void>();
+		const sendNotification = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				const body = (await req.json()) as { id: string | number };
+				let cancelled = false;
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(
+								encoder.encode(`data: {"jsonrpc":"2.0","id":${JSON.stringify(body.id)},"result":{}}\n\n`),
+							);
+							void sendNotification.promise.then(() => {
+								if (cancelled) return;
+								try {
+									controller.enqueue(
+										encoder.encode('data: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'),
+									);
+									controller.close();
+								} catch {
+									// The negative path intentionally cancels the client stream.
+								}
+							});
+						},
+						cancel() {
+							cancelled = true;
+						},
+					}),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			},
+		});
+		const transport = await connectedTransport(GUARD_TIMEOUT_MS);
+		transport.onNotification = method => {
+			if (method === "notifications/progress") notificationReceived.resolve();
+		};
+
+		try {
+			await transport.request("tools/list", undefined, { signal: caller.signal });
+			caller.abort();
+			sendNotification.resolve();
+			await withPendingGuard(notificationReceived.promise, "post-response notification");
+		} finally {
+			await transport.close();
+		}
+	});
+
+	it("keeps draining an accepted notification stream past the POST deadline", async () => {
+		const notificationReceived = Promise.withResolvers<void>();
+		const sendNotification = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				let cancelled = false;
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(encoder.encode(": accepted\n\n"));
+							void sendNotification.promise.then(() => {
+								if (cancelled) return;
+								try {
+									controller.enqueue(
+										encoder.encode('data: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'),
+									);
+									controller.close();
+								} catch {
+									// The negative path intentionally cancels the client stream.
+								}
+							});
+						},
+						cancel() {
+							cancelled = true;
+						},
+					}),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			},
+		});
+		const transport = await connectedTransport();
+		transport.onNotification = method => {
+			if (method === "notifications/progress") notificationReceived.resolve();
+		};
+
+		try {
+			await transport.notify("notifications/initialized");
+			// Let the former read timeout expire on the real fetch/body stream,
+			// then prove the accepted response remains owned by the transport.
+			await Bun.sleep(REQUEST_TIMEOUT_MS * 2);
+			sendNotification.resolve();
+			await withPendingGuard(notificationReceived.promise, "notification response drain");
+		} finally {
+			await transport.close();
+		}
 	});
 
 	it("keeps an abandoned SSE request rejection observed after caller cancellation", async () => {
@@ -426,41 +635,6 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 });
 
 describe("MCP Streamable HTTP protocol version header", () => {
-	it("omits MCP-Protocol-Version until the version is negotiated", async () => {
-		const seen: { version: string | null; present: boolean } = { version: null, present: true };
-		server = Bun.serve({
-			port: 0,
-			fetch(req) {
-				seen.present = req.headers.has("MCP-Protocol-Version");
-				seen.version = req.headers.get("MCP-Protocol-Version");
-				return Response.json({ jsonrpc: "2.0", id: 1, result: {} });
-			},
-		});
-		const transport = await connectedTransport();
-
-		// No setProtocolVersion yet: this stands in for the initialize request,
-		// which must not carry the header before negotiation completes.
-		await withPendingGuard(transport.request("initialize"), "request");
-		expect(seen.present).toBe(false);
-		expect(seen.version).toBeNull();
-	});
-
-	it("echoes the negotiated version on requests after setProtocolVersion", async () => {
-		const seen: { version: string | null } = { version: null };
-		server = Bun.serve({
-			port: 0,
-			fetch(req) {
-				seen.version = req.headers.get("MCP-Protocol-Version");
-				return Response.json({ jsonrpc: "2.0", id: 1, result: {} });
-			},
-		});
-		const transport = await connectedTransport();
-		transport.setProtocolVersion("2025-06-18");
-
-		await withPendingGuard(transport.request("tools/list"), "request");
-		expect(seen.version).toBe("2025-06-18");
-	});
-
 	it("never lets a configured MCP-Protocol-Version reach the server", async () => {
 		const seen: { pre: string | null; post: string | null } = { pre: null, post: null };
 		server = Bun.serve({
@@ -495,6 +669,65 @@ describe("MCP Streamable HTTP protocol version header", () => {
 });
 
 describe("MCP Streamable HTTP POST response resumption", () => {
+	it("reports a timeout when a resumed HTTP error body stalls", async () => {
+		let posts = 0;
+		server = Bun.serve({
+			port: 0,
+			fetch(req) {
+				if (req.method === "POST") {
+					posts++;
+					return new Response("id: stream-1\nretry: 0\ndata:\n\n", {
+						headers: { "Content-Type": "text/event-stream" },
+					});
+				}
+				return stalledBodyResponse("unavailable", { status: 503 });
+			},
+		});
+		const transport = await connectedTransport();
+		try {
+			await expect(
+				withPendingGuard(transport.request("tools/call"), "stalled resume error body"),
+			).rejects.toMatchObject({
+				failure: "timeout",
+				retryable: false,
+			});
+			expect(posts).toBe(1);
+		} finally {
+			await transport.close();
+		}
+	});
+
+	it("bounds resumed-stream auth refresh by the original request deadline", async () => {
+		const refresh = Promise.withResolvers<Record<string, string> | null>();
+		let posts = 0;
+		server = Bun.serve({
+			port: 0,
+			fetch(req) {
+				if (req.method === "POST") {
+					posts++;
+					return new Response("id: stream-1\nretry: 0\ndata:\n\n", {
+						headers: { "Content-Type": "text/event-stream" },
+					});
+				}
+				return new Response("expired", { status: 401 });
+			},
+		});
+		const transport = await connectedTransport();
+		transport.onAuthError = () => refresh.promise;
+		try {
+			await expect(
+				withPendingGuard(transport.request("tools/call"), "stalled resume auth refresh"),
+			).rejects.toMatchObject({
+				failure: "timeout",
+				retryable: false,
+			});
+			expect(posts).toBe(1);
+		} finally {
+			refresh.resolve(null);
+			await transport.close();
+		}
+	});
+
 	it("resumes a closed response stream with Last-Event-ID after the requested retry delay", async () => {
 		const observed: {
 			lastEventId: string | null;

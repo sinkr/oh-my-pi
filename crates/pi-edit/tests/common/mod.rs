@@ -110,14 +110,16 @@ impl Workspace {
 			policy: PathPolicy {
 				cwd:                  cwd.clone(),
 				home_dir:             cwd,
-				local_sandbox_root:   None,
-				vault_roots:          None,
+				url_schemes:          Vec::new(),
+				url_alias_schemes:    Vec::new(),
+				plan_writable_roots:  Vec::new(),
 				plan_active:          false,
 				block_auto_generated: true,
 			},
 			allow_fuzzy: true,
 			fuzzy_threshold: 0.95,
 			enforce_seen_lines: false,
+			max_columns: 512,
 			raw_input: false,
 		};
 		Self { dir, store: EditStore::new(), config }

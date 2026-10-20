@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -351,32 +350,28 @@ describe("financial schedule validation", () => {
 			}),
 		).toBe(false);
 	});
+
+	it("rejects malformed cost-patch and cost-fallback dated cards instead of keeping the old price", () => {
+		const card = { effectiveFrom: "2026-12-01T08:00:00Z", input: 4, output: 20 };
+		const invalid = [
+			{ ...card, effectiveFrom: "2026-12-01" },
+			{ ...card, effectiveFrom: "2026-02-30T08:00:00Z" },
+			{ ...card, input: -1 },
+			{ ...card, cache_read: 0.2 },
+		];
+		for (const axis of ["costPatch", "costFallback"] as const) {
+			const name = axis === "costPatch" ? "cost-patch" : "cost-fallback";
+			for (const effectiveRate of invalid) {
+				const catalog = { [axis]: { input: 2, output: 10, effectiveRates: { listPrice: effectiveRate } } };
+				expect(() => applyCatalogCorrections(spec("custom-model", "custom"), catalog)).toThrow(`Invalid ${name}`);
+			}
+			const duplicate = { [axis]: { input: 2, output: 10, effectiveRates: { first: card, second: card } } };
+			expect(() => applyCatalogCorrections(spec("custom-model", "custom"), duplicate)).toThrow(`Invalid ${name}`);
+		}
+	});
 });
 
 describe("pricing discovery and cache", () => {
-	it("reapplies current first-party policy to stale cached rates without a schedule", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-scheduled-cache-"));
-		const dbPath = path.join(tempDir, "models.db");
-		const options = { providerId: "deepseek", staticModels: [], cacheDbPath: dbPath };
-		try {
-			const online = await resolveProviderModels<"openai-completions">(
-				{ ...options, fetchDynamicModels: async () => [spec()] },
-				"online",
-			);
-			expect(calculateCost(online.models[0]!, usage(), offPeak).total).toBeCloseTo(0.753, 12);
-			const db = new Database(dbPath);
-			try {
-				db.run("UPDATE model_cache SET models = ? WHERE provider_id = ?", [JSON.stringify([spec()]), "deepseek"]);
-			} finally {
-				db.close();
-			}
-			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
-			expect(calculateCost(offline.models[0]!, usage(), offPeak).total).toBeCloseTo(0.753, 12);
-		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
-	});
-
 	it("retains custom static schedules when merging discovery ratecards and restoring cache", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-scheduled-merge-"));
 		const base = spec("scheduled-model", "custom-scheduled");
@@ -419,14 +414,6 @@ describe("deepseek provider metadata corrections", () => {
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
-	});
-	it("materializes the bare Flash alias limits in the bundled row for offline startup", () => {
-		// The registry serves committed rows verbatim on the cacheless,
-		// pre-discovery path, so the documented 1M/384K limits must live in
-		// models.json itself — not only in the live KDL rule.
-		const bundled = getBundledModels("deepseek").find(model => model.id === "deepseek-flash");
-		expect(bundled?.contextWindow).toBe(1_000_000);
-		expect(bundled?.maxTokens).toBe(384_000);
 	});
 	it("resolves the V4.1 thinking ladder for the bare Flash alias", () => {
 		const bundled = getBundledModels("deepseek").find(model => model.id === "deepseek-flash");

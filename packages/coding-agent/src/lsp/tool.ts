@@ -8,22 +8,23 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { isEnoent, isFsError, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { type Theme, theme } from "../modes/theme/theme";
+import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
-import { replaceTabs, shortenPath } from "../tools/render-utils";
-import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
-import { clampTimeout } from "../tools/tool-timeouts";
+import { replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
-	ensureFileOpen,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
 	type LspServerStatus,
+	reconcileFileFromDisk,
 	reconcileIdleChecker,
 	refreshFile,
 	sendNotification,
@@ -40,7 +41,6 @@ import {
 	isOnlyQueriedDeclaration,
 	MAX_GLOB_DIAGNOSTIC_TARGETS,
 	normalizeLocationResult,
-	PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	PROJECT_INDEXED_ACTIONS,
 	REFERENCE_CONTEXT_LIMIT,
 	REFERENCES_RETRY_COUNT,
@@ -76,14 +76,13 @@ import {
 	type Location,
 	type LocationLink,
 	type LspClient,
-	type LspParams,
-	type LspToolDetails,
 	lspSchema,
 	type ServerConfig,
 	type SymbolInformation,
 	type TextEdit,
 	type WorkspaceEdit,
 } from "./types";
+import { type LspParams, type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
 import {
 	applyCodeAction,
 	dedupeWorkspaceSymbols,
@@ -94,7 +93,6 @@ import {
 	formatDiagnostic,
 	formatDiagnosticsSummary,
 	formatDocumentSymbol,
-	formatGroupedDiagnosticMessages,
 	formatLocation,
 	formatSymbolInformation,
 	formatWorkspaceEdit,
@@ -104,7 +102,11 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
+import { formatGroupedDiagnosticMessages } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
+
+import { cfgToolsMaxTimeout } from "../tools/settings";
+import { cfgLspRequestTimeout } from "./settings";
 
 const MAX_RENAME_PAIRS = 1000;
 
@@ -184,12 +186,19 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	readonly label = "LSP";
 	readonly loadMode = "discoverable";
 	readonly summary = "Query LSP (language server) for diagnostics, hover info, and references";
-	readonly description: string;
 	readonly parameters = lspSchema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(lspDescription);
+	constructor(private readonly session: ToolSession) {}
+
+	get description(): string {
+		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
+		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(this.session.settings), maxTimeout);
+		return prompt.render(lspDescription, {
+			defaultTimeoutSec: defaults.call,
+			defaultWaitSec: defaults.wait,
+			maxTimeoutSec: clampTimeout("lsp", TOOL_TIMEOUTS.lsp.max, maxTimeout),
+		});
 	}
 
 	static createIf(session: ToolSession): LspTool | null {
@@ -207,7 +216,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
 			throw new ToolError(`LSP action ${action} is disabled in this read-only session`);
 		}
-		const timeoutSec = clampTimeout("lsp", timeout, this.session.settings.get("tools.maxTimeout"));
+		const budget = resolveLspTimeouts(
+			timeout,
+			cfgLspRequestTimeout.get(this.session.settings),
+			cfgToolsMaxTimeout.get(this.session.settings),
+		);
+		const timeoutSec = budget.call;
+		const waitMs = budget.wait * 1000;
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const callerSignal = signal;
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
@@ -354,11 +369,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
 						// on demand; their first response routinely overruns the 3s single-file
 						// budget, which would otherwise surface as a false "OK". An explicit
-						// diagnostics request can afford to wait, bounded by the tool timeout.
+						// diagnostics request can afford to wait: `lsp.requestTimeout`, or the
+						// call's `timeout`, bounded by the tool timeout.
 						const waitCapMs = detailed
 							? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
 							: isProjectAwareLspServer(serverConfig)
-								? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
+								? waitMs
 								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
 						const diagnostics = await waitForDiagnostics(client, uri, {
 							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
@@ -931,7 +947,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			try {
 				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
 				if (resolvedTarget) {
-					await ensureFileOpen(client, resolvedTarget, signal);
+					await reconcileFileFromDisk(client, resolvedTarget, signal);
 				}
 				const result = await sendRequest(client, method, requestParams, signal);
 				const formatted =
@@ -1160,8 +1176,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const rustWorkspaceWait =
 				needsProjectIndex && isRustAnalyzerServer && targetFile !== null && hasRustWorkspaceAncestor(targetFile);
 
+			let reconciledFromDisk = false;
 			if (targetFile) {
-				await ensureFileOpen(client, targetFile, signal);
+				reconciledFromDisk = await reconcileFileFromDisk(client, targetFile, signal);
 			}
 			if (rustWorkspaceWait) {
 				await waitForProjectLoaded(client, signal);
@@ -1347,7 +1364,28 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 
 				case "code_actions": {
-					const diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
+					let diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
+					// A reconcile dropped the stale diagnostics and pushed a didChange;
+					// the server re-publishes (or a pull answers) asynchronously, so read
+					// the map now and quick-fix providers see an empty context.diagnostics.
+					// Wait for diagnostics matching the reconciled document version first.
+					// Non-diagnostic actions (refactors, source actions) still return if the
+					// wait cannot complete, so a diagnostics failure never breaks code_actions.
+					if (reconciledFromDisk) {
+						try {
+							diagnostics = await waitForDiagnostics(client, uri, {
+								timeoutMs: Math.min(
+									isProjectAwareLspServer(serverConfig) ? waitMs : SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+									timeoutSec * 1000,
+								),
+								signal,
+								expectedDocumentVersion: client.openFiles.get(uri)?.version,
+							});
+						} catch (err) {
+							if (err instanceof ToolAbortError || signal?.aborted) throw err;
+							diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
+						}
+					}
 					const context: CodeActionContext = {
 						diagnostics,
 						only: !apply && query ? [query] : undefined,

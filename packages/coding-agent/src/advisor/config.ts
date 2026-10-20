@@ -1,38 +1,22 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { expandAtImports } from "../discovery/at-imports";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
-/**
- * One advisor declared in a `WATCHDOG.yml` file. `model` is a model selector
- * with an optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`),
- * resolved exactly like any other model override; `tools` is a subset of
- * `BUILTIN_TOOL_NAMES` — any built-in name, including mutating tools such as
- * `edit`/`write`/`bash` (the advisor is a full agent). Omitted falls back to
- * the default `read`/`grep`/`glob` subset (plus `recall` when the active
- * memory backend provides it); an explicit empty list grants no
- * tools. `instructions` is the advisor's specialization, appended to the shared
- * baseline.
- */
-export interface AdvisorConfig {
-	name: string;
-	model?: string;
-	tools?: string[];
-	instructions?: string;
-	/** Per-advisor on/off toggle (default `true`). When `false`, the advisor
-	 *  stays in the roster but its runtime is never built — it shows `○` in
-	 *  the status line and `/advisor status` rather than disappearing. */
-	enabled?: boolean;
-	/**
-	 * Per-advisor maximum non-blocker advice notes accepted per advisor prompt
-	 * update (default `4`). Blockers are exempt from the budget.
-	 */
-	maxNotesPerUpdate?: number;
-}
+import {
+	ADVISOR_SYNC_BACKLOG_MODES,
+	type AdvisorConfig,
+	type AdvisorConfigScope,
+	type AdvisorSyncBacklog,
+	type WatchdogConfigDoc,
+} from "@oh-my-pi/pi-tui/overlays/advisor-config";
+
+export { ADVISOR_REVIEW_MODES, ADVISOR_SYNC_BACKLOG_MODES } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+export type { AdvisorReviewMode, AdvisorSyncBacklog } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 
 /**
  * Runtime health of a single advisor, surfaced in stats and the status line.
@@ -62,10 +46,25 @@ export interface DiscoveredAdvisors {
 	warnings: string[];
 }
 
+const reviewIntervalSchema = type("1 <= number.integer <= 9007199254740991");
+const syncBacklogSchema = type.enumerated(...ADVISOR_SYNC_BACKLOG_MODES);
+/** Unquoted `syncBacklog: 3` parses as a number; accept the numeric thresholds alongside the string enum. */
+const syncBacklogEntrySchema = type.enumerated(...ADVISOR_SYNC_BACKLOG_MODES, 1, 3, 5);
+const SYNC_BACKLOG_NUMERIC_THRESHOLDS = { 1: "1", 3: "3", 5: "5" } as const;
+
+function normalizeSyncBacklog(
+	value: AdvisorSyncBacklog | keyof typeof SYNC_BACKLOG_NUMERIC_THRESHOLDS,
+): AdvisorSyncBacklog {
+	return typeof value === "number" ? SYNC_BACKLOG_NUMERIC_THRESHOLDS[value] : value;
+}
+
 const advisorEntrySchema = type({
 	name: "string",
 	"model?": "string",
 	"tools?": "string[]",
+	"reviewMode?": "'turn' | 'agent-end'",
+	"reviewInterval?": reviewIntervalSchema,
+	"syncBacklog?": syncBacklogEntrySchema,
 	"instructions?": "string",
 	"enabled?": "boolean",
 	"maxNotesPerUpdate?": "number",
@@ -125,11 +124,7 @@ function parseWatchdogDoc(
  * survives; callers dedupe collisions.
  */
 export function slugifyAdvisorName(name: string): string {
-	const slug = name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-	return slug || "advisor";
+	return slugify(name) || "advisor";
 }
 
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -237,6 +232,9 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 				name: entry.name,
 				model: entry.model?.trim() || undefined,
 				tools: filterAdvisorTools(entry.tools, item.path),
+				reviewMode: entry.reviewMode,
+				reviewInterval: entry.reviewInterval,
+				syncBacklog: entry.syncBacklog === undefined ? undefined : normalizeSyncBacklog(entry.syncBacklog),
 				maxNotesPerUpdate:
 					typeof entry.maxNotesPerUpdate === "number" &&
 					Number.isFinite(entry.maxNotesPerUpdate) &&
@@ -255,23 +253,6 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 		sharedMaxNotesPerUpdate,
 		warnings,
 	};
-}
-
-/** Which level a `WATCHDOG.yml` lives at: the project root or the user agent dir. */
-export type AdvisorConfigScope = "project" | "user";
-
-/**
- * The editable contents of a single `WATCHDOG.yml` file: the shared top-level
- * `instructions` plus the advisor roster. Unlike {@link DiscoveredAdvisors}, this
- * is one file's raw view (no cross-level merge, no `@import` expansion) so the
- * config editor round-trips exactly what the user wrote.
- */
-export interface WatchdogConfigDoc {
-	instructions?: string;
-	maxNotesPerUpdate?: number;
-	advisors: AdvisorConfig[];
-	/** Per-entry problems found while loading (dropped entries). Shown when the file becomes active in the editor. */
-	warnings?: string[];
 }
 
 /**
@@ -341,6 +322,9 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		const advisor: AdvisorConfig = { name: a.name };
 		if (a.model?.trim()) advisor.model = a.model;
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
+		if (a.reviewMode !== undefined) advisor.reviewMode = a.reviewMode;
+		if (a.reviewInterval !== undefined) advisor.reviewInterval = a.reviewInterval;
+		if (a.syncBacklog !== undefined) advisor.syncBacklog = normalizeSyncBacklog(a.syncBacklog);
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
 		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
@@ -409,6 +393,11 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 					}
 				}
 			}
+			if (advisor.reviewMode !== undefined) lines.push(`    reviewMode: ${YAML.stringify(advisor.reviewMode)}`);
+			if (advisor.syncBacklog !== undefined) {
+				syncBacklogSchema.assert(advisor.syncBacklog);
+				lines.push(`    syncBacklog: ${YAML.stringify(advisor.syncBacklog)}`);
+			}
 			if (advisor.instructions?.trim()) {
 				appendYamlString(lines, "    ", "instructions", advisor.instructions);
 			}
@@ -419,6 +408,10 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 				advisor.maxNotesPerUpdate >= 1
 			) {
 				lines.push(`    maxNotesPerUpdate: ${Math.trunc(advisor.maxNotesPerUpdate)}`);
+			}
+			if (advisor.reviewInterval !== undefined) {
+				reviewIntervalSchema.assert(advisor.reviewInterval);
+				lines.push(`    reviewInterval: ${advisor.reviewInterval}`);
 			}
 		}
 	}

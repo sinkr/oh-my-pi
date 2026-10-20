@@ -96,6 +96,23 @@ export function isDemotedThinking(block: DemotedThinkingCarrier | null | undefin
 }
 
 /**
+ * Marks a thinking block that `transformMessages` carried natively from
+ * another host serving the same model (see `compat/reasoning-carry` in the
+ * catalog). Its host-bound signature and item id are gone, so encoders that
+ * replay reasoning from stored payloads (Responses) emit a plaintext item for
+ * it instead. Symbol-keyed so the marker never persists or reaches the wire.
+ */
+export const kCarriedReasoning = Symbol("provider.block.carriedReasoning");
+
+/** Carries the carried-reasoning marker without exposing a string-keyed property. */
+export type CarriedReasoningCarrier = object & { [kCarriedReasoning]?: boolean };
+
+/** True for thinking blocks carried natively from another host of the same model. */
+export function isCarriedReasoning(block: CarriedReasoningCarrier | null | undefined): boolean {
+	return block?.[kCarriedReasoning] === true;
+}
+
+/**
  * Marks an Anthropic wire message that was serialized from a source
  * `role: "user"` message.
  *
@@ -140,4 +157,61 @@ export type SyntheticUserCarrier = object & { [kSyntheticUser]?: boolean };
 /** True for `user` messages synthesized by message transformation. */
 export function isSyntheticUser(message: SyntheticUserCarrier | null | undefined): boolean {
 	return message?.[kSyntheticUser] === true;
+}
+
+/**
+ * Marks a message synthesized by a per-call context transform rather than
+ * loaded from persisted conversation history.
+ *
+ * Prompt-cache boundaries must skip these messages: their content is rebuilt
+ * for each request and cannot anchor a prefix reused by the next turn.
+ * Symbol-keyed so the marker never persists or reaches the provider wire.
+ */
+export const kPerCallContextMessage = Symbol("agent.message.perCallContext");
+
+/** Carries per-call context provenance without exposing a string-keyed property. */
+export type PerCallContextMessageCarrier = object & { [kPerCallContextMessage]?: true };
+
+/** Marks a message as synthesized for the current provider call. */
+export function markPerCallContextMessage(message: PerCallContextMessageCarrier): void {
+	message[kPerCallContextMessage] = true;
+}
+
+/** Copies per-call context provenance to a converted or projected message. */
+export function copyPerCallContextMessage(
+	target: PerCallContextMessageCarrier,
+	source: PerCallContextMessageCarrier,
+): void {
+	if (source[kPerCallContextMessage] === true) target[kPerCallContextMessage] = true;
+}
+
+/** True when a message was synthesized for the current provider call. */
+export function isPerCallContextMessage(message: PerCallContextMessageCarrier | null | undefined): boolean {
+	return message?.[kPerCallContextMessage] === true;
+}
+
+/**
+ * Original history position carried by a context message clone.
+ *
+ * Object-spread transforms retain this symbol, allowing the extension runner
+ * to distinguish byte-identical historical copies from inserted messages.
+ */
+export const kContextHistoryIndex = Symbol("agent.message.contextHistoryIndex");
+
+/** Carries a context message's original history position. */
+export type ContextHistoryIndexCarrier = object & { [kContextHistoryIndex]?: number };
+
+/** Reads a context message's original history position. */
+export function getContextHistoryIndex(message: ContextHistoryIndexCarrier | null | undefined): number | undefined {
+	return message?.[kContextHistoryIndex];
+}
+
+/** Records a context message's original history position. */
+export function setContextHistoryIndex(message: ContextHistoryIndexCarrier, index: number): void {
+	message[kContextHistoryIndex] = index;
+}
+
+/** Removes context-history tracking before provider conversion. */
+export function clearContextHistoryIndex(message: ContextHistoryIndexCarrier): void {
+	delete message[kContextHistoryIndex];
 }

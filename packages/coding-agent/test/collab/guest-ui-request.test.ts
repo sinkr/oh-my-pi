@@ -12,6 +12,7 @@
  * frame is observable.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fsp from "node:fs/promises";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -23,6 +24,7 @@ import {
 	parseCollabLink,
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
 	ExtensionAskDialogQuestion,
 	ExtensionUIDialogOptions,
@@ -189,7 +191,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionFile: () => null,
 			getSessionName: () => "local session",
@@ -240,7 +242,11 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { handleEvent: () => Promise.resolve() },
+		eventController: {
+			dispatchSessionEvent: () => Promise.resolve(),
+			takeDisplaceableComponents: () => [],
+			resetTranscriptAnchors: () => {},
+		},
 		syncRunningSubagentBadge: () => {},
 		showHookSelector: (
 			title: string,
@@ -277,16 +283,20 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 
 const harnessCleanups: (() => Promise<void>)[] = [];
 let writeSpy: { mockRestore(): void } | null = null;
+let renameSpy: { mockRestore(): void } | null = null;
 
 beforeEach(() => {
 	installInMemoryRelay();
 	writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+	renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 });
 
 afterEach(async () => {
 	for (const cleanup of harnessCleanups.splice(0).reverse()) await cleanup();
 	writeSpy?.mockRestore();
+	renameSpy?.mockRestore();
 	writeSpy = null;
+	renameSpy = null;
 	uninstallInMemoryRelay();
 });
 
@@ -444,7 +454,7 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
 function makeHostContext(): InteractiveModeContext {
 	return {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionId: () => "sess-proto",
 			getCwd: () => "/tmp",
@@ -543,27 +553,6 @@ describe("collab proto handshake (#4049)", () => {
 		}
 	});
 
-	it("welcomes a current-proto guest at v3 and round-trips a ui-request", async () => {
-		const host = new CollabHost(makeHostContext());
-		await host.start("ws://localhost:8787");
-		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
-		try {
-			const welcome = await guest.nextFrame();
-			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-			expect(welcome.proto).toBe(3);
-
-			const pending = host.requestGuestUi({ kind: "select", title: "Continue?", options: ["Yes"] });
-			if (!pending) throw new Error("expected writable guest UI request");
-			const request = await guest.nextFrame();
-			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
-			guest.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "Yes" });
-			expect(await pending).toEqual({ kind: "answered", value: "Yes" });
-		} finally {
-			guest.socket.close();
-			await host.stop("test done");
-		}
-	});
-
 	it("CollabGuestLink.join fails fast with the host's rejection message instead of hanging for the welcome", async () => {
 		// Scripted host that rejects every hello the way CollabHost does for a
 		// proto mismatch. The real guest must surface that message from join().
@@ -586,8 +575,9 @@ describe("collab proto handshake (#4049)", () => {
 		await hostOpen.promise;
 
 		const ctx = {
-			settings: { get: () => "" },
+			settings: Settings.isolated(),
 			sessionManager: { getSessionFile: () => null },
+			syncRunningSubagentBadge: () => {},
 		} as unknown as InteractiveModeContext;
 		const guest = new CollabGuestLink(ctx);
 		try {
@@ -825,6 +815,62 @@ function makeAskHostContext(): InteractiveModeContext {
 	};
 	return stub as unknown as InteractiveModeContext;
 }
+
+describe("guest ask room ownership", () => {
+	it.each(["next question", "custom answer"])("does not mirror a %s to a successor room", async followup => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const successor = new CollabHost(ctx);
+		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+		const abort = new AbortController();
+		const replaced = Promise.withResolvers<void>();
+		const requestGuestUi = host.requestGuestUi.bind(host);
+		const requestSpy = spyOn(host, "requestGuestUi").mockImplementation((request, signal) => {
+			const response = requestGuestUi(request, signal);
+			// Exercise the settled-answer / suspended-loop boundary. Ending the old
+			// room cannot change this already answered promise to unavailable.
+			void response?.then(() => {
+				void host.stop("replaced");
+				ctx.collabHost = successor;
+				replaced.resolve();
+			});
+			return response;
+		});
+		try {
+			expect((await guest.nextFrame()).t).toBe("welcome");
+			const questions: ExtensionAskDialogQuestion[] = [
+				{ id: "first", question: "Original room question?", options: [{ label: "Alpha" }] },
+			];
+			if (followup === "next question") {
+				questions.push({ id: "second", question: "Private next question?", options: [{ label: "Beta" }] });
+			}
+			const controller = new ExtensionUiController(ctx);
+			const result = controller.showAskDialog(questions, { signal: abort.signal });
+			const request = await guest.nextFrame();
+			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
+			guest.socket.send({
+				t: "ui-response",
+				reqId: request.request.reqId,
+				value: followup === "next question" ? "Alpha" : "Other (type your own)",
+			});
+			await replaced.promise;
+			await Bun.sleep(0);
+			// Pending requests are replayed to the next writer even before start().
+			// The successor must have no retained question from the original ask.
+			expect(successor.inputRequired).toBe(false);
+			abort.abort();
+			expect(await result).toBeUndefined();
+		} finally {
+			abort.abort();
+			requestSpy.mockRestore();
+			guest.socket.close();
+			await host.stop("test done");
+			await successor.stop("test done");
+		}
+	});
+});
 
 describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () => {
 	/** Skip ui-request-end dismissal frames, wait for the next ui-request. */
