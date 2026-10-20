@@ -1240,3 +1240,97 @@ it("parks a steer that lands mid-dispatch until the owning prompt goes live, the
 	expect(steerIndex).toBeGreaterThanOrEqual(0);
 	expect(answerIndex).toBeGreaterThan(steerIndex);
 });
+
+it("refuses a steer into an agent-initiated turn whose output has no client forwarder", async () => {
+	// An idle `triggerTurn` custom message starts an agent-initiated turn:
+	// `#beginInFlight` counts it, but no client prompt owns it, so its
+	// output has no promptTurn forwarder. A steer arriving mid-run must be
+	// refused (the host keeps its content and resubmits via session/prompt)
+	// instead of being admitted into a run whose answer would be dropped.
+	const turnStarted = Promise.withResolvers<void>();
+	const releaseTurn = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel([], { capabilities: {} }, [
+		async () => {
+			turnStarted.resolve();
+			await releaseTurn.promise;
+			return { content: ["agent-initiated done"] };
+		},
+	]);
+	const sent = session.sendCustomMessage(
+		{ customType: "background", content: "do work", display: false },
+		{
+			deliverAs: "nextTurn",
+			triggerTurn: true,
+		},
+	);
+	await turnStarted.promise;
+	expect(session.agent.state.isStreaming).toBe(true);
+	expect(session.isStreaming).toBe(true);
+
+	expect(await session.joinActiveTurn("steer the agent-initiated turn")).toBe(false);
+	expect(session.getQueuedMessages().steering).toEqual([]);
+
+	releaseTurn.resolve();
+	await sent;
+	await session.waitForIdle();
+	const messages = session.agent.state.messages;
+	expect(
+		messages.some(
+			message =>
+				message.role === "user" && JSON.stringify(message.content).includes("steer the agent-initiated turn"),
+		),
+	).toBe(false);
+});
+
+it("delivers two steers admitted in one dialog window first-arrival-first", async () => {
+	// Two admissions can land while one permission dialog is open, before
+	// the gate's abort wake runs: the first group must stay first (the
+	// promotion is FIFO within the window), not be shadowed by the second
+	// group's latest-slot write.
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	const turnStreamStarted = Promise.withResolvers<void>();
+	const releaseTurnStream = Promise.withResolvers<void>();
+	session = await createSessionWithMockModel([deleteTool as AgentTool], bridge, [
+		async () => {
+			turnStreamStarted.resolve();
+			await releaseTurnStream.promise;
+			return {
+				content: [{ type: "toolCall", id: "call-delete-1", name: "delete", arguments: { path: "/tmp/gone.ts" } }],
+			};
+		},
+		{ content: ["answered first steer"] },
+		{ content: ["answered second steer"] },
+	]);
+
+	const promptDone = session.prompt("delete something");
+	await turnStreamStarted.promise;
+	releaseTurnStream.resolve();
+	await permissionOpened.promise;
+
+	// Both admissions in the same dialog window, with no await between the
+	// calls: each call's enqueue fires before the gate's abort wake runs.
+	const first = session.joinActiveTurn("first steering question");
+	const second = session.joinActiveTurn("second steering question");
+	expect(await first).toBe(true);
+	expect(await second).toBe(true);
+
+	await promptDone;
+	await session.waitForIdle();
+	expect(deleteTool.executeCalls).toBe(0);
+
+	const messages = session.agent.state.messages;
+	const contentIndexOf = (needle: string) =>
+		messages.findIndex(message => message.role === "user" && JSON.stringify(message.content).includes(needle));
+	expect(contentIndexOf("first steering question")).toBeLessThan(contentIndexOf("second steering question"));
+
+	permissionPending.resolve({ outcome: "cancelled" });
+});

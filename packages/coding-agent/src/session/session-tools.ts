@@ -83,13 +83,22 @@ export interface SessionToolsHost {
 	 */
 	steeringArrivalSignal(): AbortSignal;
 	/**
-	 * The user-message group admitted by the latest steering arrival (the same
-	 * arrival that fires {@link steeringArrivalSignal}), or `undefined` before
-	 * any arrival. The permission gate promotes exactly these messages: an
-	 * agent-authored steer enqueued in the same window never fired the signal
-	 * and must not ride the promotion ahead of the user's superseding message.
+	 * Monotonic count of steering arrivals fired so far. The permission gate
+	 * snapshots it when it parks, so its read of
+	 * {@link steeringArrivalAdmitted} covers exactly the arrivals inside its
+	 * own wait window — never a group that fired before the dialog opened.
 	 */
-	steeringArrivalAdmitted(): readonly AgentMessage[] | undefined;
+	steeringArrivalSeq(): number;
+	/**
+	 * The user-message groups admitted by the steering arrivals after `since`
+	 * (a snapshot from {@link steeringArrivalSeq}), flattened in admission
+	 * order — first post-park arrival first — or `undefined` when none. The
+	 * permission gate promotes exactly these messages: an agent-authored
+	 * steer enqueued in the same window never fired the signal and must not
+	 * ride the promotion ahead of the user's superseding message, and an
+	 * earlier pre-dialog steer must not be re-promoted by a later dialog.
+	 */
+	steeringArrivalAdmitted(since?: number): readonly AgentMessage[] | undefined;
 	queuedMessageCount(): number;
 	planModeEnabled(): boolean;
 	model(): Model | undefined;
@@ -987,6 +996,11 @@ export class SessionTools {
 					// executors without a loop context (e.g. the Cursor bridge)
 					// fall back to the session's steering-arrival signal.
 					const steeringSignal = ctx?.toolCall?.steeringSignal ?? this.#host.steeringArrivalSignal();
+					// Park marker: only arrivals fired after this snapshot
+					// belong to this dialog's supersede window — a steer
+					// that fired before the dialog opened must keep its
+					// natural queue position, not ride this promotion.
+					const arrivalParkSeq = this.#host.steeringArrivalSeq();
 					// The message that supersedes this dialog delivers at the
 					// next batch boundary ahead of older queued steers, so the
 					// agent reads the question that stopped the call first —
@@ -1002,7 +1016,7 @@ export class SessionTools {
 					// text matching could hit an older equal-looking steer.
 					const { promise: steerPromise, resolve: resolveSteer } = Promise.withResolvers<PermissionRaceResult>();
 					const onSteer = () => {
-						const arrived = this.#host.steeringArrivalAdmitted() ?? [];
+						const arrived = this.#host.steeringArrivalAdmitted(arrivalParkSeq) ?? [];
 						const queued = new Set(this.#host.agent.peekSteeringQueue());
 						const promotable = arrived.filter(message => queued.has(message));
 						if (promotable.length > 0) {
