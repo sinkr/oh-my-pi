@@ -588,9 +588,9 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
  * (in-process), trafilatura, lynx, Parallel, Firecrawl, then Jina. The
  * `providers.fetch` setting picks the order — `auto` uses the default above; any
  * specific backend is tried first, then the remaining backends as fallbacks.
- * Every backend's output must clear the same quality gate (>100 non-whitespace
- * chars and not {@link isLowQualityOutput}) before it is accepted, otherwise the
- * next backend is tried.
+ * Every backend's output must clear the same length and JavaScript-gate checks,
+ * and a lynx dump the navigation check too ({@link isLowQualityOutput}), before
+ * it is accepted, otherwise the next backend is tried.
  *
  * The overall `timeout` budget bounds the whole call; remote backends (Parallel,
  * Firecrawl, Jina) are additionally capped at `REMOTE_READER_MAX_MS` so a hung
@@ -712,6 +712,16 @@ export async function renderHtmlToText(
 }
 
 /**
+ * True when most lines are short: menus in a lynx dump, or a wrapper page around
+ * a linked document. In a reader's markdown, tables, code and lists look the same.
+ */
+function isMostlyShortLines(content: string): boolean {
+	const lines = content.split("\n").filter(l => l.trim());
+	const shortLines = lines.filter(l => l.trim().length < 40);
+	return lines.length > 10 && shortLines.length / lines.length > 0.7;
+}
+
+/**
  * Check if rendered output looks JS-gated, or, for a lynx dump, mostly navigation.
  */
 function isLowQualityOutput(content: string, method: string): boolean {
@@ -729,18 +739,9 @@ function isLowQualityOutput(content: string, method: string): boolean {
 		return true;
 	}
 
-	// Mostly navigation (high link/menu density). Only lynx dumps the whole page, menus
-	// included; the reader backends already drop navigation, and in their markdown short
-	// lines are table rows, code, list items and headings, so the same ratio would reject
-	// a page's content for a weaker reader's.
-	if (method !== "lynx") return false;
-	const lines = content.split("\n").filter(l => l.trim());
-	const shortLines = lines.filter(l => l.trim().length < 40);
-	if (lines.length > 10 && shortLines.length / lines.length > 0.7) {
-		return true;
-	}
-
-	return false;
+	// Only lynx dumps the whole page, menus included; the reader backends already drop
+	// navigation, so their short lines are content and must not send the page to a weaker reader.
+	return method === "lynx" && isMostlyShortLines(content);
 }
 
 /**
@@ -1532,37 +1533,41 @@ async function renderUrl(
 			};
 		}
 
-		// Step 6: If rendered output is low quality, try more targeted fallbacks
-		if (isLowQualityOutput(htmlResult.content, htmlResult.method)) {
-			const docLinks = extractDocumentLinks(rawContent, finalUrl);
-			if (docLinks.length > 0) {
-				const docUrl = docLinks[0];
-				const binary = await fetchBinary(docUrl, timeout, signal);
-				if (binary.ok) {
-					const ext = getExtensionHint(docUrl, binary.contentDisposition);
-					const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
-					if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
-						notes.push(`Extracted and converted document: ${docUrl}`);
-						const output = finalizeOutput(converted.content);
-						return {
-							url,
-							finalUrl,
-							contentType: "application/document",
-							method: "extracted-document",
-							content: output,
-							fetchedAt,
-							truncated: false,
-							notes,
-						};
-					}
-					if (!converted.ok && converted.error) {
-						notes.push(`markit conversion failed: ${converted.error}`);
-					}
-				} else if (binary.error) {
-					notes.push(`Binary fetch failed: ${binary.error}`);
+		// Step 6: If rendered output is low quality, try more targeted fallbacks. A wrapper page
+		// around a PDF or DOCX renders as a few short lines in any reader, so its linked document
+		// is tried whatever reader rendered it.
+		const lowQuality = isLowQualityOutput(htmlResult.content, htmlResult.method);
+		const docLinks =
+			lowQuality || isMostlyShortLines(htmlResult.content) ? extractDocumentLinks(rawContent, finalUrl) : [];
+		if (docLinks.length > 0) {
+			const docUrl = docLinks[0];
+			const binary = await fetchBinary(docUrl, timeout, signal);
+			if (binary.ok) {
+				const ext = getExtensionHint(docUrl, binary.contentDisposition);
+				const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
+				if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
+					notes.push(`Extracted and converted document: ${docUrl}`);
+					const output = finalizeOutput(converted.content);
+					return {
+						url,
+						finalUrl,
+						contentType: "application/document",
+						method: "extracted-document",
+						content: output,
+						fetchedAt,
+						truncated: false,
+						notes,
+					};
 				}
+				if (!converted.ok && converted.error) {
+					notes.push(`markit conversion failed: ${converted.error}`);
+				}
+			} else if (binary.error) {
+				notes.push(`Binary fetch failed: ${binary.error}`);
 			}
+		}
 
+		if (lowQuality) {
 			const llmResult = await tryLlmEndpoints(finalUrl, timeout, signal);
 			if (llmResult) {
 				notes.push(`Used llms.txt fallback: ${llmResult.endpoint}`);

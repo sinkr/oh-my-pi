@@ -6,6 +6,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { renderHtmlToText } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
+import * as scraperUtils from "@oh-my-pi/pi-coding-agent/web/scrapers/utils";
 
 // An API reference page: its markdown is mostly short lines (table rows, code, list items), none of them navigation.
 const PARAMETERS = Array.from(
@@ -23,6 +24,13 @@ print(r.time)</code></pre>
 <h2>Returns</h2><ul><li>ok: bool</li><li>time: float</li><li>log: str</li></ul>
 <p>LAST_NEEDLE: the result object is immutable.</p></main></body></html>`;
 
+// A landing page around a PDF: a few short metadata lines and the download link.
+const REPORT_ITEMS = ["Annual report", "Fiscal year 2025", "Published March 2026", "48 pages", "English"]
+	.map(item => `<li>${item}</li>`)
+	.join("");
+const WRAPPER_PAGE = `<!doctype html><html><head><title>Annual report</title></head><body><main>
+<h1>Annual report 2025</h1><ul>${REPORT_ITEMS}${REPORT_ITEMS}</ul>
+<p><a href="/report.pdf">Download PDF</a></p></main></body></html>`;
 describe("read URL: a reader's short-line markdown is not taken for navigation", () => {
 	const servers: Bun.Server<undefined>[] = [];
 	afterEach(() => {
@@ -57,14 +65,11 @@ describe("read URL: a reader's short-line markdown is not taken for navigation",
 		expect(remote).not.toHaveBeenCalled();
 	});
 
-	it("reads the page without the 'mostly navigation' note", async () => {
+	async function readLocal(pages: Record<string, () => Response>) {
 		const { fetch } = stubFallbacks();
 		const server = Bun.serve({
 			port: 0,
-			fetch: request =>
-				new URL(request.url).pathname === "/run"
-					? new Response(DOCS_PAGE, { headers: { "content-type": "text/html" } })
-					: new Response("not found", { status: 404 }),
+			fetch: request => pages[new URL(request.url).pathname]?.() ?? new Response("not found", { status: 404 }),
 		});
 		servers.push(server);
 		const cwd = process.cwd();
@@ -82,12 +87,32 @@ describe("read URL: a reader's short-line markdown is not taken for navigation",
 			settings: Settings.isolated({ "fetch.enabled": true }),
 			fetch,
 		};
+		const result = await new ReadTool(session).execute("call", { path: `http://127.0.0.1:${server.port}/page` });
+		return { method: result.details?.method, text: result.content.find(block => block.type === "text")?.text ?? "" };
+	}
 
-		const result = await new ReadTool(session).execute("call", { path: `http://127.0.0.1:${server.port}/run` });
-		const text = result.content.find(block => block.type === "text")?.text ?? "";
+	it("reads the page without the 'mostly navigation' note", async () => {
+		const { method, text } = await readLocal({
+			"/page": () => new Response(DOCS_PAGE, { headers: { "content-type": "text/html" } }),
+		});
 
-		expect(result.details?.method).toBe("native");
+		expect(method).toBe("native");
 		expect(text).toContain("LAST_NEEDLE");
 		expect(text).not.toContain("mostly navigation");
+	});
+
+	it("still reads the document a short wrapper page links to", async () => {
+		vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
+			ok: true,
+			content: `# Annual report 2025\n\n${"DOCUMENT_ONLY_MARKER revenue and costs by segment. ".repeat(20)}`,
+		});
+
+		const { method, text } = await readLocal({
+			"/page": () => new Response(WRAPPER_PAGE, { headers: { "content-type": "text/html" } }),
+			"/report.pdf": () => new Response("%PDF-1.4 stub", { headers: { "content-type": "application/pdf" } }),
+		});
+
+		expect(method).toBe("extracted-document");
+		expect(text).toContain("DOCUMENT_ONLY_MARKER");
 	});
 });
