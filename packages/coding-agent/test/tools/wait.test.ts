@@ -316,7 +316,9 @@ describe("wait", () => {
 		const childWait = (manager = new AsyncJobManager({})) =>
 			new WaitTool(session(manager, "Child")).execute("child-wait", {});
 		/** Text of a wait that returned at once instead of blocking; never an error. */
-		const idleText = async (waiting: Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }> }>) => {
+		const idleText = async (
+			waiting: Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }> }>,
+		) => {
 			const result = await waiting;
 			expect(result.isError).toBeUndefined();
 			const [first] = result.content;
