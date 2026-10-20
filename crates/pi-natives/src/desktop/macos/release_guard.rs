@@ -113,24 +113,18 @@ fn scope_waiting<T>(
 	exit_wait: Duration,
 	action: impl FnOnce() -> T,
 ) -> T {
-	struct End;
+	struct End(Duration);
 	impl Drop for End {
 		fn drop(&mut self) {
-			end();
+			end(self.0);
 		}
 	}
 	let outermost = REQUEST.with_borrow_mut(|request| {
 		if request.is_some() {
 			return false;
 		}
-		let mut ledger = Ledger {
-			open: Vec::new(),
-			next_id: 0,
-			helper: None,
-			unguarded: false,
-			connect,
-			exit_wait,
-		};
+		let mut ledger =
+			Ledger { open: Vec::new(), next_id: 0, helper: None, unguarded: false, connect };
 		match presses {
 			Presses::Nothing => {},
 			Presses::Process => ledger.start(),
@@ -139,19 +133,18 @@ fn scope_waiting<T>(
 		*request = Some(ledger);
 		true
 	});
-	let _end = outermost.then(|| End);
+	let _end = outermost.then(|| End(exit_wait));
 	action()
 }
 
 /// Ends the request's stream, also while a panic unwinds it: the helper
 /// releases whatever is still open, then exits. The request waits for that,
 /// so its input ownership outlasts the releases and the helper's share of
-/// it. A helper still running past its wait (`EXIT_TIMEOUT`) with nothing to
-/// release, such as one that has not finished starting, is stopped rather
-/// than left holding that share into the next request.
-fn end() {
-	let Some(Ledger { open, helper: Some(helper), exit_wait, .. }) =
-		REQUEST.with_borrow_mut(Option::take)
+/// it. A helper still running past `exit_wait` (`EXIT_TIMEOUT` outside tests)
+/// with nothing to release, such as one that has not finished starting, is
+/// stopped rather than left holding that share into the next request.
+fn end(exit_wait: Duration) {
+	let Some(Ledger { open, helper: Some(helper), .. }) = REQUEST.with_borrow_mut(Option::take)
 	else {
 		return;
 	};
@@ -255,8 +248,6 @@ struct Ledger {
 	/// The helper could not start, or stalled; the request runs without one.
 	unguarded: bool,
 	connect:   fn() -> io::Result<Helper>,
-	/// How long the request waits for its helper to exit as it ends.
-	exit_wait: Duration,
 }
 
 impl Ledger {
@@ -1066,7 +1057,6 @@ mod tests {
 			helper:    Some(helper),
 			unguarded: false,
 			connect:   peer,
-			exit_wait: EXIT_TIMEOUT,
 		};
 		ledger.abandon();
 		assert!(ledger.unguarded);
