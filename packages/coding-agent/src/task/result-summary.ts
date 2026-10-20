@@ -12,8 +12,14 @@ import { escapeHarnessTags } from "../session/harness-tags";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
-/** Inline preview budget before the envelope points at `agent://<id>` instead. */
-const FULL_OUTPUT_THRESHOLD = 5000;
+/**
+ * Largest output inlined whole (~4k tokens). A cut output costs the parent a
+ * `read agent://<id>` turn plus the preview it then holds twice, which parents
+ * pay for most outputs past ~8k chars.
+ */
+const INLINE_OUTPUT_CHARS = 16_000;
+/** Head shown for an output over {@link INLINE_OUTPUT_CHARS}, with a pointer to `agent://<id>`. */
+const PREVIEW_CHARS = 5000;
 
 /**
  * Preview text for a child result. Falls back to "(no output)" — annotated
@@ -33,9 +39,9 @@ export function formatResultOutputFallback(result: Pick<SingleResult, "output" |
  * one huge string would otherwise preview as a lone `{`).
  */
 function previewHead(output: string): string {
-	const slice = output.slice(0, FULL_OUTPUT_THRESHOLD);
+	const slice = output.slice(0, PREVIEW_CHARS);
 	const lastNewline = slice.lastIndexOf("\n");
-	return lastNewline >= FULL_OUTPUT_THRESHOLD / 2 ? slice.slice(0, lastNewline) : slice;
+	return lastNewline >= PREVIEW_CHARS / 2 ? slice.slice(0, lastNewline) : slice;
 }
 
 /** Render the `<task-result>` envelope for a settled run. */
@@ -57,7 +63,7 @@ export function formatTaskResultSummary(
 	// <abort-reason>; an empty output already previews the error itself.
 	const error = result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 ? result.error : undefined;
 	const outputCharCount = result.outputMeta?.charCount ?? output.length;
-	const truncated = outputCharCount > FULL_OUTPUT_THRESHOLD && result.outputPath !== undefined;
+	const truncated = outputCharCount > INLINE_OUTPUT_CHARS && result.outputPath !== undefined;
 	const preview = truncated ? previewHead(output) : output;
 	// A stopped agent stays messageable; tell the parent so it can resume via
 	// irc instead of redoing the work. Isolated runs are parked without a

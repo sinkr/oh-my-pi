@@ -30,7 +30,7 @@ describe("formatTaskResultSummary", () => {
 		// the first line is `{` and the second is one multi-KB string. Cutting the
 		// preview at the last newline inside the budget used to leave the parent
 		// with a lone `{` and no idea what the child found.
-		const report = "# Port table\n\n| tool | file |\n|---|---|\n".repeat(400);
+		const report = "# Port table\n\n| tool | file |\n|---|---|\n".repeat(600);
 		const output = JSON.stringify({ summary: "Audit of 37 tools", report }, null, 2);
 		const summary = formatTaskResultSummary(settledResult(output), {
 			totalDurationMs: 1200,
@@ -45,7 +45,7 @@ describe("formatTaskResultSummary", () => {
 	});
 
 	it("keeps a markdown preview on a line boundary when one is in range", () => {
-		const lines = Array.from({ length: 400 }, (_, i) => `- item ${i} ${"x".repeat(20)}`);
+		const lines = Array.from({ length: 700 }, (_, i) => `- item ${i} ${"x".repeat(20)}`);
 		const summary = formatTaskResultSummary(settledResult(lines.join("\n")), {
 			totalDurationMs: 5,
 		});
@@ -59,6 +59,18 @@ describe("formatTaskResultSummary", () => {
 			totalDurationMs: 5,
 		});
 		expect(summary).toContain("<output>\ndone\n</output>");
+		expect(summary).not.toContain("<preview");
+		expect(summary).not.toContain("<meta");
+	});
+
+	it("inlines a report past the preview size whole, tail included", () => {
+		// Parents re-read most cut reports through agent://<id>; one that fits the
+		// inline budget must arrive whole so its closing findings are not lost.
+		const findings = Array.from({ length: 12 }, (_, i) => `F${i + 1}: ${"detail ".repeat(100).trimEnd()}`);
+		const output = findings.join("\n\n");
+		expect(output.length).toBeGreaterThan(5000);
+		const summary = formatTaskResultSummary(settledResult(output), { totalDurationMs: 5 });
+		expect(summary).toContain(`<output>\n${output}\n</output>`);
 		expect(summary).not.toContain("<preview");
 		expect(summary).not.toContain("<meta");
 	});
