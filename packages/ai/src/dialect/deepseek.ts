@@ -275,6 +275,34 @@ function advanceCodeState(state: CodeState, text: string): CodeState {
 	return { fence, run, newline };
 }
 
+/**
+ * Whether an inline span opened by a `fence`-long backtick run closes in
+ * `text` before its paragraph ends. Markdown renders an unmatched run as plain
+ * text, so only a closed span is code. `undefined` until the stream decides.
+ */
+function inlineSpanCloses(text: string, fence: number, final: boolean): boolean | undefined {
+	let run = 0;
+	let newline = false;
+	for (let i = 0; i < text.length; i++) {
+		const c = text.charCodeAt(i);
+		if (c === BACKTICK) {
+			run++;
+			newline = false;
+			continue;
+		}
+		if (run === fence) return true;
+		run = 0;
+		if (c === LINE_FEED) {
+			if (newline) return false;
+			newline = true;
+		} else if (!/\s/.test(text[i]!)) {
+			newline = false;
+		}
+	}
+	if (!final) return undefined;
+	return run === fence;
+}
+
 type State =
 	| "outside"
 	| "thinking"
@@ -403,7 +431,12 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				this.#buffer = trimmed;
 				this.#stripLeadingWhitespace = false;
 			}
-			const match = this.#findOutsideToken();
+			const match = this.#findOutsideToken(final);
+			if (typeof match === "number") {
+				this.#emitText(this.#buffer.slice(0, match), events);
+				this.#buffer = this.#buffer.slice(match);
+				return;
+			}
 			if (!match) {
 				const hold = final
 					? 0
@@ -417,6 +450,11 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			}
 			this.#emitText(this.#buffer.slice(0, match.index), events);
 			this.#buffer = this.#buffer.slice(match.index + match.raw.length);
+			// Markup inside an open inline span proves its backticks never closed.
+			if (match.raw !== match.token) {
+				const fence = settleBacktickRun(this.#code.fence, this.#code.run);
+				if (fence > 0 && fence < 3) this.#code = OUTSIDE_CODE;
+			}
 			if (match.token === DEEPSEEK_TOOL_CALLS_BEGIN) {
 				this.#inToolSection = true;
 				this.#state = "section";
@@ -778,14 +816,22 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	 * Earliest outside-state token: a literal (`<think>`, DSML tags, canonical
 	 * template tokens) or a re-spelled template token. Ties keep the literal.
 	 * A re-spelled token inside code the model quoted is prose about the token,
-	 * not markup; canonical spellings keep their long-standing handling.
+	 * not markup; canonical spellings keep their long-standing handling. An
+	 * inline span is code only once its closing run arrives, so a token after an
+	 * unclosed run returns its index to hold from until the paragraph decides.
 	 */
-	#findOutsideToken(): DeepSeekTokenMatch | undefined {
+	#findOutsideToken(final: boolean): DeepSeekTokenMatch | number | undefined {
 		const literal = findEarliestToken(this.#buffer, OUTSIDE_TOKENS);
 		let template = findDeepSeekTemplateToken(this.#buffer, OUTSIDE_TEMPLATE_TOKENS);
 		while (template && template.raw !== template.token && (!literal || template.index < literal.index)) {
 			const code = advanceCodeState(this.#code, this.#buffer.slice(0, template.index));
-			if (settleBacktickRun(code.fence, code.run) === 0) break;
+			const fence = settleBacktickRun(code.fence, code.run);
+			if (fence === 0) break;
+			if (fence < 3) {
+				const closes = inlineSpanCloses(this.#buffer.slice(template.index + template.raw.length), fence, final);
+				if (closes === undefined) return template.index;
+				if (!closes) break;
+			}
 			template = findDeepSeekTemplateToken(
 				this.#buffer,
 				OUTSIDE_TEMPLATE_TOKENS,

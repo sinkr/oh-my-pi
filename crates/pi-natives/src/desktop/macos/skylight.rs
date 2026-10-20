@@ -1256,7 +1256,7 @@ pub(super) fn with_background_watch<T>(
 				note_send();
 				result
 			},
-			|| control::wait(BACKGROUND_SETTLE),
+			BACKGROUND_SETTLE,
 		);
 		drop(stop);
 		let cleanup = observer.join().unwrap_or_else(|_| {
@@ -1472,18 +1472,16 @@ fn guard_focus(
 }
 
 /// Runs a guarded action, then the settle during which the guard still sends
-/// back an app the action brought forward. The settle follows a failed action
-/// too: an AX action can report an error and still activate its app, as
-/// `AXOpen` on a file in Chrome's Open panel fails with -25205 within 20 ms
-/// and Chrome comes to the front some 20 ms later. The action's own error wins
-/// over the settle's.
-fn run_then_settle<T>(
-	action: impl FnOnce() -> CoreResult<T>,
-	settle: impl FnOnce() -> CoreResult<()>,
-) -> CoreResult<T> {
+/// back an app the action brought forward, or takeover still holds the front
+/// for its input. The settle follows a failed action too: an AX action can
+/// report an error and still activate its app, as `AXOpen` on a file in
+/// Chrome's Open panel fails with -25205 within 20 ms and Chrome comes to the
+/// front some 20 ms later. A cancel during the settle leaves the action's
+/// result as it was ([`control::settle`]).
+fn run_then_settle<T>(action: impl FnOnce() -> CoreResult<T>, settle: Duration) -> CoreResult<T> {
 	let result = action();
-	let settled = settle();
-	result.and_then(|value| settled.map(|()| value))
+	control::settle(settle);
+	result
 }
 
 fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreResult<()> {
@@ -1714,7 +1712,7 @@ pub(super) fn with_foreground<T>(
 	})?;
 	let focused = ax::focused_window_id(pid);
 	if preserves_exact_existing_focus(Some(previous.psn), target, focused, wid) {
-		let result = action(false).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+		let result = run_then_settle(|| action(false), FOREGROUND_SETTLE);
 		report_focus_return(false, previous.pid);
 		return result;
 	}
@@ -1793,7 +1791,7 @@ pub(super) fn with_foreground<T>(
 	let result = if let Err(error) = prepare {
 		after_cleanup(Err(error), control::cleanup(restore))
 	} else {
-		let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+		let result = run_then_settle(|| action(true), FOREGROUND_SETTLE);
 		after_cleanup(result, control::cleanup(restore))
 	};
 	report_focus_return(handed_back.get(), previous.pid);
@@ -2735,24 +2733,35 @@ mod tests {
 	fn a_failed_action_still_settles_under_the_guard() {
 		// AXOpen in Chrome's Open panel fails with -25205, then Chrome comes
 		// forward: the guard must still be watching.
-		let mut settled = false;
+		let started = Instant::now();
 		let result: CoreResult<()> = run_then_settle(
 			|| Err(DesktopError::ax_failed("AX action 'AXOpen' failed (AXError(-25205))")),
-			|| {
-				settled = true;
-				Err(DesktopError::cancelled("stopped"))
-			},
+			BACKGROUND_SETTLE,
 		);
-		assert!(settled);
+		assert!(started.elapsed() >= BACKGROUND_SETTLE);
 		let error = result.expect_err("the action failed");
 		assert_eq!(
 			(error.code, error.message.as_str()),
 			(ErrorCode::AxFailed, "AX action 'AXOpen' failed (AXError(-25205))")
 		);
+	}
 
-		let result = run_then_settle(|| Ok(7), || Err(DesktopError::cancelled("stopped")));
-		assert_eq!(result.expect_err("the settle was cancelled").code, ErrorCode::Cancelled);
-		assert_eq!(run_then_settle(|| Ok(7), || Ok(())).ok(), Some(7));
+	#[test]
+	fn a_cancel_once_the_input_is_out_keeps_it_through_the_settle() {
+		// Escape or an abort arriving once takeover's keys are out.
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let result = control::with_token_for_test(&token, || {
+			run_then_settle(
+				|| {
+					source.cancel();
+					Ok(7)
+				},
+				FOREGROUND_SETTLE,
+			)
+		});
+		assert_eq!(result.ok(), Some(7));
+		assert!(token.check().is_err(), "the cancel still stops what follows");
 	}
 
 	/// The guard's view of a desktop where the target has just come forward over
