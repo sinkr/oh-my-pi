@@ -24,6 +24,9 @@ import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -1326,6 +1329,62 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.settings.getModelRole("subagent:deferred-default")).toBe("runtime-provider/runtime-model");
 			expect(cfgRetryFallbackChains.get(session.settings)["subagent:deferred-default"]).toEqual([
 				"runtime-provider/runtime-fallback-model",
+			]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps an explicitly empty inherited chain empty for a deferred singleton sharing the default model", async () => {
+		const primary = "runtime-provider/runtime-model";
+		const fallback = "runtime-provider/runtime-fallback-model";
+		const settings = Settings.isolated({ "retry.fallbackChains": { default: [fallback] } });
+		settings.setModelRole("default", primary);
+		const { session } = await createAgentSession({
+			...buildSessionOptions(primary),
+			settings,
+			modelPatternFallbackRole: "subagent:deferred-empty",
+			modelPatternDefaultFallbackChain: [],
+		});
+
+		try {
+			// Live chain lookup: the persisted role must win over `default`, which shares the model.
+			const recovery = new TurnRecovery({
+				model: () => session.model,
+				thinkingLevel: () => undefined,
+				sessionManager: session.sessionManager,
+				settings: session.settings,
+				modelRegistry: session.modelRegistry,
+				configWarnings: [],
+			} as unknown as TurnRecoveryHost);
+			const keys = recovery.retryFallbackChainKeys(primary);
+			expect(keys).toEqual(["subagent:deferred-empty"]);
+			expect(
+				keys.flatMap(role => recovery.findRetryFallbackCandidates(role, primary).map(candidate => candidate.raw)),
+			).toEqual([]);
+
+			// Resume after a runtime fallback answered must still restore the primary as the default.
+			session.sessionManager.appendModelChange(fallback, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			session.sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				api: "openai-completions",
+				provider: "runtime-provider",
+				model: "runtime-fallback-model",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			const context = session.sessionManager.buildSessionContext();
+			expect(getRestorableSessionModels(context.models, session.sessionManager.getLastModelChangeRole())).toEqual([
+				primary,
 			]);
 		} finally {
 			await session.dispose();

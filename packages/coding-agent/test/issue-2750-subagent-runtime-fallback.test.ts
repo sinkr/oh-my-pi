@@ -257,25 +257,25 @@ describe("subagent runtime model resolution", () => {
 			await runSubprocess({
 				cwd: "/tmp",
 				agent: {
-					name: "implementer-11",
+					name: "pinned-worker",
 					description: "test",
 					systemPrompt: "test",
 					source: "bundled",
-					model: ["@implementer-11"],
+					model: ["@pinned-worker"],
 				},
 				task: "work",
 				index: 0,
 				id: explicitlyEmpty ? "empty-role-chain" : "unset-role-chain",
 				modelOverride: ["primary/bad-runtime-model"],
-				modelRole: "implementer-11",
+				modelRole: "pinned-worker",
 				settings: Settings.isolated({
 					modelRoles: {
 						default: "primary/bad-runtime-model",
-						"implementer-11": "primary/bad-runtime-model",
+						"pinned-worker": "primary/bad-runtime-model",
 					},
 					"retry.fallbackChains": {
 						default: ["fallback/working-model"],
-						...(explicitlyEmpty ? { "implementer-11": [] } : {}),
+						...(explicitlyEmpty ? { "pinned-worker": [] } : {}),
 					},
 				}),
 				modelRegistry: {
