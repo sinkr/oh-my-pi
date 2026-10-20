@@ -65,6 +65,9 @@ afterEach(async () => {
 	await removeWithRetries(root);
 });
 
+/** Holds the extension's tool discovery open while set, as a slow MCP server start would. */
+let discoveryGate: (() => Promise<void>) | undefined;
+
 /**
  * Registers the way the HexRays ida-mcp extension does: discovery starts at `session_start`, and
  * the tool is registered at the next `input` or `before_agent_start`. Its calls work only while the
@@ -75,7 +78,7 @@ const registersAtFirstTurn: ExtensionFactory = pi => {
 	let pending: (() => void) | undefined;
 	let running = false;
 	const discover = async (): Promise<void> => {
-		await Promise.resolve();
+		await discoveryGate?.();
 		if (!running) return;
 		pending = () =>
 			pi.registerTool({
@@ -237,6 +240,42 @@ it("warm-revives with the tools an extension registered at its first turn", asyn
 		expect(wake.systemPrompt).toEqual(run.parked.systemPrompt);
 		expect(lateToolOutput(revived)).toBe("late_tool ok");
 	} finally {
+		run.close();
+	}
+}, 30_000);
+
+it("hands a second caller the revived session only once its extensions have re-registered", async () => {
+	const run = await spawnAndPark();
+	const discovering = Promise.withResolvers<void>();
+	const discovered = Promise.withResolvers<void>();
+	discoveryGate = () => {
+		discovering.resolve();
+		return discovered.promise;
+	};
+	const lifecycle = AgentLifecycleManager.global();
+	let first: Promise<AgentSession> | undefined;
+	try {
+		first = lifecycle.ensureLive(AGENT_ID);
+		await discovering.promise;
+		let handedOut = false;
+		const second = lifecycle.ensureLive(AGENT_ID).then(session => {
+			handedOut = true;
+			return session;
+		});
+		// One macrotask turn runs every pending microtask, so a session handed out without waiting is out by now.
+		const turn = Promise.withResolvers<void>();
+		setImmediate(turn.resolve);
+		await turn.promise;
+		expect(handedOut).toBe(false);
+
+		discovered.resolve();
+		const revived = await first;
+		expect(await second).toBe(revived);
+		expect((await run.wake(revived)).tools).toEqual(run.parked.tools);
+	} finally {
+		discoveryGate = undefined;
+		discovered.resolve();
+		await first?.catch(() => undefined);
 		run.close();
 	}
 }, 30_000);
