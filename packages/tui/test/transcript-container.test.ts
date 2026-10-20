@@ -296,6 +296,27 @@ describe("TranscriptContainer row split", () => {
 		}
 	});
 
+	it("keeps a row inserted above the archived image live across a width change", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// An expanded pane adds a divider between the archived text and the image.
+			const rows = [...block.render()];
+			rows.splice(2, 0, "────");
+			block.finalize(rows);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest).toContain("────");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
 	it("resumes a split block at the same content after a width change, repeating at most one row", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(prose);

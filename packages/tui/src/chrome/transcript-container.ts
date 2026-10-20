@@ -1163,8 +1163,11 @@ export class TranscriptContainer extends Container {
 				while (index < rendered.length && contentOf([rendered[index]!]).length === 0) {
 					const row = rendered[index]!;
 					if (TERMINAL.isImageLine(row)) {
-						// A different image in its place is new content history never received.
-						if (imagePayload(row) === split.endImage) count = index + 1;
+						// Only the same image directly after the text: a different image, or a
+						// row inserted above its reserved rows, is content history never received.
+						if (imagePayload(row) === split.endImage && index - count === directPlacementLift(row)) {
+							count = index + 1;
+						}
 						break;
 					}
 					index++;
