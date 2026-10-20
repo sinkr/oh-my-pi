@@ -38,7 +38,7 @@ describe("session image replacement on a wire that strips images", () => {
 		const model = getBundledModel("venice", "deepseek-v4-1-flash");
 		const bodies: string[] = [];
 		const fetchStub = Object.assign(
-			async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+			async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => {
 				bodies.push(String(init?.body ?? ""));
 				return sseDone();
 			},
