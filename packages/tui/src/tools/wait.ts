@@ -360,7 +360,9 @@ function jobsRenderResult(
 	const widgetJobs = sortedJobs.filter(job => job.status === "running" && job.widget?.state === "live");
 	const compactJobLines = (width: number, live: boolean): string[] => {
 		const lines: string[] = [];
-		for (const job of settledJobs) {
+		// Failures sort first, so the cap never hides one behind successes;
+		// Ctrl+O lists the rest.
+		for (const job of settledJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)) {
 			const icon = formatStatusIcon(statusToIcon(job.status), uiTheme);
 			const word = job.status === "completed" ? "done" : job.status;
 			const exit =
@@ -389,6 +391,9 @@ function jobsRenderResult(
 				lines.push(uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), width)));
 			}
 		}
+		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
+		const hiddenSettled = settledJobs.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
+		if (hiddenSettled > 0) lines.push(`${indent}${uiTheme.fg("dim", `… ${hiddenSettled} more settled`)}`);
 		for (const job of widgetJobs) {
 			const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
 			const icon = formatStatusIcon("running", uiTheme, live ? options.spinnerFrame : undefined);
@@ -406,7 +411,6 @@ function jobsRenderResult(
 		}
 		const quietRunning = counts.running - widgetJobs.length;
 		if (settledJobs.length > 0 && quietRunning > 0) {
-			const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
 			lines.push(`${indent}${uiTheme.fg("dim", `${quietRunning} still running`)}`);
 		}
 		return lines;

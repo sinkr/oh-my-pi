@@ -364,6 +364,22 @@ describe("job renderer task-result preview", () => {
 			expect(lines[1]).toContain("artifact write failed");
 		});
 
+		it("caps a large recovered batch on the collapsed card, failures first", () => {
+			const jobs = Array.from({ length: 12 }, (_, i) => ({
+				id: `bg_${i}`,
+				type: "bash" as const,
+				status: i === 11 ? ("failed" as const) : ("completed" as const),
+				label: `job ${i}`,
+				durationMs: 1_000,
+			}));
+			const result = { content: [{ type: "text" as const, text: "" }], details: { op: "wait" as const, jobs } };
+			const component = waitToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
+			const lines = (component.render(100) as readonly string[]).map(line => Bun.stripANSI(line));
+			expect(lines).toHaveLength(9);
+			expect(lines[0]).toContain("bg_11 failed");
+			expect(lines.at(-1)!.trim()).toBe("… 4 more settled");
+		});
+
 		it("renders agent rows for running agents outside job control", () => {
 			const result = {
 				content: [{ type: "text" as const, text: "" }],

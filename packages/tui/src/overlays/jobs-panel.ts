@@ -6,7 +6,7 @@
  * (cwd, live pids, exit code, artifact) and live output.
  */
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
-import { formatDuration } from "@oh-my-pi/pi-utils";
+import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { matchesKey } from "../keys";
@@ -206,7 +206,7 @@ export class JobsSheet implements Component {
 			// Rows show the cut label; the selected job's command wraps here,
 			// bounded so a long script never pushes the facts and output off the sheet.
 			if (detail.command) {
-				const commandRows = wrapTextWithAnsi(replaceTabs(detail.command), Math.max(1, width - 3));
+				const commandRows = wrapTextWithAnsi(replaceTabs(sanitizeText(detail.command)), Math.max(1, width - 3));
 				for (const line of commandRows.slice(0, PREVIEW_LIMITS.EXPANDED_LINES)) lines.push(`   ${line}`);
 				const hidden = commandRows.length - PREVIEW_LIMITS.EXPANDED_LINES;
 				if (hidden > 0) lines.push(truncateToWidth(`   … ${hidden} more command lines`, width));

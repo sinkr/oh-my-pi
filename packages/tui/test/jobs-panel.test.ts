@@ -183,6 +183,20 @@ describe("JobsSheet", () => {
 		}
 	});
 
+	it("strips terminal control sequences from the full command", () => {
+		const command = `cat <<EOF\n\x1b]0;pwned\x07\x1b[2Jhello\nEOF`;
+		const job: JobsPanelJob = { id: "bash-x", type: "bash", status: "running", label: "cat", startTime: NOW };
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => ({ command, pids: [] }),
+			close: vi.fn(),
+		});
+		const text = sheet.render(80).join("\n");
+		expect(text).toContain("hello");
+		expect(text).not.toContain("\x1b]0;");
+		expect(text).not.toContain("\x1b[2J");
+	});
+
 	it("renders read-only when the source cannot cancel: the jobs and detail stay, Cancel job is gone", () => {
 		// A focused subagent view only watches that agent's jobs (#14814).
 		const source: JobsSheetSource = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };
