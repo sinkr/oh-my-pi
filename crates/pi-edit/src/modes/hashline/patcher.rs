@@ -109,19 +109,21 @@ fn mismatch(
 	// anchor in full, so those rows count as seen for a resend under it.
 	// Content no snapshot holds starts from them (recording it with no seen set
 	// would let the guard accept every line), and a read's seen set gains
-	// them. Content already unrestricted (no seen set, or an empty one as a
-	// `write` records) stays so.
+	// them. Line 0, never an anchor, keeps the set restrictive when the reply
+	// printed no rows (anchors past a shrunken file, head/tail-only ops), as
+	// `store.ts` does for a read whose every row was cut. Content already
+	// unrestricted (no seen set, or an empty one as a `write` records) stays so.
 	let restricted = store
 		.by_content(canonical, normalized)
 		.is_none_or(|snapshot| snapshot.seen_lines.is_some_and(|seen| !seen.is_empty()));
-	let displayed: Vec<u32> = if restricted {
-		super::messages::anchored_context_lines(&anchor_lines, file_lines.len())
-			.into_iter()
-			.collect()
+	if restricted {
+		let displayed: Vec<u32> = std::iter::once(0)
+			.chain(super::messages::anchored_context_lines(&anchor_lines, file_lines.len()))
+			.collect();
+		store.record(canonical, normalized, Some(&displayed));
 	} else {
-		Vec::new()
-	};
-	store.record(canonical, normalized, (!displayed.is_empty()).then_some(displayed.as_slice()));
+		store.record(canonical, normalized, None);
+	}
 	// When the tag isn't from this exact path, list the other paths in this
 	// session that *did* issue the same tag — so the rejection can name the
 	// file the tag was actually for and the model doesn't follow a wrong-tree
