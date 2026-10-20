@@ -341,6 +341,29 @@ describe("job renderer task-result preview", () => {
 			expect(json).not.toContain("artifact write failed");
 		});
 
+		it("keeps a job's artifact capture failure on its collapsed row", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: {
+					op: "wait" as const,
+					jobs: [
+						{
+							id: "bg_2",
+							type: "bash" as const,
+							status: "completed" as const,
+							label: "bench",
+							durationMs: 1_000,
+							meta: { artifactError: "write" as const },
+						},
+					],
+				},
+			};
+			const component = waitToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
+			const lines = (component.render(100) as readonly string[]).map(line => Bun.stripANSI(line));
+			expect(lines[0]).toContain("bg_2 done");
+			expect(lines[1]).toContain("artifact write failed");
+		});
+
 		it("renders agent rows for running agents outside job control", () => {
 			const result = {
 				content: [{ type: "text" as const, text: "" }],

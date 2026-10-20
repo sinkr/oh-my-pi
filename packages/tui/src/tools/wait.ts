@@ -382,6 +382,12 @@ function jobsRenderResult(
 				line += `  ${uiTheme.fg("muted", truncateToWidth(label, labelBudget, Ellipsis.Unicode))}`;
 			}
 			lines.push(line);
+			// The root warning is suppressed when a row owns the failure, so the
+			// compact row carries it too — otherwise it only shows after Ctrl+O.
+			const artifactError = job.meta?.artifactError ?? job.artifactError;
+			if (artifactError) {
+				lines.push(uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), width)));
+			}
 		}
 		for (const job of widgetJobs) {
 			const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);

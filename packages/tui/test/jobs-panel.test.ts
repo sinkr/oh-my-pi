@@ -152,6 +152,37 @@ describe("JobsSheet", () => {
 		expect(lines).toContain("running 12 tests");
 	});
 
+	it("shows the selected job's full command in the terminal fallback, bounded above its facts", () => {
+		const long = `export A=1; ${"x".repeat(150)}; cargo test --workspace -- --exact tail_marker`;
+		const script = Array.from({ length: 40 }, (_, i) => `echo step ${i}`).join("\n");
+		for (const [command, expectTail] of [
+			[long, true],
+			[script, false],
+		] as const) {
+			const job: JobsPanelJob = {
+				id: "bash-x",
+				type: "bash",
+				status: "running",
+				label: command.slice(0, 40),
+				startTime: NOW,
+			};
+			const detail: JobsPanelDetail = { command, cwd: "/work", pids: [7], output: "out\n" };
+			const sheet = new JobsSheet({
+				load: () => ({ running: [job], recent: [] }),
+				inspect: () => detail,
+				close: vi.fn(),
+			});
+			const lines = sheet.render(60).map(line => Bun.stripANSI(line));
+			const text = lines.join("\n");
+			// Wrapped, not cut at the row label: the end of a long one-liner is reachable.
+			if (expectTail) expect(text).toContain("tail_marker");
+			else expect(text).toContain("… 28 more command lines");
+			// The facts and output tail still follow the command.
+			expect(text).toContain("pid 7");
+			expect(text).toContain("out");
+		}
+	});
+
 	it("renders read-only when the source cannot cancel: the jobs and detail stay, Cancel job is gone", () => {
 		// A focused subagent view only watches that agent's jobs (#14814).
 		const source: JobsSheetSource = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };

@@ -12,6 +12,7 @@ import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keyb
 import { matchesKey } from "../keys";
 import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../utils";
 import { collapseCommand } from "../apps/ps-data";
+import { PREVIEW_LIMITS } from "../render/render-utils";
 import { ansi, code, col, compact, item, node, row, span, stableKey, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton, selectList } from "../native/overlay";
@@ -202,11 +203,13 @@ export class JobsSheet implements Component {
 		}
 		const detail = selected && this.#source.inspect(selected.id);
 		if (detail) {
-			// Rows show the cut label; the selected job's full command wraps here.
+			// Rows show the cut label; the selected job's command wraps here,
+			// bounded so a long script never pushes the facts and output off the sheet.
 			if (detail.command) {
-				for (const line of wrapTextWithAnsi(replaceTabs(detail.command), Math.max(1, width - 3))) {
-					lines.push(`   ${line}`);
-				}
+				const commandRows = wrapTextWithAnsi(replaceTabs(detail.command), Math.max(1, width - 3));
+				for (const line of commandRows.slice(0, PREVIEW_LIMITS.EXPANDED_LINES)) lines.push(`   ${line}`);
+				const hidden = commandRows.length - PREVIEW_LIMITS.EXPANDED_LINES;
+				if (hidden > 0) lines.push(truncateToWidth(`   … ${hidden} more command lines`, width));
 			}
 			const facts = compact([
 				detail.cwd && `cwd ${detail.cwd}`,
