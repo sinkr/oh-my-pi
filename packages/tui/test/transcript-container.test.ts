@@ -258,6 +258,24 @@ describe("TranscriptContainer row split", () => {
 		}
 	});
 
+	it("keeps an archived whole image in scrollback when the width changes", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(imageBlock());
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			expect(head.rows.length).toBe(6);
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// The image rows hold no text, so a resize must not relocate the seam above them.
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
+			expect(rest).toContain("below 1");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
 	it("resumes a split block at the same content after a width change, repeating at most one row", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(prose);

@@ -119,6 +119,12 @@ interface RowSplit {
 	readonly width: number;
 	readonly hash: number | bigint;
 	readonly text: string;
+	/**
+	 * The committed rows end with an inline image row. Its reserved rows carry
+	 * no content, so relocating by `text` alone would stop above the image and
+	 * make the archived image live again at another width.
+	 */
+	readonly endsWithImage: boolean;
 	/** Seam of the last render it was located in; renders are memoized per frame. */
 	located?: { readonly rendered: readonly string[]; readonly count: number };
 }
@@ -181,7 +187,14 @@ function contentOf(rows: readonly string[]): string {
  */
 function rowSplit(scrollback: readonly string[], rows: number, width: number): RowSplit {
 	const committed = scrollback.slice(0, rows);
-	return { rows, width, hash: Bun.hash(committed.join("\n")), text: contentOf(committed) };
+	const last = committed.at(-1);
+	return {
+		rows,
+		width,
+		hash: Bun.hash(committed.join("\n")),
+		text: contentOf(committed),
+		endsWithImage: last !== undefined && TERMINAL.isImageLine(last),
+	};
 }
 
 /**
@@ -1135,6 +1148,18 @@ export class TranscriptContainer extends Container {
 				if (row.length === 0 || !split.text.startsWith(row, consumed)) break;
 				consumed += row.length;
 				count++;
+			}
+			// The image after the committed text was archived too: carry the seam
+			// through its reserved rows to the image row, whatever its height here.
+			if (split.endsWithImage && consumed === split.text.length) {
+				let index = count;
+				while (index < rendered.length && contentOf([rendered[index]!]).length === 0) {
+					if (TERMINAL.isImageLine(rendered[index]!)) {
+						count = index + 1;
+						break;
+					}
+					index++;
+				}
 			}
 		}
 		split.located = { rendered, count };
