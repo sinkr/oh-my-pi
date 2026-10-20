@@ -18,7 +18,7 @@ import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
-import { DEFAULT_MAX_COLUMN, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -446,6 +446,13 @@ function lineRangeFetchCap(pathSpecs: readonly GrepPathSpec[], perFileKeep: numb
 	return Math.min(cap, NATIVE_GREP_MAX_FILE_BYTES);
 }
 
+/** Names of the files a per-file cap trimmed: the first few, then a count. */
+function formatCappedFiles(paths: readonly string[]): string {
+	const shown = paths.slice(0, 5).join(", ");
+	const rest = paths.length - 5;
+	return rest > 0 ? `${shown} and ${rest} more ${rest === 1 ? "file" : "files"}` : shown;
+}
+
 type SearchParams = typeof searchSchema.infer;
 
 /**
@@ -697,6 +704,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					limitReached: false,
 				};
 				let skippedOversizedCount = 0;
+				// Native sets `limitReached` for the per-file cap too; only the total cap
+				// stops the walk before every file has been surfaced.
+				let totalCapReached = false;
 				// Only a glob spelled without a directory prefix matches at any depth.
 				// The parsed base alone cannot distinguish `*.ts` from `./*.ts`.
 				try {
@@ -738,6 +748,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
 							limitReached = limitReached || Boolean(targetResult.limitReached);
+							totalCapReached ||= targetResult.matches.length >= nativeMaxCount;
 							totalMatches += targetResult.totalMatches;
 							filesSearched += targetResult.filesSearched;
 							for (const match of targetResult.matches) {
@@ -785,6 +796,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							undefined,
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
+						totalCapReached = result.matches.length >= nativeMaxCount;
 					}
 				} catch (err) {
 					if (err instanceof Error && /^regex(?: parse)? error/i.test(err.message)) {
@@ -862,6 +874,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const fileGroups = new Map<string, { count: number; list?: GrepMatch[] }>();
 				const windowLists: GrepMatch[][] = [];
 				let perFileLimitReached = false;
+				// Files in the page window whose matches past the cap were dropped.
+				const cappedFiles: string[] = [];
 				for (const match of result.matches) {
 					const group = fileGroups.get(match.path);
 					if (!group) {
@@ -874,14 +888,15 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					group.count++;
 					if (group.count > perFileMatchCap) {
 						perFileLimitReached = true;
+						if (group.count === perFileMatchCap + 1 && group.list) cappedFiles.push(match.path);
 						continue;
 					}
 					group.list?.push(match);
 				}
 				const totalFiles = fileGroups.size;
-				// When native grep stopped at its internal cap, files past the cap were
+				// When native grep stopped at its total cap, files past the cap were
 				// never surfaced — the file total is only a lower bound.
-				const totalFilesLabel = result.limitReached ? `${totalFiles}+` : `${totalFiles}`;
+				const totalFilesLabel = totalCapReached ? `${totalFiles}+` : `${totalFiles}`;
 				const skipFiles = canPaginate ? Math.min(normalizedSkip, totalFiles) : 0;
 				const fileLimitReached = canPaginate && totalFiles > skipFiles + fileWindow;
 				const selectedMatches: GrepMatch[] = [];
@@ -1085,15 +1100,31 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const matchOutput = formatFileMatches(fileList, isDirectory || isMultiScope, renderMatchesForFile);
 				outputLines.push(...matchOutput.model);
 				displayLines.push(...matchOutput.display);
+				// Name only files rendered with a full cap's worth of matches: a smaller
+				// total limit (`pi_grep`) may have left a capped file short or out.
+				const shownCapped = cappedFiles
+					.map(formatPath)
+					.filter(relativePath => fileMatchCounts.get(relativePath) === perFileMatchCap);
+				const perFileMessage =
+					shownCapped.length === 0
+						? ""
+						: isMultiScope
+							? `More than ${perFileMatchCap} matches in ${formatCappedFiles(shownCapped)}; grep keeps the first ${perFileMatchCap} per file when searching several. Search one file alone for up to ${SINGLE_FILE_MATCHES}.`
+							: `More than ${perFileMatchCap} matches; grep keeps the first ${perFileMatchCap} in a file. Add a line range (\`path:N-M\`) or narrow the pattern for the rest.`;
 				if (limitMessage) {
 					outputLines.push("", limitMessage);
 				}
 				if (warningNote) {
 					outputLines.push("", warningNote);
 				}
+				// The cap notice sits past the byte cap so a long result cannot cut it off.
+				const perFileSuffix = perFileMessage ? `\n\n${perFileMessage}` : "";
 				const rawOutput = outputLines.join("\n");
-				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-				const output = truncation.content;
+				const truncation = truncateHead(rawOutput, {
+					maxLines: Number.MAX_SAFE_INTEGER,
+					maxBytes: DEFAULT_MAX_BYTES - Buffer.byteLength(perFileSuffix),
+				});
+				const output = truncation.content + perFileSuffix;
 				const displayText = displayLines.join("\n");
 				let displayTargets: Record<string, string> | undefined;
 				// Only grouped headers start with `#`; code-frame rows start with their gutter.
