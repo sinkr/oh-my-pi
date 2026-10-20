@@ -45,20 +45,12 @@ const USER_AGENTS = [
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 ];
 
-function isBotBlocked(status: number, content: string): boolean {
-	if (status === 403 || status === 503) {
-		const lower = content.toLowerCase();
-		return (
-			lower.includes("cloudflare") ||
-			lower.includes("captcha") ||
-			lower.includes("challenge") ||
-			lower.includes("blocked") ||
-			lower.includes("access denied") ||
-			lower.includes("bot detection")
-		);
-	}
-	return false;
-}
+/**
+ * Statuses sites answer a user agent they refuse with (999 is LinkedIn's), whatever the body
+ * says: a bare nginx "403 Forbidden" page, SEC's "Undeclared Automated Tool" page or a 429
+ * keyed on the agent all serve the page to the next user agent.
+ */
+const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
 /**
  * Collapse blank-line runs and trim. Never shortens content: URL reads page the preview
@@ -117,12 +109,14 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 	let lastError: string | undefined;
 	let retried429 = false;
-	for (let attempt = 0; attempt < USER_AGENTS.length; attempt++) {
+	// A caller's own User-Agent replaces every rotated one, so retrying it would repeat one request.
+	const userAgents = headers["User-Agent"] === undefined ? USER_AGENTS : [headers["User-Agent"]];
+	for (let attempt = 0; attempt < userAgents.length; attempt++) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
 
-		const userAgent = USER_AGENTS[attempt];
+		const userAgent = userAgents[attempt];
 		const requestSignal = ptree.combineSignals(signal, timeout * 1000);
 
 		try {
@@ -149,9 +143,14 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			const contentType = rawContentType.split(";")[0]?.trim().toLowerCase() ?? "";
 			const finalUrl = response.url;
 
+			if (BLOCKED_STATUSES.has(response.status) && attempt < userAgents.length - 1) {
+				void response.body?.cancel().catch(() => {});
+				continue;
+			}
+
 			if (response.status === 429 && !retried429) {
-				// Rate limited: retry once, honoring a bounded Retry-After. The
-				// wait observes the caller's signal so an Esc during the backoff
+				// Rate limited under every user agent: retry the last once, honoring a bounded
+				// Retry-After. The wait observes the caller's signal so an Esc during the backoff
 				// does not stall for up to the full delay.
 				retried429 = true;
 				const delayMs = parseRetryAfterMs(response.headers.get("retry-after"));
@@ -180,9 +179,6 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			}
 
 			const content = decodeBody(responseBody.bytes, rawContentType);
-			if (isBotBlocked(response.status, content) && attempt < USER_AGENTS.length - 1) {
-				continue;
-			}
 
 			if (!response.ok) {
 				return {
@@ -208,7 +204,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				throw new ToolAbortError();
 			}
 			lastError = error instanceof Error ? error.message : String(error);
-			if (attempt === USER_AGENTS.length - 1) {
+			if (attempt === userAgents.length - 1) {
 				return { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
 			}
 		}
