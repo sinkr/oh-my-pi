@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Clarified that advisors may repeat non-blocker advice when escalating it to a qualifying blocker ([#13887](https://github.com/can1357/oh-my-pi/issues/13887))
+- Clarified that advisors may repeat non-blocker advice when escalating it to a qualifying blocker ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))
 
 ## [18.12.5] - 2026-10-21
 
