@@ -317,6 +317,28 @@ describe("TranscriptContainer row split", () => {
 		}
 	});
 
+	it("keeps an archived image in scrollback after a later split advances past it", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(imageBlock());
+			transcript.addChild(new Block(["tail"], true));
+			const first = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(first.id);
+			// Growing pressure moves the seam past the image into the text below it.
+			const second = transcript.peekFinalizedBatch(40, 3)!;
+			expect(second.rows).toEqual(["below 1"]);
+			transcript.acknowledgeFinalizedBatch(second.id);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
+			expect(rest).not.toContain("below 1");
+			expect(rest).toContain("below 2");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
 	it("resumes a split block at the same content after a width change, repeating at most one row", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(prose);

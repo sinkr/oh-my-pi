@@ -7,7 +7,7 @@ import type { NativeNode } from "../native/node";
 import { isNativeSettled, settleNative } from "../native/settle";
 import { isUsageRowBlock } from "../overlays/usage-row";
 import { isToolActivityComponent } from "./tool-activity";
-import { directPlacementLift, ImageProtocol, TERMINAL } from "../terminal-capabilities";
+import { directPlacementLift, ImageProtocol, iterm2ImagePayload, TERMINAL } from "../terminal-capabilities";
 
 /** Shared animation time supplied by the constrained transcript root. */
 export interface AnimationFrame {
@@ -120,12 +120,12 @@ interface RowSplit {
 	readonly hash: number | bigint;
 	readonly text: string;
 	/**
-	 * Image payload of the inline image row the committed rows end with. Its
+	 * Payloads of the inline images in the committed rows, in order. Their
 	 * reserved rows carry no content, so relocating by `text` alone would stop
-	 * above the image and make the archived image live again at another width;
-	 * the payload tells that image apart from a replacement drawn in its place.
+	 * above an image and make the archived image live again at another width;
+	 * the payload tells each image apart from a replacement drawn in its place.
 	 */
-	readonly endImage: string | undefined;
+	readonly images: readonly string[];
 	/** Seam of the last render it was located in; renders are memoized per frame. */
 	located?: { readonly rendered: readonly string[]; readonly count: number };
 }
@@ -180,12 +180,6 @@ function contentOf(rows: readonly string[]): string {
 	return text;
 }
 
-/** The encoded image of an inline-image row, without the size parameters a rewrap changes. */
-function imagePayload(row: string): string {
-	const match = /\x1b\]1337;File=[^:\x07]*:([^\x07\x1b]*)/.exec(row);
-	return match?.[1] ?? row;
-}
-
 /**
  * Split committing the first `rows` rows of `scrollback` at `width`. The
  * fingerprint covers the scrollback bytes history receives, which can differ
@@ -194,13 +188,12 @@ function imagePayload(row: string): string {
  */
 function rowSplit(scrollback: readonly string[], rows: number, width: number): RowSplit {
 	const committed = scrollback.slice(0, rows);
-	const last = committed.at(-1);
 	return {
 		rows,
 		width,
 		hash: Bun.hash(committed.join("\n")),
 		text: contentOf(committed),
-		endImage: last !== undefined && TERMINAL.isImageLine(last) ? imagePayload(last) : undefined,
+		images: committed.filter(row => TERMINAL.isImageLine(row)).map(row => iterm2ImagePayload(row) ?? row),
 	};
 }
 
@@ -1148,30 +1141,39 @@ export class TranscriptContainer extends Container {
 			count = split.rows;
 		} else {
 			let consumed = 0;
-			while (count < rendered.length && consumed < split.text.length) {
-				const row = contentOf([rendered[count]!]);
-				// An empty-content row matches at any offset, so the walk cannot
-				// tell it apart from a revealed row history never received.
-				if (row.length === 0 || !split.text.startsWith(row, consumed)) break;
-				consumed += row.length;
-				count++;
-			}
-			// The image after the committed text was archived too: carry the seam
-			// through its reserved rows to the image row, whatever its height here.
-			if (split.endImage !== undefined && consumed === split.text.length) {
+			let image = 0;
+			while (count < rendered.length && (consumed < split.text.length || image < split.images.length)) {
+				const row = rendered[count]!;
+				const content = contentOf([row]);
+				if (content.length > 0) {
+					if (!split.text.startsWith(content, consumed)) break;
+					consumed += content.length;
+					count++;
+					continue;
+				}
+				// An empty-content row matches at any offset, so the walk cannot tell it
+				// apart from a revealed row history never received; only the next
+				// archived image carries the seam on, through its own reserved rows to
+				// its row, whatever its height here.
 				let index = count;
-				while (index < rendered.length && contentOf([rendered[index]!]).length === 0) {
-					const row = rendered[index]!;
-					if (TERMINAL.isImageLine(row)) {
-						// Only the same image directly after the text: a different image, or a
-						// row inserted above its reserved rows, is content history never received.
-						if (imagePayload(row) === split.endImage && index - count === directPlacementLift(row)) {
-							count = index + 1;
-						}
-						break;
-					}
+				while (
+					index < rendered.length &&
+					!TERMINAL.isImageLine(rendered[index]!) &&
+					contentOf([rendered[index]!]).length === 0
+				) {
 					index++;
 				}
+				const imageRow = rendered[index];
+				if (
+					imageRow === undefined ||
+					!TERMINAL.isImageLine(imageRow) ||
+					(iterm2ImagePayload(imageRow) ?? imageRow) !== split.images[image] ||
+					index - count !== directPlacementLift(imageRow)
+				) {
+					break;
+				}
+				count = index + 1;
+				image++;
 			}
 		}
 		split.located = { rendered, count };
