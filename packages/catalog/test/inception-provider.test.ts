@@ -92,49 +92,49 @@ describe("Inception model discovery", () => {
 		expect(model.cost.cacheRead).toBeCloseTo(0.025);
 	});
 
-	test("corrects zero Mercury 3 prices and stale Mercury 2.5 prices at build time", async () => {
-		const options = inceptionModelManagerOptions({
-			apiKey: "inception-test-key",
-			fetch: async () =>
-				Response.json({
-					data: [
-						{
-							...chatMetadata,
-							id: "mercury-3",
-							context_length: 1_000_000,
-							max_output_length: 131_072,
-							pricing: { prompt: "0", completion: "0", input_cache_reads: "0", input_cache_writes: "0" },
-						},
-						{
-							...chatMetadata,
-							id: "mercury-2.5",
-							pricing: {
-								prompt: "0.00000004",
-								completion: "0.00000015",
-								input_cache_reads: "0.000000004",
-								input_cache_writes: "0",
+	test("prices zero-priced Mercury 3 at the launch rate until /models publishes a tariff", async () => {
+		const discoverMercury3 = async (pricing: Record<string, string>) => {
+			const options = inceptionModelManagerOptions({
+				apiKey: "inception-test-key",
+				fetch: async () =>
+					Response.json({
+						data: [
+							{
+								...chatMetadata,
+								id: "mercury-3",
+								context_length: 1_000_000,
+								max_output_length: 131_072,
+								pricing,
 							},
-						},
-					],
-				}),
+						],
+					}),
+			});
+			const models = await options.fetchDynamicModels?.();
+			return buildModel(models![0]);
+		};
+
+		const zeroPriced = await discoverMercury3({
+			prompt: "0",
+			completion: "0",
+			input_cache_reads: "0",
+			input_cache_writes: "0",
 		});
-		const discovered = await options.fetchDynamicModels?.();
-		const raw = new Map(discovered?.map(model => [model.id, model]));
-		expect(raw.get("mercury-3")?.cost.input).toBe(0);
-		expect(raw.get("mercury-2.5")?.cost.input).toBeCloseTo(0.04);
-		const mercury3 = buildModel(raw.get("mercury-3")!);
-		expect(mercury3).toMatchObject({
+		expect(zeroPriced).toMatchObject({
 			contextWindow: 1_000_000,
 			maxTokens: 131_072,
 			reasoning: true,
 			cost: { input: 0.1, output: 0.35, cacheRead: 0.01, cacheWrite: 0 },
 			thinking: { efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
 		});
-		expect(buildModel(raw.get("mercury-2.5")!).cost).toEqual({
-			input: 0.2,
-			output: 0.75,
-			cacheRead: 0.02,
-			cacheWrite: 0,
+
+		const listPriced = await discoverMercury3({
+			prompt: "0.0000002",
+			completion: "0.0000007",
+			input_cache_reads: "0.00000002",
+			input_cache_writes: "0",
 		});
+		expect(listPriced.cost.input).toBeCloseTo(0.2);
+		expect(listPriced.cost.output).toBeCloseTo(0.7);
+		expect(listPriced.cost.cacheRead).toBeCloseTo(0.02);
 	});
 });

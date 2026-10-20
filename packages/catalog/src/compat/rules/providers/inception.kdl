@@ -48,20 +48,13 @@ provider "inception" {
 		// 131,072-token budget; at the measured ~400 reasoning tokens/s that
 		// can take ~330s before the first chunk, past the 300s default.
 		stream-first-event-timeout-ms 600000
-		// /models reports zero prices; use the published 50%-off launch tariff.
-		cost-patch {
+		// /models reports $0. `cost-fallback` seeds the published launch price
+		// ($0.10/$0.35, 50% off the $0.20/$0.70 list price, no announced end) only
+		// while it does, so a real upstream tariff takes over once published.
+		cost-fallback {
 			input 0.1
 			output 0.35
 			cache-read 0.01
-			cache-write 0
-		}
-	}
-	models "mercury-2.5" {
-		// /models still reports an older tariff, not the current published rate.
-		cost-patch {
-			input 0.2
-			output 0.75
-			cache-read 0.02
 			cache-write 0
 		}
 	}
