@@ -11,6 +11,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
 import type { MCPProgress, MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 
 const definition = { name: "progress_tool", inputSchema: { type: "object" as const } };
@@ -106,16 +107,29 @@ describe("MCP tools/call progress updates", () => {
 		});
 	}
 
-	it("caps and sanitizes a multiline server message in the partial's text", async () => {
-		const tool = new MCPTool(withSteps([{ progress: 1, message: `first\n\t${"x".repeat(400)}` }]), definition);
+	it("caps and sanitizes a multiline server message in the partial's text, keeping the count", async () => {
+		const message = `first\n\t${"x".repeat(400)}`;
+		const tool = new MCPTool(
+			withSteps([
+				{ progress: 1, message },
+				{ progress: 2, total: 3, message },
+			]),
+			definition,
+		);
 		const updates: AgentToolResult<MCPToolDetails>[] = [];
 		await tool.execute("bounded-message", {}, partial => updates.push(partial), context);
-		const text = updates[0]?.content[0];
-		expect(text?.type).toBe("text");
-		if (text?.type !== "text") throw new Error("missing progress text");
-		expect(text.text).toStartWith("first ");
-		expect(text.text).not.toMatch(/[\n\t]/);
-		expect(text.text.length).toBeLessThanOrEqual(200);
+		const texts = updates.map(update => {
+			const content = update.content[0];
+			if (content?.type !== "text") throw new Error("missing progress text");
+			return content.text;
+		});
+		expect(texts).toHaveLength(2);
+		for (const text of texts) {
+			expect(text).toStartWith("first ");
+			expect(text).not.toMatch(/[\n\t]/);
+			expect(visibleWidth(text)).toBeLessThanOrEqual(200);
+		}
+		expect(texts[1]).toEndWith(" (2/3)");
 	});
 
 	for (const kind of ["connected", "deferred"] as const) {

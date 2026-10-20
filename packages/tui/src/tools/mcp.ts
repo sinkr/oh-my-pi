@@ -27,7 +27,8 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
-import { clipCollapsed, formatExpandHint, previewLine } from "../render/render-utils";
+import { clipCollapsed, flattenLine, formatExpandHint } from "../render/render-utils";
+import { truncateToWidth, visibleWidth } from "../utils";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
 import type { StatusLineOptions } from "../render/status-line";
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
@@ -410,15 +411,20 @@ export function parseMCPProgress(value: unknown): MCPProgress | undefined {
 }
 
 /**
- * One-line display text for MCP progress: the message, with `progress/total`
- * when the server reports a total. The bare progress value appears only when
- * there is no message: without a total it is an opaque counter, not a percentage.
+ * One-line display text for MCP progress, at most `maxWidth` cells: the
+ * message, with `progress/total` when the server reports a total. The bare
+ * progress value appears only when there is no message: without a total it is
+ * an opaque counter, not a percentage. A long message is cut before the count,
+ * so the count stays visible.
  */
 export function formatMCPProgress(progress: MCPProgress, maxWidth = 200): string {
-	const message = progress.message === undefined ? "" : previewLine(sanitizeText(progress.message), maxWidth);
+	const message = progress.message === undefined ? "" : flattenLine(sanitizeText(progress.message));
 	const amount = progress.total === undefined ? `${progress.progress}` : `${progress.progress}/${progress.total}`;
-	if (!message) return amount;
-	return progress.total === undefined ? message : `${message} (${amount})`;
+	if (!message) return truncateToWidth(amount, maxWidth);
+	if (progress.total === undefined) return truncateToWidth(message, maxWidth);
+	const suffix = ` (${amount})`;
+	const messageWidth = maxWidth - visibleWidth(suffix);
+	return messageWidth > 0 ? `${truncateToWidth(message, messageWidth)}${suffix}` : truncateToWidth(amount, maxWidth);
 }
 
 /** MCP result details shared by renderers and programmatic tool consumers. */
