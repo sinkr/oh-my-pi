@@ -5,6 +5,9 @@
 ### Added
 
 - Added `RpcConnection.requestCancellable()` (shared plumbing with `request()`, `$/cancel_request` now sent with the ACP v1 `requestId` parameter) and `Client.requestPermission(params, { signal })`, and a cancelled inbound request is now always answered with `-32800` on the wire while its handler receives the request's abort signal — so a peer cancelling an elicit can never leave the other side's dialog pending or strand a clean shutdown ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
+### Fixed
+
+- Fixed frontmatter repair deleting HTML comments from document bodies and plain markdown; it now strips only leading comments ahead of the opening delimiter, so prompt bodies keep their comments ([#16481](https://github.com/can1357/oh-my-pi/pull/16481) by [@adi-IL](https://github.com/adi-IL)).
 
 ## [18.12.2] - 2026-10-18
 
