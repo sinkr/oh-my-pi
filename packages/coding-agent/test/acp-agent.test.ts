@@ -22,7 +22,7 @@ import type {
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
@@ -2543,6 +2543,92 @@ describe("ACP agent", () => {
 		).rejects.toThrow("Unsupported ACP session");
 
 		finishPrompt();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+	it("resolves a prompt queued at cancel time as cancelled without starting it", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// First abort (the live turn's cancel cleanup) parks until released; the
+		// second (the autonomous-run cancel below) resolves so cancel() returns.
+		let abortCalls = 0;
+		const firstAbortBlocked = Promise.withResolvers<void>();
+		session.abort = async () => {
+			abortCalls++;
+			if (abortCalls === 1) {
+				await firstAbortBlocked.promise;
+			}
+			session.isStreaming = false;
+		};
+		const finishPrompt = holdPromptStreaming(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000048",
+			prompt: [{ type: "text", text: "long running" }],
+		} as PromptRequest);
+		for (let i = 0; i < 20 && session.promptCalls.length === 0; i++) {
+			await Bun.sleep(0);
+		}
+		expect(session.promptCalls).toEqual(["long running"]);
+
+		// Cancel the live turn: its wire response settles immediately, but its
+		// cleanup parks behind the blocked first abort.
+		const firstCancel = harness.agent.cancel({ sessionId: created.sessionId });
+		for (let i = 0; i < 20 && abortCalls === 0; i++) {
+			await Bun.sleep(0);
+		}
+		expect(abortCalls).toBe(1);
+
+		// A second prompt arrives while the first turn is settled but its
+		// cleanup is still in flight: the queue callback parks on
+		// `previousTurn.cleanup` before creating its turn slot.
+		const secondPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000049",
+			prompt: [{ type: "text", text: "queued behind the running turn" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		// The user cancels again while that prompt is still inside its
+		// dispatch window: the stop must mark it, not just no-op.
+		await harness.agent.cancel({ sessionId: created.sessionId });
+		expect(abortCalls).toBe(2);
+
+		// Let the first cleanup finish; the queued prompt must resolve
+		// cancelled without ever starting a run.
+		firstAbortBlocked.resolve();
+		finishPrompt();
+		const firstResponse = await firstPrompt;
+		expect(firstResponse.stopReason).toBe("cancelled");
+		const secondResponse = await secondPrompt;
+		expect(secondResponse.stopReason).toBe("cancelled");
+		expect(session.promptCalls).toEqual(["long running"]);
+		await firstCancel;
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("aborts an autonomous run when cancel arrives with no client promptTurn", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const abortReasons: Array<string | undefined> = [];
+		session.abort = async (options?: { reason?: string }) => {
+			abortReasons.push(options?.reason);
+			session.isStreaming = false;
+		};
+
+		// Autonomous wake (steer-triggered follow-up, IRC, scheduler): streaming
+		// with no client promptTurn owning the run.
+		session.isStreaming = true;
+		await harness.agent.cancel({ sessionId: created.sessionId });
+
+		expect(abortReasons).toEqual([USER_INTERRUPT_LABEL]);
+		expect(session.isStreaming).toBe(false);
+
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});

@@ -143,6 +143,15 @@ type PromptQueueState = {
 	promise: Promise<void>;
 	release: (() => void) | undefined;
 };
+/**
+ * Cancellation carrier for a client prompt accepted on the wire whose turn has
+ * not started yet — still queued behind another prompt, or inside the dispatch
+ * window before its `PromptTurnState` slot exists. `session/request_cancel`
+ * marks every live carrier so a stop can never race past a prompt that is
+ * about to stream; the queue callback consumes the mark when the slot is
+ * created and resolves the wire response `cancelled` without starting the run.
+ */
+type PromptDispatchCancellation = { cancelled: boolean };
 type PromptLifecycleError = Error & { readonly code: "ACP_SESSION_CLOSED" };
 
 type PromptTurnState = {
@@ -318,6 +327,11 @@ type ManagedSessionRecord = {
 	mcpRefreshChain: Promise<void> | undefined;
 	promptTurn: PromptTurnState | undefined;
 	promptQueue: PromptQueueState;
+	// Cancellation carriers for client prompts accepted on the wire whose
+	// turn slot does not exist yet (queued behind another prompt or still
+	// inside the dispatch window). Marked by cancel(); consumed at slot
+	// creation so a stop never leaves a prompt streaming behind the client's back.
+	pendingPromptDispatches: Array<PromptDispatchCancellation>;
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
@@ -994,57 +1008,78 @@ export class AcpAgent implements Agent {
 				await this.#closeManagedSession(params.sessionId, record);
 			});
 		}
-		return await this.#queuePrompt(record, async () => {
-			const previousTurn = record.promptTurn;
-			if (previousTurn) {
-				// Wait for any prompt that's still settling or whose cancel cleanup is
-				// still in flight. We deliberately swallow the prompt rejection (the
-				// owning caller already received it) but let cleanup rejections
-				// propagate — a timed-out cancel must fail this queued prompt instead
-				// of letting it run on a session that is about to be closed.
-				await previousTurn.promise.catch(() => undefined);
-				await previousTurn.cleanup;
+		// A cancel that lands between this prompt's wire acceptance and its
+		// turn slot creation must still stop it (the client believes it stopped
+		// the session). The carrier is marked by cancel() and consumed below.
+		const cancellation: PromptDispatchCancellation = { cancelled: false };
+		record.pendingPromptDispatches.push(cancellation);
+		try {
+			return await this.#queuePrompt(record, async () => {
+				const previousTurn = record.promptTurn;
+				if (previousTurn) {
+					// Wait for any prompt that's still settling or whose cancel cleanup is
+					// still in flight. We deliberately swallow the prompt rejection (the
+					// owning caller already received it) but let cleanup rejections
+					// propagate — a timed-out cancel must fail this queued prompt instead
+					// of letting it run on a session that is about to be closed.
+					await previousTurn.promise.catch(() => undefined);
+					await previousTurn.cleanup;
+				}
+				this.#throwIfRecordClosed(record);
+
+				const converted = this.#convertPromptBlocks(params.prompt);
+				const pendingPrompt = Promise.withResolvers<PromptResponse>();
+				record.promptTurn = {
+					abortController: new AbortController(),
+					cancelRequested: false,
+					settled: false,
+					errorTextDelivery: undefined,
+					cleanup: undefined,
+					usageBaseline: this.#cloneUsageStatistics(record.session.sessionManager.getUsageStatistics()),
+					unsubscribe: undefined,
+					resolve: pendingPrompt.resolve,
+					reject: pendingPrompt.reject,
+					promise: pendingPrompt.promise,
+				};
+
+				record.promptTurn.unsubscribe = record.session.subscribe(event => {
+					this.#trackPromptEvent(record, event);
+				});
+
+				// Cancelled before the turn ever started (dispatch window or
+				// queued behind a cancelled predecessor): settle the wire
+				// response cancelled instead of starting a run the client
+				// has already stopped.
+				if (cancellation.cancelled) {
+					this.#beginCancelCleanup(record, record.promptTurn);
+					return await pendingPrompt.promise;
+				}
+
+				// Autonomous turns stream without an owning promptTurn, so the implicit-cancel
+				// guard above cannot fire and a client prompt lands on AgentSession's busy
+				// guard. Type that failure for the wire instead of letting transport.ts wrap
+				// it as a generic -32603 internal error.
+				this.#runPromptOrCommand(record, converted.text, converted.images).catch((error: unknown) => {
+					this.#finishPrompt(
+						record,
+						undefined,
+						error instanceof AgentBusyError
+							? RequestError.sessionBusy(error.message, {
+									reason: "session_busy",
+									hint: "steer|followUp|wait",
+								})
+							: error,
+					);
+				});
+
+				return await pendingPrompt.promise;
+			});
+		} finally {
+			const index = record.pendingPromptDispatches.indexOf(cancellation);
+			if (index >= 0) {
+				record.pendingPromptDispatches.splice(index, 1);
 			}
-			this.#throwIfRecordClosed(record);
-
-			const converted = this.#convertPromptBlocks(params.prompt);
-			const pendingPrompt = Promise.withResolvers<PromptResponse>();
-			record.promptTurn = {
-				abortController: new AbortController(),
-				cancelRequested: false,
-				settled: false,
-				errorTextDelivery: undefined,
-				cleanup: undefined,
-				usageBaseline: this.#cloneUsageStatistics(record.session.sessionManager.getUsageStatistics()),
-				unsubscribe: undefined,
-				resolve: pendingPrompt.resolve,
-				reject: pendingPrompt.reject,
-				promise: pendingPrompt.promise,
-			};
-
-			record.promptTurn.unsubscribe = record.session.subscribe(event => {
-				this.#trackPromptEvent(record, event);
-			});
-
-			// Autonomous turns stream without an owning promptTurn, so the implicit-cancel
-			// guard above cannot fire and a client prompt lands on AgentSession's busy
-			// guard. Type that failure for the wire instead of letting transport.ts wrap
-			// it as a generic -32603 internal error.
-			this.#runPromptOrCommand(record, converted.text, converted.images).catch((error: unknown) => {
-				this.#finishPrompt(
-					record,
-					undefined,
-					error instanceof AgentBusyError
-						? RequestError.sessionBusy(error.message, {
-								reason: "session_busy",
-								hint: "steer|followUp|wait",
-							})
-						: error,
-				);
-			});
-
-			return await pendingPrompt.promise;
-		});
+		}
 	}
 
 	async #queuePrompt(record: ManagedSessionRecord, run: () => Promise<PromptResponse>): Promise<PromptResponse> {
@@ -1235,16 +1270,45 @@ export class AcpAgent implements Agent {
 
 	async cancel(params: { sessionId: string }): Promise<void> {
 		const record = this.#getSessionRecord(params.sessionId);
+		// Stop means stop everything accepted on this session: prompts still
+		// inside the dispatch window or queued behind the running turn must not
+		// stream after the client believes it stopped the session.
+		for (const cancellation of record.pendingPromptDispatches) {
+			cancellation.cancelled = true;
+		}
 		const promptTurn = record.promptTurn;
-		if (!promptTurn || promptTurn.settled) {
+		if (promptTurn && !promptTurn.settled) {
+			const cleanup = this.#beginCancelCleanup(record, promptTurn);
+			try {
+				await cleanup;
+			} catch (error: unknown) {
+				logger.warn("ACP cancel cleanup timed out; closing session", {
+					sessionId: record.session.sessionId,
+					error,
+				});
+				await this.#closeManagedSession(record.session.sessionId, record);
+			}
 			return;
 		}
-		const cleanup = this.#beginCancelCleanup(record, promptTurn);
+		if (!record.session.isStreaming) {
+			return;
+		}
+		// Autonomous run (steer-triggered follow-up, IRC wake, scheduler turn):
+		// no client promptTurn owns it, so #beginCancelCleanup has nothing to
+		// settle — but the client's stop is still an explicit interrupt. Abort
+		// the run with the same bound as cancel cleanup instead of silently
+		// dropping it.
+		let timer: NodeJS.Timeout | undefined;
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("ACP cancel cleanup timed out")), this.#cancelCleanupTimeoutMs);
+		});
 		try {
-			await cleanup;
+			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeout]);
 		} catch (error: unknown) {
 			logger.warn("ACP cancel cleanup timed out; closing session", { sessionId: record.session.sessionId, error });
 			await this.#closeManagedSession(record.session.sessionId, record);
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 
@@ -1601,6 +1665,7 @@ export class AcpAgent implements Agent {
 			extensionsConfigured: false,
 			closedError: undefined,
 			promptEventHandlers: new Set(),
+			pendingPromptDispatches: [],
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
 		};
