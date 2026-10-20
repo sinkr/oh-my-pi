@@ -172,11 +172,8 @@ const clients: ImageClientCase[] = [
 		assertPayload: (call, input) => {
 			const body = jsonBody(call) as {
 				request?: { contents?: Array<{ parts?: Array<{ inlineData?: ImageInput }> }> };
-				requestType?: string;
 			};
 			expect(body.request?.contents?.[0]?.parts?.[0]?.inlineData).toEqual(input);
-			// `requestType: "agent"` draws false 429 quota errors from Antigravity.
-			expect(body.requestType).toBeUndefined();
 		},
 	},
 ];
@@ -283,4 +280,17 @@ it("delivers legal MIME punctuation and image bytes intact through hosted provid
 	const consumed = await fetch(new URL(imageUrl));
 	expect(consumed.headers.get("content-type")).toBe(input.mimeType);
 	expect(Buffer.from(await consumed.arrayBuffer())).toEqual(IMAGE_BYTES);
+});
+
+it("does not tag Antigravity image requests with the requestType that draws false 429 quota errors", async () => {
+	const calls: FetchCall[] = [];
+	await generateAntigravityImage(
+		antigravityModel,
+		{ prompt: "draw a cat" },
+		{ apiKey: ANTIGRAVITY_KEY, fetch: createFetch(calls) },
+	);
+	const call = calls.find(item => item.url.includes(":streamGenerateContent"));
+	if (!call) throw new Error("Expected the Antigravity image request");
+	const body = jsonBody(call);
+	expect(body !== null && typeof body === "object" && "requestType" in body).toBe(false);
 });

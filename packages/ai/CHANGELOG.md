@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed Google Antigravity chat and image requests failing with false 429 quota-exhausted errors; requests no longer send `requestType: "agent"`, matching the official Antigravity client ([#11849](https://github.com/can1357/oh-my-pi/pull/11849) by [@jotafurtado](https://github.com/jotafurtado))
+- Fixed Google Antigravity chat and image requests failing with false 429 quota-exhausted errors ([#11849](https://github.com/can1357/oh-my-pi/pull/11849) by [@jotafurtado](https://github.com/jotafurtado))
 
 ## [18.12.3] - 2026-10-19
 
