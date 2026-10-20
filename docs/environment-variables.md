@@ -593,6 +593,21 @@ These affect where coding-agent stores data and which process-local settings ove
 
 `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases when the canonical variable is unset or empty. These controls use non-empty string checks, not boolean parsing: even `0` or `false` activates the corresponding no-CI/no-login control.
 
+### Set by the `bash` tool
+
+Every command the agent runs through the `bash` tool (foreground, background, PTY, ACP client terminal, and `name`-launched services) receives the current session identity:
+
+| Variable          | Value                                                                        |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `PI_SESSION_ID`   | Current session ID                                                           |
+| `PI_SESSION_FILE` | Absolute path to the current session JSONL file; empty when not persisted (`--no-session`) |
+
+Values are read when each tool call starts, so the next call follows `/fork`, `/new`, and `/resume`, and a call already under way keeps the session it started in. They are always set, so an empty value replaces a stale one inherited from a parent omp process. User `!` commands do not receive them.
+
+```bash
+echo "$PI_SESSION_ID"
+```
+
 ---
 
 ## 8) UI/theme/session detection (auto-detected env)
