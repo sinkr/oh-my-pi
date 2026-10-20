@@ -134,14 +134,17 @@ function compressedReader(decompress: (bytes: Uint8Array, maxOutput: number) => 
  * {@link compressedReader} for codecs that decompress as a stream. Output that
  * fits `maxInMemorySize` is indexed the same way; a tar that inflates past it
  * is indexed by a streaming header walk instead, its members decompressed
- * again when read, so memory stays bounded by the limits either way.
+ * again when read, so memory stays bounded by the limits either way. Each pass
+ * stops at `maxStreamSize`.
  */
-function streamedReader(decompress: (source: ByteSource) => AsyncIterable<Uint8Array>): FormatReader {
+function streamedReader(
+	decompress: (source: ByteSource, maxOutput: number) => AsyncIterable<Uint8Array>,
+): FormatReader {
 	return async (source, options) => {
-		const { maxInMemorySize } = options.limits;
+		const { maxInMemorySize, maxStreamSize } = options.limits;
 		const chunks: Uint8Array[] = [];
 		let size = 0;
-		for await (const chunk of decompress(source)) {
+		for await (const chunk of decompress(source, maxStreamSize)) {
 			chunks.push(chunk);
 			size += chunk.byteLength;
 			if (size > maxInMemorySize) break;
@@ -156,7 +159,7 @@ function streamedReader(decompress: (source: ByteSource) => AsyncIterable<Uint8A
 				`Archive is too large to read in memory (decompressed > ${formatBytes(maxInMemorySize)} limit)`,
 			);
 		}
-		return readTarEntriesFromStream(() => decompress(source), options);
+		return readTarEntriesFromStream(() => decompress(source, maxStreamSize), options);
 	};
 }
 

@@ -20,9 +20,9 @@ export async function gzipDecompress(bytes: Uint8Array, maxOutput: number): Prom
 	}
 }
 
-/** Decompress a gzip source as a stream of chunks, for output too large to hold at once. */
-export function gzipDecompressStream(source: ByteSource): AsyncGenerator<Uint8Array> {
-	return decodeByteSource(source, zlib.createGunzip({ chunkSize: STREAM_CHUNK_SIZE }));
+/** Decompress a gzip source as a stream of chunks, bounded to `maxOutput` bytes, for output too large to hold at once. */
+export function gzipDecompressStream(source: ByteSource, maxOutput: number): AsyncGenerator<Uint8Array> {
+	return decodeByteSource(source, zlib.createGunzip({ chunkSize: STREAM_CHUNK_SIZE }), maxOutput);
 }
 
 /** Compress bytes as one gzip stream (tar.gz writing). */

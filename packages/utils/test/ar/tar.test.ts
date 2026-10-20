@@ -250,6 +250,20 @@ describe("compressed tar past maxInMemorySize", () => {
 		expect(String(error)).toContain("too large to read in memory");
 		expect(String(error)).toContain("4.0KB limit");
 	});
+
+	test("a decompression bomb stops at maxStreamSize", async () => {
+		// All zeros sniff as an empty tar, so only the stream ceiling stops the walk.
+		const bytes = await gzipCompress(new Uint8Array(64 * 1024));
+		const error = await openArchive(
+			{ bytes, format: "tar.gz" },
+			{ limits: { ...limits, maxStreamSize: 16 * 1024 } },
+		).then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toBeInstanceOf(ArchiveError);
+		expect(String(error)).toContain("past the 16.0KB stream limit");
+	});
 });
 
 describe("tar writer", () => {

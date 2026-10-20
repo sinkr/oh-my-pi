@@ -166,13 +166,18 @@ class TarStreamPayload implements TarPayload {
 			await stream?.close();
 			stream = new TarByteStream(this.#open());
 		}
-		const bytes = (await stream.skip(offset - stream.position)) ? await stream.read(size) : undefined;
-		if (bytes?.byteLength !== size) {
-			throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' is truncated`);
+		try {
+			const bytes = (await stream.skip(offset - stream.position)) ? await stream.read(size) : undefined;
+			if (bytes?.byteLength !== size) {
+				throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' is truncated`);
+			}
+			this.#stream = stream;
+			// A view into a decoder chunk would keep the whole chunk alive with the member.
+			return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
+		} catch (error) {
+			await stream.close();
+			throw error;
 		}
-		this.#stream = stream;
-		// A view into a decoder chunk would keep the whole chunk alive with the member.
-		return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
 	}
 }
 
