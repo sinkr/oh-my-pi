@@ -380,6 +380,23 @@ describe("job renderer task-result preview", () => {
 			expect(lines.at(-1)!.trim()).toBe("… 4 more settled");
 		});
 
+		it("caps live widget tiles on the collapsed card and counts the rest", () => {
+			const jobs = Array.from({ length: 10 }, (_, i) => ({
+				id: `bg_${i}`,
+				type: "bash" as const,
+				status: "running" as const,
+				label: `bench ${i}`,
+				durationMs: 1_000,
+				widget: decodeBench,
+			}));
+			const result = { content: [{ type: "text" as const, text: "" }], details: { op: "wait" as const, jobs } };
+			const component = waitToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
+			const text = (component.render(100) as readonly string[]).map(line => Bun.stripANSI(line)).join("\n");
+			expect(text).toContain("bg_7");
+			expect(text).not.toContain("bg_8");
+			expect(text).toContain("2 still running");
+		});
+
 		it("renders agent rows for running agents outside job control", () => {
 			const result = {
 				content: [{ type: "text" as const, text: "" }],

@@ -394,7 +394,8 @@ function jobsRenderResult(
 		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
 		const hiddenSettled = settledJobs.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
 		if (hiddenSettled > 0) lines.push(`${indent}${uiTheme.fg("dim", `… ${hiddenSettled} more settled`)}`);
-		for (const job of widgetJobs) {
+		const shownWidgetJobs = widgetJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+		for (const job of shownWidgetJobs) {
 			const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
 			const icon = formatStatusIcon("running", uiTheme, live ? options.spinnerFrame : undefined);
 			const meta = compact([
@@ -409,8 +410,10 @@ function jobsRenderResult(
 				}),
 			);
 		}
-		const quietRunning = counts.running - widgetJobs.length;
-		if (settledJobs.length > 0 && quietRunning > 0) {
+		// Running jobs without a drawn tile (no widget, or past the cap) collapse
+		// into one count; the header already carries it while nothing settled.
+		const quietRunning = counts.running - shownWidgetJobs.length;
+		if (quietRunning > 0 && (settledJobs.length > 0 || shownWidgetJobs.length < widgetJobs.length)) {
 			lines.push(`${indent}${uiTheme.fg("dim", `${quietRunning} still running`)}`);
 		}
 		return lines;
