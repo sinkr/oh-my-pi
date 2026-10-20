@@ -88,12 +88,16 @@ export class ToolCallLoopGuard {
 		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
 			// An exempt poll its tool flagged useless (a wait that elapsed with nothing
-			// new) is skipped, so alternating it with a repeated call cannot hide the
-			// loop. Any other exempt turn may have changed state (finished jobs, a
-			// message), so it ends the repetition.
+			// new) or that failed outright (nothing to wait for) is skipped, so
+			// alternating it with a repeated call cannot hide the loop. Any other exempt
+			// turn may have changed state (finished jobs, a message, injected context),
+			// so it ends the repetition.
 			const idle =
 				!turn.injectedContext &&
-				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
+				toolCalls.every(tc => {
+					const result = turn.toolResults.find(candidate => candidate.toolCallId === tc.id);
+					return result?.useless === true || result?.isError === true;
+				});
 			if (!idle) {
 				this.#lastHash = undefined;
 				this.#count = 0;

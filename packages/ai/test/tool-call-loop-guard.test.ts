@@ -349,6 +349,28 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(pytest())).toBeNull();
 	});
 
+	test("keeps counting across an exempt poll that failed with nothing to wait for", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["wait"] });
+		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
+		const call = toolCall("wait", {});
+		const failedWait = turn(
+			[call],
+			[
+				{
+					role: "toolResult",
+					toolCallId: call.id,
+					toolName: "wait",
+					content: [{ type: "text", text: "Nothing to wait for." }],
+					isError: true,
+					timestamp: Date.now(),
+				},
+			],
+		);
+		expect(guard.recordTurn(pytest())).toBeNull();
+		expect(guard.recordTurn(failedWait)).toBeNull();
+		expect(guard.recordTurn(pytest())).toMatchObject({ toolName: "bash", count: 2 });
+	});
+
 	test("counts a mixed batch and reports the first non-exempt call", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["read"] });
 		const mixed = () => [toolCall("read", { path: "a.ts" }), toolCall("bash", { command: "echo a" })];
