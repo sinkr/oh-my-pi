@@ -96,7 +96,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		}
 		const serviceRunning = hasLiveOwnedService(this.session);
 		if (jobs.length === 0 && !serviceRunning) {
-			// An idle poll, not a failure: flagged so the loop guard keeps counting across it.
+			// An idle poll, not a failure: flagged so the loop guard keeps counting
+			// across it, unless an interrupt (news for the model) landed meanwhile.
 			return {
 				content: [
 					{
@@ -105,7 +106,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					},
 				],
 				details: { op: "wait", jobs: [] },
-				useless: true,
+				...(signal?.aborted ? {} : { useless: true }),
 			};
 		}
 		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate });

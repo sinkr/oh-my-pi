@@ -254,7 +254,8 @@ describe("wait", () => {
 				{},
 				controller.signal,
 			);
-			expect(result.useless).toBe(true);
+			// The interrupt is news for the model, so the loop guard must not skip this poll.
+			expect(result.useless).toBeUndefined();
 			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Nothing to wait for") });
 		});
 	});
