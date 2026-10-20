@@ -49,7 +49,7 @@ function parseChunk(sel: string, pinBare: boolean): LineRange | null {
 	return { startLine: rawStart, endLine: rawEnd };
 }
 
-/** What a lone bare `N` selects: lines `N` onward (`:50`), or the single line `N` (`:50:raw`). */
+/** What a bare `N` selects in a one-chunk list: lines `N` onward (`:50`), or the single line `N`. */
 export type BareLineMode = "onward" | "single";
 
 /**
@@ -59,8 +59,8 @@ export type BareLineMode = "onward" | "single";
  */
 export function parseLineRanges(sel: string, bare: BareLineMode = "onward"): [LineRange, ...LineRange[]] | null {
 	const chunks = sel.split(",");
-	// A lone `:50` means "from line 50". Beside `raw` or inside a comma list, a bare
-	// number is that one line; otherwise `:19,59` collapses to "from 19 through EOF".
+	// A lone `:50` means "from line 50" unless `bare` pins it. Inside a comma list,
+	// a bare number is that one line; otherwise `:19,59` collapses to "from 19 through EOF".
 	const pinBare = bare === "single" || chunks.length > 1;
 	const parsed: LineRange[] = [];
 	for (const chunk of chunks) {
