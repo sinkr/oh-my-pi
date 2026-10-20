@@ -90,6 +90,9 @@ function reportIdentifiers(report: UsageReport): Set<string> {
  * Conservative on purpose: when a provider's reports or the credential carry
  * no identity at all (or the credential is an API key alongside existing
  * reports), we can't attribute, so we don't claim the account is missing.
+ * The tradeoff: once a provider returns any report, its identity-less rows
+ * are never flagged, so a failed fetch for one of several identity-less
+ * logins of the same provider (e.g. two Devin browser logins) goes unshown.
  */
 export function collectUnreportedAccounts(
 	reports: UsageReport[],
