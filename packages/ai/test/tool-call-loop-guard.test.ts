@@ -301,43 +301,42 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(turn(batch()))).toBeNull();
 	});
 
-	/** An exempt `hub` turn whose wait returned `text`. */
-	function hubWait(text: string) {
-		const call = toolCall("hub", { op: "wait" });
+	/** An exempt `wait` turn; `useless` marks a wait that elapsed with nothing new. */
+	function waitTurn(text: string, useless: boolean) {
+		const call = toolCall("wait", {});
 		return turn(
 			[call],
 			[
 				{
 					role: "toolResult",
 					toolCallId: call.id,
-					toolName: "hub",
+					toolName: "wait",
 					content: [{ type: "text", text }],
 					isError: false,
+					...(useless ? { useless: true } : {}),
 					timestamp: Date.now(),
 				},
 			],
 		);
 	}
 
-	test("keeps counting across a repeated idle exempt poll between identical turns", () => {
-		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["hub"] });
+	test("keeps counting across an idle exempt poll between identical turns", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["wait"] });
 		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
 		expect(guard.recordTurn(pytest())).toBeNull();
-		expect(guard.recordTurn(hubWait("no messages"))).toBeNull();
-		expect(guard.recordTurn(pytest())).toBeNull();
-		// The same poll with the same empty answer made no progress, so it does not hide the loop.
-		expect(guard.recordTurn(hubWait("no messages"))).toBeNull();
+		// The wait elapsed with nothing new, so it does not hide the loop.
+		expect(guard.recordTurn(waitTurn("Wait limit reached.", true))).toBeNull();
 		expect(guard.recordTurn(pytest())).toMatchObject({ toolName: "bash", count: 2 });
 	});
 
-	test("resets after an exempt turn that returned something new", () => {
-		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["hub"] });
+	test("resets after an exempt poll that returned something, even repeated text", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["wait"] });
 		const pytest = () => turn([toolCall("bash", { command: "pytest" })]);
 		expect(guard.recordTurn(pytest())).toBeNull();
-		expect(guard.recordTurn(hubWait("no messages"))).toBeNull();
+		// A finished service may have changed what the rerun sees.
+		expect(guard.recordTurn(waitTurn("A service finished.", false))).toBeNull();
 		expect(guard.recordTurn(pytest())).toBeNull();
-		// Finished peer work may have changed what the rerun sees.
-		expect(guard.recordTurn(hubWait("worker finished: fixed test"))).toBeNull();
+		expect(guard.recordTurn(waitTurn("A service finished.", false))).toBeNull();
 		expect(guard.recordTurn(pytest())).toBeNull();
 	});
 

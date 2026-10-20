@@ -189,6 +189,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					},
 				],
 				details: { op: "wait", jobs: [] },
+				// A wait that ran out with nothing to report is an idle poll.
+				...(wake === "timeout" ? { useless: true } : {}),
 			};
 		} finally {
 			manager?.unwatchJobs(watchedIds);

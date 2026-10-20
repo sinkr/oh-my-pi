@@ -51,7 +51,7 @@ function summarizeText(text: string, limit: number): string {
 	return summary;
 }
 
-function toolResultText(toolResults: readonly ToolResultMessage[], toolCallId: string): string {
+function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCallId: string): string {
 	const result = toolResults.find(candidate => candidate.toolCallId === toolCallId);
 	if (!result) return "";
 
@@ -61,7 +61,7 @@ function toolResultText(toolResults: readonly ToolResultMessage[], toolCallId: s
 			textParts.push(block.text);
 		}
 	}
-	return textParts.join("\n");
+	return summarizeText(textParts.join("\n"), RESULT_SUMMARY_LIMIT);
 }
 
 /** Detects consecutive identical assistant tool calls across model turns. */
@@ -70,8 +70,6 @@ export class ToolCallLoopGuard {
 	#exemptTools: ReadonlySet<string>;
 	#lastHash: string | undefined;
 	#count = 0;
-	/** Calls and results of the last all-exempt turn, to tell an idle poll from a productive one. */
-	#lastExemptHash: string | undefined;
 
 	constructor(options: ToolCallLoopGuardOptions) {
 		this.#threshold = Math.max(1, Math.trunc(options.threshold));
@@ -84,28 +82,17 @@ export class ToolCallLoopGuard {
 		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
-			this.#lastExemptHash = undefined;
 			return null;
 		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
-			// An exempt turn that repeats the previous one call for call and result for
-			// result (a poll that returned nothing new) is skipped, so alternating it with
-			// a repeated call cannot hide the loop. Any other exempt turn may have changed
-			// state (a `hub` start/send, a wait that returned finished work), so it ends
-			// the repetition.
-			const exemptHash = JSON.stringify(
-				toolCalls
-					.map(tc =>
-						JSON.stringify([
-							tc.name,
-							canonicalizeToolCallValue(tc.arguments),
-							toolResultText(turn.toolResults, tc.id),
-						]),
-					)
-					.sort(),
+			// An exempt poll its tool flagged useless (a wait that elapsed with nothing
+			// new) is skipped, so alternating it with a repeated call cannot hide the
+			// loop. Any other exempt turn may have changed state (finished jobs, a
+			// message), so it ends the repetition.
+			const idle = toolCalls.every(
+				tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true,
 			);
-			if (exemptHash !== this.#lastExemptHash) {
-				this.#lastExemptHash = exemptHash;
+			if (!idle) {
 				this.#lastHash = undefined;
 				this.#count = 0;
 			}
@@ -129,7 +116,7 @@ export class ToolCallLoopGuard {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
 			count: this.#count,
-			resultSummary: summarizeText(toolResultText(turn.toolResults, reportCall.id), RESULT_SUMMARY_LIMIT),
+			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
 				ARGUMENT_SUMMARY_LIMIT,
