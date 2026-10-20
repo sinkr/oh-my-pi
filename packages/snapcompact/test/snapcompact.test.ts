@@ -509,6 +509,12 @@ describe("shape resolution", () => {
 				snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.7" }),
 			),
 		).toBe(2442);
+		// DeepSeek V4.1 Flash via OpenRouter: its own verified rule, not the Anthropic-wire fallback's 3,136.
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape(getBundledModel("openrouter", "deepseek/deepseek-v4.1-flash-1017")),
+			),
+		).toBe(994);
 		expect(
 			snapcompact.plannedFrameTokens(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" })),
 		).toBe(snapcompact.FRAME_TOKEN_ESTIMATE);
