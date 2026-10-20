@@ -6,7 +6,6 @@ import {
 	WALL_TIME_NOTICE_MIN_MS,
 } from "@oh-my-pi/pi-tui/tools/bash";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -654,14 +653,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	 * `/fork`, `/new`, and `/resume` take effect on the next call while a call
 	 * already under way keeps the session it began in. Always set both keys: an
 	 * empty value replaces a stale one inherited from a parent omp process,
-	 * since an env overlay cannot unset. A relative `--session-dir` yields a
-	 * relative file, so it is made absolute for commands that `cd` elsewhere.
+	 * since an env overlay cannot unset.
 	 */
 	#sessionEnv(): Record<string, string> {
-		const file = this.session.getSessionFile();
 		return {
 			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
-			PI_SESSION_FILE: file ? path.resolve(file) : "",
+			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
 		};
 	}
 

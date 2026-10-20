@@ -80,12 +80,12 @@ it.skipIf(process.platform === "win32")(
 	10_000,
 );
 
-it.skipIf(process.platform === "win32")("gives a background job the session identity, file made absolute", async () => {
+it.skipIf(process.platform === "win32")("gives a background job the session identity", async () => {
+	const sessionFile = path.join(cwd, "sessions", "bg.jsonl");
 	const job = new BashTool({
 		cwd,
 		hasUI: false,
-		// A relative `--session-dir` yields a relative session file.
-		getSessionFile: () => "sessions/bg.jsonl",
+		getSessionFile: () => sessionFile,
 		getSessionId: () => "session-bg",
 		getSessionSpawns: () => "*",
 		asyncJobManager: manager,
@@ -99,5 +99,5 @@ it.skipIf(process.platform === "win32")("gives a background job the session iden
 	await manager.waitForAll();
 	const [id, file] = (await Bun.file(path.join(cwd, "env.txt")).text()).split("|");
 	expect(id).toBe("session-bg");
-	expect(file).toBe(path.resolve("sessions/bg.jsonl"));
+	expect(file).toBe(sessionFile);
 });
