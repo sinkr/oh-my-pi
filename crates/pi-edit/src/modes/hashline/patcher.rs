@@ -14,11 +14,10 @@ use super::{
 	clipboard::validate_clipboard_sequence,
 	input::{Parsed, Patch, PatchSection},
 	messages::{
-		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, missing_snapshot_tag_message,
-		path_recovered_from_tag_message, unseen_lines_message, unverified_wide_lines_message,
-		wide_unseen_lines_message,
+		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, path_recovered_from_tag_message,
+		unseen_lines_message, unverified_wide_lines_message, wide_unseen_lines_message,
 	},
-	mismatch::{MismatchDetails, mismatch_error},
+	mismatch::{MismatchDetails, format_header_only_message, mismatch_error},
 	parser::{ParseFailure, parse_patch},
 	recovery::{RecoveryArgs, try_recover},
 	types::{ApplyResult, BlockOpKind, BlockResolution, Edit, FileOp},
@@ -95,7 +94,7 @@ fn has_anchor_scoped_edit(edits: &[Edit]) -> bool {
 	})
 }
 
-fn mismatch(
+pub(crate) fn mismatch(
 	section: &PatchSection,
 	canonical: &Path,
 	normalized: &str,
@@ -143,6 +142,24 @@ fn mismatch(
 		hash_recognized: store.has_hash(canonical, expected),
 		tag_origin_paths,
 	})
+}
+
+/// Answer input that is only a section header (no ops) with the file's
+/// current tag, as an unknown tag would get.
+pub fn header_only_error(path: &str, files: &mut dyn FileSource) -> EditError {
+	let resolved = match files.resolve(path, false) {
+		Ok(resolved) => resolved,
+		Err(err) => return err,
+	};
+	match files.try_read(&resolved) {
+		Ok(Some(read)) => {
+			EditError::matched(format_header_only_message(path, &file_hash(&read.text)))
+		},
+		Ok(None) => EditError::apply(format!(
+			"File not found: {path}. Use the write tool to create new files."
+		)),
+		Err(err) => err,
+	}
 }
 
 /// Minimum trimmed length, in chars, for a current-content line to count as
@@ -688,9 +705,7 @@ pub fn stage_patch(
 	let mut canonical_paths = HashMap::<std::path::PathBuf, String>::new();
 	for original in &patch.sections {
 		let parsed = parse_with_range_diagnostics(original, files)?;
-		let Some(tag) = original.file_hash.as_deref() else {
-			return Err(EditError::apply(missing_snapshot_tag_message(&original.path)));
-		};
+		let tag = original.file_hash.as_deref();
 		let initial = files.resolve(&original.path, false)?;
 		let recovered = recover_target(original, &initial, files, store);
 		let (section, resolved) = recovered
@@ -698,14 +713,16 @@ pub fn stage_patch(
 			.map_or((original, &initial), |(section, resolved)| (section, resolved));
 		// Whole-file delete needs existence, not text, so an undecodable file
 		// stages without its content; anything else still rejects.
-		let undecodable_delete = matches!(parsed.file_op, Some(FileOp::Rem));
+		let undecodable_delete = tag.filter(|_| matches!(parsed.file_op, Some(FileOp::Rem)));
 		let read = match files.try_read(resolved) {
 			Ok(read) => read,
-			Err(err) if err.is_invalid_utf8() && undecodable_delete => None,
+			Err(err) if err.is_invalid_utf8() && undecodable_delete.is_some() => None,
 			Err(err) => return Err(err),
 		};
 		let Some(read) = read else {
-			if undecodable_delete && files.exists(&resolved.absolute) {
+			if let Some(tag) = undecodable_delete
+				&& files.exists(&resolved.absolute)
+			{
 				staged.push(undecodable_delete_staged(
 					section,
 					resolved,
@@ -721,6 +738,11 @@ pub fn stage_patch(
 				"File not found: {}. Use the write tool to create new files.",
 				section.path
 			)));
+		};
+		// A section with no tag (missing, or a placeholder like `#AUTO`) never
+		// applies; like an unknown tag, it gets the current tag and context.
+		let Some(tag) = tag else {
+			return Err(mismatch(section, &read.canonical, &read.text, "", store));
 		};
 		if section.path != original.path {
 			// Warning is attached below once parser/apply warnings are collected.

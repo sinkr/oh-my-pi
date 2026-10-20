@@ -723,16 +723,6 @@ pub fn write_drift_warning(path: &str) -> String {
 	)
 }
 
-/// Section omitted the mandatory snapshot tag. Shared by the apply
-/// (`Patcher.prepare`) and preview/diff paths so both stay in lockstep.
-pub fn missing_snapshot_tag_message(section_path: &str) -> String {
-	format!(
-		"Missing hashline snapshot tag for {section_path}; use \
-		 `{HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}tag{HL_FILE_SUFFIX}` from your latest \
-		 read/search output. To create a new file, use the write tool."
-	)
-}
-
 /// Section named a nonexistent path matching an earlier snapshot's name and
 /// tag.
 ///

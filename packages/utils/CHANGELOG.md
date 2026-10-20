@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `bun test` runs writing their logs into your real `~/.omp/logs`: test processes now log to a per-user `omp-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
 ### Breaking Changes
 
 - `readTarEntriesFromBuffer()` in `@oh-my-pi/pi-utils/ar/tar` now returns `Promise<ArchiveIndexEntry[]>` instead of `ArchiveIndexEntry[]`; `await` its result ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))

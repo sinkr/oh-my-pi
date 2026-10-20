@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Factory Droid now carries Droid's 3.5 MB inline-image budget (`inline-image-byte-budget`) for its hosted routes, under their 4.5 MB request limit, and the new `request-body-byte-limit` axis (`resolveRequestBodyByteLimit`) records that limit; it applies on Factory's own hosts through pi-ai's `reachesBudgetedHost` ([#16288](https://github.com/can1357/oh-my-pi/pull/16288) by [@will-bogusz](https://github.com/will-bogusz))
+- DeepSeek V4.1 Flash images are now priced by DeepSeek's own billing (994 tokens for a snapcompact frame) instead of a GPT or Claude rate (2,882 to 3,136), so a 25-frame archive no longer counts about 50k tokens the provider never bills and triggers compaction early ([#16418](https://github.com/can1357/oh-my-pi/pull/16418) by [@will-bogusz](https://github.com/will-bogusz))
 ### Changed
 
 - Changed Devin model discovery to send legacy Windsurf Enterprise keys unprefixed in one request, dropping the Windsurf-editor retry that returned a smaller model list ([#13677](https://github.com/can1357/oh-my-pi/pull/13677) by [@will-bogusz](https://github.com/will-bogusz))

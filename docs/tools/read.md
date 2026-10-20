@@ -44,7 +44,7 @@ For normal file-like reads, `splitPathAndSel()` in `packages/tui/src/tools/read.
 | `:N` / `:LN` / `:N-` / `:N..` | Start at 1-indexed line `N`, open-ended.                                                                                                       |
 | `:A-B` / `:LA-LB` / `:A..B`   | Inclusive 1-indexed line range (`..` is a forgiving alias normalized to `-`).                                                                  |
 | `:A+C` / `:LA+LC`             | `C` lines starting at `A`; tool converts this to end line `A + C - 1`.                                                                         |
-| `:-N`                        | Last `N` lines; `N` must be positive. Also combines with `:raw`. |
+| `:-N`                        | Last `N` lines; `N` must be positive. Also combines with `:raw` and with ranges in a comma list (`:1-12,-15`). |
 | `:R1,R2,...`                  | Multiple ranges, sorted and merged before reading (for example `:5-16,960-973`).                                                               |
 | `:range:raw` or `:raw:range`  | Same line selection, but raw output. Exception: a lone bare `N` is the single line `N` (`:17:raw`); `:N-:raw` stays open-ended.                |
 
@@ -55,6 +55,8 @@ Validation in `parseLineRangeChunk()`:
 - `-` end must be `>= start`.
 
 Selector parsing intentionally falls through for unrecognized trailing `:...`; archive and SQLite paths consume their own colon syntax.
+
+A comma list may repeat the selector colon after a comma (`:1-30,:-30` reads as `:1-30,-30`, `:raw` on either side included). `splitPathAndSel(path, { foldListColons: false })` keeps that colon in the path, and the literal-preferring splitters use it so an existing file named like the list's head (`a:1-30,`) still wins.
 
 URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts`, but use the same line-range parser for `:raw`, `:N`, `:A-B`, `:A+C`, `:5-10,20-30`, and `:range:raw` / `:raw:range`. Because URL ports also use `:`, add a trailing slash before a selector on a host/port URL, e.g. `https://example.com/:80`.
 Literal filesystem paths take precedence over selector interpretation, so an existing POSIX filename that ends in selector-looking text is read literally.
@@ -208,9 +210,9 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 #### `db.sqlite?q=SELECT ...`
 
 - `kind: "raw"`
-- Cannot be combined with table selectors or any other query param.
+- Cannot be combined with a table selector; the only other query params are `limit` and `offset`, which page the query's rows as they page a table (defaults `limit = 20`, `offset = 0`, `limit` capped at `500`) and add a footer naming the next page's `?q=…&limit=…&offset=…`. Any other param throws, naming it.
 - Empty `q` throws.
-- `executeReadQuery()` prepares the SQL, rejects bound parameters, and collects rows from `statement.iterate()` capped at `MAX_RAW_QUERY_ROWS = 1000`; it does not verify that the SQL starts with `SELECT`.
+- `executeReadQuery()` prepares the SQL and rejects bound parameters. With `limit`/`offset` it runs the query as a subquery under `LIMIT ? OFFSET ?`, so skipped rows are never built; statements that cannot nest (`PRAGMA`, `EXPLAIN`) skip `offset` rows while iterating instead. Without them it collects rows from `statement.iterate()` capped at `MAX_RAW_QUERY_ROWS = 1000`. It does not verify that the SQL starts with `SELECT`.
 
 - Rendering caps in `packages/coding-agent/src/tools/sqlite-reader.ts`:
    - ASCII table width `120` (`MAX_RENDER_WIDTH`)
