@@ -489,6 +489,42 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
 	});
 
+	test("warms a Factory Droid model whose override declares only the 1h lifetime", () => {
+		const model = factoryModel("claude-opus-4-6", ["anthropic"]);
+		model.promptCache = { long: 3600 };
+		const reply = (cttl: Usage["cttl"]) => ({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl })),
+			provider: model.provider,
+			model: model.id,
+		});
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+		h.warmer.onResponse(reply({ ephemeral1h: 500 }));
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+
+		// An upstream that wrote a 5m entry has no declared lifetime: stop.
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
+	});
+
+	test("adopts the tier a Factory Droid server-side fallback response reports", () => {
+		const model = factoryModel("claude-fable-5", ["anthropic"]);
+		const h = harness();
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
+		// The refused request retried on claude-opus-5; the response carries the served id.
+		h.warmer.onResponse({
+			...makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })),
+			content: [{ type: "fallback", from: { model: model.id }, to: { model: "claude-opus-5" } }],
+			provider: model.provider,
+			model: "claude-opus-5",
+		});
+		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
+		expect(h.warmer.cacheEntry).toMatchObject({ tier: "long", ttlMs: 3_600_000 });
+	});
+
 	test("streaming mode stops when the agent settles", () => {
 		const h = harness();
 		h.mode = "streaming";
