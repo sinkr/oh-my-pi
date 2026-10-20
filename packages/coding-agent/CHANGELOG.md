@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- An agent that messages another agent can now `wait` for the reply instead of erroring; the wait ends early, without an error, once the agent asked finishes its turn without replying or is itself waiting on the caller's result ([#16445](https://github.com/can1357/oh-my-pi/pull/16445) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed agents opening your own Chrome through the relay (with `browser.relay` on) when they asked the `browser` tool for Chromium with `app.tern: false`; the tool now points them to `app.relay: false` ([#16294](https://github.com/can1357/oh-my-pi/pull/16294) by [@will-bogusz](https://github.com/will-bogusz))
