@@ -207,6 +207,36 @@ async fn header_only_input_gets_the_current_tag() {
 }
 
 #[tokio::test]
+async fn header_only_reply_records_nothing_so_the_resend_meets_the_unread_guard() {
+	// The reply shows no rows, so it records no snapshot: a resend under its
+	// tag gets the guard a tag with no retained read gets, which applies short
+	// lines and rejects one that may have been shown cut.
+	let mut workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let wide = "x".repeat(600);
+	let text = format!("alpha\n{wide}\ngamma\n");
+	workspace.write("a.txt", &text);
+	let current = pi_edit::store::file_hash(&text);
+	let writer = common::DiskWriter::default();
+	workspace
+		.apply_json(&json!({ "input": "[a.txt#AUTO]\n" }), &writer)
+		.await
+		.expect_err("a header with no ops must not apply");
+	let error = workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{current}]\nPUT 2.=2:\n+y\n") }), &writer)
+		.await
+		.expect_err("a wide line no read showed whole")
+		.to_string();
+	assert!(error.contains("no retained read shows them in full"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{current}]\nPUT 1.=1:\n+ALPHA\n") }), &writer)
+		.await
+		.expect("a short line applies under the returned tag");
+	assert_eq!(workspace.read("a.txt").unwrap(), format!("ALPHA\n{wide}\ngamma\n"));
+}
+
+#[tokio::test]
 async fn placeholder_section_does_not_borrow_a_same_path_tag() {
 	let current = pi_edit::store::file_hash(UNTAGGED_TEXT);
 	for placeholder in ["AUTO", "????", ""] {

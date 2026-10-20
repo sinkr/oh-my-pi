@@ -132,7 +132,9 @@ pub fn header_only_error(path: &str, files: &mut dyn FileSource) -> EditError {
 		Err(err) => return err,
 	};
 	match files.try_read(&resolved) {
-		Ok(Some(read)) => EditError::apply(format_header_only_message(path, &file_hash(&read.text))),
+		Ok(Some(read)) => {
+			EditError::matched(format_header_only_message(path, &file_hash(&read.text)))
+		},
 		Ok(None) => EditError::apply(format!(
 			"File not found: {path}. Use the write tool to create new files."
 		)),
@@ -678,6 +680,7 @@ pub fn stage_patch(
 	let mut canonical_paths = HashMap::<std::path::PathBuf, String>::new();
 	for original in &patch.sections {
 		let parsed = parse_with_range_diagnostics(original, files)?;
+		let tag = original.file_hash.as_deref();
 		let initial = files.resolve(&original.path, false)?;
 		let recovered = recover_target(original, &initial, files, store);
 		let (section, resolved) = recovered
@@ -685,20 +688,21 @@ pub fn stage_patch(
 			.map_or((original, &initial), |(section, resolved)| (section, resolved));
 		// Whole-file delete needs existence, not text, so an undecodable file
 		// stages without its content; anything else still rejects.
-		let undecodable_delete =
-			original.file_hash.is_some() && matches!(parsed.file_op, Some(FileOp::Rem));
+		let undecodable_delete = tag.filter(|_| matches!(parsed.file_op, Some(FileOp::Rem)));
 		let read = match files.try_read(resolved) {
 			Ok(read) => read,
-			Err(err) if err.is_invalid_utf8() && undecodable_delete => None,
+			Err(err) if err.is_invalid_utf8() && undecodable_delete.is_some() => None,
 			Err(err) => return Err(err),
 		};
 		let Some(read) = read else {
-			if undecodable_delete && files.exists(&resolved.absolute) {
+			if let Some(tag) = undecodable_delete
+				&& files.exists(&resolved.absolute)
+			{
 				staged.push(undecodable_delete_staged(
 					section,
 					resolved,
 					&original.path,
-					original.file_hash.as_deref().unwrap_or_default(),
+					tag,
 					parsed.warnings.clone(),
 					&mut canonical_paths,
 					&clipboard.fork(),
@@ -712,7 +716,7 @@ pub fn stage_patch(
 		};
 		// A section with no tag (missing, or a placeholder like `#AUTO`) never
 		// applies; like an unknown tag, it gets the current tag and context.
-		let Some(tag) = original.file_hash.as_deref() else {
+		let Some(tag) = tag else {
 			return Err(mismatch(section, &read.canonical, &read.text, "", store));
 		};
 		if section.path != original.path {
