@@ -8,7 +8,9 @@ it("native restart preserves the active profile and reopens its persisted sessio
 		cwd: tempDir.path(),
 		env: {
 			...process.env,
+			// os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
 			HOME: tempDir.path(),
+			USERPROFILE: tempDir.path(),
 			OMP_PROFILE: undefined,
 			PI_PROFILE: undefined,
 			PI_CODING_AGENT_DIR: undefined,

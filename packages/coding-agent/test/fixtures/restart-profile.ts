@@ -18,10 +18,11 @@ if (process.argv[2] === "receive") {
 	setProfile(extracted.profile);
 	const resumeIndex = extracted.argv.indexOf("--resume");
 	if (resumeIndex === -1) throw new Error("Restarted process did not receive --resume");
-	const sessionId = extracted.argv[resumeIndex + 1];
+	const sessionFile = extracted.argv[resumeIndex + 1];
+	// Listed under the restored profile only if the profile reached the new process.
 	const sessions = await SessionManager.list(process.cwd());
-	const found = sessions.find(session => session.id === sessionId);
-	if (!found) throw new Error(`Restarted profile could not find session ${sessionId}`);
+	const found = sessionFile && sessions.find(session => path.resolve(session.path) === path.resolve(sessionFile));
+	if (!found) throw new Error(`Restarted profile could not find session ${sessionFile}`);
 	const resumed = await SessionManager.open(found.path);
 	process.stdout.write(
 		`${JSON.stringify({ profile: getActiveProfile() ?? "default", entries: resumed.getEntries() })}\n`,

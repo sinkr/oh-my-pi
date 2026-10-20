@@ -17,7 +17,7 @@ async fn patcher_apply_cases() {
 
 #[test]
 fn matcher_paths_accept_partial_sections_and_header_noise() {
-	let engine = HashlineEngine { enforce_seen_lines: false };
+	let engine = HashlineEngine { enforce_seen_lines: false, max_columns: 512 };
 	let inspected = engine.inspect(&ArgSnapshot {
 		input: Some(
 			"[one.ts#ABCD]\nPUT 1.=1:\n+one\n[*** Update File: dir with spaces/two.ts#1234]\nPUT \
@@ -163,4 +163,52 @@ fn completed_preview_surfaces_stale_hash_error() {
 			.as_deref()
 			.is_some_and(|error| error.contains("not from this session"))
 	);
+}
+
+#[tokio::test]
+async fn file_ops_reject_a_tag_that_does_not_match_the_file() {
+	for op in ["REM", "MV b.txt"] {
+		for recorded in [false, true] {
+			let workspace = common::Workspace::new(EditMode::Hashline);
+			workspace.write("a.txt", "current\n");
+			let tag = if recorded {
+				workspace.snapshot("a.txt", "old\n", None)
+			} else {
+				"0000".to_owned()
+			};
+			assert_ne!(tag, pi_edit::store::file_hash("current\n"));
+			let writer = common::DiskWriter::default();
+			let error = workspace
+				.apply_json(&json!({ "input": format!("[a.txt#{tag}]\n{op}\n") }), &writer)
+				.await
+				.expect_err("a file op under a non-matching tag must be rejected")
+				.to_string();
+			let reason = if recorded {
+				"file changed between read and edit"
+			} else {
+				"not from this session"
+			};
+			assert!(error.contains(reason), "{op} recorded={recorded}: {error}");
+			assert!(writer.requests.lock().is_empty());
+			assert_eq!(workspace.read("a.txt").as_deref(), Some("current\n"));
+			assert_eq!(workspace.read("b.txt"), None);
+		}
+	}
+}
+
+#[tokio::test]
+async fn head_insert_still_applies_across_a_stale_tag() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("a.txt", "current\n");
+	let tag = workspace.snapshot("a.txt", "old\n", None);
+	let outcome = workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{tag}]\nPUT <1:\n+head\nMV b.txt\n") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("head insert is content-independent");
+	assert_eq!(workspace.read("a.txt"), None);
+	assert_eq!(workspace.read("b.txt").as_deref(), Some("head\ncurrent\n"));
+	assert!(outcome.text.contains("despite a stale snapshot tag"), "{}", outcome.text);
 }

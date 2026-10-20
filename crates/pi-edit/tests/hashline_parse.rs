@@ -32,6 +32,19 @@ fn formats_hashline_v4_rows_and_headers() {
 }
 
 #[test]
+fn numbered_empty_text_keeps_its_display_row() {
+	assert_eq!(format_numbered_lines("", 0), "0:");
+}
+
+#[test]
+fn numbered_rows_preserve_payload_and_saturate_at_u32_max() {
+	assert_eq!(
+		format_numbered_lines("a\r\n\n\u{3bb}\0\n", u32::MAX - 1),
+		"4294967294:a\r\n4294967295:\n4294967295:\u{3bb}\0\n4294967295:"
+	);
+}
+
+#[test]
 fn tokenizer_recognizes_headers_ops_payloads_and_envelope() {
 	let mut tokenizer = Tokenizer::new();
 	let tokens = tokenizer
@@ -708,6 +721,29 @@ fn prefix_helpers_leave_mixed_content_unchanged() {
 	let lines = vec!["1:one".into(), "plain".into()];
 	assert_eq!(strip_hashline_prefixes(&lines), lines);
 	assert_eq!(strip_new_line_prefixes(&lines), lines);
+}
+
+fn rows(text: &str) -> Vec<String> {
+	text.split('\n').map(str::to_owned).collect()
+}
+
+#[test]
+fn write_prefix_strip_keeps_numbers_that_do_not_count_up_by_one() {
+	for text in [
+		"100000000: 30 00 00 54 bc.eq 0x100000004\n100000004: c0 03 5f d6 ret\n",
+		"00:00 welcome back\n00:02 to the series\n00:03 today we\n",
+		"20:56:07 read a\n20:56:07 read b\n",
+	] {
+		assert_eq!(strip_hashline_prefixes(&rows(text)), rows(text), "{text:?}");
+	}
+}
+
+#[test]
+fn write_prefix_strip_still_removes_read_and_search_numbering() {
+	let read = "[a.ts#1A2B]\n1:one\n2:two\n\n…\n\n9:nine\n10:ten\n";
+	assert_eq!(strip_hashline_prefixes(&rows(read)), ["one", "two", "", "", "nine", "ten", ""]);
+	let search = "[a.ts#1A2B]\n 4:ctx\n*5:hit\n...\n*9:hit\n[b.ts#3C4D]\n*2:hit\n";
+	assert_eq!(strip_hashline_prefixes(&rows(search)), ["ctx", "hit", "hit", "hit", ""]);
 }
 
 #[test]

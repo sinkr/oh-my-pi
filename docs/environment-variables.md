@@ -118,6 +118,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `AIAND_API_KEY`                 | ai& auth                                         | Using `aiand` provider                                         |                                                                                                     |
 | `GMI_API_KEY`                   | GMI Cloud auth                                   | Using `gmi-cloud` provider                                     |                                                                                                     |
 | `MODEL_API_KEY` / `META_API_KEY` | Meta Model API auth                             | Using `meta` provider                                          | Either variable works                                                                               |
+| `INCEPTION_API_KEY`             | Inception Mercury API auth                      | Using `inception` provider                                     | Also available via `/login inception`, which validates the key with a one-token Mercury 3 request (`/v1/models` is public) |
 | `SINGULARITYAPI_DEV_API_KEY`    | SingularityAPI universal gateway auth            | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`    |
 | `SINGULARITYAPI_TECH_API_KEY`   | SingularityAPI reserved lanes auth               | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models` |
 
@@ -173,6 +174,14 @@ Scope differs between the two `PI_PROXY` forms:
 Loopback, link-local, private-range (`10/8`, `172.16/12`, `192.168/16`), and
 `NO_PROXY` targets always bypass, so local model servers and MCP hosts stay direct.
 
+### Request body compression
+
+Request bodies of 1 KiB or more are compressed when sent to a provider's own endpoint that decodes them, as declared by the `request-encodings` / `endpoint-hosts` catalog rules: the official Anthropic API (gzip), the ChatGPT Codex backend (zstd), and the GitHub Copilot API at `api[.individual|.business|.enterprise].githubcopilot.com` (zstd, falling back to gzip). Proxies, relays, models.yml gateways (even under a built-in provider id), and every other host receive uncompressed JSON. If an endpoint, or a TLS-inspecting proxy in front of it, rejects an encoding and the uncompressed resend succeeds, that encoding stays off for the host for the rest of the process.
+
+| Variable                 | Behavior                                                                          |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| `PI_REQUEST_COMPRESSION` | `0`/`false`/`no`/`off` sends every request body uncompressed (enabled by default) |
+
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 
 When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry mode:
@@ -216,7 +225,6 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 | `ANTHROPIC_FOUNDRY_API_KEY` | Token string                                   | Used for `Authorization: Bearer <token>`                                                                                                                      |
 | `ANTHROPIC_CUSTOM_HEADERS`  | Header list string                             | Extra headers; format `header-a: value, header-b: value` or newline-separated. Also forwarded outside Foundry whenever `ANTHROPIC_BASE_URL` is non-Anthropic. |
 | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | Boolean-like string (`1`, `true`, `yes`, `on`) | Omits pre-release fields (`context_management`, beta tool fields, task budgets, structured-output format, `thinking.block_binding`, server compaction) and their beta headers on provider `anthropic` |
-| `PI_ANTHROPIC_GZIP` | Boolean-like string (`0`, `false`, `no`, `off` disable) | Request bodies of 1 KiB or more sent to the official Anthropic API are gzip-compressed (enabled by default); `0` sends them uncompressed. Applies to every provider whose requests reach `api.anthropic.com`, not only Foundry |
 | `NODE_EXTRA_CA_CERTS`       | PEM path or inline PEM                         | Extra CA chain for server certificate validation                                                                                                              |
 | `CLAUDE_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                                                                                                       |
 | `CLAUDE_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                                                                                                            |
@@ -341,7 +349,6 @@ therefore completes through the paste-code path.
 | `PI_CODEX_WEBSOCKET`                        | `1`/`true` enables websocket transport preference                                                                                                                                                             |
 | `PI_CODEX_RESPONSES_LITE`                   | `1`/`true` opts normal inference into Responses Lite; `0`/`false` forces the standard Responses body; unset defaults normal inference to full Responses                                                       |
 | `PI_OPENAI_STATEFUL`                        | Overrides the stateful-chaining default for the platform OpenAI Responses API (`previous_response_id`, forces `store: true`): on by default against api.openai.com, off elsewhere                             |
-| `PI_CODEX_ZSTD`                             | `0`/`false` disables zstd compression of request bodies sent to the official Codex API (enabled by default)                                                                                                   |
 | `PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS`        | Positive integer override (default `300000`)                                                                                                                                                                  |
 | `PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS` | First-event timeout override (default `300000`)                                                                                                                                                               |
 | `PI_CODEX_WEBSOCKET_PING_INTERVAL_MS`       | Ping interval override (default `10000`)                                                                                                                                                                      |
@@ -379,6 +386,7 @@ therefore completes through the paste-code path.
 | `EXA_API_KEY`                                       | Exa search/MCP; alternatively use `/login exa`                            |
 | `TINYFISH_API_KEY`                                  | TinyFish search provider (required)                                       |
 | `BRAVE_API_KEY`                                     | Brave search provider                                                     |
+| `DEEPSEEK_API_KEY`                                  | DeepSeek search provider (same key as DeepSeek models)                    |
 | `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                   |
 | `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                                        |
 | `PI_PERPLEXITY_RESPONSES`                           | `1` selects the Perplexity Responses endpoint instead of Chat Completions |
@@ -423,7 +431,7 @@ For an Anthropic catalog model, `searchAnthropic()` uses credentials in this ord
 
 ### TypeSafe judgments
 
-Small typed decisions the app makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging, and `judge()` eval helper) use the `judge` model role. With a TypeSafe credential, the catalog discovers the account-visible judge roster from `GET /v1/models`—including `jev-latest` and `jev-preview` when advertised—and the role selects an exact catalog model. The built-in judge chain is `typesafe/jev-latest`, `openrouter/~typesafe/jev-latest`, `tiny`, `smol`, `default`, then the active-session model. Once the chain reaches a native System One model (TypeSafe directly or through OpenRouter), it only falls back to other native models: when every native judge fails, the judgment fails instead of degrading to a prompted chat or on-device model. Each failed candidate is logged as `judgment candidate failed`. Configure `modelRoles.judge` or `retry.fallbackChains.judge` to select `typesafe/jev-preview` or another judge candidate.
+Small typed decisions the app makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging, and `judge()` eval helper) use the `judge` model role. With a TypeSafe credential, the catalog discovers the account-visible judge roster from `GET /v1/models`—including `jev-latest` and `jev-preview` when advertised, alongside the seeded `jev-1.14.0` the alias-only listing omits—and the role selects an exact catalog model. The built-in judge chain is `typesafe/jev-1.14.0`, `openrouter/typesafe/jev-1.14`, `tiny`, `smol`, `default`, then the active-session model. Once the chain reaches a native System One model (TypeSafe directly or through OpenRouter), it only falls back to other native models: when every native judge fails, the judgment fails instead of degrading to a prompted chat or on-device model. Each failed candidate is logged as `judgment candidate failed`. Configure `modelRoles.judge` or `retry.fallbackChains.judge` to select `typesafe/jev-preview` or another judge candidate.
 
 | Variable                 | Default / behavior                                                                                                                                                                                                                                       |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

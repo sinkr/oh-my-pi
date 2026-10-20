@@ -896,6 +896,13 @@ export interface ThinkingContent {
 	 * replay natively on another host.
 	 */
 	summary?: boolean;
+	/**
+	 * `true`: the block is narration — prose the model addressed to the user
+	 * between tool calls, which the provider returned as a signed thinking block
+	 * (Anthropic connector-text summarization). It stays a thinking block for
+	 * replay; user-facing surfaces present it as answer text.
+	 */
+	narration?: boolean;
 }
 
 export interface RedactedThinkingContent {
@@ -1110,6 +1117,8 @@ export interface AnthropicCompactionPayload {
 	content: string;
 	/** Signature of an on-demand block; replayed verbatim. */
 	signature?: string;
+	/** Net tool changes across the summarized range; covered by the signature, replayed verbatim. */
+	toolChanges?: Record<string, unknown>[];
 	/** Legacy threshold block state (`compact-2026-01-12`); replay-only. */
 	encryptedContent?: string;
 	/**
