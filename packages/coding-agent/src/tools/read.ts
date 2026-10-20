@@ -50,7 +50,6 @@ import type { ToolSession } from "../sdk";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
-	enforceInlineByteCap,
 	type TruncationResult,
 	truncateHead,
 	truncateHeadBytes,
@@ -86,7 +85,6 @@ import {
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
 import { approvalDirectoryKey } from "./approval-cache";
 import { approvalTargetKey, approvalTargetNamesFile, isApprovalPublicUrl } from "./approval-targets";
-import { saveArtifactText } from "./gh-common";
 import {
 	postProcessToolResult,
 	resolveArtifactSpillThreshold,
@@ -2119,12 +2117,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (rendered) {
 				// One unnumbered document: `:N` addresses the file, so the summary carries no row
 				// numbers, snapshot tag or `:N` continuation, and no line count that would mark it a
-				// complete read of the file. An oversized summary is cut with its full text in an artifact.
-				const text = await enforceInlineByteCap(rendered, {
-					saveArtifact: full => saveArtifactText(this.session, "read", full),
-				});
+				// complete read of the file. An oversized summary goes to the central artifact spill.
 				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath })
-					.text(text)
+					.text(rendered)
 					.sourcePath(renderAbsolutePath)
 					.done();
 			}

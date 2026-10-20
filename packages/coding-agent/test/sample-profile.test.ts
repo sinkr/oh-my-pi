@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	demangleSymbol,
 	parseSampleProfile,
@@ -199,8 +199,8 @@ describe("read tool .sample.txt dispatch", () => {
 		expect((await fs.readFile(filePath, "utf8")).split("\n")[8]).toBe("    100 Thread_1: renamed");
 	});
 
-	it("cuts an oversized summary to an artifact instead of a :N continuation into the file", async () => {
-		const threads = Array.from({ length: 400 }, (_, t) => [
+	it("spills an oversized summary to an artifact instead of a :N continuation into the file", async () => {
+		const threads = Array.from({ length: 200 }, (_, t) => [
 			`    100 Thread_${t}: worker-${t}`,
 			"    + 100 start  (in dyld) + 8  [0x100]",
 			`    +   100 worker_loop_${t}  (in demo) + 24  [0x200]`,
@@ -210,16 +210,26 @@ describe("read tool .sample.txt dispatch", () => {
 		const report = ["Analysis of sampling demo (pid 42) every 1 millisecond", "Call graph:", ...threads, ""];
 		const filePath = path.join(tmpDir, "busy.sample.txt");
 		await fs.writeFile(filePath, report.join("\n"));
-		const summary = renderSampleProfile(report.join("\n"));
-		expect(Buffer.byteLength(summary ?? "")).toBeGreaterThan(DEFAULT_MAX_BYTES);
+		const summary = renderSampleProfile(report.join("\n")) ?? "";
+		expect(Buffer.byteLength(summary)).toBeGreaterThan(20 * 1024);
 
-		const output = textOutput(
-			await wrapToolWithMetaNotice(new ReadTool(createSession(tmpDir))).execute("read-busy", { path: filePath }),
-		);
-		expect(output).toContain("macOS sample profile: demo (pid 42)");
-		expect(output).not.toMatch(/Use :\d+ to continue/);
-		expect(output).toContain("[raw output: artifact://artifact-1]");
-		expect(await fs.readFile(path.join(tmpDir, "artifact-1.log"), "utf8")).toBe(summary ?? "");
+		const settings = Settings.isolated({ "edit.mode": "hashline", "tools.artifactSpillThreshold": 20 });
+		const sessionManager = SessionManager.create(tmpDir, path.join(tmpDir, "sessions"));
+		await sessionManager.ensureOnDisk();
+		const context = { sessionManager, settings } as unknown as AgentToolContext;
+		try {
+			const tool = wrapToolWithMetaNotice(new ReadTool({ ...createSession(tmpDir), settings }));
+			const result = await tool.execute("read-busy", { path: filePath }, undefined, undefined, context);
+			const output = textOutput(result);
+			expect(output).toContain("macOS sample profile: demo (pid 42)");
+			expect(output).not.toMatch(/Use :\d+ to continue/);
+			const artifactId = result.details?.meta?.truncation?.artifactId;
+			expect(artifactId).toBeDefined();
+			const artifactPath = await sessionManager.getArtifactPath(artifactId ?? "");
+			expect(await fs.readFile(artifactPath ?? "", "utf8")).toBe(summary);
+		} finally {
+			await sessionManager.close();
+		}
 	});
 
 	it("shows the summary without row numbers when read line numbers are on", async () => {

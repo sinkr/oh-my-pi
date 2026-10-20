@@ -170,7 +170,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 ### Profiler reports
 
 - A whole-file read of a recognized macOS `sample` call-tree file (`*.sample.txt`) or V8 `.cpuprofile` JSON returns a bottleneck summary rather than the raw dump when valid and at most `32 MiB`.
-- The summary is generated text: it has no row numbers or hashline header, and one over `50 KiB` is cut with its full text saved as an artifact. Line selectors, tails and `:raw` read the original file, so their line numbers and snapshot tag are the file's.
+- The summary is generated text: it has no row numbers, hashline header or `:N` continuation, and one over `tools.artifactSpillThreshold` spills to an artifact like any tool result. Line selectors, tails and `:raw` read the original file, so their line numbers and snapshot tag are the file's.
 - A file that merely has one of those names/extensions but does not parse as the expected report falls through to ordinary text handling.
 
 ### SQLite databases
