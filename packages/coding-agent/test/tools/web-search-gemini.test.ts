@@ -414,8 +414,7 @@ describe("searchGemini tools serialization", () => {
 		).rejects.toThrow("Gemini API returned an empty grounded response");
 	});
 
-	it("omits requestType from Antigravity search requests", async () => {
-		// `requestType: "agent"` draws false 429 quota errors from Antigravity.
+	it("does not tag Antigravity search requests with the requestType that draws false 429 quota errors", async () => {
 		const fetchMock = mockGeminiFetch();
 		await searchGemini({
 			...makeParams("antigravity search", getBundledModel("google-antigravity", "gemini-3.8-flash")),
