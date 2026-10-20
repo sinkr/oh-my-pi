@@ -106,10 +106,12 @@ export function mergeLineRanges(ranges: readonly LineRange[]): [LineRange, ...Li
  */
 export function selectorLineRanges(sel: string | undefined): [LineRange, ...LineRange[]] | undefined {
 	if (!sel) return undefined;
-	for (const chunk of sel.split(":")) {
+	const chunks = sel.split(":");
+	const bare = chunks.some(chunk => chunk.toLowerCase() === "raw") ? "single" : "onward";
+	for (const chunk of chunks) {
 		const lower = chunk.toLowerCase();
 		if (lower === "raw" || lower === "conflicts") continue;
-		const ranges = parseLineRanges(chunk);
+		const ranges = parseLineRanges(chunk, bare);
 		if (ranges) return ranges;
 	}
 	return undefined;
