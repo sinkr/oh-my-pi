@@ -1357,9 +1357,12 @@ export function renderImage(
 		return { sequence, rows };
 	}
 	if (TERMINAL.imageProtocol === ImageProtocol.Iterm2) {
+		// The height is the rows reserved for the image, not `auto`: iTerm2
+		// resolves `auto` only for a session on screen, so an image written to a
+		// background tab is dropped, and its rows stay blank in scrollback too.
 		const sequence = encodeITerm2(base64Data, {
 			width: fit.columns,
-			height: "auto",
+			height: fit.rows,
 			preserveAspectRatio: options.preserveAspectRatio ?? true,
 		});
 		return { sequence, rows: fit.rows };
