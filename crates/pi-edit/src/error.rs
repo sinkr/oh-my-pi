@@ -13,8 +13,8 @@ pub enum EditError {
 	/// line when the parser knows it.
 	#[error("{message}")]
 	Parse { message: String, line: Option<u32> },
-	/// The payload parsed but could not be applied (missing file, overlap,
-	/// invalid op, auto-generated target, no-op, …).
+	/// The payload parsed but could not be applied for a reason no
+	/// [`Rejection`] names (overlap, invalid op, auto-generated target, …).
 	#[error("{0}")]
 	Apply(String),
 	/// The target is not valid UTF-8 and the operation needs its text.
@@ -42,6 +42,54 @@ pub enum EditError {
 	/// The host writer callback failed; carries its message verbatim.
 	#[error("{0}")]
 	Writer(String),
+	/// A check refused a payload that parsed; `reason` names the check.
+	#[error("{message}")]
+	Rejected { reason: Rejection, message: String },
+	/// One file's failure in a multi-file call, which writes nothing.
+	#[error("[{path}]: {source}\nNo files were modified — sections apply atomically.")]
+	InFile { path: String, source: Box<Self> },
+}
+
+/// Which check refused an edit whose payload parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rejection {
+	/// The section's tag names an earlier version of the file.
+	StaleTag,
+	/// The tag was never issued in this session.
+	UnknownTag,
+	/// The tag was issued in this session for a different file.
+	OtherFileTag,
+	/// The header carries no tag, or a placeholder.
+	MissingTag,
+	/// A header with no ops under it.
+	HeaderOnly,
+	/// An op anchors on lines this session has not displayed whole.
+	UnseenLines,
+	/// An anchor lies past the end of the file.
+	OutOfRange,
+	/// A replacement's boundary rows leave where it lands undecided.
+	AmbiguousBoundary,
+	/// The edit leaves the file unchanged.
+	NoChange,
+	/// The target file does not exist.
+	FileNotFound,
+}
+
+impl Rejection {
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::StaleTag => "stale_tag",
+			Self::UnknownTag => "unknown_tag",
+			Self::OtherFileTag => "other_file_tag",
+			Self::MissingTag => "missing_tag",
+			Self::HeaderOnly => "header_only",
+			Self::UnseenLines => "unseen_lines",
+			Self::OutOfRange => "out_of_range",
+			Self::AmbiguousBoundary => "ambiguous_boundary",
+			Self::NoChange => "no_change",
+			Self::FileNotFound => "file_not_found",
+		}
+	}
 }
 
 impl EditError {
@@ -65,6 +113,11 @@ impl EditError {
 		Self::Match(message.into())
 	}
 
+	/// Refusal by a named check, carrying a preformatted message.
+	pub fn rejected(reason: Rejection, message: impl Into<String>) -> Self {
+		Self::Rejected { reason, message: message.into() }
+	}
+
 	/// Whether this rejects an undecodable target.
 	pub const fn is_invalid_utf8(&self) -> bool {
 		matches!(self, Self::InvalidUtf8 { .. })
@@ -73,6 +126,23 @@ impl EditError {
 	/// Whether this is `File not found` (ENOENT) for the given path.
 	pub fn is_not_found(&self) -> bool {
 		matches!(self, Self::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
+	}
+
+	/// Stable class of this failure, which hosts record beside the message.
+	pub fn kind(&self) -> &'static str {
+		match self {
+			Self::Parse { .. } => "parse",
+			Self::Apply(_) => "apply",
+			Self::InvalidUtf8 { .. } => "invalid_utf8",
+			Self::Match(_) => "no_match",
+			Self::Plan(_) => "plan_mode",
+			Self::UnresolvedUrl(_) => "unresolved_url",
+			Self::Io { .. } if self.is_not_found() => "file_not_found",
+			Self::Io { .. } => "io",
+			Self::Writer(_) => "write_failed",
+			Self::Rejected { reason, .. } => reason.as_str(),
+			Self::InFile { source, .. } => source.kind(),
+		}
 	}
 }
 

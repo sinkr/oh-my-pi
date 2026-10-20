@@ -244,6 +244,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"server",
 		"customWireName",
 		"visibility",
+		"errorKind",
 	]),
 	...fields("identity", [
 		"api",
@@ -560,6 +561,26 @@ const TOOL_ENUM_VALUES: Record<string, ReadonlySet<string>> = {
 	contentType: MIME_TYPES,
 	mimeType: MIME_TYPES,
 	detail: new Set(["auto", "low", "high", "original"]),
+	errorKind: new Set([
+		"parse",
+		"apply",
+		"invalid_utf8",
+		"no_match",
+		"plan_mode",
+		"unresolved_url",
+		"io",
+		"write_failed",
+		"stale_tag",
+		"unknown_tag",
+		"other_file_tag",
+		"missing_tag",
+		"header_only",
+		"unseen_lines",
+		"out_of_range",
+		"ambiguous_boundary",
+		"no_change",
+		"file_not_found",
+	]),
 };
 
 /** Built-in tool argument keys holding free-form structures (env maps, schemas, structured output). */

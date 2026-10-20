@@ -23,6 +23,10 @@
 
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 
+### Added
+
+- Added `errorKind` to `EditToolDetails`, set on a failed edit
+
 ## [18.12.4] - 2026-10-20
 
 ### Added

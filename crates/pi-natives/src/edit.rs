@@ -226,12 +226,13 @@ pub struct EditFileOutcome {
 }
 
 /// Whole-call apply outcome. `is_error` carries the model-facing failure in
-/// `text` with no files.
+/// `text` with no files, and `error_kind` its class (`EditError::kind`).
 #[napi(object)]
 pub struct EditApplyOutcome {
-	pub text:     String,
-	pub files:    Vec<EditFileOutcome>,
-	pub is_error: bool,
+	pub text:       String,
+	pub files:      Vec<EditFileOutcome>,
+	pub is_error:   bool,
+	pub error_kind: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -633,8 +634,8 @@ impl EditSession {
 		drop(session);
 		Ok(match outcome {
 			Ok(outcome) => EditApplyOutcome {
-				text:     outcome.text,
-				files:    outcome
+				text:       outcome.text,
+				files:      outcome
 					.files
 					.into_iter()
 					.map(|file| EditFileOutcome {
@@ -653,10 +654,14 @@ impl EditSession {
 						parse_regressed:    file.parse_regressed,
 					})
 					.collect(),
-				is_error: false,
+				is_error:   false,
+				error_kind: None,
 			},
-			Err(err) => {
-				EditApplyOutcome { text: err.to_string(), files: Vec::new(), is_error: true }
+			Err(err) => EditApplyOutcome {
+				error_kind: Some(err.kind().to_owned()),
+				text:       err.to_string(),
+				files:      Vec::new(),
+				is_error:   true,
 			},
 		})
 	}

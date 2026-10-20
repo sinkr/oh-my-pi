@@ -1717,12 +1717,13 @@ export declare function diffWords(oldText: string, newText: string): Array<DiffC
 
 /**
  * Whole-call apply outcome. `is_error` carries the model-facing failure in
- * `text` with no files.
+ * `text` with no files, and `error_kind` its class (`EditError::kind`).
  */
 export interface EditApplyOutcome {
   text: string
   files: Array<EditFileOutcome>
   isError: boolean
+  errorKind?: string
 }
 
 /** Apply-time knobs. */
