@@ -443,6 +443,7 @@ describe("builtin-defaults rule provider", () => {
 			'const SIZES = new Map([["small", 1] as const, ["large", 2] as const]);',
 			'const KINDS = new Set(["text", "json"] as const);',
 			'const KEYS = new Set(["topP", "topK"] as const satisfies readonly (keyof StreamOptions)[]);',
+			'const KINDS = new Set([\n\t"text",\n\t"json",\n],\n);',
 		];
 		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
 
