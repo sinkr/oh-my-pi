@@ -8,16 +8,18 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
+import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
 import { escapeHarnessTags } from "../session/harness-tags";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
 /**
- * Largest output inlined whole (~4k tokens). A cut output costs the parent a
+ * Largest output inlined whole. A cut output costs the parent a
  * `read agent://<id>` turn plus the preview it then holds twice, which parents
- * pay for most outputs past ~8k chars.
+ * pay for most outputs past ~8k chars. Sized so the whole envelope still passes
+ * async delivery uncut: a background task result arrives as an async follow-up.
  */
-const INLINE_OUTPUT_CHARS = 16_000;
+export const INLINE_OUTPUT_CHARS = ASYNC_INLINE_RESULT_MAX_CHARS - 500;
 /** Head shown for an output over {@link INLINE_OUTPUT_CHARS}, with a pointer to `agent://<id>`. */
 const PREVIEW_CHARS = 5000;
 
