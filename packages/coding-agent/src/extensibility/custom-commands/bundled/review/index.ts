@@ -285,74 +285,14 @@ function pickablePrs(items: PrListItem[]): PickablePr[] {
 	);
 }
 
-async function fetchOpenPullRequests(
-	cwd: string,
-	ctx: HookCommandContext,
-	repo: string,
-	search: string | undefined,
-): Promise<PickablePr[] | undefined> {
-	const args = [
-		"pr",
-		"list",
-		"--repo",
-		repo,
-		"--state",
-		"open",
-		"--limit",
-		String(PR_PICKER_LIMIT),
-		"--json",
-		"number,title,author,isDraft,url",
-	];
-	if (search !== undefined) args.push("--search", search);
-	ctx.ui.setStatus("review", "Loading open pull requests…");
-	try {
-		return pickablePrs(await github.json<PrListItem[]>(cwd, args, undefined, { repoProvided: true }));
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		ctx.ui.notify(`Failed to list open pull requests in ${repo}: ${message}`, "error");
-		return undefined;
-	} finally {
-		ctx.ui.setStatus("review", undefined);
-	}
-}
-
-async function fetchOpenMergeRequests(
-	cwd: string,
-	ctx: HookCommandContext,
-	project: string,
-	search: string | undefined,
-): Promise<PickablePr[] | undefined> {
-	const args = ["mr", "list", "-R", glab.formatGitlabProjectArg(project), "-F", "json", "-P", String(PR_PICKER_LIMIT)];
-	if (search !== undefined) args.push("--search", search);
-	ctx.ui.setStatus("review", "Loading open merge requests…");
-	try {
-		const items = await gitlab.json<GitlabMrListItem[]>(cwd, args);
-		return pickablePrs(
-			items.map(item => ({
-				number: item.iid,
-				title: item.title,
-				author: { login: item.author?.username },
-				isDraft: item.draft,
-				url: item.web_url,
-			})),
-		);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		ctx.ui.notify(`Failed to list open merge requests in ${project}: ${message}`, "error");
-		return undefined;
-	} finally {
-		ctx.ui.setStatus("review", undefined);
-	}
-}
-
 /** The forge-specific half of the open PR/MR picker. */
 interface ChangeRequestSource {
 	repo: string;
 	plural: "pull requests" | "merge requests";
 	prefix: "#" | "!";
 	searchPrompt: string;
-	/** Notifies and resolves `undefined` on failure. */
-	list(search: string | undefined): Promise<PickablePr[] | undefined>;
+	/** One page of open items, optionally narrowed by a server-side search; throws on CLI failure. */
+	fetch(search: string | undefined): Promise<PrListItem[]>;
 	refFor(item: PickablePr): ReviewPrRef;
 	refForNumber(number: number): ReviewPrRef;
 }
@@ -373,7 +313,12 @@ async function resolveChangeRequestSource(
 			plural: "pull requests",
 			prefix: "#",
 			searchPrompt: "Search open pull requests — title, author, or #123",
-			list: search => fetchOpenPullRequests(cwd, ctx, repo, search),
+			fetch: search => {
+				const args = ["pr", "list", "--repo", repo, "--state", "open", "--limit", String(PR_PICKER_LIMIT)];
+				args.push("--json", "number,title,author,isDraft,url");
+				if (search !== undefined) args.push("--search", search);
+				return github.json<PrListItem[]>(cwd, args, undefined, { repoProvided: true });
+			},
 			refFor: item => (item.url ? parseGithubPrUrl(item.url) : undefined) ?? prNumberRef(repo, item.number),
 			refForNumber: number => prNumberRef(repo, number),
 		};
@@ -391,7 +336,19 @@ async function resolveChangeRequestSource(
 			plural: "merge requests",
 			prefix: "!",
 			searchPrompt: "Search open merge requests — title, description, or !123",
-			list: search => fetchOpenMergeRequests(cwd, ctx, project, search),
+			fetch: async search => {
+				const args = ["mr", "list", "-R", glab.formatGitlabProjectArg(project), "-F", "json"];
+				args.push("-P", String(PR_PICKER_LIMIT));
+				if (search !== undefined) args.push("--search", search);
+				const items = await gitlab.json<GitlabMrListItem[]>(cwd, args);
+				return items.map(item => ({
+					number: item.iid,
+					title: item.title,
+					author: { login: item.author?.username },
+					isDraft: item.draft,
+					url: item.web_url,
+				}));
+			},
 			refFor: item => mrNumberRef(project, item.number),
 			refForNumber: iid => mrNumberRef(project, iid),
 		};
@@ -413,7 +370,20 @@ async function selectPullRequestRef(cwd: string, ctx: HookCommandContext): Promi
 	if (!source) return undefined;
 	const { repo, plural, prefix } = source;
 	const searchEntry = `Search open ${plural}…`;
-	const openPrs = await source.list(undefined);
+	/** Notifies and resolves `undefined` on failure. */
+	const listOpen = async (search: string | undefined): Promise<PickablePr[] | undefined> => {
+		ctx.ui.setStatus("review", `Loading open ${plural}…`);
+		try {
+			return pickablePrs(await source.fetch(search));
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Failed to list open ${plural} in ${repo}: ${message}`, "error");
+			return undefined;
+		} finally {
+			ctx.ui.setStatus("review", undefined);
+		}
+	};
+	const openPrs = await listOpen(undefined);
 	if (openPrs === undefined) return undefined;
 	if (openPrs.length === 0) {
 		ctx.ui.notify(`No open ${plural} in ${repo}`, "warning");
@@ -446,7 +416,7 @@ async function selectPullRequestRef(cwd: string, ctx: HookCommandContext): Promi
 		}
 		const number = parsePositivePrNumber(query.startsWith(prefix) ? query.slice(1) : query);
 		if (number !== undefined) return source.refForNumber(number);
-		const matches = await source.list(query);
+		const matches = await listOpen(query);
 		// The failure was already reported; stay in the picker on the list shown before.
 		if (matches === undefined) continue;
 		if (matches.length === 0) {

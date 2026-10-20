@@ -1,11 +1,12 @@
-import * as path from "node:path";
-import { isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Settings } from "../config/settings";
+import { CwdLookupMemo } from "../utils/forge-cli";
 import { gitlab } from "../utils/gitlab";
 import { type PrDiffPayload, parsePrUnifiedDiff } from "./gh-pr-diff";
 import type { ViewLookupResult } from "./gh-view";
 import { GITLAB_TOKEN_ENV_VARS, getGlabConfigPath, getOrFetchView, resolveGitlabCacheAuthKey } from "./github-cache";
+import { ToolAbortError } from "./tool-errors";
 
 /**
  * GitLab project refs are `<host>/<namespace…>/<project>` (host lowercased).
@@ -18,6 +19,8 @@ export function formatGitlabProjectArg(project: string): string {
 
 /** One namespace or project path segment of a GitLab project ref. */
 export const GITLAB_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
+/** A GitLab host with optional port; rejects userinfo, paths, and control characters. */
+export const GITLAB_HOST_PATTERN = /^[A-Za-z0-9.-]+(?::\d+)?$/;
 
 /** Parse a GitLab project web URL into a `<host>/<namespace…>/<project>` ref. */
 export function parseGitlabProjectWebUrl(webUrl: string): string | undefined {
@@ -68,6 +71,7 @@ async function assertGitlabHostTrustedForEnvToken(host: string, cwd: string, sig
 		const ownProject = await resolveDefaultGitlabProjectMemoized(cwd, signal);
 		if (ownProject.split("/")[0] === host) return;
 	} catch (err) {
+		if (signal?.aborted) throw new ToolAbortError();
 		logger.debug("glab: no GitLab project for cwd while checking host trust", { err: String(err) });
 	}
 	throw new ToolError(
@@ -75,13 +79,7 @@ async function assertGitlabHostTrustedForEnvToken(host: string, cwd: string, sig
 	);
 }
 
-/**
- * Process-lifetime cache of `glab repo view` lookups keyed by absolute cwd.
- * Mirrors `resolveDefaultRepoMemoized`: the shared lookup is not bound to any
- * caller's signal; each caller's abort is honored at the wait point.
- */
-export const GITLAB_DEFAULT_PROJECT_RESOLVED = new Map<string, string>();
-export const GITLAB_DEFAULT_PROJECT_INFLIGHT = new Map<string, Promise<string>>();
+const defaultProjectMemo = new CwdLookupMemo(resolveGitlabProjectFromCwd);
 
 async function resolveGitlabProjectFromCwd(cwd: string): Promise<string> {
 	const view = await gitlab.json<{ web_url?: string; http_url_to_repo?: string }>(cwd, ["repo", "view", "-F", "json"]);
@@ -92,24 +90,13 @@ async function resolveGitlabProjectFromCwd(cwd: string): Promise<string> {
 	return project;
 }
 
-export async function resolveDefaultGitlabProjectMemoized(cwd: string, signal?: AbortSignal): Promise<string> {
-	const key = path.resolve(cwd);
-	const ready = GITLAB_DEFAULT_PROJECT_RESOLVED.get(key);
-	if (ready) return ready;
-	let pending = GITLAB_DEFAULT_PROJECT_INFLIGHT.get(key);
-	if (!pending) {
-		pending = (async () => {
-			const value = await resolveGitlabProjectFromCwd(cwd);
-			GITLAB_DEFAULT_PROJECT_RESOLVED.set(key, value);
-			return value;
-		})();
-		void pending.then(
-			() => GITLAB_DEFAULT_PROJECT_INFLIGHT.delete(key),
-			() => GITLAB_DEFAULT_PROJECT_INFLIGHT.delete(key),
-		);
-		GITLAB_DEFAULT_PROJECT_INFLIGHT.set(key, pending);
-	}
-	return untilAborted(signal, pending);
+/** `glab repo view` for `cwd`, memoized per absolute cwd. */
+export function resolveDefaultGitlabProjectMemoized(cwd: string, signal?: AbortSignal): Promise<string> {
+	return defaultProjectMemo.get(cwd, signal);
+}
+
+export function resetDefaultGitlabProjectMemoForTests(): void {
+	defaultProjectMemo.clear();
 }
 
 export async function fetchMrDiffFresh(
@@ -133,11 +120,7 @@ export async function fetchMrDiffFresh(
 		// latest version still carries `diff --git` headers.
 		if (!(message.includes("could not obtain raw diff") && message.includes("404"))) throw err;
 		logger.debug("GitLab raw_diffs endpoint unavailable; retrying without --raw", { project, iid, err: message });
-		try {
-			text = await gitlab.text(cwd, [...baseArgs, "--color", "never"], signal, { trimOutput: false });
-		} catch {
-			throw err;
-		}
+		text = await gitlab.text(cwd, [...baseArgs, "--color", "never"], signal, { trimOutput: false });
 	}
 	const payload = parsePrUnifiedDiff(text);
 	if (payload.files.length === 0 && text.trim()) {

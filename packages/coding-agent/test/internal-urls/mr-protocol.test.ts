@@ -10,10 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import {
-	GITLAB_DEFAULT_PROJECT_INFLIGHT,
-	GITLAB_DEFAULT_PROJECT_RESOLVED,
-} from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
+import { resetDefaultGitlabProjectMemoForTests } from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { gitlab } from "@oh-my-pi/pi-coding-agent/utils/gitlab";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -59,15 +56,13 @@ beforeEach(async () => {
 	process.env.GLAB_CONFIG_DIR = tempDir;
 	resetCacheForTests();
 	InternalUrlRouter.resetForTests();
-	GITLAB_DEFAULT_PROJECT_RESOLVED.clear();
-	GITLAB_DEFAULT_PROJECT_INFLIGHT.clear();
+	resetDefaultGitlabProjectMemoForTests();
 });
 
 afterEach(async () => {
 	resetCacheForTests();
 	InternalUrlRouter.resetForTests();
-	GITLAB_DEFAULT_PROJECT_RESOLVED.clear();
-	GITLAB_DEFAULT_PROJECT_INFLIGHT.clear();
+	resetDefaultGitlabProjectMemoForTests();
 	for (const key of ENV_KEYS) {
 		if (savedEnv[key] === undefined) delete process.env[key];
 		else process.env[key] = savedEnv[key];
@@ -125,12 +120,14 @@ describe("mr:// diff family", () => {
 		expect(jsonSpy.mock.calls[0]![1]).toEqual(["repo", "view", "-F", "json"]);
 	});
 
-	it("rejects URLs without a diff suffix or a group/project pair", async () => {
+	it("rejects URLs without a diff suffix, a group/project pair, or a plain host", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 		const router = InternalUrlRouter.instance();
 
 		await expect(router.resolve("mr://gitlab.com/g/p/7")).rejects.toThrow(/Invalid mr:\/\/ URL/);
 		await expect(router.resolve("mr://gitlab.com/g/7/diff")).rejects.toThrow(/Invalid mr:\/\/ URL/);
+		await expect(router.resolve("mr://gitlab.com@evil.example/g/p/7/diff")).rejects.toThrow(/Invalid mr:\/\/ URL/);
+		await expect(router.resolve("mr://evil%1B%5D8%3B%3B.example/g/p/7/diff")).rejects.toThrow(/Invalid mr:\/\/ URL/);
 		expect(textSpy).not.toHaveBeenCalled();
 	});
 

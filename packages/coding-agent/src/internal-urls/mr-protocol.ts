@@ -11,7 +11,12 @@
  */
 import mrDoc from "../prompts/internal-urls/mr.md" with { type: "text" };
 import { parsePositiveDecimalInt } from "../tools/gh";
-import { GITLAB_PATH_SEGMENT_PATTERN, getOrFetchMrDiff, resolveDefaultGitlabProjectMemoized } from "../tools/glab-mr";
+import {
+	GITLAB_HOST_PATTERN,
+	GITLAB_PATH_SEGMENT_PATTERN,
+	getOrFetchMrDiff,
+	resolveDefaultGitlabProjectMemoized,
+} from "../tools/glab-mr";
 import { gitlab } from "../utils/gitlab";
 import { renderDiffFamilyResource, resolveCwd, splitInternalUrlSegments } from "./forge-diff";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
@@ -59,7 +64,11 @@ export function parseMrUrl(url: InternalUrl): ParsedMrUrl {
 	if (iidIndex === 0) return { iid, mode, index };
 
 	const segments = all.slice(1, iidIndex);
-	if (!host || segments.length < 2 || !segments.every(segment => GITLAB_PATH_SEGMENT_PATTERN.test(segment))) {
+	if (
+		!GITLAB_HOST_PATTERN.test(host) ||
+		segments.length < 2 ||
+		!segments.every(segment => GITLAB_PATH_SEGMENT_PATTERN.test(segment))
+	) {
 		throw new Error(INVALID_MR_URL);
 	}
 	return { project: `${host.toLowerCase()}/${segments.join("/")}`, iid, mode, index };

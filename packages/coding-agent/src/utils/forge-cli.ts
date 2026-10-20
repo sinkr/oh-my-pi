@@ -1,7 +1,47 @@
-import { $which } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
+import { $which, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { REJECT_PROMPT_COMMAND } from "../exec/non-interactive-env";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+
+/**
+ * Process-lifetime cache of a forge's default-repo lookup (`gh repo view`,
+ * `glab repo view`) keyed by absolute cwd.
+ *
+ * The shared lookup is intentionally **not** bound to any caller's
+ * AbortSignal. Cancelling one caller would otherwise kill the underlying
+ * subprocess for every concurrent waiter on the same cwd. Each caller's
+ * signal is honored at the wait point via `untilAborted` instead, so an abort
+ * unwinds only that caller. Failures are not cached.
+ */
+export class CwdLookupMemo {
+	readonly #resolved = new Map<string, string>();
+	readonly #inflight = new Map<string, Promise<string>>();
+
+	constructor(private readonly lookup: (cwd: string) => Promise<string>) {}
+
+	get(cwd: string, signal?: AbortSignal): Promise<string> {
+		const key = path.resolve(cwd);
+		const ready = this.#resolved.get(key);
+		if (ready) return Promise.resolve(ready);
+		let pending = this.#inflight.get(key);
+		if (!pending) {
+			pending = this.lookup(cwd).then(value => {
+				this.#resolved.set(key, value);
+				return value;
+			});
+			const settled = () => this.#inflight.delete(key);
+			void pending.then(settled, settled);
+			this.#inflight.set(key, pending);
+		}
+		return untilAborted(signal, pending);
+	}
+
+	clear(): void {
+		this.#resolved.clear();
+		this.#inflight.clear();
+	}
+}
 
 /** Captured result of a completed forge CLI (`gh`/`glab`) invocation. */
 export interface ForgeCliResult {
