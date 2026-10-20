@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed Devin model discovery to send legacy Windsurf Enterprise keys unprefixed in one request, dropping the Windsurf-editor retry that returned a smaller model list ([#13677](https://github.com/can1357/oh-my-pi/pull/13677) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added native Inception support with Mercury 3, Mercury 2.5, and Mercury 2, live chat-model discovery, API-key login, reasoning controls, and Mercury 3 launch pricing while its catalog reports none; Mercury 3 waits up to 10 minutes for its first output, since high-effort reasoning streams nothing ([#16439](https://github.com/can1357/oh-my-pi/pull/16439) by [@eggpeat](https://github.com/eggpeat))
+
+### Fixed
+
+- Fixed Amazon Bedrock Kimi K3 (`global.`/`us.moonshotai.kimi-k3`) offering Anthropic-style thinking budgets it ignores; it now offers `low`, `high` and `max` effort, defaulting to `max` ([#13697](https://github.com/can1357/oh-my-pi/pull/13697) by [@alblez](https://github.com/alblez))
+- Marked supported Bedrock Claude models as eligible for native compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
 ## [18.12.3] - 2026-10-19
 
 ### Changed

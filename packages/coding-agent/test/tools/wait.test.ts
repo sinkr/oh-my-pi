@@ -46,7 +46,7 @@ describe("wait", () => {
 		expect(manager.isDeliverySuppressed(id)).toBe(true);
 	});
 
-	test("errors for a subagent whose only running work is its parent's job on it", async () => {
+	test("finds nothing to wait for in a subagent whose only running work is its parent's job on it", async () => {
 		const registry = AgentRegistry.global();
 		const streaming = { isStreaming: true } as never;
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: streaming, status: "running" });
@@ -66,8 +66,9 @@ describe("wait", () => {
 			agentId: "Child",
 			ownerId: "Main",
 		});
-		const waiting = new WaitTool(session(manager, "Child")).execute("child-wait", {});
-		await expect(waiting).rejects.toThrow("Nothing to wait for");
+		const result = await new WaitTool(session(manager, "Child")).execute("child-wait", {});
+		expect(result.useless).toBe(true);
+		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Nothing to wait for") });
 		childRun.resolve("done");
 	});
 
@@ -249,12 +250,14 @@ describe("wait", () => {
 		test("reports nothing to wait for, as after the refresh, when the caller has no work", async () => {
 			const controller = new AbortController();
 			controller.abort(TOOL_INTERRUPT_ABORT_REASON);
-			const waiting = new WaitTool(session(new AsyncJobManager({}), "Main", true)).execute(
+			const result = await new WaitTool(session(new AsyncJobManager({}), "Main", true)).execute(
 				"interrupted-refresh-idle",
 				{},
 				controller.signal,
 			);
-			await expect(waiting).rejects.toThrow("Nothing to wait for");
+			// The interrupt is news for the model, so the loop guard must not skip this poll.
+			expect(result.useless).toBeUndefined();
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Nothing to wait for") });
 		});
 	});
 
@@ -312,6 +315,13 @@ describe("wait", () => {
 		const ask = () => IrcBus.global().send({ from: "Child", to: "Main", body: "which codeword?" });
 		const childWait = (manager = new AsyncJobManager({})) =>
 			new WaitTool(session(manager, "Child")).execute("child-wait", {});
+		/** Text of a wait that returned at once instead of blocking; never an error. */
+		const idleText = async (waiting: Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }> }>) => {
+			const result = await waiting;
+			expect(result.isError).toBeUndefined();
+			const [first] = result.content;
+			return first?.type === "text" ? (first.text ?? "") : "";
+		};
 
 		test("blocks for the answer to a question the caller asked", async () => {
 			registerParentAndChild();
@@ -322,7 +332,7 @@ describe("wait", () => {
 			expect(result.isError).toBeUndefined();
 			expect(result.details?.waited).toMatchObject({ from: "Main", body: "heliotrope" });
 			// The answer settled the question: nothing is owed any more.
-			await expect(childWait()).rejects.toThrow("no agent you messaged this run owes a reply");
+			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
 		});
 
 		test("blocks for a second question asked in the same millisecond its first was answered", async () => {
@@ -382,22 +392,22 @@ describe("wait", () => {
 			});
 		});
 
-		test("errors when the agent asked runs the caller inline and cannot see the question", async () => {
+		test("returns at once when the agent asked runs the caller inline and cannot see the question", async () => {
 			const { registry } = registerParentAndChild();
 			const release = registry.awaits.hold("Main", ["Child"], { interruptible: false });
 			await ask();
-			await expect(childWait()).rejects.toThrow("`Main` cannot reply before you finish");
+			expect(await idleText(childWait())).toContain("`Main` cannot reply before you finish");
 			release();
 		});
 
-		test("errors while the agent asked waits on the caller's eval handle with no timeout", async () => {
+		test("returns at once while the agent asked waits on the caller's eval handle with no timeout", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
 			const childRun = registerChildJob(manager);
 			const parentSession = { asyncJobManager: manager, getAgentId: () => "Main" } as unknown as ToolSession;
 			const handleWait = runEvalWait({ items: [{ kind: "agent", id: "Child" }] }, { session: parentSession });
 			await ask();
-			await expect(childWait(manager)).rejects.toThrow("`Main` cannot reply before you finish");
+			expect(await idleText(childWait(manager))).toContain("`Main` cannot reply before you finish");
 			childRun.resolve("done");
 			await handleWait;
 		});
@@ -422,14 +432,14 @@ describe("wait", () => {
 		test("a broadcast owes the caller no reply", async () => {
 			registerParentAndChild();
 			await IrcBus.global().send({ from: "Child", to: "Main", body: "status: halfway", broadcast: true });
-			await expect(childWait()).rejects.toThrow("Nothing to wait for");
+			expect(await idleText(childWait())).toContain("Nothing to wait for");
 		});
 
 		test("a question from the caller's previous run owes no reply in the next", async () => {
 			const { child } = registerParentAndChild();
 			await ask();
 			child.state.runStartedAt = Date.now() + 1;
-			await expect(childWait()).rejects.toThrow("no agent you messaged this run owes a reply");
+			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
 		});
 	});
 });

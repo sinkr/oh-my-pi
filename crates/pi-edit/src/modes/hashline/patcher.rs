@@ -103,7 +103,27 @@ fn mismatch(
 	store: &EditStore,
 ) -> EditError {
 	let actual = file_hash(normalized);
-	store.record(canonical, normalized, None);
+	let file_lines: Vec<String> = normalized.split('\n').map(str::to_owned).collect();
+	let anchor_lines = section.collect_anchor_lines().unwrap_or_default();
+	// The reply hands back the current tag and prints the rows around each
+	// anchor in full, so those rows count as seen for a resend under it.
+	// Content no snapshot holds starts from them (recording it with no seen set
+	// would let the guard accept every line), and a read's seen set gains
+	// them. Line 0, never an anchor, keeps the set restrictive when the reply
+	// printed no rows (anchors past a shrunken file, head/tail-only ops), as
+	// `store.ts` does for a read whose every row was cut. Content already
+	// unrestricted (no seen set, or an empty one as a `write` records) stays so.
+	let restricted = store
+		.by_content(canonical, normalized)
+		.is_none_or(|snapshot| snapshot.seen_lines.is_some_and(|seen| !seen.is_empty()));
+	if restricted {
+		let displayed: Vec<u32> = std::iter::once(0)
+			.chain(super::messages::anchored_context_lines(&anchor_lines, file_lines.len()))
+			.collect();
+		store.record(canonical, normalized, Some(&displayed));
+	} else {
+		store.record(canonical, normalized, None);
+	}
 	// When the tag isn't from this exact path, list the other paths in this
 	// session that *did* issue the same tag — so the rejection can name the
 	// file the tag was actually for and the model doesn't follow a wrong-tree
@@ -118,8 +138,8 @@ fn mismatch(
 		path: Some(section.path.clone()),
 		expected_file_hash: expected.to_owned(),
 		actual_file_hash: actual,
-		file_lines: normalized.split('\n').map(str::to_owned).collect(),
-		anchor_lines: section.collect_anchor_lines().unwrap_or_default(),
+		file_lines,
+		anchor_lines,
 		hash_recognized: store.has_hash(canonical, expected),
 		tag_origin_paths,
 	})
@@ -530,6 +550,11 @@ pub(crate) fn apply_with_recovery(
 		resolve_warnings.extend(result.warnings);
 		result.warnings = resolve_warnings;
 		return Ok(result);
+	}
+	// A bare `MV`/`REM` has no content edit to stand on; the tag is its only
+	// evidence the caller saw this file.
+	if resolved.is_empty() {
+		return Err(mismatch(section, canonical, normalized, expected, store));
 	}
 	if !has_anchor_scoped_edit(&resolved) {
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
