@@ -22,6 +22,7 @@ import {
 	type MCPFailureStage,
 	MCPTransportError,
 	mcpTraceIdFromHeaders,
+	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
@@ -559,7 +560,8 @@ export class HttpTransport implements MCPTransport {
 				});
 			}
 			if (error instanceof Error && error.name === "AbortError") throw error;
-			throw normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+			const normalized = normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+			throw stage === "decode" ? nonRetryableMCPTransportError(normalized) : normalized;
 		} finally {
 			releaseCaller?.();
 			operation.clear();
@@ -690,21 +692,7 @@ export class HttpTransport implements MCPTransport {
 						stage: error instanceof SyntaxError ? "decode" : "receive",
 						traceId,
 					});
-					reject(
-						normalized.retryable
-							? new MCPTransportError({
-									transport: normalized.transport,
-									stage: normalized.stage,
-									failure: normalized.failure,
-									message: normalized.message,
-									retryable: false,
-									code: normalized.code,
-									data: normalized.data,
-									traceId: normalized.traceId,
-									cause: normalized,
-								})
-							: normalized,
-					);
+					reject(nonRetryableMCPTransportError(normalized));
 				}
 			} finally {
 				operation.clear();
