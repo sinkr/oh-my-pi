@@ -65,7 +65,9 @@ describe("read URL refused for one user agent", () => {
 	});
 
 	it("reads the page from the next user agent before waiting out a 429's Retry-After", async () => {
-		const server = serveRefusingCurl(() => new Response("Too Many Requests", { status: 429, headers: { "retry-after": "10" } }));
+		const server = serveRefusingCurl(
+			() => new Response("Too Many Requests", { status: 429, headers: { "retry-after": "10" } }),
+		);
 
 		const started = performance.now();
 		const { method, text } = await readText(server);
@@ -76,12 +78,12 @@ describe("read URL refused for one user agent", () => {
 	});
 
 	it("sends a caller's own User-Agent once instead of repeating a refused request", async () => {
-		let requests = 0;
+		const agents: (string | null)[] = [];
 		const server = Bun.serve({
 			port: 0,
-			fetch: () => {
-				requests++;
-				return new Response("Forbidden", { status: 403 });
+			fetch: request => {
+				agents.push(request.headers.get("user-agent"));
+				return new Response("Access denied by bot detection", { status: 403 });
 			},
 		});
 		servers.push(server);
@@ -90,6 +92,29 @@ describe("read URL refused for one user agent", () => {
 
 		expect(result.ok).toBe(false);
 		expect(result.status).toBe(403);
-		expect(requests).toBe(1);
+		expect(agents).toEqual(["omp/test"]);
+	});
+
+	it("still retries a caller's own User-Agent after a transport error", async () => {
+		const agents: (string | null)[] = [];
+		const server = Bun.serve({
+			port: 0,
+			fetch: request => {
+				agents.push(request.headers.get("user-agent"));
+				// The first request never answers, so loadPage's own timeout ends it.
+				if (agents.length === 1) return Promise.withResolvers<Response>().promise;
+				return new Response("recovered", { headers: { "content-type": "text/plain" } });
+			},
+		});
+		servers.push(server);
+
+		const result = await loadPage(`http://127.0.0.1:${server.port}/api`, {
+			headers: { "User-Agent": "omp/test" },
+			timeout: 0.2,
+		});
+
+		expect(result.ok).toBe(true);
+		expect(result.content).toBe("recovered");
+		expect(agents).toEqual(["omp/test", "omp/test"]);
 	});
 });

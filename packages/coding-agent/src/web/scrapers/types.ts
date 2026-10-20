@@ -109,14 +109,15 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 	let lastError: string | undefined;
 	let retried429 = false;
-	// A caller's own User-Agent replaces every rotated one, so retrying it would repeat one request.
-	const userAgents = headers["User-Agent"] === undefined ? USER_AGENTS : [headers["User-Agent"]];
-	for (let attempt = 0; attempt < userAgents.length; attempt++) {
+	// A caller's own User-Agent replaces every rotated one, so a refusal of it is final; a
+	// transport error still retries.
+	const rotates = headers["User-Agent"] === undefined;
+	for (let attempt = 0; attempt < USER_AGENTS.length; attempt++) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
 
-		const userAgent = userAgents[attempt];
+		const userAgent = USER_AGENTS[attempt];
 		const requestSignal = ptree.combineSignals(signal, timeout * 1000);
 
 		try {
@@ -143,13 +144,14 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			const contentType = rawContentType.split(";")[0]?.trim().toLowerCase() ?? "";
 			const finalUrl = response.url;
 
-			if (BLOCKED_STATUSES.has(response.status) && attempt < userAgents.length - 1) {
+			const lastAgent = !rotates || attempt === USER_AGENTS.length - 1;
+			if (!lastAgent && BLOCKED_STATUSES.has(response.status)) {
 				void response.body?.cancel().catch(() => {});
 				continue;
 			}
 
 			if (response.status === 429 && !retried429) {
-				// Rate limited under every user agent: retry the last once, honoring a bounded
+				// Rate limited under the last user agent: retry it once, honoring a bounded
 				// Retry-After. The wait observes the caller's signal so an Esc during the backoff
 				// does not stall for up to the full delay.
 				retried429 = true;
@@ -204,7 +206,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				throw new ToolAbortError();
 			}
 			lastError = error instanceof Error ? error.message : String(error);
-			if (attempt === userAgents.length - 1) {
+			if (attempt === USER_AGENTS.length - 1) {
 				return { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
 			}
 		}
