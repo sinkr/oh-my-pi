@@ -72,7 +72,8 @@ static CREATE_DISPLAY_INFO: LazyLock<Option<CreateDisplayInfoFn>> = LazyLock::ne
 		return None;
 	}
 	// SAFETY: CoreDisplay exports this symbol as
-	// `CFDictionaryRef (*)(CGDirectDisplayID)`, which `CreateDisplayInfoFn` spells.
+	// `CFDictionaryRef (*)(CGDirectDisplayID)`, which `CreateDisplayInfoFn`
+	// spells.
 	Some(unsafe { mem::transmute::<*mut c_void, CreateDisplayInfoFn>(raw) })
 });
 
@@ -90,7 +91,8 @@ fn display_product_name(display_id: u32) -> Option<String> {
 	let info = NonNull::new(unsafe { create(display_id) }.cast_mut())?;
 	// SAFETY: A `Create` function returns a +1 reference, adopted exactly once.
 	let info = unsafe { CFRetained::from_raw(info) };
-	// SAFETY: The info dictionary is keyed by CFString; values are checked below.
+	// SAFETY: The info dictionary is keyed by CFString; values are checked
+	// below.
 	let info = unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(info) };
 	let names = info
 		.get(&CFString::from_str("DisplayProductName"))?
