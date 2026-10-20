@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added native Inception support with Mercury 3, Mercury 2.5, and Mercury 2, live chat-model discovery, API-key login, reasoning controls, and published pricing; Mercury 3 waits up to 10 minutes for its first output, since high-effort reasoning streams nothing
+
 ## [18.12.3] - 2026-10-19
 
 ### Changed

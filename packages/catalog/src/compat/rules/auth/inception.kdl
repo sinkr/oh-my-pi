@@ -1,0 +1,9 @@
+auth "inception" {
+	name "Inception"
+	login "api-key" {
+		auth-url "https://platform.inceptionlabs.ai/dashboard/api-keys"
+		instructions "Create or copy your key from the Inception dashboard"
+		prompt "Paste your Inception API key" placeholder="sk_..."
+		validate "models-endpoint" url="https://api.inceptionlabs.ai/v1/models"
+	}
+}
