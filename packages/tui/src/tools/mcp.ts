@@ -27,7 +27,7 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
-import { clipCollapsed, flattenLine, formatExpandHint } from "../render/render-utils";
+import { clipCollapsed, flattenLine, formatExpandHint, shortenEmbeddedPaths } from "../render/render-utils";
 import { truncateToWidth, visibleWidth } from "../utils";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
 import type { StatusLineOptions } from "../render/status-line";
@@ -414,11 +414,13 @@ export function parseMCPProgress(value: unknown): MCPProgress | undefined {
  * One-line display text for MCP progress, at most `maxWidth` cells: the
  * message, with `progress/total` when the server reports a total. The bare
  * progress value appears only when there is no message: without a total it is
- * an opaque counter, not a percentage. A long message is cut before the count,
- * so the count stays visible.
+ * an opaque counter, not a percentage. Home paths in the message show as `~`,
+ * and a long message is cut before the count, so the count stays visible.
+ * Every progress display (tool card and both Eval status renderers) uses it.
  */
 export function formatMCPProgress(progress: MCPProgress, maxWidth = 200): string {
-	const message = progress.message === undefined ? "" : flattenLine(sanitizeText(progress.message));
+	const message =
+		progress.message === undefined ? "" : shortenEmbeddedPaths(flattenLine(sanitizeText(progress.message)));
 	const amount = progress.total === undefined ? `${progress.progress}` : `${progress.progress}/${progress.total}`;
 	if (!message) return truncateToWidth(amount, maxWidth);
 	if (progress.total === undefined) return truncateToWidth(message, maxWidth);

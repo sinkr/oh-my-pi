@@ -706,21 +706,25 @@ const STATUS_VALUE_WIDTH = 200;
 
 /**
  * Plain one-line summary of a status event: op plus its scalar fields, each
- * collapsed to one line. A `preview` (file or command text a helper returned)
- * never joins the line: an expanded cell shows it under the line as a code
- * block holding its first {@link PREVIEW_LIMITS.OUTPUT_EXPANDED} lines, folded
- * to {@link PREVIEW_LIMITS.COLLAPSED_LINES}.
+ * collapsed to one line. MCP progress shows its tool and then the shared
+ * {@link formatMCPProgress} text; its call id is internal. A `preview` (file or
+ * command text a helper returned) never joins the line: an expanded cell shows
+ * it under the line as a code block holding its first
+ * {@link PREVIEW_LIMITS.OUTPUT_EXPANDED} lines, folded to
+ * {@link PREVIEW_LIMITS.COLLAPSED_LINES}.
  */
 function describeStatusEvent(event: EvalStatusEvent, expanded: boolean): NativeNode {
 	const spans: TspSpan[] = [span(event.op, "accent")];
+	const mcpProgress = event.op === "mcp_progress" ? parseMCPProgress(event) : undefined;
 	for (const key in event) {
 		if (key === "op" || key === "preview" || key === "resolvedThinkingLevel") continue;
-		if (event.op === "mcp_progress" && key === "id") continue;
+		if (event.op === "mcp_progress" && key !== "tool") continue;
 		const value = event[key];
 		if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
 			spans.push(span(` ${key}=`, "muted"), span(previewLine(sanitizeText(String(value)), STATUS_VALUE_WIDTH)));
 		}
 	}
+	if (mcpProgress) spans.push(span(` ${formatMCPProgress(mcpProgress, STATUS_VALUE_WIDTH)}`));
 	const line = text(spans, { truncate: "end", role: "omp.tool.eval.status" });
 	const preview = expanded ? eventString(event.preview)?.trimEnd() : undefined;
 	if (!preview) return line;

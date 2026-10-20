@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import { getThemeByName, type Theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	type EvalStatusEvent,
@@ -141,19 +142,19 @@ describe("eval status event log", () => {
 		expect(rendered).toContain("… 5000 earlier");
 	});
 
-	it("shows the MCP tool, amount, and message without exposing its internal call id in either renderer", () => {
+	it("shows the MCP tool and its progress text, with home paths shortened and no internal call id, in either renderer", () => {
 		const event: EvalStatusEvent = {
 			op: "mcp_progress",
 			id: "internal-call-id",
 			tool: "mcp__search",
 			progress: 2,
 			total: 4,
-			message: "Fetching rows",
+			message: `Fetching rows from ${os.homedir()}/private/data`,
 		};
 		const rendered = renderCell([event], 0);
 		expect(rendered).toContain("mcp__search");
-		expect(rendered).toContain("2/4");
-		expect(rendered).toContain("Fetching rows");
+		expect(rendered).toContain("Fetching rows from ~/private/data (2/4)");
+		expect(rendered).not.toContain(os.homedir());
 		expect(rendered).not.toContain("internal-call-id");
 
 		const view = evalToolRenderer.describeResult(
@@ -175,7 +176,8 @@ describe("eval status event log", () => {
 		);
 		const native = JSON.stringify(view.body);
 		expect(native).toContain("mcp__search");
-		expect(native).toContain("Fetching rows");
+		expect(native).toContain("Fetching rows from ~/private/data (2/4)");
+		expect(native).not.toContain(os.homedir());
 		expect(native).not.toContain("internal-call-id");
 	});
 });

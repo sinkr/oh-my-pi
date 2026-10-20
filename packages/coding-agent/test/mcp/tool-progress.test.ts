@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
@@ -130,6 +131,17 @@ describe("MCP tools/call progress updates", () => {
 			expect(visibleWidth(text)).toBeLessThanOrEqual(200);
 		}
 		expect(texts[1]).toEndWith(" (2/3)");
+	});
+
+	it("shows home paths in the partial's text as ~ and keeps the raw message in details", async () => {
+		const message = `Indexing ${os.homedir()}/private/repo`;
+		const tool = new MCPTool(withSteps([{ progress: 1, total: 2, message }]), definition);
+		const updates: AgentToolResult<MCPToolDetails>[] = [];
+		await tool.execute("home-path", {}, partial => updates.push(partial), context);
+		expect(updates.map(update => update.content[0])).toEqual([
+			{ type: "text", text: "Indexing ~/private/repo (1/2)" },
+		]);
+		expect(updates[0]?.details?.progress).toEqual({ progress: 1, total: 2, message });
 	});
 
 	for (const kind of ["connected", "deferred"] as const) {
