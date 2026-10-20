@@ -210,9 +210,9 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 #### `db.sqlite?q=SELECT ...`
 
 - `kind: "raw"`
-- Cannot be combined with table selectors or any other query param.
+- Cannot be combined with a table selector; the only other query params are `limit` and `offset`, which page the query's rows as they page a table (defaults `limit = 20`, `offset = 0`, `limit` capped at `500`) and add a footer naming the next page's `?q=…&limit=…&offset=…`. Any other param throws, naming it.
 - Empty `q` throws.
-- `executeReadQuery()` prepares the SQL, rejects bound parameters, and collects rows from `statement.iterate()` capped at `MAX_RAW_QUERY_ROWS = 1000`; it does not verify that the SQL starts with `SELECT`.
+- `executeReadQuery()` prepares the SQL and rejects bound parameters. With `limit`/`offset` it runs the query as a subquery under `LIMIT ? OFFSET ?`, so skipped rows are never built; statements that cannot nest (`PRAGMA`, `EXPLAIN`) skip `offset` rows while iterating instead. Without them it collects rows from `statement.iterate()` capped at `MAX_RAW_QUERY_ROWS = 1000`. It does not verify that the SQL starts with `SELECT`.
 
 - Rendering caps in `packages/coding-agent/src/tools/sqlite-reader.ts`:
    - ASCII table width `120` (`MAX_RENDER_WIDTH`)
