@@ -459,8 +459,6 @@ describe("Bedrock native compaction transport", () => {
 		expect(result.providerPayload).toMatchObject({
 			type: "anthropicCompaction",
 			provider: "amazon-bedrock",
-			model: model.id,
-			api: "bedrock-converse-stream",
 			content: "Signed compacted context",
 			signature: "opaque-bedrock-signature",
 			toolChanges: SIGNED_TOOL_CHANGES,
@@ -580,7 +578,7 @@ describe("Bedrock native compaction transport", () => {
 		expect(betas).not.toContain("thinking-binding-controls-2026-08-01");
 	});
 
-	it("keeps ordinary and unsupported/disabled requests on Converse without compaction beta", async () => {
+	it("keeps ordinary, unsupported, disabled, and un-opted gateway requests on Converse without compaction beta", async () => {
 		const cases = [
 			{ model: compactionModel(), options: {} },
 			{
@@ -588,6 +586,13 @@ describe("Bedrock native compaction transport", () => {
 				options: { anthropicCompaction: {} },
 			},
 			{ model: compactionModel({ enabled: false }), options: { anthropicCompaction: {} } },
+			{
+				model: bedrockTestModel({
+					baseUrl: "https://llm-gateway.example.com/bedrock",
+					compat: { supportsServerCompaction: true },
+				}),
+				options: { anthropicCompaction: {} },
+			},
 		];
 
 		for (const entry of cases) {
@@ -605,7 +610,7 @@ describe("Bedrock native compaction transport", () => {
 		}
 	});
 
-	it("replays signed state only on its Bedrock model/API and keeps ordinary Converse summaries textual", async () => {
+	it("replays signed state natively on later Bedrock compactions and keeps ordinary Converse summaries textual", async () => {
 		const producer = compactionModel();
 		const produced = await streamBedrock(producer, BEDROCK_TEST_CONTEXT, {
 			bearerToken: "bedrock-test-token",
@@ -656,6 +661,7 @@ describe("Bedrock native compaction transport", () => {
 		expect(replayMessages[1]).toMatchObject({ role: "user" });
 		expect(messageText(replayMessages[1])).toBe("Continue");
 
+		// Like the Anthropic path, another model of the same provider adopts the block.
 		const otherModel = bedrockTestModel({
 			id: "anthropic.other-bedrock-model",
 			compat: { supportsServerCompaction: true },
@@ -666,12 +672,7 @@ describe("Bedrock native compaction transport", () => {
 			anthropicCompaction: {},
 			fetch: crossModel.fetch,
 		}).result();
-		const crossModelMessages = JSON.stringify(crossModel.requests[0]?.body.messages);
-		expect(crossModelMessages).toContain("Signed compacted context");
-		expect(crossModelMessages).not.toContain("opaque-bedrock-signature");
-		expect(crossModelMessages).not.toContain('"type":"compaction"');
-		expect(crossModelMessages).not.toContain("bedrock-signed-add");
-		expect(crossModelMessages).not.toContain("bedrock-signed-remove");
+		expect(JSON.stringify(crossModel.requests[0]?.body.messages)).toContain("opaque-bedrock-signature");
 
 		const portable = captureFetch(eventStreamResponse);
 		await streamBedrock(producer, context, {
@@ -929,6 +930,20 @@ describe("Bedrock native compaction transport", () => {
 					};
 
 					await assertTimeout({}, 450_000);
+					// Ordinary Converse turns keep the global pre-header default, not the model idle window.
+					{
+						const { fetch, requestSignal } = fetchWaitingForAbort();
+						const pending = streamBedrock(model, BEDROCK_TEST_CONTEXT, {
+							bearerToken: "bedrock-test-token",
+							fetch,
+						});
+						const signal = await requestSignal;
+						vi.advanceTimersByTime(299_999);
+						expect(signal.aborted).toBe(false);
+						vi.advanceTimersByTime(1);
+						expect(signal.aborted).toBe(true);
+						expect((await pending.result()).stopReason).toBe("error");
+					}
 					await assertTimeout({ streamIdleTimeoutMs: 600_000 }, 600_000);
 					await withEnv({ PI_STREAM_FIRST_EVENT_TIMEOUT_MS: "5" }, async () => {
 						await assertTimeout({ streamIdleTimeoutMs: 600_000, streamFirstEventTimeoutMs: 20 }, 20);

@@ -7,7 +7,7 @@
  * shared credential resolution and SigV4 signing. The normal path decodes
  * `application/vnd.amazon.eventstream`; no AWS SDK, Smithy, or proxy-agent
  * dependency is required. Bun's native `HTTPS_PROXY` support is honored.
-
+ *
  * A `models.yml` `baseUrl` is the request origin verbatim (VPC endpoint, gateway, …);
  * only AWS's own regional host is re-pointed at the resolved region. SigV4 unaffected.
  */
@@ -53,13 +53,12 @@ import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
 import { isThinkingPrefixBindingError, streamBedrockAnthropicCompaction } from "./anthropic";
 import type { AnthropicMessagesClientLike, AnthropicRequestOptions } from "./anthropic-client";
+import { supportsBedrockConverseCompaction } from "./anthropic-compaction";
 import { isAnthropicNarrationSignature } from "./anthropic-signature";
-import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
 import type { MessageCreateParams, MessageCreateParamsStreaming, RawMessageStreamEvent } from "./anthropic-wire";
-
-import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
+import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
 import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
-
+import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
 import { transformMessages } from "./transform-messages";
 
 /**
@@ -167,12 +166,19 @@ function resolveBearerToken(options: BedrockOptions): string | undefined {
 	return resolveAwsBearerToken(options.apiKey, options.bearerToken);
 }
 
+/**
+ * Request origin. `baseUrl` is the origin verbatim, path prefix (and query, for
+ * gateways that authenticate via a query parameter) included, so a gateway
+ * mounted under a path works. AWS's own host is re-pointed: the catalog can't
+ * know the region.
+ */
 function resolveBedrockBaseUrl(model: Model<"bedrock-converse-stream">, region: string): URL {
 	const base = new URL(model.baseUrl || `https://bedrock-runtime.${region}.amazonaws.com`);
 	if (AWS_REGIONAL_BEDROCK_HOST.test(base.host)) base.host = `bedrock-runtime.${region}.amazonaws.com`;
 	return base;
 }
 
+/** Bedrock Runtime operation, named by its URL suffix under `/model/<id>/`. */
 type BedrockRequestEndpoint = "converse-stream" | "invoke-with-response-stream";
 
 function resolveBedrockRequestUrl(
@@ -180,11 +186,15 @@ function resolveBedrockRequestUrl(
 	base: URL,
 	endpoint: BedrockRequestEndpoint,
 ): { urlPath: string; url: string } {
-	const suffix = endpoint === "invoke-with-response-stream" ? "invoke-with-response-stream" : "converse-stream";
-	const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(model.id)}/${suffix}`;
+	const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(model.id)}/${endpoint}`;
 	return { urlPath, url: `${base.origin}${urlPath}${base.search}` };
 }
 
+/**
+ * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
+ * body is read under the same pre-response deadline, so a stalled error body
+ * cannot hang the caller.
+ */
 async function sendBedrockRequest(
 	model: Model<"bedrock-converse-stream">,
 	options: BedrockOptions,
@@ -193,10 +203,25 @@ async function sendBedrockRequest(
 	input: unknown,
 	endpoint: BedrockRequestEndpoint,
 	signal: AbortSignal | undefined = options.signal,
-): Promise<{ response: Response; responseBody?: string; rawRequestDump: RawHttpRequestDump }> {
+): Promise<{ response: Response; responseBody?: string }> {
 	const host = base.host;
 	const { urlPath, url } = resolveBedrockRequestUrl(model, base, endpoint);
 	const query = base.search.slice(1) || undefined;
+	// Caller headers are merged BEFORE signing, so SigV4 covers them and they
+	// reach the wire; tracing/attribution headers (including those set by a
+	// `before_provider_headers` extension) work here as on every other provider.
+	// `model.headers` first, `options.headers` second: `StreamOptions.headers` is
+	// documented as merged ON TOP of model-defined headers.
+	//
+	// The signer's OWN headers are dropped first, and that is load-bearing:
+	// `signRequest` lets a caller value overwrite `host`/`x-amz-*` in the map it
+	// signs, but always RETURNS the generated ones, which `requestHeaders` below
+	// puts on the wire. A caller supplying any of them would sign one set of
+	// values and send another, and Bedrock would reject every request.
+	// Names the request sets itself are dropped too: keeping a caller
+	// `Content-Type` beside the fixed `content-type` leaves TWO object keys, which
+	// SigV4 signs as one value while fetch joins both into a single comma-joined
+	// wire header, so AWS validates different bytes than were signed.
 	const callerHeaders: Record<string, string> = {};
 	for (const source of [model.headers, options.headers]) {
 		for (const [name, value] of Object.entries(source ?? {})) {
@@ -205,8 +230,11 @@ async function sendBedrockRequest(
 			callerHeaders[field] = value;
 		}
 	}
-	// SigV4 never signs `user-agent`; this default is still recorded by CloudTrail.
+	// SigV4 never signs `user-agent` (UNSIGNABLE in aws-sigv4.ts), so this default
+	// cannot break the signature. Without it Bun's fetch sends `Bun/<version>`,
+	// and that is what CloudTrail records for every request.
 	callerHeaders["user-agent"] ??= USER_AGENT;
+	// Content-type and accept stay last: the eventstream framing is not the caller's to change.
 	const headers: Record<string, string> = {
 		...callerHeaders,
 		"content-type": "application/json",
@@ -256,16 +284,20 @@ async function sendBedrockRequest(
 		});
 		requestHeaders = { ...headers, ...signed };
 	}
-	const rawRequestDump: RawHttpRequestDump = {
-		provider: model.provider,
-		api: model.api,
-		model: model.id,
-		method: "POST",
-		url,
-		body: input,
-	};
-	const idleTimeoutMs = options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
-	const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+	// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
+	// watchdogs govern slow-prefill streams (issue #2422). Direct callers that
+	// bypass `register-builtins` (which installs the iterator-level first-event
+	// watchdog) still need this pre-response timer, otherwise an endpoint that
+	// accepts the POST and never sends headers would hang forever. Converse keeps
+	// the global default; a compaction request summarizes a whole history before
+	// streaming, so it waits as long as the model's idle window allows.
+	const firstEventTimeoutMs =
+		options.streamFirstEventTimeoutMs ??
+		(endpoint === "converse-stream"
+			? getStreamFirstEventTimeoutMs()
+			: getStreamFirstEventTimeoutMs(
+					options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs),
+				));
 	const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
 	let response: Response;
 	let responseBody: string | undefined;
@@ -281,11 +313,12 @@ async function sendBedrockRequest(
 		if (!response.ok && endpoint === "invoke-with-response-stream")
 			responseBody = await response.text().catch(() => "");
 	} finally {
-		// Keep the first-event deadline active for finite HTTP-error bodies, then
-		// leave successful stream liveness to the event iterator's idle watchdog.
+		// Cleared once headers (or a finite error body) arrive: an absolute
+		// deadline would keep aborting an actively streaming body. Stream
+		// liveness belongs to the event iterator's idle watchdog.
 		watchdog.clear();
 	}
-	return { response, responseBody, rawRequestDump };
+	return { response, responseBody };
 }
 
 function inferRegionFromBedrockArn(modelId: string): string | undefined {
@@ -537,6 +570,7 @@ function sanitizeRequestMetadata(raw: unknown): Record<string, string> | undefin
 	if (dropped.length > 0) logger.warn("Bedrock requestMetadata entries dropped", { keys: dropped });
 	return kept > 0 ? out : undefined;
 }
+
 /** Shared across events: every payload decode is a complete, non-streaming call. */
 const PAYLOAD_DECODER = new TextDecoder();
 type BedrockAnthropicStreamEvent = RawMessageStreamEvent | { type: "ping" };
@@ -554,6 +588,11 @@ function isAnthropicStreamEvent(value: unknown): value is RawMessageStreamEvent 
 	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(ANTHROPIC_STREAM_EVENT_TYPES, value.type);
 }
 
+/**
+ * Anthropic Messages stream events carried in InvokeModelWithResponseStream
+ * `chunk` frames (base64 event JSON). Exception frames throw with the status
+ * their AWS shape maps to; a stream that ends before `message_stop` is truncated.
+ */
 async function* decodeBedrockAnthropicEvents(
 	body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<BedrockAnthropicStreamEvent> {
@@ -604,11 +643,8 @@ async function* decodeBedrockAnthropicEvents(
 			);
 		}
 		if (!isAnthropicStreamEvent(event)) continue;
-		if (event.type === "message_stop") {
-			yield event;
-			return;
-		}
 		yield event;
+		if (event.type === "message_stop") return;
 	}
 	throw new AIError.AnthropicStreamEnvelopeError("Bedrock InvokeModelWithResponseStream ended before message_stop");
 }
@@ -721,11 +757,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	context: Context,
 	options: BedrockOptions,
 ): AssistantMessageEventStream => {
-	if (
-		options.anthropicCompaction !== undefined &&
-		model.compat.supportsServerCompaction === true &&
-		model.remoteCompaction?.enabled !== false
-	) {
+	if (options.anthropicCompaction !== undefined && supportsBedrockConverseCompaction(model)) {
 		let requestLocation: { region: string; base: URL } | undefined;
 		const getRequestLocation = (): { region: string; base: URL } => {
 			if (!requestLocation) {
@@ -798,14 +830,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		try {
 			const base = resolveBedrockBaseUrl(model, region);
 			const bearerToken = resolveBearerToken(options);
-			const sendRequest = async (
-				input: unknown,
-				endpoint: BedrockRequestEndpoint,
-			): Promise<{ response: Response; responseBody?: string }> => {
-				const sent = await sendBedrockRequest(model, options, region, base, input, endpoint);
-				rawRequestDump = sent.rawRequestDump;
-				return { response: sent.response, responseBody: sent.responseBody };
-			};
 
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const promptCachePolicy = resolvePromptCachePolicy(model, cacheRetention);
@@ -867,7 +891,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			let prefixBindingRetryAttempted = false;
 			let response: Response;
 			while (true) {
-				response = (await sendRequest(commandInput, "converse-stream")).response;
+				rawRequestDump = {
+					provider: model.provider,
+					api: output.api,
+					model: model.id,
+					method: "POST",
+					url: resolveBedrockRequestUrl(model, base, "converse-stream").url,
+					body: commandInput,
+				};
+				({ response } = await sendBedrockRequest(model, options, region, base, commandInput, "converse-stream"));
 				if (response.ok) break;
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
 					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —

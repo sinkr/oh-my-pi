@@ -1706,36 +1706,21 @@ function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackConte
 }
 
 /**
- * Whether a persisted compaction summary replays natively: it must come from
- * this provider; signed blocks additionally require the exact model and API.
+ * Whether a persisted compaction summary replays as a native `compaction`
+ * block: only the provider that produced it may replay it, and only on a
+ * request whose endpoint supports compaction (the caller decides that with
+ * {@link supportsAnthropicCompaction}); every other model reads the text.
  */
-
-interface AnthropicCompactionIdentity {
-	provider: string;
-	model: string;
-	api: Api;
-}
-
-function resolveAnthropicCompactionIdentity<TApi extends Api>(
-	model: Model<TApi>,
-	override?: AnthropicCompactionIdentity,
-): AnthropicCompactionIdentity {
-	return override ?? { provider: model.provider, model: model.id, api: model.api };
-}
-
 function isReplayableAnthropicCompaction(
 	payload: ProviderPayload | undefined,
 	model: Model<"anthropic-messages">,
-	identity?: AnthropicCompactionIdentity,
 ): payload is AnthropicCompactionPayload {
-	const source = resolveAnthropicCompactionIdentity(model, identity);
-	return payload?.type === "anthropicCompaction" && payload.provider === source.provider && payload.content.length > 0;
+	return payload?.type === "anthropicCompaction" && payload.provider === model.provider && payload.content.length > 0;
 }
 
 /** Which persisted compaction summaries a request replays as native blocks. */
 interface AnthropicCompactionReplay {
 	model: Model<"anthropic-messages">;
-	identity?: AnthropicCompactionIdentity;
 	/** Replay persisted legacy threshold blocks (encrypted content) too. */
 	legacy: boolean;
 }
@@ -1749,12 +1734,10 @@ function replaysAnthropicCompactionBlock(
 	payload: ProviderPayload | undefined,
 	replay: AnthropicCompactionReplay,
 ): payload is AnthropicCompactionPayload {
-	if (!isReplayableAnthropicCompaction(payload, replay.model, replay.identity)) return false;
-	if (payload.signature !== undefined) {
-		const source = resolveAnthropicCompactionIdentity(replay.model, replay.identity);
-		return payload.model === source.model && payload.api === source.api;
-	}
-	return replay.legacy && payload.encryptedContent !== undefined;
+	return (
+		isReplayableAnthropicCompaction(payload, replay.model) &&
+		(payload.signature !== undefined || (replay.legacy && payload.encryptedContent !== undefined))
+	);
 }
 
 /** The wire block for a replayed compaction payload, opaque state included. */
@@ -1778,51 +1761,39 @@ function contextReplaysAnthropicCompaction(
 	messages: readonly Message[],
 	model: Model<"anthropic-messages">,
 	format: "signed" | "legacy",
-	identity?: AnthropicCompactionIdentity,
 ): boolean {
-	const source = resolveAnthropicCompactionIdentity(model, identity);
 	return messages.some(message => {
 		if (message.role !== "user" && message.role !== "developer" && message.role !== "assistant") return false;
 		const payload = message.providerPayload;
-		if (!isReplayableAnthropicCompaction(payload, model, source)) return false;
-		if (format === "signed")
-			return payload.signature !== undefined && payload.model === source.model && payload.api === source.api;
-		return payload.signature === undefined && payload.encryptedContent !== undefined;
+		return (
+			isReplayableAnthropicCompaction(payload, model) &&
+			(format === "signed" ? payload.signature !== undefined : payload.encryptedContent !== undefined)
+		);
 	});
 }
 
-/** Parse an Anthropic `compaction` content block and bind it to its source model and API. */
-export function parseAnthropicCompactionBlock(
-	value: unknown,
-	model: Model<Api>,
-): AnthropicCompactionPayload | undefined {
-	if (
-		!isRecord(value) ||
-		value.type !== "compaction" ||
-		typeof value.content !== "string" ||
-		value.content.length === 0
-	) {
+/**
+ * The persisted payload for a streamed `compaction` content block, or
+ * `undefined` when the block carries no summary or malformed `tool_changes`.
+ * `tool_changes` is covered by the signature, so it is kept verbatim.
+ */
+function parseAnthropicCompactionBlock(value: unknown, provider: string): AnthropicCompactionPayload | undefined {
+	if (!isRecord(value) || value.type !== "compaction" || typeof value.content !== "string" || !value.content) {
 		return undefined;
 	}
-	const hasToolChanges = Object.hasOwn(value, "tool_changes");
 	const toolChanges = value.tool_changes;
-	if (hasToolChanges && (!Array.isArray(toolChanges) || !toolChanges.every(isRecord))) return undefined;
-	const signature = typeof value.signature === "string" ? value.signature : undefined;
-	const encryptedContent =
-		typeof value.encrypted_content === "string" && value.encrypted_content.length > 0
-			? value.encrypted_content
-			: undefined;
+	if (toolChanges !== undefined && (!Array.isArray(toolChanges) || !toolChanges.every(isRecord))) return undefined;
+	const { content, signature, encrypted_content } = value;
 	return {
 		type: "anthropicCompaction",
-		provider: model.provider,
-		model: model.id,
-		api: model.api,
-		content: value.content,
-		...(signature !== undefined ? { signature } : {}),
-		...(encryptedContent !== undefined ? { encryptedContent } : {}),
-		...(hasToolChanges ? { toolChanges: toolChanges as Record<string, unknown>[] } : {}),
+		provider,
+		content,
+		...(typeof signature === "string" ? { signature } : {}),
+		...(typeof encrypted_content === "string" && encrypted_content ? { encryptedContent: encrypted_content } : {}),
+		...(toolChanges !== undefined ? { toolChanges } : {}),
 	};
 }
+
 /**
  * Persisted encrypted threshold blocks still require a legacy strategy.
  * This edit is replay-only and cannot trigger a new threshold compaction.
@@ -1857,7 +1828,7 @@ function carriesSignedCompaction(params: MessageCreateParams): boolean {
  * documented billing total. Requests without a compaction iteration retain
  * their top-level usage.
  */
-function applyAnthropicCompactionIterationUsage(usage: Usage, source: AnthropicWireUsage): boolean {
+function applyCompactionIterationUsage(usage: Usage, source: AnthropicWireUsage): boolean {
 	const iterations = source.iterations;
 	if (!iterations?.some(iteration => iteration?.type === "compaction")) return false;
 	let input = 0;
@@ -1935,7 +1906,7 @@ function resolveIterationModel(requestModel: Model<Api>, iterationModelId: strin
 function calculateIterationTurnCost(
 	requestModel: Model<Api>,
 	usage: Usage,
-	source: Pick<AnthropicWireUsage, "iterations">,
+	source: AnthropicWireUsage,
 	timestamp: number,
 ): boolean {
 	const iterations = source.iterations ?? [];
@@ -2186,10 +2157,14 @@ export function maybeAddReplayUnsignedThinkingHint(model: Model<"anthropic-messa
 	return `${hint}\n\n${message}`;
 }
 
+/**
+ * A non-Anthropic transport that reuses this stream consumer: it owns the
+ * request body and HTTP exchange, while events, usage, and errors keep the
+ * source model's identity and pricing.
+ */
 type AnthropicStreamTransport = {
 	sourceModel: Model<"bedrock-converse-stream">;
-	compactionSupported: boolean;
-	compactionReplayIdentity: AnthropicCompactionIdentity;
+	/** Encode reasoning-off; `forceThinkingOffFields` supplies the source model's explicit disabled form. */
 	forceThinkingOff: boolean;
 	forceThinkingOffFields?: Record<string, unknown>;
 	prefixMismatchBehavior?: "drop_block" | "error";
@@ -2214,7 +2189,6 @@ const streamAnthropicOnce = (
 		let firstTokenTime: number | undefined;
 
 		const sourceModel = transport?.sourceModel ?? model;
-		const costModel = sourceModel;
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -2265,9 +2239,10 @@ const streamAnthropicOnce = (
 			const baseUrl = copilotBaseUrl ?? resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			// A caller-owned client decides the endpoint itself (its `baseURL`, or an
-			// explicit opt-in); it receives the compaction beta per request.
+			// explicit opt-in); it receives the compaction beta per request. A transport
+			// exists only to compact, so its endpoint supports the beta.
 			const compactionSupported =
-				transport?.compactionSupported ??
+				transport !== undefined ||
 				(options?.client
 					? supportsAnthropicCompactionOnClient(model, options.client)
 					: supportsAnthropicCompaction(model, baseUrl));
@@ -2576,7 +2551,6 @@ const streamAnthropicOnce = (
 				if (transport) rawRequestDump = undefined;
 				const built = buildParams(model, preparedContext, isOAuthToken, options, {
 					compactionSupported,
-					compactionReplayIdentity: transport?.compactionReplayIdentity,
 					forceThinkingOff: transport?.forceThinkingOff,
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
@@ -3081,8 +3055,7 @@ const streamAnthropicOnce = (
 								output.usage.output = startUsage.output_tokens || 0;
 								output.usage.cacheRead = startUsage.cache_read_input_tokens || 0;
 								output.usage.cacheWrite = startUsage.cache_creation_input_tokens || 0;
-								const compacted = applyAnthropicCompactionIterationUsage(output.usage, startUsage);
-
+								const compacted = applyCompactionIterationUsage(output.usage, startUsage);
 								output.usage.totalTokens =
 									output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 								if (serverSideFallback) {
@@ -3091,9 +3064,9 @@ const streamAnthropicOnce = (
 								}
 								if (
 									!(serverSideFallback || compacted) ||
-									!calculateIterationTurnCost(costModel, output.usage, startUsage, output.timestamp)
+									!calculateIterationTurnCost(sourceModel, output.usage, startUsage, output.timestamp)
 								) {
-									calculateCost(costModel, output.usage, output.timestamp);
+									calculateCost(sourceModel, output.usage, output.timestamp);
 								}
 							} else {
 								reportAnthropicEnvelopeAnomaly("message_start missing usage");
@@ -3253,7 +3226,7 @@ const streamAnthropicOnce = (
 									partial: output,
 								});
 							} else if (event.content_block.type === "compaction") {
-								compactionPayload = parseAnthropicCompactionBlock(event.content_block, sourceModel);
+								compactionPayload = parseAnthropicCompactionBlock(event.content_block, sourceModel.provider);
 								openBlocks.set(event.index, { contentIndex: -1, kind: "compaction" });
 							} else {
 								openBlocks.set(event.index, { contentIndex: -1, kind: "ignored" });
@@ -3449,8 +3422,7 @@ const streamAnthropicOnce = (
 									output.usage.cacheWrite = deltaUsage.cache_creation_input_tokens;
 								}
 								applyAnthropicUsageExtras(output.usage, deltaUsage);
-								const compacted = applyAnthropicCompactionIterationUsage(output.usage, deltaUsage);
-
+								const compacted = applyCompactionIterationUsage(output.usage, deltaUsage);
 								output.usage.totalTokens =
 									output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 								if (serverSideFallback) {
@@ -3459,9 +3431,9 @@ const streamAnthropicOnce = (
 								}
 								if (
 									!(serverSideFallback || compacted) ||
-									!calculateIterationTurnCost(costModel, output.usage, deltaUsage, output.timestamp)
+									!calculateIterationTurnCost(sourceModel, output.usage, deltaUsage, output.timestamp)
 								) {
-									calculateCost(costModel, output.usage, output.timestamp);
+									calculateCost(sourceModel, output.usage, output.timestamp);
 								}
 							}
 						} else if (event.type === "message_stop") {
@@ -5264,6 +5236,7 @@ type AnthropicParamBuildOptions = {
 	 * and block replay inert. Defaults to the model's static resolution.
 	 */
 	compactionSupported?: boolean;
+	/** Omit thinking/effort controls entirely (a transport's reasoning-off request). */
 	forceThinkingOff?: boolean;
 	/**
 	 * Already-resolved effective endpoint for this request (reroutes applied).
@@ -5271,7 +5244,6 @@ type AnthropicParamBuildOptions = {
 	 * land on the right channel. Defaults to `model.baseUrl`.
 	 */
 	effectiveBaseUrl?: string;
-	compactionReplayIdentity?: AnthropicCompactionIdentity;
 };
 
 /**
@@ -5371,7 +5343,6 @@ function buildParams(
 		compactionSupported = supportsAnthropicCompaction(model),
 		forceThinkingOff,
 		effectiveBaseUrl,
-		compactionReplayIdentity,
 	} = buildOptions;
 	// A session-scoped auto-demote (learned from a live signing 400) clones the
 	// resolved compat with `replayUnsignedThinking: false` so every subsequent
@@ -5560,14 +5531,9 @@ function buildParams(
 	// A new on-demand compaction request cannot carry context_management.
 	// Later turns carrying its signed block may keep clear_thinking as usual.
 	// Persisted encrypted threshold blocks alone need a legacy replay edit.
-	const signedReplay =
-		compactionSupported &&
-		contextReplaysAnthropicCompaction(context.messages, model, "signed", compactionReplayIdentity);
+	const signedReplay = compactionSupported && contextReplaysAnthropicCompaction(context.messages, model, "signed");
 	const legacyReplay =
-		compactionSupported &&
-		!signedReplay &&
-		contextReplaysAnthropicCompaction(context.messages, model, "legacy", compactionReplayIdentity);
-
+		compactionSupported && !signedReplay && contextReplaysAnthropicCompaction(context.messages, model, "legacy");
 	const contextManagementEdits: NonNullable<MessageCreateParams["context_management"]>["edits"] = [];
 	if (!compactionRequest && shouldKeepThinkingContext) {
 		contextManagementEdits.push({ type: "clear_thinking_20251015", keep: "all" });
@@ -5582,7 +5548,7 @@ function buildParams(
 	// (`anthropic_beta`), never as the `anthropic-beta` HTTP header this path sets
 	// — so the field is dropped alongside the beta to avoid a 400 (#5614).
 	const compactionReplay: AnthropicCompactionReplay | undefined = compactionSupported
-		? { model: effectiveModel, identity: compactionReplayIdentity, legacy: !compactionRequest && !signedReplay }
+		? { model: effectiveModel, legacy: !compactionRequest && !signedReplay }
 		: undefined;
 	// `minimizeEffort` lowers only an effort a per-message control can carry: once an
 	// earlier request recorded one, the plan keeps the top-level effort in force.
@@ -5617,8 +5583,6 @@ function buildParams(
 			serverSideFallbackEnabled: !!fallbacks?.length,
 			replayCompaction: compactionSupported,
 			replayLegacyCompaction: compactionReplay?.legacy,
-			compactionReplayIdentity,
-
 			dropAllThinking: dropAllThinking || stripThinkingHistory,
 			droppedThinkingBlocks,
 			credentialId: options?.credentialId,
@@ -5761,8 +5725,8 @@ function buildParams(
 
 	return { params, requestControls };
 }
-/** Resolve canonical Anthropic wire compat for Bedrock's Messages-shaped side request. */
 
+/** Project a Bedrock Converse model onto Anthropic Messages so the shared encoder resolves canonical wire compat. */
 function buildBedrockAnthropicEncoderModel(model: Model<"bedrock-converse-stream">): Model<"anthropic-messages"> {
 	const {
 		compat: _bedrockCompat,
@@ -5777,9 +5741,10 @@ function buildBedrockAnthropicEncoderModel(model: Model<"bedrock-converse-stream
 	};
 	return buildModel(spec);
 }
+
 /**
  * Route Bedrock's on-demand Anthropic compaction through the shared Messages
- * stream consumer while keeping source-provider identity and pricing explicit.
+ * stream consumer while keeping source-provider identity and pricing.
  */
 export function streamBedrockAnthropicCompaction(
 	sourceModel: Model<"bedrock-converse-stream">,
@@ -5793,12 +5758,7 @@ export function streamBedrockAnthropicCompaction(
 	prepareOptions: (options: AnthropicOptions) => AnthropicOptions,
 	forceThinkingOffFields?: Record<string, unknown>,
 ): AssistantMessageEventStream {
-	const anthropicModel = buildBedrockAnthropicEncoderModel(sourceModel);
-	const sourceIdentity: AnthropicCompactionIdentity = {
-		provider: sourceModel.provider,
-		model: sourceModel.id,
-		api: sourceModel.api,
-	};
+	const anthropicModel = withoutDisabledExperimentalBetas(buildBedrockAnthropicEncoderModel(sourceModel));
 	const forceThinkingOff = options.reasoning === undefined;
 	const prefixMismatchBehavior =
 		!forceThinkingOff && anthropicModel.thinking?.prefixBinding && sourceModel.compat.supportsThinkingBindingControls
@@ -5807,24 +5767,15 @@ export function streamBedrockAnthropicCompaction(
 	const compactionOptions = { ...options };
 	delete compactionOptions.toolChoice;
 	delete compactionOptions.fallbacks;
-	const transport: AnthropicStreamTransport = {
+	return streamAnthropicOnce(anthropicModel, context, compactionOptions, {
 		sourceModel,
-		compactionSupported: true,
-		compactionReplayIdentity: sourceIdentity,
 		forceThinkingOff,
 		forceThinkingOffFields,
 		prefixMismatchBehavior,
 		prepareOptions,
 		prepareRequest,
 		createClient,
-	};
-	const streamAttempt = (
-		model: Model<"anthropic-messages">,
-		streamContext: Context,
-		streamOptions?: AnthropicOptions,
-	): AssistantMessageEventStream =>
-		streamAnthropicOnce(model, streamContext, streamOptions ?? compactionOptions, transport);
-	return streamAttempt(withoutDisabledExperimentalBetas(anthropicModel), context, compactionOptions);
+	});
 }
 
 const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";
@@ -5982,7 +5933,6 @@ export function convertAnthropicMessages(
 		credentialId?: number;
 		/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
 		compactionRequest?: AnthropicCompactionRequest;
-		compactionReplayIdentity?: AnthropicCompactionIdentity;
 	},
 ): AnthropicMessageParam[] {
 	// Indices of params emitted from agent-owned `developer` messages. After the
@@ -6050,11 +6000,7 @@ export function convertAnthropicMessages(
 		if (
 			opts?.replayCompaction &&
 			(msg.role === "user" || msg.role === "developer") &&
-			replaysAnthropicCompactionBlock(msg.providerPayload, {
-				model,
-				identity: opts?.compactionReplayIdentity,
-				legacy: opts.replayLegacyCompaction !== false,
-			})
+			replaysAnthropicCompactionBlock(msg.providerPayload, { model, legacy: opts.replayLegacyCompaction !== false })
 		) {
 			const compactionParam: AnthropicMessageParam = {
 				role: "assistant",
@@ -6159,7 +6105,6 @@ export function convertAnthropicMessages(
 				opts?.replayCompaction &&
 				replaysAnthropicCompactionBlock(msg.providerPayload, {
 					model,
-					identity: opts.compactionReplayIdentity,
 					legacy: opts.replayLegacyCompaction !== false,
 				})
 			) {

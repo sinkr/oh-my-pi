@@ -161,7 +161,7 @@ function hasConfiguredCompactionMethod(settings: CompactionSettings): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).length > 0;
 }
 
-/** Native compaction needs the same live model to keep provider-bound state valid. */
+/** Kept Claude thinking (Anthropic Messages or Bedrock Converse) requires compaction by the same live model. */
 function canUseLiveProviderNativeCompaction(
 	candidate: Model,
 	liveModel: Model,

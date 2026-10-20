@@ -1104,23 +1104,20 @@ export interface AnthropicRequestControls {
  * Anthropic on-demand compaction summary (`compact-2026-09-04` beta).
  *
  * Produced by the Anthropic provider on the assistant message of a request
- * that returned a `compaction` content block, and attached to the user-role
+ * that streamed a `compaction` content block, and attached to the user-role
  * compaction summary message that replaces the compacted history so the
  * provider can replay the block verbatim: the API drops every block that
- * precedes it. Signed blocks are bound to their producing model and API;
- * `content` remains portable text for every other provider.
+ * precedes it. `content` is the plain-text summary, so every other provider
+ * reads the message text and ignores the payload.
  */
 export interface AnthropicCompactionPayload {
 	type: "anthropicCompaction";
-	/** Provider and API that produced the signed summary. */
+	/** Provider that produced the summary; only that provider replays it natively. */
 	provider: string;
-	/** Exact catalog model identity required for native signed-block replay. */
-	model?: string;
-	api?: Api;
 	content: string;
-	/** Signature of an on-demand block; replayed only by the same model and API. */
+	/** Signature of an on-demand block; replayed verbatim. */
 	signature?: string;
-	/** Opaque signed tool changes returned with the summary; replayed unchanged. */
+	/** Net tool changes across the summarized range; covered by the signature, replayed verbatim. */
 	toolChanges?: Record<string, unknown>[];
 	/** Legacy threshold block state (`compact-2026-01-12`); replay-only. */
 	encryptedContent?: string;

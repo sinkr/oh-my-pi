@@ -2028,10 +2028,11 @@ export async function compact(
 	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model)) {
 		const previousNative = getPreservedAnthropicCompactionData(previousPreserveData);
 		// Lead with the previous summary as the live context renders it:
-		// signed blocks require the exact model and API, while legacy encrypted
-		// threshold blocks keep their existing same-provider replay behavior.
-		// Every other route reads the portable text summary. A prior snapcompact
-		// archive is already merged into that text.
+		// natively when this provider wrote it, as text otherwise.
+		// A prior snapcompact archive is already merged into that summary
+		// text. Like the live context, the summary keeps its commit time and
+		// predates its rewrite marker before all replayed messages, so
+		// retained thinking stays bound to the original prefix.
 		const firstReplayed = messagesToSummarize[0] ?? turnPrefixMessages[0] ?? recentMessages[0];
 		const previousSummaryMessage = previousSummaryForCompaction
 			? createCompactionSummaryMessage(
@@ -2041,9 +2042,7 @@ export async function compact(
 					{
 						historyRewriteAt: firstReplayed !== undefined ? firstReplayed.timestamp - 1 : undefined,
 						providerPayload:
-							previousNative?.provider === model.provider &&
-							(!previousNative.signature ||
-								(previousNative.model === model.id && previousNative.api === model.api))
+							previousNative?.provider === model.provider
 								? {
 										type: "anthropicCompaction",
 										provider: previousNative.provider,
@@ -2056,8 +2055,6 @@ export async function compact(
 										...(previousNative.retainedFiles ? { retainedFiles: previousNative.retainedFiles } : {}),
 										...(previousNative.toolChanges ? { toolChanges: previousNative.toolChanges } : {}),
 										...(previousNative.exactTail ? { exactTail: true as const } : {}),
-										model: previousNative.model,
-										api: previousNative.api,
 									}
 								: undefined,
 					},
@@ -2241,11 +2238,12 @@ export async function compact(
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 	if (nativeSummary !== undefined) {
-		// The signed block's summary and tool-change records remain verbatim so they
-		// match its signature. The converter replaces the summary message with the
-		// block and skips its text, so the harness file lists above travel separately;
-		// otherwise those file lists would be invisible to this provider.
-		// Every other provider keeps reading the entry text.
+		// The replayed block (summary and any `tool_changes`) stays
+		// byte-identical to the API's output so it matches its signature. The
+		// harness file lists above travel separately: the converter replaces the
+		// summary message with the block and skips its text, so they would
+		// otherwise be invisible to this provider. Every other provider keeps
+		// reading the entry text.
 		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
 		preserveData = withAnthropicCompactionPreserveData(preserveData, {
 			provider: model.provider,
@@ -2256,7 +2254,6 @@ export async function compact(
 			...(nativeRetainedFiles ? { retainedFiles: nativeRetainedFiles } : {}),
 			exactTail: true,
 			model: model.id,
-			api: model.api,
 			usedTokens: nativeUsedTokens,
 		});
 	}

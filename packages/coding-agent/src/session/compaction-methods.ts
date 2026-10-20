@@ -13,7 +13,7 @@ export const COMPACTION_METHOD_CHOICES = [
 		value: "remote",
 		label: "Server compaction",
 		description:
-			"Use provider-native compaction (OpenAI Responses, the Anthropic beta, or Bedrock Runtime's compaction-only side path) when supported; normal Bedrock turns remain on Converse",
+			"Use provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta, including on Bedrock) when the active route supports it",
 	},
 	{
 		value: "snapcompact",

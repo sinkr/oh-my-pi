@@ -19,7 +19,10 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resolveAnthropicCompactionEffort } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { supportsAnthropicCompaction } from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
+import {
+	supportsAnthropicCompaction,
+	supportsBedrockConverseCompaction,
+} from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type InstrumentedChatSpanOptions, instrumentedCompleteSimple } from "../telemetry";
 import type { AgentMessage } from "../types";
@@ -45,8 +48,6 @@ export interface AnthropicCompactionPreserveData {
 	exactTail?: true;
 	/** Model that wrote the summary. */
 	model?: string;
-	/** API that wrote the signature. */
-	api?: Model["api"];
 	/** Prompt tokens the compaction request processed, for display. */
 	usedTokens?: number;
 }
@@ -62,17 +63,17 @@ function isBedrockConverseModel(model: Model): model is Model<"bedrock-converse-
 /**
  * Whether a model compacts through the Anthropic compaction beta. Model
  * eligibility is catalog policy (`compat.supportsServerCompaction`, the
- * lineage the beta documents); endpoint eligibility for Anthropic Messages is
- * resolved the way that provider routes requests. Bedrock Converse has a
- * compaction-only Runtime InvokeModel lane, gated by catalog capability and
- * the per-model remote-compaction opt-out; normal turns still use Converse.
+ * lineage the beta documents); endpoint eligibility is resolved the way the
+ * provider routes requests, so a Foundry or `ANTHROPIC_BASE_URL` reroute of a
+ * first-party model is excluded unless the route opted in with
+ * `remoteCompaction.enabled`. Bedrock Converse models compact through a
+ * Bedrock Runtime side request; their ordinary turns stay on Converse.
  */
 export function shouldUseAnthropicNativeCompaction(
 	model: Model,
 ): model is Model<"anthropic-messages" | "bedrock-converse-stream"> {
 	if (isAnthropicMessagesModel(model)) return supportsAnthropicCompaction(model);
-	if (!isBedrockConverseModel(model)) return false;
-	return model.compat?.supportsServerCompaction === true && model.remoteCompaction?.enabled !== false;
+	return isBedrockConverseModel(model) && supportsBedrockConverseCompaction(model);
 }
 
 type AnthropicNativeCompactionModel = Model<"anthropic-messages" | "bedrock-converse-stream">;
@@ -84,19 +85,9 @@ export function getPreservedAnthropicCompactionData(
 	if (!isRecord(candidate)) return undefined;
 	if (typeof candidate.provider !== "string" || candidate.provider.length === 0) return undefined;
 	if (typeof candidate.content !== "string" || candidate.content.length === 0) return undefined;
-	const api =
-		candidate.api === "anthropic-messages" || candidate.api === "bedrock-converse-stream"
-			? candidate.api
-			: candidate.api === undefined &&
-				  typeof candidate.model === "string" &&
-				  candidate.model.length > 0 &&
-				  typeof candidate.signature === "string" &&
-				  candidate.signature.length > 0
-				? "anthropic-messages"
-				: undefined;
-	const hasToolChanges = Object.prototype.hasOwnProperty.call(candidate, "toolChanges");
 	const toolChanges = candidate.toolChanges;
-	if (hasToolChanges && (!Array.isArray(toolChanges) || !toolChanges.every(isRecord))) return undefined;
+	// The signature covers `tool_changes`: a block missing or mangling them cannot replay.
+	if (toolChanges !== undefined && (!Array.isArray(toolChanges) || !toolChanges.every(isRecord))) return undefined;
 	return {
 		provider: candidate.provider,
 		content: candidate.content,
@@ -117,10 +108,9 @@ export function getPreservedAnthropicCompactionData(
 					),
 				}
 			: {}),
-		...(hasToolChanges ? { toolChanges: toolChanges as Record<string, unknown>[] } : {}),
+		...(toolChanges !== undefined ? { toolChanges } : {}),
 		...(candidate.exactTail === true ? { exactTail: true as const } : {}),
 		...(typeof candidate.model === "string" ? { model: candidate.model } : {}),
-		...(api ? { api } : {}),
 		...(typeof candidate.usedTokens === "number" ? { usedTokens: candidate.usedTokens } : {}),
 	};
 }
@@ -156,10 +146,6 @@ export function getAnthropicCompactionPayload(
 		...(preserved.toolChanges ? { toolChanges: preserved.toolChanges } : {}),
 		...(preserved.retainedFiles?.length ? { retainedFiles: preserved.retainedFiles } : {}),
 		...(preserved.exactTail ? { exactTail: true as const } : {}),
-		...(preserved.model ? { model: preserved.model } : {}),
-		...(preserved.api === "anthropic-messages" || preserved.api === "bedrock-converse-stream"
-			? { api: preserved.api }
-			: {}),
 	};
 }
 
