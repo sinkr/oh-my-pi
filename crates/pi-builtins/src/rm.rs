@@ -574,24 +574,26 @@ fn remove_empty_dir(host: &mut Host, fs_path: &Path) -> io::Result<()> {
 		.as_ref()
 		.is_err_and(|e| e.kind() == io::ErrorKind::PermissionDenied)
 	{
+		// A step that finds the directory gone reports that, which `-f`
+		// ignores, rather than the stale `PermissionDenied`.
+		let gone = |e: io::Error| (e.kind() == io::ErrorKind::NotFound).then_some(e);
 		let metadata = match host.fs().symlink_metadata(fs_path) {
 			Ok(metadata) => metadata,
-			// Gone meanwhile: report that, which `-f` ignores.
-			Err(gone) if gone.kind() == io::ErrorKind::NotFound => return Err(gone),
-			Err(_) => return result,
+			Err(e) => return Err(gone(e).unwrap_or_else(|| result.unwrap_err())),
 		};
 		// Not a symlink or junction: set_permissions would follow it.
 		if metadata.is_dir() && metadata.permissions().readonly() {
 			let mut writable = metadata.permissions();
 			writable.set_readonly(false);
-			if host.fs().set_permissions(fs_path, writable).is_ok() {
-				let retry = host.fs().remove_dir(fs_path);
-				if retry.is_err() {
-					// Best effort: the retry's error is the one to report.
-					let _ = host.fs().set_permissions(fs_path, metadata.permissions());
-				}
-				return retry;
+			if let Err(e) = host.fs().set_permissions(fs_path, writable) {
+				return Err(gone(e).unwrap_or_else(|| result.unwrap_err()));
 			}
+			let retry = host.fs().remove_dir(fs_path);
+			if retry.is_err() {
+				// Best effort: the retry's error is the one to report.
+				let _ = host.fs().set_permissions(fs_path, metadata.permissions());
+			}
+			return retry;
 		}
 	}
 	result
