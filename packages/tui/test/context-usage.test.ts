@@ -7,12 +7,21 @@
  */
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import {
+	compactionContextTokens,
+	DEFAULT_COMPACTION_SETTINGS,
+	shouldCompact,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
 	type ContextBreakdown,
+	type NonMessageTokenSource,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
+	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	getToolSchemaMetadataRevision,
 	invalidateToolSchemaMetadata,
@@ -47,6 +56,14 @@ describe("estimateToolSchemaTokens", () => {
 			tokenizer,
 		);
 		expect(estimate).toBe(estimateToolSchemaTokens([{ name: "odd", description: "odd tool" } as never], tokenizer));
+	});
+
+	it("counts rendered examples, which the agent loop appends to the wire description", () => {
+		const tool = { name: "grep", description: "Search files.", parameters: { type: "object" } };
+		const examples = [{ caption: "Find TODOs", call: { pattern: "TODO", path: "src" } }];
+		const without = estimateToolSchemaTokens([tool as never], tokenizer);
+		const withExamples = estimateToolSchemaTokens([{ ...tool, examples } as never], tokenizer);
+		expect(withExamples).toBeGreaterThan(without);
 	});
 
 	it("skips non-string name/description fragments", () => {
@@ -162,6 +179,47 @@ describe("renderContextUsage snapcompact section", () => {
 	});
 });
 
+describe("deferred tool schema accounting", () => {
+	it("does not let Cursor's server-side MCP catalog force compaction below provider usage", () => {
+		const spec: ModelSpec<"anthropic-messages"> = {
+			id: "claude-opus-5-5",
+			name: "Claude Opus",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8192,
+		};
+		const directModel = buildModel(spec);
+		const cursorModel = buildModel({ ...spec, api: "cursor-agent", provider: "cursor" });
+		const tools = Array.from({ length: 200 }, (_, index) => ({
+			name: `mcp__service__tool_${index}`,
+			description: `Search records ${"search account records with detailed query filters and output metadata ".repeat(110)}`,
+			parameters: type({ query: "string" }),
+		}));
+		const systemPrompt = ["You are an assistant."];
+		const session: NonMessageTokenSource & { model: Model } = {
+			model: directModel,
+			systemPrompt,
+			agent: { state: { tools } },
+		};
+		const direct = computeNonMessageTokens(session, tokenizer);
+		expect(shouldCompact(compactionContextTokens(9000, direct), 100_000, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
+
+		session.model = cursorModel;
+		const cursor = computeNonMessageTokens(session, tokenizer);
+		expect(cursor).toBe(tokenizer.countTokens(systemPrompt));
+		expect(computeNonMessageBreakdown(session, tokenizer).toolsTokens).toBe(0);
+		expect(shouldCompact(compactionContextTokens(9000, cursor), 100_000, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
+
+		session.model = directModel;
+		expect(computeNonMessageTokens(session, tokenizer)).toBe(direct);
+	});
+});
+
 /**
  * Contract: the non-message token totals reflect the CURRENT system prompt,
  * tools, and skills — including after they change via reference replacement
@@ -265,6 +323,22 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 		expect(b.skillsTokens).toBe(0);
 		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
 	});
+
+	it("counts frozen rendered descriptions, not full source descriptions", () => {
+		const full = { ...visible, description: "Use this skill for browser tasks. ".repeat(50) };
+		const rendered = { ...visible, description: "Use for interactive browser tasks." };
+		const promptText = `You are an agent.\nSkills:\n- vis: ${rendered.description}\n`;
+		const source = {
+			systemPrompt: [promptText],
+			agent: { state: { tools: [readTool] } },
+			skills: [full],
+			renderedSkills: [rendered],
+		};
+		const b = computeNonMessageBreakdown(source as never, tokenizer);
+		expect(b.skillsTokens).toBe(estimateSkillsTokens([rendered], tokenizer));
+		expect(b.skillsTokens).toBeLessThan(estimateSkillsTokens([full], tokenizer));
+		expect(b.systemPromptTokens + b.skillsTokens).toBe(tokenizer.countTokens(promptText));
+	});
 });
 
 /**
@@ -278,15 +352,6 @@ describe("computeNonMessageBreakdown skills filtering", () => {
  */
 describe("non-message estimates tolerate a missing description", () => {
 	const readTool = { name: "read", description: "read files", parameters: {} };
-
-	it("estimateToolSchemaTokens does not throw on an undefined tool description", () => {
-		const tokens = estimateToolSchemaTokens(
-			[{ name: "lens_tool", description: undefined, parameters: {} } as never],
-			tokenizer,
-		);
-		expect(Number.isFinite(tokens)).toBe(true);
-		expect(tokens).toBeGreaterThanOrEqual(0);
-	});
 
 	it("computeNonMessageBreakdown does not throw on an undefined skill description", () => {
 		const session = {

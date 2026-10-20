@@ -1,5 +1,5 @@
 import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
-import type { Api, AssistantMessage } from "../types";
+import type { Api, AssistantMessage, Usage } from "../types";
 import { AwsCredentialsError } from "./aws";
 import {
 	AnthropicConnectionError,
@@ -41,6 +41,16 @@ export const Flag = {
 	FastModeUnsupported: 0x2000_0000,
 	/** OAuth refresh failed definitively — the stored grant is dead, re-login required. */
 	OAuthExpiry: 0x4000_0000,
+	/**
+	 * An Anthropic-compatible endpoint rejected the `cache_control` field with a
+	 * 400, so prompt-cache breakpoints must be dropped for it.
+	 *
+	 * Every bit from {@link Flag.Class} up is already taken, so this claims a low
+	 * bit instead. Those belong to the raw-status lane — an unclassified id is an
+	 * HTTP status (100-599, see `statusFromId`) — and 0x800 is 2048, above every
+	 * status value, so no raw status id can set it.
+	 */
+	CacheControlUnsupported: 0x0000_0800,
 	/** HTTP 413 byte/media rejection — token compaction cannot shrink bytes or media budgets (#9235). */
 	PayloadRejected: 0x8000_0000,
 } as const;
@@ -66,6 +76,7 @@ const KIND_MASK =
 	Flag.Abort |
 	Flag.Grammar |
 	Flag.FastModeUnsupported |
+	Flag.CacheControlUnsupported |
 	Flag.OAuthExpiry;
 
 const RETRIABLE_KINDS =
@@ -85,6 +96,8 @@ const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 	/reduce the length of the messages/i, // Groq
 	/maximum context length is \d+ tokens/i, // OpenRouter (all backends)
 	/exceeds the available context size/i, // llama.cpp server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s*\+\s*max\s+tokens\s*\(\s*\d+\s*\)\s+exceeds\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s+leaves\s+no\s+room\s+to\s+answer\s+in\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
 	/requested tokens?.*exceed.*context (window|length|size)/i, // llama.cpp / OpenAI-compatible local servers
 	/context (window|length|size).*(exceeded|overflow|too small)/i, // Generic local server variants
 	/(prompt|input).*(too long|too large).*(context|n_ctx)/i, // llama.cpp phrasing variants
@@ -154,7 +167,7 @@ function matchesPayloadRejectionText(text: string): boolean {
 
 const TIMEOUT_PATTERN = /\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bstream stall\b/i;
 const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
-const TRANSIENT_ENVELOPE_TRUNCATION_PATTERN = /before message_(?:start|stop)/i;
+const TRANSIENT_ENVELOPE_TRUNCATION_PATTERN = /before message_(?:start|delta|stop)/i;
 export const STREAM_READ_ERROR_PATTERN = /stream[_ -]?read[_ -]?error/i;
 /** Python h2/httpx diagnostics forwarded through provider or proxy error events. */
 export const PYTHON_HTTP2_STREAM_RESET_PATTERN = /<StreamReset stream_id:\d+, error_code:(?:2|7), remote_reset:True>/;
@@ -185,8 +198,36 @@ export function isResponsesRequestBodyReadTimeout(message: {
 	);
 }
 
+/**
+ * Codex code for the experimental native turn lane refusing a mid-response
+ * `response.steer`; the server then drops the in-flight response and closes
+ * the socket.
+ */
+export const CODEX_NATIVE_LANE_STEER_REJECTED_CODE = "unsupported_native_inflight_message";
+
+/**
+ * A Codex turn the native turn lane dropped because omp steered it. The
+ * rejection answers our own `response.steer`, not the model's health: the
+ * provider stops steering the session, so the same model replays cleanly.
+ */
+export function isCodexSteerRejection(message: { api?: Api; errorMessage?: string }): boolean {
+	return (
+		message.api === "openai-codex-responses" &&
+		message.errorMessage?.includes(`code=${CODEX_NATIVE_LANE_STEER_REJECTED_CODE}`) === true
+	);
+}
+
+/**
+ * Transport-failure wording that marks an error transient. Covers
+ * diagnostics forwarded verbatim by gateways/proxies in other runtimes, e.g.
+ * undici's "other side closed" and Go's `net.ErrClosed` ("use of closed
+ * network connection", #15385). Also covers OMP's own network-failure
+ * sentences from `networkFailureMessage` (offline / unreachable / refused /
+ * TLS), which must stay at least as retryable as the bare `Connection error.`
+ * text they replaced.
+ */
 export const TRANSIENT_TRANSPORT_PATTERN =
-	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
+	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|temporar(?:y|ily)[ _-]?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|use of closed network connection|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|\bE(?:TIMEOUT|NOTFOUND|NETUNREACH|HOSTUNREACH)\b|\bFailedToOpenSocket\b|no internet connection|couldn.?t reach|couldn.?t connect to|tls certificate verification failed|malformed.?function.?call/i;
 const AUTH_FAILURE_PATTERN =
 	/\b(?:401|403|unauthorized|forbidden|authentication|auth[_ ]?unavailable|no auth available|(?:invalid|no)[_ ]?api[_ ]?key)\b/i;
 const MALFORMED_FUNCTION_CALL_PATTERN = /\bmalformed.?function.?call\b/i;
@@ -194,6 +235,29 @@ const PROVIDER_FINISH_ERROR_PATTERN = /\bProvider (?:returned error finish_reaso
 const EMPTY_RESPONSE_PATTERN = /\bthought-only response without final output\b/i;
 const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
 const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
+export const ANTHROPIC_ACCOUNT_POLICY_PATTERN =
+	/\b(?:oauth_not_allowed_for_organization|permission_error)\b|\bOAuth authentication is currently not allowed for this organization\b/i;
+
+/** Whether an error message represents an Anthropic account-scoped permission/policy denial. */
+export function isAnthropicAccountPolicyText(text: string, provider?: string, statusArg?: number): boolean {
+	if (provider !== undefined && provider !== "anthropic") return false;
+	const statusCandidate = statusArg ?? (text ? status({ message: text }) : undefined);
+	if (statusCandidate !== undefined && statusCandidate !== 403) return false;
+	return ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(text);
+}
+
+const IMMUTABLE_LATEST_THINKING_PATTERN =
+	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
+
+/**
+ * Anthropic's rejection of a replayed latest assistant turn whose `thinking` or
+ * `redacted_thinking` blocks no longer verify. Resending the same turn fails the
+ * same way; only a request that changes that turn's reasoning can succeed.
+ */
+export function isImmutableLatestThinkingText(text: string): boolean {
+	return IMMUTABLE_LATEST_THINKING_PATTERN.test(text);
+}
+
 const CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_PATTERN =
 	/\bThe ['"]([^'"\r\n]+)['"] model is not supported when using Codex with a ChatGPT account\./i;
 const CODEX_CHATGPT_ACCOUNT_MODEL_MAX_LENGTH = 256;
@@ -264,17 +328,83 @@ const STRUCTURED_OUTPUTS_PATTERN = /structured[_ -]?outputs?/i;
 const FEATURE_NOT_SUPPORTED_PATTERN = /not (?:supported|available|enabled)|unsupported|does(?: not|n'?t) support/i;
 const ANTHROPIC_STRICT_FIELD_PATTERN = /\btools\.\d+\.custom\.strict\b/i;
 const EXTRA_INPUTS_NOT_PERMITTED_PATTERN = /extra inputs? (?:are|is) not permitted/i;
+// Upstream strict-schema validation surfaced through a translating gateway.
+// Vercel AI Gateway serves non-Anthropic upstreams on its Anthropic
+// `/v1/messages` route and applies Anthropic's `strict: true` to an OpenAI
+// function tool. OpenAI strict mode additionally demands every `properties`
+// key in `required`, which Anthropic's strict subset does not, so a
+// legally-optional parameter is rejected only after translation and the sole
+// recovery is dropping `strict`. Mirrors the phrasings
+// `shouldRetryWithoutStrictTools` already recognizes on the OpenAI-family path.
+const STRICT_TOOL_SCHEMA_REJECTION_PATTERN = /invalid schema for function|invalid tool parameters schema/i;
 // Anthropic fast-mode unsupported: 400 rejecting `speed`, or 429 rate_limit_error
 // because the account lacks the extra-usage entitlement fast mode requires.
 const FAST_MODE_SPEED_PARAM_PATTERN = /\bspeed\b/i;
 const FAST_MODE_NOT_SUPPORTED_PATTERN = /not support/i;
 const FAST_MODE_RATE_LIMIT_PATTERN = /rate_limit_error/i;
 const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
+// Anthropic-compatible proxies that do not implement prompt caching reject the
+// `cache_control` field itself with a 400 naming it. Requires rejection wording
+// so a 400 that merely mentions the field for another reason stays terminal.
+//
+// The trigger is deliberately a bare mention. Whether such a 400 refused the
+// field or one option *under* it — `ttl`, `scope` — is not decidable from the
+// message. The forward direction is: punctuation between the field and a
+// following member proves the member is the next token, for any joiner, without
+// enumerating them. The backward direction is not, and it is where four rounds
+// of this rule died. Prose subordinates a member to the field through an
+// English connective, grammar does not partition the way syntax does, and
+// `unsupported content type for cache_control` is unresolvable in principle:
+// `type` is both a member of `CacheControlEphemeral` and an ordinary noun, and
+// the construction that clause uses is the construction a real member refusal
+// uses. A rule that decides one direction and guesses the other still hands its
+// caller a partition the caller cannot trust.
+//
+// So this predicate answers only "this 400 is about `cache_control`", and the
+// retry ladder in `providers/anthropic.ts` asks the endpoint the rest. When the
+// failing request carried `ttl` or `scope`, the ladder replays with every
+// breakpoint intact and those options removed, and the rung that carries the
+// turn names what was refused: that rung succeeding means the field is
+// supported and an option was not, so short-lived caching stays on for the
+// session instead of being latched off by a reading of the prose. When the
+// request carried neither option a nested refusal is impossible — `type` is
+// mandatory and its only legal value is constant — so the ladder starts at the
+// breakpoint-free replay, which is the behavior this predicate has always had.
+const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b/i;
+const CACHE_CONTROL_REJECTION_PATTERN =
+	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
+// The bare-word gate above reads prose, and `_` is a word character, so it
+// misses every snake_cased error code: `\bunsupported\b` never fires on
+// `unsupported_parameter`, `\bunrecognized\b` never fires on
+// `unrecognized_keys`. Strict decoders and OpenAI-compatible validators report
+// a refused *member* rather than a forbidden extra input, either as a negation
+// (`json: unknown field "cache_control"` — Go `DisallowUnknownFields`;
+// `unknown_parameter` — OpenAI-compatible error codes; `Unpermitted parameter`
+// — Rails strong parameters; `is not a valid field` — hand-rolled validators)
+// or as a bare adjective (`Invalid parameter: cache_control` and the
+// `invalid_parameter` / `unsupported_parameter` codes — OpenAI-compatible;
+// `unrecognized_keys` — a strict Zod object, which is how this repo's own
+// auth-broker 400'd an extension field; `invalid_argument` — the gRPC/Connect
+// canonical code; `Unknown name "cache_control": Cannot find field` —
+// protojson, so every Google-gateway-fronted deployment).
+//
+// Both families stay anchored to a schema-member noun one joiner away, and that
+// anchor is the false-positive bound: `invalid_request_error` prefixes nearly
+// every Anthropic 400 and still cannot match, because `request` is not a member
+// noun. `value` is absent for the same reason — a 400 refusing a cache_control
+// *value* while naming no member says nothing about the field.
+const CACHE_CONTROL_MEMBER_REFUSAL_PATTERN =
+	/\b(?:un(?:known|permitted|supported|recognized|expected)|invalid|bad|not (?:an? )?(?:known|valid|accepted|supported|permitted|allowed|recognized))[_ -](?:field|name|param(?:eter)?|argument|key|propert(?:y|ies)|attribute|member|option|input)s?\b/i;
+// Anthropic rejects a breakpoint on an empty text block with a 400 that names
+// `cache_control` too. That is a content-shape fault — dropping every
+// breakpoint neither fixes it nor proves the endpoint lacks prompt caching.
+const CACHE_CONTROL_EMPTY_TEXT_PATTERN =
+	/empty text block|text content block.*non-(?:empty|whitespace)|text.{0,40}must (?:be non-empty|not be empty)/i;
 // Definitive OAuth refresh failure — the stored grant/client is dead.
 const OAUTH_DEFINITIVE_FAILURE_PATTERN =
 	/invalid_grant|invalid_token|unauthorized_client|\brevoked\b|refresh[\s_]?token.*expired/i;
 const OAUTH_TRANSIENT_FAILURE_PATTERN =
-	/timeout|network|fetch failed|ECONN(?:REFUSED|RESET)|ETIMEDOUT|EAI_AGAIN|socket hang up|\b(?:408|425|429|5\d{2})\b|rate.?limit|too many requests|temporar|unavailable|forbidden|permission_denied|cloudflare|captcha/i;
+	/timeout|network|fetch failed|ECONN(?:REFUSED|RESET)|ETIMEDOUT|ETIMEOUT|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|FailedToOpenSocket|EAI_AGAIN|socket hang up|\b(?:408|425|429|5\d{2})\b|rate.?limit|too many requests|temporar|unavailable|forbidden|permission_denied|cloudflare|captcha/i;
 const OAUTH_HTTP_AUTH_PATTERN = /\b401\b/;
 
 function matchesStrictToolsRejection(message: string, errorStatus: number | undefined): boolean {
@@ -283,6 +413,7 @@ function matchesStrictToolsRejection(message: string, errorStatus: number | unde
 		return true;
 	}
 	if (STRUCTURED_OUTPUTS_PATTERN.test(message) && FEATURE_NOT_SUPPORTED_PATTERN.test(message)) return true;
+	if (STRICT_TOOL_SCHEMA_REJECTION_PATTERN.test(message)) return true;
 	if (!INVALID_REQUEST_PATTERN.test(message)) return false;
 	const grammarTooLarge = GRAMMAR_TOO_LARGE_PATTERN.test(message) && GRAMMAR_TOO_LARGE_DETAIL_PATTERN.test(message);
 	const schemaTooComplex =
@@ -305,6 +436,13 @@ function matchesFastModeUnsupported(message: string, errorStatus: number | undef
 	return (
 		errorStatus === 429 && FAST_MODE_RATE_LIMIT_PATTERN.test(message) && FAST_MODE_ENTITLEMENT_PATTERN.test(message)
 	);
+}
+
+function matchesCacheControlRejection(message: string, errorStatus: number | undefined): boolean {
+	if (errorStatus !== 400) return false;
+	if (!CACHE_CONTROL_FIELD_PATTERN.test(message)) return false;
+	if (CACHE_CONTROL_EMPTY_TEXT_PATTERN.test(message)) return false;
+	return CACHE_CONTROL_REJECTION_PATTERN.test(message) || CACHE_CONTROL_MEMBER_REFUSAL_PATTERN.test(message);
 }
 
 /** Whether an OAuth refresh error message means the grant is definitively dead. */
@@ -380,6 +518,9 @@ function statusInternal(error: unknown, depth: number): number | undefined {
 		}
 		if (typeof errObj.statusCode === "number" && errObj.statusCode >= 100 && errObj.statusCode <= 599) {
 			return errObj.statusCode;
+		}
+		if (typeof errObj.errorStatus === "number" && errObj.errorStatus >= 100 && errObj.errorStatus <= 599) {
+			return errObj.errorStatus;
 		}
 		if (typeof errObj.response === "object" && errObj.response !== null) {
 			const resp = errObj.response as Record<string, unknown>;
@@ -490,6 +631,8 @@ function classifyText(
 		if (isProviderFinishErrorText(errorMessage)) kinds |= Flag.ProviderFinishError;
 		if (EMPTY_RESPONSE_PATTERN.test(errorMessage)) kinds |= Flag.EmptyResponse | Flag.Transient;
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
+		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
+
 		if (
 			ACCOUNT_POLICY_PATTERN.test(errorMessage) ||
 			isCodexChatGPTAccountPolicyText(errorMessage, provider, modelId) ||
@@ -497,9 +640,10 @@ function classifyText(
 		) {
 			kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 		}
+		if (isAnthropicAccountPolicyText(errorMessage, provider, statusClean)) {
+			kinds |= Flag.AccountPolicy;
+		}
 		if (isAuthFailureText(errorMessage)) kinds |= Flag.AuthFailed;
-
-		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
 		const cleanMessage = errorMessage;
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
 
@@ -523,28 +667,31 @@ function classifyText(
 		) {
 			kinds |= Flag.UsageLimit;
 		}
-		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
-		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
-		// A stream truncation, transport-level stream drop, or forwarded Codex HTTP
-		// body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag it
-		// explicitly so AIError.retriable and the turn-recovery layer treat it as
-		// retryable, matching the provider retry path (isProviderRetryableError).
-		// Separate `if` (not chained onto the else-if) so a timeout whose text also
-		// reads as a truncation keeps Flag.Timeout alongside Flag.Transient. The
-		// string arm applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the
-		// rationale on isTransientStreamParseError. Skip a phrase that rides on a
-		// terminal 4xx (e.g. a malformed request rejected as "400 unexpected EOF"):
-		// that is a deterministic client error that replays identically, so keep it
-		// terminal. classify() carries the outer terminal status down the cause
-		// chain so a wrapped truncation (ProviderHttpError 400 → cause "unexpected
-		// EOF") is caught here too.
-		if (
-			!isTerminalClientErrorStatus(statusClean) &&
-			(isTransientStreamParseError(errorMessage) ||
+		// Transport/timeout/truncation wording that rides on a terminal 4xx (e.g. a
+		// "400 unexpected EOF" malformed request, or a region/entitlement denial
+		// whose body carries `type=server_error`) describes a deterministic client
+		// error that replays identically, so keep it terminal — the same 4xx policy
+		// as isProviderRetryableError. classify() carries the outer terminal status
+		// down the cause chain so a wrapped phrase (ProviderHttpError 400 → cause
+		// "unexpected EOF") is caught here too.
+		if (!isTerminalClientErrorStatus(statusClean)) {
+			if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
+			else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+			// A stream truncation, transport-level stream drop, or forwarded Codex
+			// HTTP body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag
+			// it explicitly so AIError.retriable and the turn-recovery layer treat it
+			// as retryable, matching the provider retry path. Separate `if` (not
+			// chained onto the else-if) so a timeout whose text also reads as a
+			// truncation keeps Flag.Timeout alongside Flag.Transient. The string arm
+			// applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the rationale
+			// on isTransientStreamParseError.
+			if (
+				isTransientStreamParseError(errorMessage) ||
 				isTransientStreamDropError(errorMessage) ||
-				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage))
-		) {
-			kinds |= Flag.Transient;
+				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage)
+			) {
+				kinds |= Flag.Transient;
+			}
 		}
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") is transient — shed-and-backoff. The bare wording need
@@ -554,12 +701,16 @@ function classifyText(
 		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
 			kinds |= Flag.StaleResponsesItem;
 		}
+		// Retryable like the provider's own classification of the code, so a
+		// message reclassified from its text alone still retries.
+		if (isCodexSteerRejection({ api, errorMessage })) kinds |= Flag.Transient;
 
 		// Fireworks mid-generation NaN 400 is a model-side decode fault, not a bad
 		// request; a byte-identical replay succeeds, so treat it as transient.
 		if (statusClean === 400 && GENERATION_NAN_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
 		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
 		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
+		if (matchesCacheControlRejection(cleanMessage, statusClean)) kinds |= Flag.CacheControlUnsupported;
 	}
 	// Status-only 413: infer PayloadRejected unless prior classification carries token-context evidence (#9235).
 	const statusEvidence = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
@@ -585,9 +736,10 @@ export function classify(error: unknown, api?: Api): number {
 	const causeTokenEvidence = hasCauseTokenContextOverflowEvidence(error);
 	let link: unknown = error;
 	// A terminal 4xx on an outer link governs its own cause diagnostics: a
-	// wrapped truncation is describing why the deterministic request failed,
-	// not an independently retryable transport fault. Carry it down so the
-	// stream-parse guard in classifyText sees it on the status-less cause.
+	// wrapped truncation or transport phrase is describing why the deterministic
+	// request failed, not an independently retryable transport fault. Carry it
+	// down so the terminal-4xx guard in classifyText sees it on the status-less
+	// cause.
 	let governingTerminalStatus: number | undefined;
 	while (link !== undefined && link !== null) {
 		if (typeof link === "object") {
@@ -597,8 +749,12 @@ export function classify(error: unknown, api?: Api): number {
 			if ("errorId" in link && typeof (link as { errorId: unknown }).errorId === "number") {
 				kinds |= (link as { errorId: number }).errorId & KIND_MASK;
 			}
-			if ("code" in link && typeof link.code === "string" && ACCOUNT_POLICY_PATTERN.test(link.code)) {
-				kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
+			if ("code" in link && typeof link.code === "string") {
+				if (ACCOUNT_POLICY_PATTERN.test(link.code)) {
+					kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
+				} else if (ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(link.code)) {
+					kinds |= Flag.AccountPolicy;
+				}
 			}
 		}
 
@@ -628,12 +784,20 @@ export function classify(error: unknown, api?: Api): number {
 				code === "usage_limit_reached" ||
 				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
 				(codeStatus === 402 &&
-					(code === "payment_required" || code === "deactivated_workspace" || is402BillingCapBody(link.message)))
+					(is402BillingCapBody(link.message) ||
+						(code !== undefined && !isOpaqueStatusBody(code) && is402BillingCapBody(code))))
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}
 			if (code === "overloaded_error" || code === "rate_limit_error") {
 				linkKinds |= Flag.Transient;
+			}
+			if (
+				code === "oauth_not_allowed_for_organization" ||
+				code === "permission_error" ||
+				(codeStatus === 403 && ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(link.message))
+			) {
+				linkKinds |= Flag.AccountPolicy;
 			}
 			if (
 				(codeStatus === 401 || codeStatus === 403) &&
@@ -655,12 +819,12 @@ export function classify(error: unknown, api?: Api): number {
 			linkMessage = link.message;
 		} else if (typeof link === "string") {
 			linkMessage = link;
-		} else if (
-			typeof link === "object" &&
-			"message" in link &&
-			typeof (link as { message: unknown }).message === "string"
-		) {
-			linkMessage = (link as { message: string }).message;
+		} else if (typeof link === "object") {
+			if ("message" in link && typeof link.message === "string") {
+				linkMessage = link.message;
+			} else if ("errorMessage" in link && typeof link.errorMessage === "string") {
+				linkMessage = link.errorMessage;
+			}
 		}
 
 		const linkStatus = status(link);
@@ -752,6 +916,23 @@ export function isFastModeUnsupported(error: unknown): boolean {
 	return is(classify(error), Flag.FastModeUnsupported);
 }
 
+/**
+ * An Anthropic-compatible endpoint returned a 400 rejecting something about
+ * `cache_control`. Whether it refused the field or one nested option is not
+ * decidable here (see {@link CACHE_CONTROL_FIELD_PATTERN}); the caller's retry
+ * ladder settles it by replaying.
+ * Accessor for {@link Flag.CacheControlUnsupported}.
+ *
+ * Unlike the high-bit accessors this also requires a classified id. The flag
+ * sits in the raw-status lane (see {@link Flag.CacheControlUnsupported}), and
+ * while no HTTP status reaches 0x800, `is` is a bare bit test — the extra gate
+ * keeps a stray non-HTTP status out of the retry path.
+ */
+export function isCacheControlUnsupported(error: unknown): boolean {
+	const id = classify(error);
+	return isClassified(id) && is(id, Flag.CacheControlUnsupported);
+}
+
 const CLINE_PASS_SURFACE_GATE_PATTERN = /only available via cline product surfaces/i;
 
 /**
@@ -834,14 +1015,28 @@ export function attach<E extends object>(error: E, id: number): E {
 	return error;
 }
 
-/** Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235). */
-export function isUsageBackedContextOverflow(message: AssistantMessage, contextWindow?: number): boolean {
-	if (!contextWindow) return false;
-	const inputTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+/** Overflow-classification evidence, including errors received before token usage is available. */
+export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId" | "stopReason" | "errorMessage"> {
+	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "contextTokens">;
+}
+
+/**
+ * Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235).
+ *
+ * Prefers `contextTokens` when the provider reports it: providers that run
+ * several model calls per turn (Cursor's server-side tool loop) report
+ * `input`/`cacheRead` summed across those calls, which can exceed the window
+ * many times over while the conversation itself stays small.
+ */
+export function isUsageBackedContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
+	const usage = message.usage;
+	if (!contextWindow || !usage) return false;
+	const inputTokens = usage.contextTokens ?? usage.input + usage.cacheRead + usage.cacheWrite;
 	return inputTokens > contextWindow;
 }
 
-export function isContextOverflow(message: AssistantMessage, contextWindow?: number): boolean {
+/** Classify overflow from error flags, available token usage, or provider error text. */
+export function isContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	if (is(message.errorId, Flag.ContextOverflow)) return true;
 	if (isUsageBackedContextOverflow(message, contextWindow)) return true;
 	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
@@ -861,7 +1056,7 @@ export function isPayloadRejection(message: AssistantMessage): boolean {
  *  Usage-backed overflows are authoritative window excesses and never ambiguous. */
 export function isTextAmbiguousContextOverflow(
 	errorId: number,
-	message: AssistantMessage | undefined,
+	message: ContextOverflowMessage | undefined,
 	contextWindow?: number,
 ): boolean {
 	const overflowFlagged =
@@ -908,7 +1103,7 @@ export function isTransientStreamParseError(error: unknown): boolean {
  * non-terminal status treat it as transient (#11805).
  */
 const STREAM_DROP_PATTERN =
-	/stream disconnected before completion|stream closed before response\.completed|stream was interrupted|stream ended before terminal (?:chunk|completion event)|socket disconnected before secure tls connection/i;
+	/stream disconnected before completion|(?:stream|websocket) closed before response\.completed|stream was interrupted|stream ended before (?:terminal (?:chunk|completion event)|message_(?:start|delta|stop))|socket disconnected before secure tls connection/i;
 
 /**
  * Transport stream-drop diagnostic (see {@link STREAM_DROP_PATTERN}). Unlike

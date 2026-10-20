@@ -24,8 +24,9 @@ import {
 import { create, fromBinary, toBinary } from "../src/discovery/protobuf";
 import { Effort } from "../src/effort";
 import { providerEntry } from "../src/compat/providers";
+import { calculateUncachedInputCost, getTimeBasedPricingPeriod } from "../src/models";
 import { devinModelManagerOptions } from "../src/provider-models/special";
-import type { ModelSpec, ThinkingConfig } from "../src/types";
+import type { Api, Model, ModelSpec, ThinkingConfig } from "../src/types";
 
 /** `DISPLAY_OPTION_INTERNAL_DEFAULT`, absent from the vendored descriptor's enum. */
 const DISPLAY_OPTION_INTERNAL_DEFAULT = 6 as DisplayOption;
@@ -430,6 +431,42 @@ describe("devin native discovery request", () => {
 		expect(requestMetadata?.apiKey).toBe("devin-session-token$fixture-token");
 	});
 
+	it("falls back to the legacy Windsurf identity when native discovery returns only the seed", async () => {
+		const nativePayload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [config({ uid: "swe-1-6" }), config({ uid: "swe-1-6-fast" })],
+			}),
+		);
+		const legacyPayload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [
+					config({ uid: "swe-1-6" }),
+					config({ uid: "swe-1-6-fast" }),
+					config({ uid: "glm-5-2" }),
+				],
+			}),
+		);
+		const requests: Metadata[] = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			const metadata = fromBinary(
+				GetCliModelConfigsRequestSchema,
+				new Uint8Array(init?.body as Uint8Array),
+			).metadata;
+			if (metadata === undefined) throw new Error("expected discovery metadata");
+			requests.push(metadata);
+			const payload = metadata.ideName === "windsurf" ? legacyPayload : nativePayload;
+			return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+		};
+
+		const discovered = await fetchDevinModels({ apiKey: "legacy-key", fetch: fetchImpl });
+
+		expect(discovered?.map(entry => entry.id)).toEqual(["glm-5-2", "swe-1-6", "swe-1-6-fast"]);
+		expect(requests.map(metadata => metadata.ideName)).toEqual(["chisel", "windsurf"]);
+		expect(requests[1]?.apiKey).toBe("legacy-key");
+	});
+
 	it("treats an empty-but-200 catalog as failed discovery so the seed survives", async () => {
 		const emptyPayload = toBinary(
 			GetCliModelConfigsResponseSchema,
@@ -479,6 +516,78 @@ describe("devin native display filtering", () => {
 		// Composite dims flatten the composite card plus each component's card;
 		// only the headline card is the model's own rate.
 		expect(fusion.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 0 });
+	});
+
+	it("sends Fusion pairings through an available lead rather than the composite uid", async () => {
+		const pairing = (uid: string, init: Partial<ConfigInit> = {}) =>
+			config({ uid, isModelRouter: true, harnessUids: ["fusion"], ...init });
+		const configs = [
+			config({
+				uid: "gpt-6-sol-high",
+				contextWindow: 400_000,
+				maxOutputTokens: 128_000,
+				features: { supportsToolCalls: true, supportsImages: true },
+				dimensions: [
+					{ label: "Input", value: 2 },
+					{ label: "Output", value: 8 },
+				],
+			}),
+			config({ uid: "gpt-6-sol-high-priority" }),
+			config({ uid: "claude-opus-5-high" }),
+			config({ uid: "claude-opus-5-high-priority", disabled: true }),
+			config({ uid: "swe-1-6-fast" }),
+			config({ uid: "swe-1-6-priority" }),
+			config({ uid: "swe-2-high" }),
+			config({ uid: "kimi-k3", disabled: true }),
+			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
+				contextWindow: 1_000_000,
+				maxOutputTokens: 256_000,
+				dimensions: [
+					{ label: "Input", value: 10 },
+					{ label: "Output", value: 50 },
+				],
+			}),
+			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
+			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
+			pairing("fusion-swe-1-6-fast-sidekick-swe-2-high"),
+			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
+			pairing("fusion-sidekick-swe-2-high"),
+			pairing("fusion"),
+		];
+		const payload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, { clientModelConfigs: configs }),
+		);
+		const fetched = await fetchDevinModels({
+			apiKey: "fixture-token",
+			fetch: async () => new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
+		});
+		const find = (id: string) => fetched?.find(entry => entry.id === id);
+		const wireId = (id: string) => find(id)?.requestModelId;
+		expect(wireId("fusion-gpt-6-sol-high-sidekick-swe-2-high")).toBe("gpt-6-sol-high");
+		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
+		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
+		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
+		expect(wireId("fusion-swe-1-6-fast-sidekick-swe-2-high")).toBe("swe-1-6-fast");
+		// No live lead: the composite uid is unservable, so the pairing is not listed.
+		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
+		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
+		expect(wireId("fusion")).toBeUndefined();
+		// Only the lead runs, so limits and pricing are the lead's, not the
+		// composite card's. Discovery carries the lead's card as reported; the
+		// lead's own cache-write rate and long-context tier apply at build.
+		const routed = find("fusion-gpt-6-sol-high-sidekick-swe-2-high");
+		expect(routed?.contextWindow).toBe(400_000);
+		expect(routed?.maxTokens).toBe(128_000);
+		expect(routed?.input).toEqual(["text", "image"]);
+		expect(routed?.cost).toEqual({ input: 2, output: 8, cacheRead: 0, cacheWrite: 0 });
+		expect(buildModel(routed!).cost).toEqual({
+			input: 2,
+			output: 8,
+			cacheRead: 0,
+			cacheWrite: 2.5,
+			longContext: { inputThreshold: 272_000, input: 4, output: 12, cacheRead: 0, cacheWrite: 5 },
+		});
 	});
 
 	it("stops composite pricing at the Sidekick marker even with a sparse headline card", () => {
@@ -670,7 +779,7 @@ describe("devin catalog seed", () => {
 	});
 });
 
-describe("devin cost-fallback", () => {
+describe("devin catalog pricing", () => {
 	const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 	function spec(id: string, cost = zero): ModelSpec<"devin-agent"> {
@@ -689,18 +798,31 @@ describe("devin cost-fallback", () => {
 		};
 	}
 
-	it("prices plan-included SWE-2 at the promo fallback without a recurring tariff", () => {
+	const PROMO_ENDS = Date.parse("2027-01-01T00:00:00Z");
+	// Input cost of one million uncached prompt tokens: the input rate in force.
+	const inputRateAt = (model: Model<Api>, timestamp: number) =>
+		calculateUncachedInputCost(model.cost, 1_000_000, timestamp);
+
+	it("prices plan-included SWE-2 at the promo fallback and bills list from the promo's end", () => {
 		const model = buildModel(spec("swe-2"));
-		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 });
-		expect(model.cost.timeBased).toBeUndefined();
+		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 });
+		// A dated card is not a peak/off-peak tariff.
+		expect(getTimeBasedPricingPeriod(model.cost, PROMO_ENDS)).toBeUndefined();
+		// A row built during the promo still bills list once it ends.
+		expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.75, 10);
+		expect(inputRateAt(model, PROMO_ENDS)).toBeCloseTo(3, 10);
 	});
 
-	it("switches the SWE-2 fallback to list after the promo ends", () => {
-		const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2027-01-01T00:00:00Z"));
+	it("switches the SWE-2 fallback to list after the promo ends, including on rows rebuilt from promo-era rows", () => {
+		const promoEra = buildModel(spec("swe-2"));
+		const clock = spyOn(Date, "now").mockReturnValue(PROMO_ENDS);
 		try {
-			const model = buildModel(spec("swe-2"));
-			expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
-			expect(model.cost.timeBased).toBeUndefined();
+			// A fresh row, and a promo-era row re-materialized (dynamic merge, override) after the promo.
+			for (const model of [buildModel(spec("swe-2")), buildModel(promoEra)]) {
+				expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
+				// Requests made during the promo keep the promo price.
+				expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.75, 10);
+			}
 		} finally {
 			clock.mockRestore();
 		}
@@ -710,5 +832,87 @@ describe("devin cost-fallback", () => {
 		const model = buildModel(spec("swe-2", { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 }));
 		expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
 		expect(model.cost.timeBased).toBeUndefined();
+	});
+
+	it("bills Claude and GPT-5.6+ cache writes at 1.25x input and earlier GPT writes at nothing", () => {
+		const haiku = buildModel(spec("claude-haiku-5-5", { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 }));
+		expect(haiku.cost.cacheWrite).toBeCloseTo(0.125, 10);
+		const terra = buildModel(spec("gpt-5-6-terra", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
+		expect(terra.cost.cacheWrite).toBe(2.5);
+		const gpt55 = buildModel(spec("gpt-5-5", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(gpt55.cost.cacheWrite).toBe(0);
+		// An unpublished generation records no cache-write price.
+		const gpt7 = buildModel(spec("gpt-7-sol", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
+		expect(gpt7.cost.cacheWrite).toBe(0);
+	});
+
+	it("bills Adaptive router cache writes at the input rate", () => {
+		const adaptive = buildModel(spec("adaptive", { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 }));
+		expect(adaptive.cost.cacheWrite).toBe(1);
+	});
+
+	it("derives a GPT-6 Fast lane's long-context tier from its own price", () => {
+		const fast = buildModel(spec("gpt-6-sol-fast", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
+		expect(fast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 30,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+	});
+
+	it("tiers the standard GPT-5.6 lanes but not their undocumented Fast lanes", () => {
+		const standard = buildModel(spec("gpt-5-6-sol-high", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
+		expect(standard.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 30,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+		const fast = buildModel(
+			spec("gpt-5-6-sol-high-priority", { input: 8, output: 40, cacheRead: 0.8, cacheWrite: 0 }),
+		);
+		expect(fast.cost.longContext).toBeUndefined();
+	});
+
+	it("doubles every Grok leg but raises Gemini Pro output only 1.5x above 200K", () => {
+		const grok = buildModel(spec("grok-4-7", { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(grok.cost.longContext).toEqual({
+			inputThreshold: 200_000,
+			input: 4,
+			output: 12,
+			cacheRead: 1,
+			cacheWrite: 0,
+		});
+		const gemini = buildModel(spec("gemini-3-1-pro", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
+		expect(gemini.cost.longContext).toEqual({
+			inputThreshold: 200_000,
+			input: 4,
+			output: 18,
+			cacheRead: 0.4,
+			cacheWrite: 0,
+		});
+	});
+
+	it("tiers Gemini 2.5 Pro's legacy uid like the classified Pro rows", () => {
+		const legacy = buildModel(
+			spec("MODEL_GOOGLE_GEMINI_2_5_PRO", { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 }),
+		);
+		expect(legacy.cost.longContext).toEqual({
+			inputThreshold: 200_000,
+			input: 2.5,
+			output: 15,
+			cacheRead: 0.25,
+			cacheWrite: 0,
+		});
+	});
+
+	it("leaves models Devin publishes no tier for untiered", () => {
+		for (const id of ["gpt-7-sol", "gpt-6-mini", "gpt-6-nano", "gemini-3-pro", "gemini-4-pro", "grok-5"]) {
+			const model = buildModel(spec(id, { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
+			expect(model.cost.longContext).toBeUndefined();
+		}
 	});
 });

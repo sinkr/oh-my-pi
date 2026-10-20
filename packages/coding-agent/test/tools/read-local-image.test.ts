@@ -1,11 +1,11 @@
 /**
- * `local://` is routed through the internal-URL handler, whose resource
- * contract is text-only (`content: string`). Before the image fast path, a
- * `local://photo.png` read UTF-8-decoded the PNG bytes into mojibake. These
- * lock the fix: genuine image files under the session local root decode into an
+ * `local://` URLs locate to real files, which `read` serves through the
+ * filesystem pipeline rather than the text-only resource contract
+ * (`content: string`) that once UTF-8-decoded PNG bytes into mojibake. These
+ * lock that: genuine image files under the session local root decode into an
  * inline image block, text files still read as text, and a file symlinked
- * outside the local root is rejected by the same realpath guard the router uses
- * (the fast path must not become a containment bypass).
+ * outside the local root is rejected by the handler's realpath guard (locating
+ * must not become a containment bypass).
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -29,7 +29,7 @@ function expectVideoProbeFailure(text: string, fileName: string): void {
 		expect(text).toContain("Could not probe video");
 		expect(text).toContain(fileName);
 	} else {
-		expect(text).toContain("requires ffprobe");
+		expect(text).toContain("require ffprobe");
 	}
 	expect(text).not.toContain("\u0000");
 }
@@ -37,6 +37,10 @@ function expectVideoProbeFailure(text: string, fileName: string): void {
 // 1x1 transparent PNG — small enough to pass through image loading untouched.
 const TINY_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+	"base64",
+);
+const OTHER_TINY_PNG = Buffer.from(
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
 	"base64",
 );
 const TINY_SVG =
@@ -54,6 +58,10 @@ function makeSession(testDir: string, textOnlyModel = false): ToolSession {
 		hasUI: false,
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
+		localProtocolOptions: {
+			getArtifactsDir: () => path.join(testDir, "artifacts"),
+			getSessionId: () => "session-local-image",
+		},
 		getSessionSpawns: () => null,
 		getModelString: () => `${model.provider}/${model.id}`,
 		getActiveModelString: () => `${model.provider}/${model.id}`,
@@ -110,6 +118,25 @@ describe("read local:// images", () => {
 		// the replacement char; the fixed path must never emit it as text.
 		expect(joinText(result.content)).not.toContain("\uFFFDPNG");
 	});
+	it("resets the repeat-read hint when an image at the same path changes", async () => {
+		const file = path.join(localRoot, "regenerated.png");
+		const tool = new ReadTool(makeSession(testDir));
+		await Bun.write(file, TINY_PNG);
+		const first = await tool.execute("first", { path: file });
+		await Bun.write(file, OTHER_TINY_PNG);
+		const changed = await tool.execute("changed", { path: file });
+		await Bun.write(file, TINY_PNG);
+		const restored = await tool.execute("restored", { path: file });
+
+		expect(first.content[0]).toEqual(changed.content[0]);
+		expect(first.content[1]).not.toEqual(changed.content[1]);
+		expect(joinText(restored.content)).not.toContain("identical output");
+
+		await tool.execute("repeat", { path: file });
+		const repeated = await tool.execute("repeat-again", { path: file });
+		expect(joinText(repeated.content)).toContain("identical output 3 times");
+	});
+
 	it("rasterizes a local SVG into a PNG attachment when :img is selected", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
 		const tool = new ReadTool(makeSession(testDir));
@@ -120,7 +147,7 @@ describe("read local:// images", () => {
 		expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
 		const png = image?.type === "image" ? Buffer.from(image.data, "base64") : Buffer.alloc(0);
 		expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-		expect(joinText(result.content)).toContain("Read SVG file [image/png]");
+		expect(joinText(result.content)).toContain("Read SVG file [image/svg+xml] (displayed as image/png)");
 	});
 	it("returns SVG metadata plus a question hint for text-only models", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
@@ -168,7 +195,7 @@ describe("read local:// images", () => {
 		expect(joinText(result.content)).toContain("<svg");
 	});
 
-	it("still reads a local:// text file as text (fast path falls through)", async () => {
+	it("still reads a local:// text file as text", async () => {
 		await Bun.write(path.join(localRoot, "notes.txt"), "hello world");
 		const tool = new ReadTool(makeSession(testDir));
 
@@ -176,14 +203,6 @@ describe("read local:// images", () => {
 
 		expect(result.content.some(c => c.type === "image")).toBe(false);
 		expect(joinText(result.content)).toContain("hello world");
-	});
-
-	it("surfaces a corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
-		await Bun.write(path.join(localRoot, "clip.mp4"), new Uint8Array([0, 1, 2, 3, 4, 5]));
-		const tool = new ReadTool(makeSession(testDir));
-
-		const error = await tool.execute("call", { path: "local://clip.mp4" }).catch(e => e);
-		expectVideoProbeFailure(String(error?.message ?? error), "clip.mp4");
 	});
 
 	it("surfaces a large corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
@@ -216,8 +235,8 @@ describe("read local:// images", () => {
 		await fs.symlink(outsideDir, path.join(localRoot, "linked"));
 		const tool = new ReadTool(makeSession(testDir));
 
-		// The realpath/containment guard the router applies must still reject the
-		// escape; the image fast path must not silently read it.
+		// The handler's realpath/containment guard must reject the escape before
+		// the filesystem pipeline could read it.
 		await expect(tool.execute("call", { path: "local://linked/secret.png" })).rejects.toThrow(
 			"local:// URL escapes local root",
 		);

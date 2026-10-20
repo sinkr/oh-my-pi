@@ -1,5 +1,7 @@
-import { describe, expect, it } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { afterEach, describe, expect, it } from "bun:test";
+import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
@@ -20,10 +22,14 @@ function makeBridge() {
 describe("IrcBridge wake-relay marking", () => {
 	it("marks relay messages so the peer never relays them back", async () => {
 		const { bridge, woken } = makeBridge();
-		const outcome = await bridge.deliver(
-			{ id: "irc-1", from: "B", to: "A", body: "You hang up", ts: Date.now(), wakeRelay: true },
-			undefined,
-		);
+		const outcome = await bridge.deliver({
+			id: "irc-1",
+			from: "B",
+			to: "A",
+			body: "You hang up",
+			ts: Date.now(),
+			wakeRelay: true,
+		});
 
 		expect(outcome).toBe("woken");
 		expect(woken).toHaveLength(1);
@@ -35,10 +41,52 @@ describe("IrcBridge wake-relay marking", () => {
 
 	it("still advertises the stop relay for genuine messages", async () => {
 		const { bridge, woken } = makeBridge();
-		await bridge.deliver({ id: "irc-2", from: "B", to: "A", body: "status?", ts: Date.now() }, undefined);
+		await bridge.deliver({ id: "irc-2", from: "B", to: "A", body: "status?", ts: Date.now() });
 
 		const record = woken[0][0] as CustomMessage;
 		expect(record.details).not.toHaveProperty("wakeRelay");
 		expect(record.content).toContain("is delivered to");
+	});
+});
+
+describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
+	afterEach(() => {
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	function makeStreamingChild() {
+		const steered: AgentMessage[] = [];
+		const host = {
+			agent: { steer: (message: AgentMessage) => steered.push(message) } as unknown as Agent,
+			isDisposed: () => false,
+			isStreaming: () => true,
+			planModeEnabled: () => false,
+			emitSessionEvent: async () => {},
+			wakeForIrc: () => {},
+		} as unknown as IrcBridgeHost;
+		AgentRegistry.global().register({
+			id: "Child",
+			displayName: "task",
+			kind: "sub",
+			status: "running",
+			parentId: "Main",
+			session: {} as AgentSession,
+		});
+		return { bridge: new IrcBridge(host), steered };
+	}
+
+	it("never counts a parent's broadcast steer as a parent request", async () => {
+		const { bridge, steered } = makeStreamingChild();
+		await bridge.deliver({ id: "b1", from: "Main", to: "Child", body: "everyone: status", ts: 1, broadcast: true });
+		await bridge.deliver({ id: "d1", from: "Main", to: "Child", body: "you: status", ts: 2 });
+
+		expect(steered.map(message => bridge.isParentSteer(message))).toEqual([false, true]);
+	});
+
+	it("keeps the broadcast flag on a message drained from the inbox", async () => {
+		const { bridge } = makeStreamingChild();
+		await bridge.deliver({ id: "b2", from: "Peer", to: "Child", body: "everyone: rebase", ts: 3, broadcast: true });
+
+		expect(bridge.drainInboxMessages("Child")).toMatchObject([{ id: "b2", from: "Peer", broadcast: true }]);
 	});
 });
