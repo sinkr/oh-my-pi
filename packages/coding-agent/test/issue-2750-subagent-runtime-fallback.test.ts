@@ -219,6 +219,79 @@ describe("subagent runtime model resolution", () => {
 		expect(candidates).toEqual(["fallback/working-model"]);
 	});
 
+	it("refuses default fallbacks for an explicitly empty subagent role chain but inherits when unset", async () => {
+		const primary = model("primary", "bad-runtime-model");
+		const fallback = model("fallback", "working-model");
+		const resolutions: Array<{ keys: string[]; candidates: string[] }> = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options?.settings || !options.sessionManager) throw new Error("Expected child settings and history");
+			const recovery = new TurnRecovery({
+				model: () => primary,
+				thinkingLevel: () => undefined,
+				sessionManager: options.sessionManager,
+				settings: options.settings,
+				modelRegistry: {
+					find: (provider: string, id: string) =>
+						[primary, fallback].find(m => m.provider === provider && m.id === id),
+					hasProvider: () => true,
+					getAvailable: () => [primary, fallback],
+				},
+				configWarnings: [],
+			} as unknown as TurnRecoveryHost);
+			return {
+				session: createYieldingSession("none", async () => {
+					const selector = "primary/bad-runtime-model";
+					const keys = recovery.retryFallbackChainKeys(selector);
+					resolutions.push({
+						keys,
+						candidates: keys.flatMap(role =>
+							recovery.findRetryFallbackCandidates(role, selector).map(candidate => candidate.raw),
+						),
+					});
+				}),
+				extensionsResult: {},
+				setToolUIContext: () => {},
+			} as never;
+		});
+		for (const explicitlyEmpty of [true, false]) {
+			await runSubprocess({
+				cwd: "/tmp",
+				agent: {
+					name: "implementer-11",
+					description: "test",
+					systemPrompt: "test",
+					source: "bundled",
+					model: ["@implementer-11"],
+				},
+				task: "work",
+				index: 0,
+				id: explicitlyEmpty ? "empty-role-chain" : "unset-role-chain",
+				modelOverride: ["primary/bad-runtime-model"],
+				modelRole: "implementer-11",
+				settings: Settings.isolated({
+					modelRoles: {
+						default: "primary/bad-runtime-model",
+						"implementer-11": "primary/bad-runtime-model",
+					},
+					"retry.fallbackChains": {
+						default: ["fallback/working-model"],
+						...(explicitlyEmpty ? { "implementer-11": [] } : {}),
+					},
+				}),
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [primary, fallback],
+					getApiKey: async () => "test-key",
+				} as never,
+				enableLsp: false,
+			});
+		}
+		expect(resolutions).toEqual([
+			{ keys: ["subagent:empty-role-chain"], candidates: [] },
+			{ keys: ["subagent:unset-role-chain"], candidates: ["fallback/working-model"] },
+		]);
+	});
+
 	it("passes ordered subagent candidates as a child retry fallback chain", async () => {
 		const primary = model("primary", "bad-runtime-model");
 		const fallback = model("fallback", "working-model");
