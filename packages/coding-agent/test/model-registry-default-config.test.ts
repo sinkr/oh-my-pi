@@ -84,6 +84,8 @@ describe("ModelRegistry default custom models config", () => {
 			supportsSamplingParams: false,
 			// Bedrock Converse keeps thinking-binding controls on unless an override opts out.
 			supportsThinkingBindingControls: true,
+			// Converse on an AWS host supports native Claude server compaction (provider rule).
+			supportsServerCompaction: true,
 		});
 	});
 
