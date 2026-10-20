@@ -39,6 +39,7 @@ import {
 	skillToken,
 } from "./composer-attachments";
 import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spelling";
+import { TypingWordTracker } from "./typing-word";
 import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
 import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
 import { isNativeRendering } from "../native/state";
@@ -64,6 +65,8 @@ export interface ComposerNativeState {
 	readonly rate?: number;
 	/** A turn is running: the send keycap becomes a Stop button. */
 	readonly running: boolean;
+	/** Native dictation control; undefined hides it for hosts without speech-to-text. */
+	readonly dictation?: "idle" | "starting" | "recording" | "transcribing";
 	/** The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main session. */
 	readonly viewing?: readonly string[];
 	/** The session's title, quoted in italics as the TSP placeholder; undefined until it has one. */
@@ -75,12 +78,18 @@ const FOCUS_ACTION = "focus:";
 
 const IDLE_COMPOSER: ComposerNativeState = { running: false };
 
+/** Recording and transcription still write into the draft, so sending it then would split the dictation. */
+function dictationHoldsDraft(dictation: ComposerNativeState["dictation"]): boolean {
+	return dictation === "recording" || dictation === "transcribing";
+}
+
 /** The composer's controls around the input, rebuilt when what they show changes; the bar adds the rate and facts. */
 interface ComposerControls {
 	readonly focus: NativeNode | undefined;
 	readonly mode: NativeNode | undefined;
 	readonly model: NativeNode | undefined;
 	readonly effort: NativeNode | undefined;
+	readonly dictation: NativeNode | undefined;
 	readonly submit: NativeNode;
 }
 
@@ -453,6 +462,8 @@ export type ComposerChipDescriptor =
  */
 export class CustomEditor extends Editor {
 	#spelling = new MacOSSpellingProvider();
+	/** The word being typed: its typo mark waits until the caret leaves it. */
+	#typing = new TypingWordTracker();
 	#wordCompletion = new WordCompletionProvider();
 	imageLinks?: readonly (string | undefined)[];
 
@@ -857,6 +868,9 @@ export class CustomEditor extends Editor {
 		}
 		// One string instance per revision: whole-buffer memos downstream hit on identity.
 		const editorText = this.#decorationText;
+		const caret = this.getCursor();
+		this.#typing.update(this.textRevision, this.#decorationLines, caret.line, caret.col, this.focused);
+		const typing = this.#typing.word;
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
@@ -879,6 +893,7 @@ export class CustomEditor extends Editor {
 							lines: this.#decorationLines,
 							line: context.line,
 							startCol: context.startCol + sourceOffset,
+							typing,
 						},
 						span => highlightMagicKeywords(span, undefined, phase),
 					);
@@ -926,6 +941,15 @@ export class CustomEditor extends Editor {
 		);
 	};
 
+	/** Catch the typed word up with the caret first: its leaving the word (or a blur) re-describes the typo marks. */
+	override describe(cx: DescribeContext): NativeNode {
+		const caret = this.getCursor();
+		if (this.#typing.update(this.textRevision, this.getLines(), caret.line, caret.col, this.focused)) {
+			this.invalidate();
+		}
+		return super.describe(cx);
+	}
+
 	/**
 	 * TSP decorations: magic keywords shimmer (terminal-clocked) in the accent
 	 * color, chips and markers take their token colors, misspellings are marked,
@@ -966,6 +990,7 @@ export class CustomEditor extends Editor {
 
 		const queueBody = parseQueueShorthand(text);
 		const queueList = queueBody !== undefined && isQueuedMessageList(queueBody);
+		const typing = this.#typing.word;
 		let lineStart = 0;
 		for (let line = 0; line < lines.length; line++) {
 			const value = lines[line] ?? "";
@@ -979,7 +1004,8 @@ export class CustomEditor extends Editor {
 					decor.push({ from: lineStart + indent, to: lineStart + marker[0].length, s: "accent" });
 				}
 			}
-			for (const typo of this.#spelling.typoRanges(value, { editorText: text, lines, line, startCol: 0 })) {
+			const context = { editorText: text, lines, line, startCol: 0, typing };
+			for (const typo of this.#spelling.typoRanges(value, context)) {
 				decor.push({ from: lineStart + typo.start, to: lineStart + typo.start + typo.length, s: "typo" });
 			}
 			lineStart += value.length + 1;
@@ -1034,9 +1060,10 @@ export class CustomEditor extends Editor {
 		}, CustomEditor.SHIMMER_FRAME_MS);
 		this.#shimmerTimer.unref?.();
 	}
-	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled. */
+	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled
+	 *  and no dictation is still writing into the draft. */
 	protected override get nativeSendable(): boolean {
-		return this.onSubmit !== undefined && !this.disableSubmit;
+		return this.onSubmit !== undefined && !this.disableSubmit && !dictationHoldsDraft(this.composerState().dictation);
 	}
 	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
 	#titlePlaceholder: { title: string; text: TspText } | undefined;
@@ -1078,9 +1105,9 @@ export class CustomEditor extends Editor {
 	 * subagent is focused, the attachment chips, a `line` row of the
 	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
 	 * (or the effort glyph as the model chip's icon), the generation rate,
-	 * the other status facts, usage, then send (Stop while a turn runs).
-	 * Clicks come back as `status.model`, `thinking.cycle`, `submit`,
-	 * `interrupt` and `focus:<id>` actions.
+	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
+	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
+	 * `submit`, `interrupt` and `focus:<id>` actions.
 	 */
 	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
 		const effortGlyph = cx.supports("effort");
@@ -1095,6 +1122,7 @@ export class CustomEditor extends Editor {
 			shell?.excluded,
 			state.thinking,
 			state.running,
+			state.dictation,
 			thinkingKey,
 			modelKey,
 			interruptKey,
@@ -1138,6 +1166,7 @@ export class CustomEditor extends Editor {
 								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
 								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
 								facts?.usage,
+								controls.dictation,
 								controls.submit,
 							]),
 							{ role: "omp.composer.bar", gap: "sm", align: "center" },
@@ -1289,6 +1318,38 @@ export class CustomEditor extends Editor {
 						"effort",
 					)
 				: undefined;
+		const recording = state.dictation === "recording";
+		const starting = state.dictation === "starting";
+		const transcribing = state.dictation === "transcribing";
+		const dictation =
+			state.dictation === undefined
+				? undefined
+				: node(
+						"row",
+						{
+							role: "omp.composer.dictation",
+							gap: "xs",
+							align: "center",
+							tone: recording ? "error" : starting || transcribing ? "pending" : undefined,
+							title: recording
+								? "Stop recording and transcribe"
+								: starting
+									? "Cancel dictation"
+									: transcribing
+										? "Transcribing dictation"
+										: "Start dictation",
+							// The model can take a while to load on first use, so a start stays cancellable.
+							actions: transcribing ? undefined : { click: "dictation.toggle" },
+						},
+						starting || transcribing
+							? [node("spinner", { label: starting ? "Starting…" : "Transcribing…" }, undefined, "pending")]
+							: compact([
+									node("icon", { name: recording ? "stop" : "mic" }, undefined, "icon"),
+									recording && node("text", { text: "Recording · Stop", wrap: "none" }, undefined, "label"),
+								]),
+						"dictation",
+					);
+		const dictating = dictationHoldsDraft(state.dictation);
 		const submit = state.running
 			? node(
 					"text",
@@ -1307,13 +1368,14 @@ export class CustomEditor extends Editor {
 					{
 						role: "omp.composer.send",
 						keys: ["enter"],
-						title: `Send  ${formatTooltipKey("enter")}`,
-						actions: { click: "submit" },
+						title: dictating ? "Finish dictation before sending" : `Send  ${formatTooltipKey("enter")}`,
+						tone: dictating ? "muted" : undefined,
+						actions: dictating ? undefined : { click: "submit" },
 					},
 					undefined,
 					"send",
 				);
-		if (!shell) return { focus, mode: undefined, model, effort, submit };
+		if (!shell) return { focus, mode: undefined, model, effort, dictation, submit };
 		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
 		const mode = keyed(
 			row(
@@ -1336,15 +1398,15 @@ export class CustomEditor extends Editor {
 			),
 			"mode",
 		);
-		return { focus, mode, model, effort, submit };
+		return { focus, mode, model, effort, dictation, submit };
 	}
 
 	/**
-	 * Clicks on the composer's controls take the same paths as their keys: ⇧⇥,
-	 * ⏎ and Esc; the viewing header's links (`focus:<id>`) go to the host,
-	 * the status facts' clicks (`status.*`) to their source. Selection edits
-	 * go to the buffer; `send` submits its own prompt after saving the old draft
-	 * for recall and waiting for in-flight clipboard work.
+	 * Dictation clicks go directly to the host, independent of keybindings.
+	 * Other controls take the same paths as their keys; the viewing header's
+	 * links (`focus:<id>`) go to the host, the status facts' clicks to their source.
+	 * Selection edits go to the buffer; `send` submits its own prompt after
+	 * saving the old draft for recall and waiting for in-flight clipboard work.
 	 */
 	override handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "send") {
@@ -1368,8 +1430,13 @@ export class CustomEditor extends Editor {
 			case "thinking.cycle":
 				this.onCycleThinkingLevel?.();
 				return;
+			case "dictation.toggle": {
+				const { dictation } = this.composerState();
+				if (dictation !== undefined && dictation !== "transcribing") this.onToggleDictation?.();
+				return;
+			}
 			case "submit":
-				this.submit();
+				if (this.nativeSendable) this.submit();
 				return;
 			case "interrupt":
 				this.onEscape?.();
@@ -1404,6 +1471,8 @@ export class CustomEditor extends Editor {
 	onRetry?: () => void;
 	/** Called when Caps Lock is pressed. */
 	onCapsLock?: () => void;
+	/** Called directly by the native microphone/stop control, without synthesizing a keypress. */
+	onToggleDictation?: () => void;
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
 	onLeftAtStart?: () => void;
 	/** Called when the viewing header asks to view agent `id` ({@link MAIN_AGENT_ID}: the main session). */
@@ -1561,6 +1630,16 @@ export class CustomEditor extends Editor {
 
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
+
+		// Enter matches the disabled Send button while dictation still writes into the draft;
+		// dictation's own submit trigger goes through submit(), not this key path.
+		if (
+			canonical !== undefined &&
+			getKeybindings().matchesCanonical(canonical, "tui.input.submit") &&
+			dictationHoldsDraft(this.composerState().dictation)
+		) {
+			return;
+		}
 
 		// Space-hold push-to-talk runs before editor shortcuts so a reserved binding can never
 		// delete, move, submit, or invoke an app action while the gesture is enabled.
