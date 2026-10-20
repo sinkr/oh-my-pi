@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Moonshot `kimi-k3` pricing cache writes at $0; usage cost now includes cache writes at Moonshot's $3/M 5-minute rate ([#16508](https://github.com/can1357/oh-my-pi/issues/16508))
+
 ## [18.12.4] - 2026-10-20
 
 ### Added
@@ -18,7 +22,6 @@
 - DeepSeek V4.1 Flash images are now priced by DeepSeek's own billing (994 tokens for a snapcompact frame) instead of a GPT or Claude rate (2,882 to 3,136), so a 25-frame archive no longer counts about 50k tokens the provider never bills and triggers compaction early ([#16418](https://github.com/can1357/oh-my-pi/pull/16418) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Amazon Bedrock Kimi K3 (`global.`/`us.moonshotai.kimi-k3`) offering Anthropic-style thinking budgets it ignores; it now offers `low`, `high` and `max` effort, defaulting to `max` ([#13697](https://github.com/can1357/oh-my-pi/pull/13697) by [@alblez](https://github.com/alblez))
 - Marked supported Bedrock Claude models as eligible for native compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
-- Fixed Moonshot `kimi-k3` pricing cache writes at $0; usage cost now includes cache writes at Moonshot's $3/M 5-minute rate ([#16508](https://github.com/can1357/oh-my-pi/issues/16508))
 
 ## [18.12.3] - 2026-10-19
 
