@@ -2560,8 +2560,9 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		// First abort (the live turn's cancel cleanup) parks until released; the
-		// second (the autonomous-run cancel below) resolves so cancel() returns.
+		// First abort (the live turn's cancel cleanup) parks until released;
+		// the queued prompt's own pre-start cleanup later reuses normal
+		// (immediately resolving) aborts.
 		let abortCalls = 0;
 		const firstAbortBlocked = Promise.withResolvers<void>();
 		session.abort = async () => {
@@ -2601,10 +2602,15 @@ describe("ACP agent", () => {
 		} as PromptRequest);
 		await Bun.sleep(0);
 
-		// The user cancels again while that prompt is still inside its
-		// dispatch window: the stop must mark it, not just no-op.
-		await harness.agent.cancel({ sessionId: created.sessionId });
-		expect(abortCalls).toBe(2);
+		// The user cancels again while the first cleanup is still unwinding
+		// and that second prompt is still inside its dispatch window: the
+		// stop must mark the queued prompt, and it must REUSE the first
+		// cleanup's barrier (the turn is settled but still in flight) rather
+		// than starting a second, uncoalesced abort that could reset a
+		// replacement prompt.
+		const secondCancel = harness.agent.cancel({ sessionId: created.sessionId });
+		await Bun.sleep(20);
+		expect(abortCalls).toBe(1);
 
 		// Let the first cleanup finish; the queued prompt must resolve
 		// cancelled without ever starting a run.
@@ -2616,6 +2622,7 @@ describe("ACP agent", () => {
 		expect(secondResponse.stopReason).toBe("cancelled");
 		expect(session.promptCalls).toEqual(["long running"]);
 		await firstCancel;
+		await secondCancel;
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -2652,11 +2659,12 @@ describe("ACP agent", () => {
 		// start; the second abort — the queued prompt's own pre-start
 		// cleanup — hangs so its barrier rejects at the timeout.
 		let abortCalls = 0;
+		const neverSettles = Promise.withResolvers<void>();
 		session.abort = async () => {
 			abortCalls++;
 			session.isStreaming = false;
 			if (abortCalls >= 2) {
-				return new Promise<void>(() => undefined);
+				return neverSettles.promise;
 			}
 		};
 		const finishPrompt = holdPromptStreaming(session);

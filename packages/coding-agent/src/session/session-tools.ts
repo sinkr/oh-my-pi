@@ -1023,19 +1023,65 @@ export class SessionTools {
 					// message wait another boundary. Identity-based promotion:
 					// text matching could hit an older equal-looking steer.
 					const { promise: steerPromise, resolve: resolveSteer } = Promise.withResolvers<PermissionRaceResult>();
-					const onSteer = () => {
-						const arrived = this.#host.steeringArrivalAdmitted(arrivalParkSeq) ?? [];
+					// Only user steering may supersede the dialog. The
+					// loop-owned signal aborts — once per run — for ANY queued
+					// steering source (agent-authored asides, IRC interrupts
+					// included), none of which the user asked to preempt
+					// their own dialog, so re-check the arrival channel at
+					// the loop abort and only then classify the dialog as
+					// superseded. The loop's own interruptMode policy is
+					// untouched: a queued non-user steer still injects at
+					// the next batch boundary once the call this dialog
+					// guards finishes normally.
+					const userSteering = new AbortController();
+					let superseded = false;
+					const finishSteer = (arrived: readonly AgentMessage[]): void => {
 						const queued = new Set(this.#host.agent.peekSteeringQueue());
 						const promotable = arrived.filter(message => queued.has(message));
 						if (promotable.length > 0) {
 							this.#host.agent.prioritizeSteering(promotable);
 						}
+						userSteering.abort();
 						resolveSteer({ kind: "steered" });
+						superseded = true;
+					};
+					const onLoopSteer = () => {
+						if (superseded) return;
+						const arrived = this.#host.steeringArrivalAdmitted(arrivalParkSeq) ?? [];
+						// Empty window: agent-authored or IRC steering. Keep
+						// waiting — the arrival listener below still catches a
+						// user steer admitted later.
+						if (arrived.length === 0) {
+							return;
+						}
+						finishSteer(arrived);
+					};
+					// The arrival channel re-arms on every user-steering
+					// admission, so it also covers the case where an
+					// agent-authored steer already spent the loop's single
+					// soft abort: the loop signal being aborted is the proof
+					// the interruptMode policy allowed an interrupt this
+					// batch, so a user steer admitted afterwards still
+					// supersedes. In "wait" mode the loop signal never
+					// aborts and this listener stays inert, preserving the
+					// policy.
+					const arrivalSignal = this.#host.steeringArrivalSignal();
+					const onArrival = () => {
+						if (superseded) return;
+						if (!steeringSignal.aborted) return;
+						const arrived = this.#host.steeringArrivalAdmitted(arrivalParkSeq) ?? [];
+						if (arrived.length === 0) return;
+						finishSteer(arrived);
 					};
 					if (steeringSignal.aborted) {
-						onSteer();
+						onLoopSteer();
 					} else {
-						steeringSignal.addEventListener("abort", onSteer, { once: true });
+						steeringSignal.addEventListener("abort", onLoopSteer);
+					}
+					if (arrivalSignal.aborted) {
+						onArrival();
+					} else {
+						arrivalSignal.addEventListener("abort", onArrival);
 					}
 					let raced: PermissionRaceResult;
 					try {
@@ -1057,17 +1103,22 @@ export class SessionTools {
 								},
 								PERMISSION_OPTIONS,
 								signal,
-								// The bridge cancels its pending wire dialog when the steer wins;
-								// the gate's own race above classifies the outcome either way.
-								steeringSignal,
+								// The bridge cancels its pending wire dialog when the
+								// steer wins; the gate's own race above classifies the
+								// outcome either way. The derived signal keeps the wire
+								// cancel on user steering only — an agent-authored or
+								// IRC steer that aborted the loop signal leaves the
+								// client's dialog open.
+								userSteering.signal,
 							).then(outcome => ({ kind: "permission" as const, outcome }));
 							return Promise.race([permissionPromise, abortPromise, steerPromise]);
 						});
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
-						steeringSignal.removeEventListener("abort", onSteer);
+						steeringSignal.removeEventListener("abort", onLoopSteer);
+						arrivalSignal.removeEventListener("abort", onArrival);
 						// The dialog is over; its park window can no longer
-						// read. Idempotent when onSteer's drain already
+						// read. Idempotent when a supersede's drain already
 						// released it.
 						this.#host.steeringArrivalRelease(arrivalParkSeq);
 					}

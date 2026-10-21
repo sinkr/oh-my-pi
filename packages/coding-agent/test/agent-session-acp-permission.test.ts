@@ -129,39 +129,6 @@ async function createSession(
 	return sess;
 }
 
-async function createSessionWithMockModel(
-	tools: AgentTool[],
-	bridge: ClientBridge,
-	responses: NonNullable<MockModelOptions["responses"]>,
-	options?: { getApiKey?: () => Promise<string> | string },
-): Promise<AgentSession> {
-	const mock = createMockModel({ responses });
-	const settings = Settings.isolated({ "compaction.enabled": false });
-	const sessionManager = SessionManager.inMemory(tempDir.path());
-	const getApiKey = options?.getApiKey ?? (() => "test-key");
-	const agent = new Agent({
-		getApiKey,
-		initialState: {
-			model: mock.model,
-			systemPrompt: ["Test"],
-			tools,
-			messages: [],
-		},
-		convertToLlm,
-		streamFn: mock.stream,
-	});
-
-	const sess = new AgentSession({
-		agent,
-		sessionManager,
-		settings,
-		modelRegistry: { getApiKey } as never,
-		toolRegistry: new Map(tools.map(t => [t.name, t])),
-	});
-	sess.setClientBridge(bridge);
-	return sess;
-}
-
 beforeAll(() => {
 	tempDir = TempDir.createSync("@pi-acp-permission-test-");
 });
@@ -1054,6 +1021,71 @@ it("a steer sent while a permission dialog is open supersedes it instead of wait
 	permissionPending.resolve({ outcome: "cancelled" });
 });
 
+it("keeps the dialog open when an agent-authored steer queues mid-dialog", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const permissionOpened = Promise.withResolvers<void>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(_toolCall, _options, _signal) {
+			permissionOpened.resolve();
+			return await permissionPending.promise;
+		},
+	};
+	// A controllable loop steering signal: tool calls run under a ctx
+	// (`ctx.toolCall.steeringSignal`), so the gate takes the production
+	// loop-signal path and the test aborts it on command, exactly the way
+	// the loop's any-source steering poll does.
+	const loopSteering = new AbortController();
+	session = await createSessionWithMockModel(
+		[deleteTool as AgentTool],
+		bridge,
+		[
+			{
+				content: [{ type: "toolCall", id: "call-delete-9", name: "delete", arguments: { path: "/tmp/gone2.ts" } }],
+			},
+			{ content: ["done after steer"] },
+		],
+		{ loopSteeringSignal: loopSteering.signal },
+	);
+
+	let promptSettled = false;
+	const promptDone = session.prompt("delete something else").then(() => {
+		promptSettled = true;
+	});
+	await permissionOpened.promise;
+
+	// An agent-authored steer queues while the dialog is open: the loop's
+	// steering signal aborts for it (any queued source), but no user
+	// steering arrival fired, so the dialog must stay open — the tool call
+	// keeps waiting on the user instead of being classified as superseded.
+	await session.agent.steer({
+		role: "user",
+		content: [{ type: "text", text: "agent-authored aside while the dialog is open" }],
+		timestamp: Date.now(),
+	});
+	loopSteering.abort();
+	await Bun.sleep(50);
+	expect(promptSettled).toBe(false);
+	expect(deleteTool.executeCalls).toBe(0);
+
+	// A user steer through the arrival channel still supersedes the dialog.
+	const admitted = await session.joinActiveTurn("wait — the user changed their mind");
+	expect(admitted).toBe(true);
+	await promptDone;
+	expect(promptSettled).toBe(true);
+	expect(deleteTool.executeCalls).toBe(0);
+	const messages = session.agent.state.messages;
+	expect(
+		messages.some(
+			message => message.role === "user" && JSON.stringify(message.content).includes("the user changed their mind"),
+		),
+	).toBe(true);
+
+	// Resolve the abandoned elicit so nothing dangles into the next test.
+	permissionPending.resolve({ outcome: "cancelled" });
+});
+
 it("delivers the steer that supersedes a permission dialog ahead of older queued steers", async () => {
 	const deleteTool = makeFakeTool("delete");
 	const permissionPending = Promise.withResolvers<ClientBridgePermissionOutcome>();
@@ -1281,6 +1313,47 @@ it("refuses a steer into an agent-initiated turn whose output has no client forw
 		),
 	).toBe(false);
 });
+
+async function createSessionWithMockModel(
+	tools: AgentTool[],
+	bridge: ClientBridge,
+	responses: NonNullable<MockModelOptions["responses"]>,
+	options?: { getApiKey?: () => Promise<string> | string; loopSteeringSignal?: AbortSignal },
+): Promise<AgentSession> {
+	const mock = createMockModel({ responses });
+	const settings = Settings.isolated({ "compaction.enabled": false });
+	const sessionManager = SessionManager.inMemory(tempDir.path());
+	const getApiKey = options?.getApiKey ?? (() => "test-key");
+	const agent = new Agent({
+		getApiKey,
+		// With a loop steering signal the tool calls run under a ctx
+		// (`ctx.toolCall.steeringSignal`), the path the production loop
+		// wires; the test aborts it on command to simulate the loop's
+		// any-source steering abort.
+		...(options?.loopSteeringSignal
+			? {
+					getToolContext: (() => ({ toolCall: { steeringSignal: options.loopSteeringSignal } }) as never) as never,
+				}
+			: {}),
+		initialState: {
+			model: mock.model,
+			systemPrompt: ["Test"],
+			tools,
+			messages: [],
+		},
+		convertToLlm,
+		streamFn: mock.stream,
+	});
+	const sess = new AgentSession({
+		agent,
+		sessionManager,
+		settings,
+		modelRegistry: { getApiKey } as never,
+		toolRegistry: new Map(tools.map(t => [t.name, t])),
+	});
+	sess.setClientBridge(bridge);
+	return sess;
+}
 
 it("delivers two steers admitted in one dialog window first-arrival-first", async () => {
 	// Two admissions can land while one permission dialog is open, before

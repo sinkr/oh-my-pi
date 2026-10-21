@@ -1304,7 +1304,13 @@ export class AcpAgent implements Agent {
 			cancellation.cancelled = true;
 		}
 		const promptTurn = record.promptTurn;
-		if (promptTurn && !promptTurn.settled) {
+		// A turn whose cancel cleanup is still unwinding counts as in
+		// flight: a repeated cancel notification must reuse that barrier
+		// (#beginCancelCleanup is idempotent) instead of falling through to
+		// the autonomous-run branch below — a second, uncoalesced
+		// AgentSession.abort() there can reset or interrupt a replacement
+		// prompt that started after the first cleanup.
+		if (promptTurn && (!promptTurn.settled || promptTurn.cleanup)) {
 			const cleanup = this.#beginCancelCleanup(record, promptTurn);
 			try {
 				await cleanup;
@@ -1325,12 +1331,13 @@ export class AcpAgent implements Agent {
 		// settle — but the client's stop is still an explicit interrupt. Abort
 		// the run with the same bound as cancel cleanup instead of silently
 		// dropping it.
-		let timer: NodeJS.Timeout | undefined;
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("ACP cancel cleanup timed out")), this.#cancelCleanupTimeoutMs);
-		});
+		const timeoutGate = Promise.withResolvers<never>();
+		const timer = setTimeout(
+			() => timeoutGate.reject(new Error("ACP cancel cleanup timed out")),
+			this.#cancelCleanupTimeoutMs,
+		);
 		try {
-			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeout]);
+			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeoutGate.promise]);
 		} catch (error: unknown) {
 			logger.warn("ACP cancel cleanup timed out; closing session", { sessionId: record.session.sessionId, error });
 			await this.#closeManagedSession(record.session.sessionId, record);
