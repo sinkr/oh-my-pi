@@ -55,7 +55,11 @@ describe("markdown table column alignment", () => {
 		expect(rows).toHaveLength(3);
 
 		// The right-aligned cell wraps; its header and every wrapped line end at
-		// the column's right edge.
+		// the column's right edge, and the left column stays flush left.
+		expect(rows[0]).toEqual(["L  ", "        R"]);
+		expect(rows[1]).toEqual(["abc", "    alpha"]);
+		expect(rows[2]).toEqual(["   ", "     beta"]);
+
 		for (const row of rows) {
 			const right = row[1]!;
 			expect(right).toBe(right.trimEnd());
