@@ -413,7 +413,7 @@ async function readTextFileConvention(
 	const file = Bun.file(absolutePath);
 	let chunk = await file.slice(0, BINARY_SNIFF_BYTES).bytes();
 	if (isProbablyBinaryHeader(chunk)) return undefined;
-	const bom = hasUtf8Bom(chunk);
+	const bom = chunk[0] === 0xef && chunk[1] === 0xbb && chunk[2] === 0xbf;
 	let offset = 0;
 	let previous: number | undefined;
 	for (;;) {
@@ -425,35 +425,6 @@ async function readTextFileConvention(
 		previous = chunk[chunk.length - 1];
 		chunk = await file.slice(offset, offset + LINE_BREAK_SCAN_BYTES).bytes();
 	}
-}
-
-function hasUtf8Bom(bytes: Uint8Array): boolean {
-	return bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
-}
-
-/**
- * Convention of the text a write to `absolutePath` replaces. When the write goes to an ACP editor
- * that can read files, its buffer is that text (as for the read-projection guard), so unsaved
- * line-ending changes and unsaved new buffers count; otherwise the `fileSize`-byte file on disk
- * does, and a missing file (`fileSize` undefined) has none.
- */
-async function readWriteTargetConvention(
-	session: ToolSession,
-	requestedPath: string,
-	absolutePath: string,
-	fileSize: number | undefined,
-	signal: AbortSignal | undefined,
-): Promise<TextFileConvention | undefined> {
-	const bridgeRead = (await shouldRouteWriteThroughBridge(session, requestedPath, absolutePath))
-		? routeReadThroughBridge(session, absolutePath)
-		: undefined;
-	if (bridgeRead) {
-		const text = await bridgeRead.catch(() => undefined);
-		if (text !== undefined) {
-			return { bom: text.startsWith("\uFEFF"), crlf: detectLineEnding(text) === "\r\n" };
-		}
-	}
-	return fileSize === undefined ? undefined : readTextFileConvention(absolutePath, fileSize, signal);
 }
 
 /**
@@ -481,15 +452,14 @@ function applyTextFileConvention(
 }
 
 /**
- * Name each convention `applied` added that the persisted file still has, so the model knows the
- * file differs from the text it sent. `finalText` is what the editor or formatter persisted and
- * `finalBom` whether the file on disk starts with a BOM (a decoded read-back may have stripped it).
- * A convention an editor or formatter removed again is not claimed.
+ * Name each convention `applied` added that `finalText` (what the LSP formatter left, or the content
+ * as written) still has, so the model knows the file differs from the text it sent. A convention a
+ * formatter removed again is not claimed.
  */
-function textFileConventionNote(applied: TextFileConvention, finalText: string, finalBom: boolean): string | undefined {
+function textFileConventionNote(applied: TextFileConvention, finalText: string): string | undefined {
 	const kept: string[] = [];
 	if (applied.crlf && detectLineEnding(finalText) === "\r\n") kept.push("CRLF line endings");
-	if (applied.bom && finalBom) kept.push("UTF-8 BOM");
+	if (applied.bom && finalText.startsWith("\uFEFF")) kept.push("UTF-8 BOM");
 	return kept.length === 0 ? undefined : `Note: kept the replaced file's ${kept.join(" and ")}.`;
 }
 
@@ -1083,14 +1053,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				cleanContent,
 			);
 
-			// An unreadable file keeps today's behavior; the write itself reports why it fails.
-			const convention = await readWriteTargetConvention(
-				this.session,
-				path,
-				absolutePath,
-				existing?.isFile() ? existing.size : undefined,
-				signal,
-			).catch(() => undefined);
+			// An ACP editor saves with its buffer's own line endings and encoding, so a write routed to
+			// it goes as given. Elsewhere an unreadable file keeps today's behavior; the write reports why.
+			const bridge = this.session.getClientBridge?.();
+			const editorOwnsFile =
+				bridge?.capabilities.writeTextFile === true &&
+				bridge.writeTextFile !== undefined &&
+				(await shouldRouteWriteThroughBridge(this.session, path, absolutePath));
+			const convention =
+				existing?.isFile() && !editorOwnsFile
+					? await readTextFileConvention(absolutePath, existing.size, signal).catch(() => undefined)
+					: undefined;
 			// `untilAborted` has already rejected the call if it was cancelled during the scan; don't write.
 			signal?.throwIfAborted();
 			const { text: writeContent, applied } = applyTextFileConvention(cleanContent, convention);
@@ -1100,7 +1073,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
-			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, writeContent, signal);
+			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
 			if (bridgeWrite) {
 				// `write` always replaces the whole file, so (unlike hashline's
 				// hunk-scoped diff) there's no size cost to keying the header/
@@ -1109,22 +1082,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// hands back a tag that matches what's actually on disk.
 				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
 				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text, displayPath);
-				// The read-back decodes the file, which drops a leading BOM: take it from the bytes.
-				const diskBom = await Bun.file(absolutePath)
-					.slice(0, 3)
-					.bytes()
-					.then(hasUtf8Bom, () => writeContent.startsWith("\uFEFF"));
-				const persistedBytes =
-					Buffer.byteLength(bridgeWrite.text, "utf8") +
-					(diskBom && !bridgeWrite.text.startsWith("\uFEFF") ? 3 : 0);
-				const writeLine = `Successfully wrote ${persistedBytes} bytes to ${displayPath}`;
+				const writeLine = `Successfully wrote ${cleanBytes} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
 					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-				}
-				const conventionNote = textFileConventionNote(applied, bridgeWrite.text, diskBom);
-				if (conventionNote) {
-					resultText += `\n${conventionNote}`;
 				}
 				if (madeExecutable) {
 					resultText += `\n${EXECUTABLE_NOTICE}`;
@@ -1153,7 +1114,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 			}
-			const conventionNote = textFileConventionNote(applied, finalContent, finalContent.startsWith("\uFEFF"));
+			const conventionNote = textFileConventionNote(applied, finalContent);
 			if (conventionNote) {
 				resultText += `\n${conventionNote}`;
 			}

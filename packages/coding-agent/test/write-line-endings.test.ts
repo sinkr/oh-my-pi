@@ -156,52 +156,9 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 		expect(await fs.readFile(crlfFirst, "latin1")).toBe("x\r\ny\r\n");
 	});
 
-	it("claims only the conventions an editor bridge persisted", async () => {
-		const filePath = path.join(tmpDir, "Saved.cs");
+	it("sends an ACP editor the content as given, since its save applies the buffer's own convention", async () => {
+		const filePath = path.join(tmpDir, "Editor.cs");
 		await fs.writeFile(filePath, "\uFEFFclass A {}\r\n");
-		// An editor whose save normalizes to LF without a BOM.
-		const bridge: ClientBridge = {
-			capabilities: { writeTextFile: true },
-			writeTextFile: async ({ path: target, content }) => {
-				await Bun.write(target, content.replace(/^\uFEFF/, "").replaceAll("\r\n", "\n"));
-			},
-		};
-
-		const result = await new WriteTool(createSession(tmpDir, bridge)).execute("call-1", {
-			path: filePath,
-			content: "class A {}\nclass B {}\n",
-		});
-
-		expect(await fs.readFile(filePath, "latin1")).toBe("class A {}\nclass B {}\n");
-		expect(resultText(result)).toContain("Successfully wrote 22 bytes to Saved.cs");
-		expect(resultText(result)).not.toContain("Note: kept");
-	});
-
-	it("names the BOM and counts its bytes when an editor bridge saves it", async () => {
-		const filePath = path.join(tmpDir, "Kept.cs");
-		await fs.writeFile(filePath, "\uFEFFclass A {}\r\n");
-		const bridge: ClientBridge = {
-			capabilities: { writeTextFile: true },
-			writeTextFile: async ({ path: target, content }) => {
-				await Bun.write(target, content);
-			},
-		};
-
-		const result = await new WriteTool(createSession(tmpDir, bridge)).execute("call-1", {
-			path: filePath,
-			content: "class A {}\n",
-		});
-
-		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFclass A {}\r\n");
-		expect(resultText(result)).toContain(
-			"Successfully wrote 15 bytes to Kept.cs\nNote: kept the replaced file's CRLF line endings and UTF-8 BOM.",
-		);
-	});
-
-	it("takes the convention from the editor buffer when the bridge can read it", async () => {
-		const filePath = path.join(tmpDir, "Buffer.cs");
-		// Disk is LF; the editor's unsaved buffer was switched to CRLF.
-		await fs.writeFile(filePath, "class A {}\n");
 		const sent: string[] = [];
 		const bridge: ClientBridge = {
 			capabilities: { readTextFile: true, writeTextFile: true },
@@ -212,26 +169,14 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 			},
 		};
 
-		await new WriteTool(createSession(tmpDir, bridge)).execute("call-1", { path: filePath, content: "class B {}\n" });
-
-		expect(sent).toEqual(["class B {}\r\n"]);
-	});
-
-	it("counts a BOM the editor adds on save", async () => {
-		const filePath = path.join(tmpDir, "Utf8Bom.cs");
-		const bridge: ClientBridge = {
-			capabilities: { writeTextFile: true },
-			writeTextFile: async ({ path: target, content }) => {
-				await Bun.write(target, `\uFEFF${content}`);
-			},
-		};
-
 		const result = await new WriteTool(createSession(tmpDir, bridge)).execute("call-1", {
 			path: filePath,
-			content: "class A {}\n",
+			content: "class B {}\n",
 		});
 
-		expect(resultText(result)).toContain("Successfully wrote 14 bytes to Utf8Bom.cs");
+		expect(sent).toEqual(["class B {}\n"]);
+		expect(resultText(result)).toContain("Successfully wrote 11 bytes to Editor.cs");
+		expect(resultText(result)).not.toContain("Note: kept");
 	});
 
 	it("does not write once the call is cancelled during a long first-line scan", async () => {
