@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -582,6 +583,8 @@ const AGENT_START_POLICY_MAX_ATTEMPTS = 3;
 export const MCP_DISCOVERY_TURN_WAIT_MS = 1500;
 /** Vision descriptions gate admission; stay under the RPC clients' 30 s request timeout. */
 const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
+/** Marks work running inside the deferred extension load so it never waits on itself. */
+const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
 
 /** A failed preparation, not a provider failure: the ordinary input can still be restored. */
 class AgentStartPolicyChangedError extends Error {
@@ -1133,6 +1136,13 @@ export class AgentSession implements SettingsScope {
 	 * otherwise the prompt changes on the next turn and the provider prompt cache misses.
 	 */
 	#pendingMCPDiscovery: Promise<void> | undefined;
+	/**
+	 * Startup-deferred extensions (see `startup-deferral.ts`): the loader binding
+	 * them into this session, then its in-flight run once started. Submissions and
+	 * turns await the run so the first request carries their tools and hooks.
+	 */
+	#deferredExtensionLoader: (() => Promise<void>) | undefined;
+	#deferredExtensionLoad: Promise<void> | undefined;
 	#activeAgentContinue: ActiveAgentContinue | undefined;
 	#agentContinueSchedulerToken = 0;
 
@@ -3255,6 +3265,7 @@ export class AgentSession implements SettingsScope {
 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
 		this.#admittedSubmissionCount++;
 		try {
+			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 			return await work();
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
@@ -6884,6 +6895,45 @@ export class AgentSession implements SettingsScope {
 		this.#pendingMCPDiscovery = pending;
 	}
 
+	/** Bind startup-deferred extensions on the first {@link loadDeferredExtensions} call. */
+	setDeferredExtensionLoader(load: () => Promise<void>): void {
+		this.#deferredExtensionLoader = load;
+	}
+
+	/** Whether startup-deferred extensions are still unbound (loading or not yet started). */
+	get hasPendingDeferredExtensions(): boolean {
+		return this.#deferredExtensionLoader !== undefined || this.#deferredExtensionLoad !== undefined;
+	}
+
+	/**
+	 * Start binding the startup-deferred extensions (once) and resolve when they
+	 * are live; never rejects. Resolves at once when none are pending, and inside
+	 * the load itself so a deferred extension's `session_start` handler that sends
+	 * a message cannot wait on its own load.
+	 */
+	loadDeferredExtensions(): Promise<void> {
+		if (deferredExtensionLoadScope.getStore()) return Promise.resolve();
+		const load = this.#deferredExtensionLoader;
+		if (load) {
+			this.#deferredExtensionLoader = undefined;
+			const pending = deferredExtensionLoadScope
+				.run(true, load)
+				.then(
+					() => this.#notifyCommandMetadataChanged(),
+					(error: unknown) => {
+						logger.error("Deferred extension load failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					},
+				)
+				.finally(() => {
+					if (this.#deferredExtensionLoad === pending) this.#deferredExtensionLoad = undefined;
+				});
+			this.#deferredExtensionLoad = pending;
+		}
+		return this.#deferredExtensionLoad ?? Promise.resolve();
+	}
+
 	/** Replaces host-owned RPC tools before the next model call. */
 	refreshRpcHostTools(rpcTools: AgentTool[]): Promise<void> {
 		return this.#tools.refreshRpcHostTools(rpcTools);
@@ -8211,6 +8261,7 @@ export class AgentSession implements SettingsScope {
 			(!this.#isDisposed || alreadyDisposing) &&
 			!signal?.aborted;
 		const cancelled = { baseXdevCatalogDelivered: false, commit: () => undefined };
+		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
 		if (pendingMCPDiscovery) {
 			const timedOut = new Error("MCP discovery still pending");
