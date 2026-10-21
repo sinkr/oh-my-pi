@@ -61,18 +61,21 @@ describe("ConfigFile JSON → YAML migration", () => {
 
 		// Simulate an interrupted write: the leading bytes reach the destination,
 		// then the write fails before the rest of the content is flushed.
-		vi.spyOn(fs, "writeFileSync").mockImplementation(((
-			target: fs.PathLike | number,
-			data: string | NodeJS.ArrayBufferView,
-		) => {
-			const partial = Buffer.from(data as string).subarray(0, 8);
-			if (typeof target === "number") {
-				fs.writeSync(target, partial);
-			} else {
-				fs.appendFileSync(target, partial);
-			}
-			throw new Error("simulated interrupted write");
-		}) as typeof fs.writeFileSync);
+		vi.spyOn(fs, "writeFileSync").mockImplementation(
+			(target: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView) => {
+				const bytes =
+					typeof data === "string"
+						? Buffer.from(data)
+						: Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+				const partial = bytes.subarray(0, 8);
+				if (typeof target === "number") {
+					fs.writeSync(target, partial);
+				} else {
+					fs.appendFileSync(target, partial);
+				}
+				throw new Error("simulated interrupted write");
+			},
+		);
 
 		new ConfigFile<unknown>("models", getModelsConfigSchema(), ymlPath).tryLoad();
 		vi.restoreAllMocks();
