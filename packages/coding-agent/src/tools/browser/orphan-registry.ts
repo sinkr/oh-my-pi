@@ -213,8 +213,8 @@ export async function collectOrphanTargets(
 }
 
 /**
- * How long {@link closeCdpTarget} waits for Chromium to destroy a target whose close it accepted. Past it the
- * close counts as unconfirmed, as a failed one does.
+ * How long {@link closeCdpTarget} waits by default for Chromium to destroy a target whose close it accepted.
+ * Past it the close counts as unconfirmed, as a failed one does.
  */
 const CLOSE_CONFIRM_TIMEOUT_MS = 5_000;
 
@@ -228,8 +228,16 @@ const CLOSE_CONFIRM_TIMEOUT_MS = 5_000;
  * page, not once it is gone: the target stays listed until its renderer has
  * unloaded it. Its `Target.targetDestroyed` confirms the close instead, as it
  * does for Puppeteer's own `page.close()`.
+ *
+ * A caller that bounds the whole close MUST pass a `confirmTimeoutMs` well below
+ * its budget, so a missed `targetDestroyed` still leaves time for the
+ * `Target.getTargets` absence check to decide the result.
  */
-export async function closeCdpTarget(browser: Browser, targetId: string): Promise<boolean> {
+export async function closeCdpTarget(
+	browser: Browser,
+	targetId: string,
+	confirmTimeoutMs = CLOSE_CONFIRM_TIMEOUT_MS,
+): Promise<boolean> {
 	const session = await browser
 		.target()
 		.createCDPSession()
@@ -247,7 +255,7 @@ export async function closeCdpTarget(browser: Browser, targetId: string): Promis
 			await session.send("Target.setDiscoverTargets", { discover: true });
 			const result = await session.send("Target.closeTarget", { targetId });
 			if (result.success) {
-				timer = setTimeout(() => destroyed.resolve(false), CLOSE_CONFIRM_TIMEOUT_MS);
+				timer = setTimeout(() => destroyed.resolve(false), confirmTimeoutMs);
 				if (await destroyed.promise) return true;
 			}
 		} catch {
