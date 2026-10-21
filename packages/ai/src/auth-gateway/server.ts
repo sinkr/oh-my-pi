@@ -29,6 +29,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../error/gateway";
@@ -148,6 +149,28 @@ function serializeTools(context: Context): string | undefined {
 	return context.tools && context.tools.length > 0 ? JSON.stringify(context.tools) : undefined;
 }
 
+/**
+ * Fit a client-requested effort to the resolved model. Clients speak their own
+ * effort vocabulary: omp's `lowest-effort` reasoning-off sends `minimal` to a
+ * generic OpenAI-compatible endpoint, and Claude ladders have no `minimal`.
+ * `streamSimple` throws on an effort the model cannot serve, so clamp it to the
+ * nearest supported tier as in-process callers do. Efforts the model maps onto
+ * its wire values, and models without an effort ladder, pass through unchanged.
+ */
+function resolveGatewayEffort(model: Model<Api>, requested: Effort): Effort {
+	const efforts = getSupportedEfforts(model);
+	if (efforts.length === 0 || efforts.includes(requested)) return requested;
+	if (model.thinking?.effortMap?.[requested] !== undefined) return requested;
+	if (
+		model.compat &&
+		"reasoningEffortMap" in model.compat &&
+		model.compat.reasoningEffortMap[requested] !== undefined
+	) {
+		return requested;
+	}
+	return clampThinkingLevelForModel(model, requested) ?? requested;
+}
+
 function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, signal: AbortSignal): SimpleStreamOptions {
 	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
@@ -179,7 +202,8 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 					? options.toolChoice
 					: { type: "tool", name: options.toolChoice.name };
 	}
-	if (options.reasoning !== undefined) opts.reasoning = options.reasoning;
+	const reasoning = options.reasoning === undefined ? undefined : resolveGatewayEffort(model, options.reasoning);
+	if (reasoning !== undefined) opts.reasoning = reasoning;
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.forceReasoningOff !== undefined) {
 		opts.disableReasoning = options.forceReasoningOff;
@@ -208,7 +232,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 		// whichever effort the client requested (or High when unspecified) and
 		// ALSO sets the effort so providers that gate on `reasoning` actually
 		// surface the budget.
-		const effort = options.reasoning ?? Effort.High;
+		const effort = reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
 			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
@@ -593,6 +617,7 @@ async function handlePiNative(
 		cursorExternalToolExecutor: true,
 		providerSessionState: lease.states,
 	};
+	if (streamOpts.reasoning !== undefined) streamOpts.reasoning = resolveGatewayEffort(model, streamOpts.reasoning);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts,

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
+- Fixed auth-gateway requests failing with "Thinking effort minimal is not supported by anthropic/…" when a client asks for an effort the resolved model's ladder lacks (omp sends `minimal` for thinking-off on OpenAI-compatible custom providers); the gateway now serves the nearest supported effort
 
 ## [18.12.4] - 2026-10-20
 
