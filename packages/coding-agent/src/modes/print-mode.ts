@@ -16,6 +16,7 @@ import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disable
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { executeAcpBuiltinSlashCommand } from "../slash-commands/acp-builtins";
+import { parseSlashCommand, parseSubcommand } from "../slash-commands/helpers/parse";
 import type { SlashCommandRuntime } from "../slash-commands/types";
 import { reconnectMcpManagerServer } from "../mcp/oauth-reauth";
 import {
@@ -281,16 +282,9 @@ async function runPrintModeCore(
 	// process alive until the dashboard closes is a separate design
 	// decision; until then `/stats` keeps the historic prompt-the-literal
 	// behavior of every undispatched command.
-	const PRINT_DISPATCHED_COMMANDS = [
-		/^\/mcp\s+reauth(?:\s|$)/,
-		/^\/compact(?:\s|$)/,
-		/^\/handoff(?:\s|$)/,
-		/^\/retry(?:\s|$)/,
-	] as const;
-	// Dispatched commands that schedule a model turn themselves, outside
-	// `promptTurn` — today only `/retry`. They need the shared pre-turn prep
-	// (see `dispatchCliMessage`) before they execute.
-	const TURNSCHEDULING_COMMANDS = [/^\/retry(?:\s|$)/] as const;
+	// Matched with the dispatcher's own parser, so `/compact:focus` and
+	// `/compact focus` are treated alike; `/mcp` dispatches only `reauth`.
+	const PRINT_DISPATCHED_COMMANDS: Record<string, true> = { compact: true, handoff: true, retry: true };
 	/**
 	 * Dispatch a CLI-authored message as a local command, if it is one.
 	 * Only CLI-authored input (`messages`, the positional/-p args) is ever
@@ -302,7 +296,13 @@ async function runPrintModeCore(
 	 * was consumed locally.
 	 */
 	const dispatchCliMessage = async (message: string): Promise<boolean> => {
-		if (!PRINT_DISPATCHED_COMMANDS.some(pattern => pattern.test(message))) return false;
+		const parsed = parseSlashCommand(message);
+		const dispatched =
+			parsed !== null &&
+			(parsed.name === "mcp"
+				? parseSubcommand(parsed.args).verb === "reauth"
+				: Object.hasOwn(PRINT_DISPATCHED_COMMANDS, parsed.name));
+		if (!dispatched) return false;
 		// `/retry` schedules its model turn outside `promptTurn`
 		// (`session.retry()` posts the continuation as a post-prompt task),
 		// so run `promptTurn`'s pre-turn prep BEFORE the command executes:
@@ -312,7 +312,7 @@ async function runPrintModeCore(
 		// stream without the MCP tools turn one gets, strict automation
 		// would pass on a run it should fail, and turn recovery would treat
 		// buffered text as already committed.
-		if (TURNSCHEDULING_COMMANDS.some(pattern => pattern.test(message)) && !(await prepareAgentTurn())) {
+		if (parsed.name === "retry" && !(await prepareAgentTurn())) {
 			// The strict gate refused the turn the command would schedule:
 			// reported, consumed without executing, and the run exits 1.
 			return true;

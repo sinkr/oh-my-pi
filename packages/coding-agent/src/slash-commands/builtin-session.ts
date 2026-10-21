@@ -452,8 +452,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.output(result.message);
 			} catch (error) {
 				await runtime.output(`Stats dashboard failed: ${errorMessage(error)}`);
-				// Print mode turns a failed dashboard launch into a nonzero exit
-				// so `omp -p '/stats'` automation does not report success.
+				// Mark the failure like `usage()` does, for hosts that report a
+				// failed builtin (print mode does not dispatch `/stats`).
 				return commandConsumed({ failed: true });
 			}
 			return commandConsumed();
