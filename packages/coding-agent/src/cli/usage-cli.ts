@@ -708,8 +708,8 @@ function computePolicyDiagnostics(
 			: isWithinUsageReserve(remainingFraction, reservePct / 100)
 				? "inside-reserve"
 				: "eligible";
-	// One decimal, as the text view prints it, so JSON carries 9 rather than 8.999999999999996.
-	return { ...base, state, remainingPct: Math.round(remainingFraction * 1000) / 10 };
+	// Rounded exactly as the text view prints it (`toFixed(1)`), so JSON carries 9 rather than 8.999999999999996.
+	return { ...base, state, remainingPct: Number((remainingFraction * 100).toFixed(1)) };
 }
 
 function formatPolicyLine(policy: UsagePolicyDiagnostics): string {
