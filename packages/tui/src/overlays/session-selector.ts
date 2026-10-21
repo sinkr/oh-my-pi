@@ -15,7 +15,7 @@ import {
 } from "../index";
 import * as path from "node:path";
 import { formatBytes, getProjectDir } from "@oh-my-pi/pi-utils";
-import type { TspPickerGroup, TspPickerItem, TspPickerProps, TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspPickerGroup, TspPickerItem, TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { compact, kv, md, node, span } from "../native/describe";
 import {
 	picker,
@@ -25,7 +25,6 @@ import {
 	type PickerEvent,
 	pickerEvent,
 	pickerHits,
-	pickerSize,
 } from "../native/picker";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
@@ -1426,7 +1425,6 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	#previewTimer: NodeJS.Timeout | undefined;
 	#pickerMemo:
 		| {
-				size: TspPickerProps["size"];
 				view: SessionPickerView;
 				preview: readonly NativeChild[];
 				scope: "folder" | "all";
@@ -1706,7 +1704,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	 * path — and the key-hint footer.
 	 */
 	override describe(cx: DescribeContext): NativeNode {
-		if (cx.supports("picker")) return this.#describePicker(cx);
+		if (cx.supports("picker")) return this.#describePicker();
 		const list = this.#sessionList.describeList();
 		const memo = this.#nativeMemo;
 		if (
@@ -1761,8 +1759,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	 * Tab (the scope toggle, labelled with the scope it switches to) and Esc.
 	 * Untitled unless the caller named it; the placeholder says the scope.
 	 */
-	#describePicker(cx: DescribeContext): NativeNode {
-		const size = this.#standalone ? "screen" : pickerSize(cx, "lg");
+	#describePicker(): NativeNode {
 		const list = this.#sessionList;
 		const view = list.pickerView();
 		const preview = this.#previewFor(list.selectedSession);
@@ -1771,8 +1768,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		const choice = this.#deleteChoice;
 		const memo = this.#pickerMemo;
 		if (
-			memo?.size === size &&
-			memo.view === view &&
+			memo?.view === view &&
 			memo.preview === preview &&
 			memo.scope === this.#scope &&
 			memo.message === message &&
@@ -1804,7 +1800,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				...(title ? { title, ...(folder ? { subtitle: folder } : {}) } : {}),
 				icon: "history",
 				noun: "sessions",
-				size,
+				size: this.#standalone ? "screen" : "lg",
 				layout: "cards",
 				preview: "side",
 				query: view.query,
@@ -1835,7 +1831,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			},
 			preview,
 		);
-		this.#pickerMemo = { size, view, preview, scope: this.#scope, message, errorOpen, choice, node: result };
+		this.#pickerMemo = { view, preview, scope: this.#scope, message, errorOpen, choice, node: result };
 		return result;
 	}
 
