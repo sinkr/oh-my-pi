@@ -4061,7 +4061,7 @@ function trackSubagentSettings(session: AgentSession, capture: WarmReviveCapture
  * already holds what the parked session's turns added.
  */
 export async function replayRevivedAgentStart(session: AgentSession): Promise<void> {
-	await session.extensionRunner?.emitBeforeAgentStart("", undefined, session.baseSystemPrompt);
+	await session.extensionRunner?.emitBeforeAgentStart("", undefined, session.baseSystemPrompt, "revive");
 }
 
 /**

@@ -67,6 +67,8 @@ afterEach(async () => {
 
 /** Holds the extension's tool discovery open while set, as a slow MCP server start would. */
 let discoveryGate: (() => Promise<void>) | undefined;
+/** `reason` of every `before_agent_start` the extension saw, across its bindings. */
+const turnStartReasons: string[] = [];
 
 /**
  * Registers the way the HexRays ida-mcp extension does: discovery starts at `session_start`, and
@@ -106,7 +108,10 @@ const registersAtFirstTurn: ExtensionFactory = pi => {
 		startup = discover();
 	});
 	pi.on("input", ensure);
-	pi.on("before_agent_start", ensure);
+	pi.on("before_agent_start", event => {
+		turnStartReasons.push(event.reason);
+		return ensure();
+	});
 	pi.on("session_shutdown", () => {
 		running = false;
 		startup = undefined;
@@ -121,6 +126,7 @@ interface RecordedRequest {
 
 /** Runs `AGENT_ID` to a finished keep-alive state with `registersAtFirstTurn` loaded, then parks it. */
 async function spawnAndPark() {
+	turnStartReasons.length = 0;
 	const cwd = path.join(root, "home", "work");
 	const artifactsDir = path.join(root, "artifacts");
 	await fs.mkdir(cwd, { recursive: true });
@@ -239,6 +245,8 @@ it("warm-revives with the tools an extension registered at its first turn", asyn
 		expect(wake.tools).toEqual(run.parked.tools);
 		expect(wake.systemPrompt).toEqual(run.parked.systemPrompt);
 		expect(lateToolOutput(revived)).toBe("late_tool ok");
+		// The spawn's prompt, then the revive's replay; the wake turn fires none.
+		expect(turnStartReasons).toEqual(["prompt", "revive"]);
 	} finally {
 		run.close();
 	}

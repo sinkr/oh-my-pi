@@ -1062,11 +1062,13 @@ export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
 }
 
 /**
- * Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider,
- * and once with an empty `prompt` when a parked subagent is revived (its result is discarded).
+ * Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider
+ * (`reason: "prompt"`), and once with an empty `prompt` when a parked subagent is revived
+ * (`reason: "revive"`, result discarded).
  */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
+	reason: "prompt" | "revive";
 	/** Already-transformed text; queued batches join user messages with two newlines, excluding agent companions. */
 	prompt: string;
 	/** Already-normalized user images in delivery order. */
