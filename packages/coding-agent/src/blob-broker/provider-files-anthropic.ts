@@ -104,10 +104,10 @@ export function createAnthropicFileClient(
 	}
 	if (credential.length === 0) throw new Error("Anthropic Files API credential is required");
 
-	const headers = requestHeaders(credential);
 	return {
 		provider: "anthropic",
 		async upload(request: ProviderFileUploadRequest): Promise<ProviderFileHandle> {
+			const headers = requestHeaders(credential);
 			const form = new FormData();
 			form.append("file", uploadedFile(request));
 			const response = await expectAnthropicOk(
@@ -133,6 +133,7 @@ export function createAnthropicFileClient(
 		async delete(handle: ProviderFileHandle): Promise<void> {
 			if (handle.provider !== "anthropic" || !handle.id)
 				throw new Error("Cannot delete an invalid Anthropic file handle");
+			const headers = requestHeaders(credential);
 			await expectAnthropicOk(
 				await fetchImpl(`${ANTHROPIC_FILES_URL}/${encodeURIComponent(handle.id)}`, {
 					method: "DELETE",
