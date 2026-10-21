@@ -107,6 +107,27 @@ describe("grep file pagination", () => {
 		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
 	});
 
+	it("keeps the page line and names only capped files whose section survives the byte cap", async () => {
+		const filler = "x".repeat(500);
+		const names = Array.from({ length: 25 }, (_, index) => `f${String(index).padStart(2, "0")}`);
+		for (const name of names) {
+			await Bun.write(
+				path.join(cwd, `${name}.txt`),
+				Array.from({ length: 21 }, (_, index) => `needle ${name} ${index} ${filler}`).join("\n"),
+			);
+		}
+		const result = await newTool({ context: 0 }).execute("wide-many", { pattern: "needle", path: "." });
+		const text = textOf(result);
+		expect(result.details?.truncation?.truncated).toBe(true);
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
+		expect(text).toContain("Showing files 1-20 of 25. Use skip=20 for the next page");
+		// The byte cap drops later files whole; only files whose 20th match is still in the text are named.
+		const whole = names.filter(name => text.includes(`needle ${name} 19 `));
+		expect(whole.length).toBeGreaterThan(0);
+		expect(whole.length).toBeLessThan(5);
+		expect(text).toContain(`More than 20 matches in ${whole.map(name => `${name}.txt`).join(", ")};`);
+	});
+
 	it("names only capped files the result renders in full", async () => {
 		for (const name of ["a.txt", "b.txt"]) {
 			await Bun.write(path.join(cwd, name), Array.from({ length: 30 }, (_, index) => `needle ${index}`).join("\n"));

@@ -18,7 +18,12 @@ import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_COLUMN,
+	type TruncationResult,
+	truncateHead,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -1100,31 +1105,46 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const matchOutput = formatFileMatches(fileList, isDirectory || isMultiScope, renderMatchesForFile);
 				outputLines.push(...matchOutput.model);
 				displayLines.push(...matchOutput.display);
-				// Name only files rendered with a full cap's worth of matches: a smaller
-				// total limit (`pi_grep`) may have left a capped file short or out.
-				const shownCapped = cappedFiles
+				const trailer = (shownCapped: readonly string[]): string => {
+					const capNotice =
+						shownCapped.length === 0
+							? ""
+							: isMultiScope
+								? `More than ${perFileMatchCap} matches in ${formatCappedFiles(shownCapped)}; grep keeps the first ${perFileMatchCap} per file when searching several. Search one file alone for up to ${SINGLE_FILE_MATCHES}.`
+								: `More than ${perFileMatchCap} matches; grep keeps the first ${perFileMatchCap} in a file. Add a line range (\`path:N-M\`) or narrow the pattern for the rest.`;
+					return [limitMessage, warningNote, capNotice]
+						.filter(Boolean)
+						.map(note => `\n\n${note}`)
+						.join("");
+				};
+				// The page, warning and cap notices sit past the byte cap so a long result
+				// cannot cut them off. A multi-file notice names only files the kept text
+				// shows with a full cap's worth of matches: a smaller total limit (`pi_grep`)
+				// can leave a capped file short, and the byte cap can drop its section. A
+				// single file's notice names no file, so it stays when the byte cap cuts it.
+				const rawOutput = outputLines.join("\n");
+				const cappedCandidates = cappedFiles
 					.map(formatPath)
 					.filter(relativePath => fileMatchCounts.get(relativePath) === perFileMatchCap);
-				const perFileMessage =
-					shownCapped.length === 0
-						? ""
-						: isMultiScope
-							? `More than ${perFileMatchCap} matches in ${formatCappedFiles(shownCapped)}; grep keeps the first ${perFileMatchCap} per file when searching several. Search one file alone for up to ${SINGLE_FILE_MATCHES}.`
-							: `More than ${perFileMatchCap} matches; grep keeps the first ${perFileMatchCap} in a file. Add a line range (\`path:N-M\`) or narrow the pattern for the rest.`;
-				if (limitMessage) {
-					outputLines.push("", limitMessage);
+				let suffix = trailer(cappedCandidates);
+				let truncation: TruncationResult;
+				for (;;) {
+					const reserved = Buffer.byteLength(suffix);
+					truncation = truncateHead(rawOutput, {
+						maxLines: Number.MAX_SAFE_INTEGER,
+						maxBytes: DEFAULT_MAX_BYTES - reserved,
+					});
+					const keptLines = truncation.truncated ? (truncation.outputLines ?? 0) : outputLines.length;
+					const shownCapped = isMultiScope
+						? cappedCandidates.filter(
+								relativePath => (matchOutput.modelEnds.get(relativePath) ?? Infinity) <= keptLines,
+							)
+						: cappedCandidates;
+					suffix = trailer(shownCapped);
+					// Fewer files named can still mean longer names; re-cut until the notice fits its room.
+					if (Buffer.byteLength(suffix) <= reserved) break;
 				}
-				if (warningNote) {
-					outputLines.push("", warningNote);
-				}
-				// The cap notice sits past the byte cap so a long result cannot cut it off.
-				const perFileSuffix = perFileMessage ? `\n\n${perFileMessage}` : "";
-				const rawOutput = outputLines.join("\n");
-				const truncation = truncateHead(rawOutput, {
-					maxLines: Number.MAX_SAFE_INTEGER,
-					maxBytes: DEFAULT_MAX_BYTES - Buffer.byteLength(perFileSuffix),
-				});
-				const output = truncation.content + perFileSuffix;
+				const output = truncation.content + suffix;
 				const displayText = displayLines.join("\n");
 				let displayTargets: Record<string, string> | undefined;
 				// Only grouped headers start with `#`; code-frame rows start with their gutter.
