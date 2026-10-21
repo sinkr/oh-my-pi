@@ -44,7 +44,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		Some("status") if is_status_machine_format(ctx.command) => cleaned,
 		Some("status") => condense_status(&cleaned),
 		// Word diffs carry no per-line `+`/`-` prefix, so they cannot be counted.
-		Some("diff" | "show") if is_word_diff(ctx.command) => cleaned,
+		Some("diff" | "show") if prints_word_patch(ctx.command) => cleaned,
 		Some("diff") if has_token(ctx.command, "--summary") => cleaned,
 		Some("diff") if is_stat_format(ctx.command) => condense_diff_stat(&cleaned),
 		Some("diff") => {
@@ -164,6 +164,25 @@ fn is_word_diff(command: &str) -> bool {
 			},
 			_ => on,
 		})
+}
+
+/// Whether the output holds a word-diff patch: word diff is on, and either a
+/// patch is asked for or no stat or listing option replaces it.
+fn prints_word_patch(command: &str) -> bool {
+	if !is_word_diff(command) {
+		return false;
+	}
+	let parts = || command.split_whitespace();
+	if parts().any(|part| matches!(part, "-p" | "-u" | "--patch")) {
+		return true;
+	}
+	let replaces_patch = is_stat_format(command)
+		|| diff_listing_mode(command).is_some()
+		|| parts().any(|part| {
+			matches!(part, "--shortstat" | "--raw" | "--no-patch" | "-s")
+				|| part.starts_with("--dirstat")
+		});
+	!replaces_patch
 }
 
 #[derive(Clone, Copy)]
@@ -2128,6 +2147,25 @@ mod tests {
 			let out = filter(&ctx, &input, 0);
 			assert_eq!(out.text, cleaned, "{command}");
 		}
+	}
+
+	#[test]
+	fn word_diff_with_a_stat_or_listing_is_still_condensed() {
+		assert!(!prints_word_patch("git diff --word-diff --stat"));
+		assert!(!prints_word_patch("git diff --color-words --name-only"));
+		assert!(!prints_word_patch("git show --word-diff --shortstat HEAD"));
+		assert!(prints_word_patch("git diff --word-diff --stat -p"));
+		assert!(prints_word_patch("git show --color-words HEAD"));
+
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff --word-diff --name-only", &cfg);
+		let mut input = String::new();
+		for idx in 0..40 {
+			let _ = writeln!(input, "src/file{idx}.rs");
+		}
+		let out = filter(&ctx, &input, 0);
+		assert!(out.changed, "{}", out.text);
+		assert!(!out.text.contains("src/file39.rs"), "{}", out.text);
 	}
 
 	#[test]
