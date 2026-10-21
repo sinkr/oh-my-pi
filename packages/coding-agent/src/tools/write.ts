@@ -28,7 +28,7 @@ import {
 	readArchiveEntries,
 	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
-import { detectLineEnding, normalizeToLF } from "../edit/normalize";
+import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/normalize";
 
 import { extractUriScheme, InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
@@ -441,7 +441,7 @@ function applyTextFileConvention(
 	if (!convention) return { text: content, applied };
 	let text = content;
 	if (convention.crlf && text.includes("\n") && !text.includes("\r")) {
-		text = text.replaceAll("\n", "\r\n");
+		text = restoreLineEndings(text, "\r\n");
 		applied.crlf = true;
 	}
 	if (convention.bom && text.length > 0 && !text.startsWith("\uFEFF")) {
@@ -1114,7 +1114,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 			}
-			const conventionNote = textFileConventionNote(applied, finalContent);
+			// A non-final batch entry returns before the batch's formatter runs: claim nothing yet.
+			const conventionNote =
+				batchRequest?.flush === false ? undefined : textFileConventionNote(applied, finalContent);
 			if (conventionNote) {
 				resultText += `\n${conventionNote}`;
 			}

@@ -8,6 +8,8 @@ import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-brid
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { rejectionOf } from "./helpers/rejection";
 
 function createSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	return {
@@ -156,6 +158,33 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 		expect(await fs.readFile(crlfFirst, "latin1")).toBe("x\r\ny\r\n");
 	});
 
+	it("names nothing for a write that a later call in the same batch will format", async () => {
+		const filePath = path.join(tmpDir, "batched.bat");
+		await fs.writeFile(filePath, "@echo off\r\n");
+		const context = {
+			toolCall: {
+				batchId: "batch-1",
+				index: 0,
+				total: 2,
+				toolCalls: [
+					{ id: "call-1", name: "write" },
+					{ id: "call-2", name: "edit" },
+				],
+			},
+		} as unknown as AgentToolContext;
+
+		const result = await new WriteTool(createSession(tmpDir)).execute(
+			"call-1",
+			{ path: filePath, content: "@echo on\n" },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(await fs.readFile(filePath, "latin1")).toBe("@echo on\r\n");
+		expect(resultText(result)).not.toContain("Note: kept");
+	});
+
 	it("sends an ACP editor the content as given, since its save applies the buffer's own convention", async () => {
 		const filePath = path.join(tmpDir, "Editor.cs");
 		await fs.writeFile(filePath, "\uFEFFclass A {}\r\n");
@@ -218,7 +247,7 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 				{ path: filePath, content: "replaced\n" },
 				signal,
 			);
-			await expect(call).rejects.toThrow();
+			await rejectionOf(call);
 			await settled.promise;
 		} finally {
 			fileSpy.mockRestore();
