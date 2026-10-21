@@ -497,21 +497,26 @@ describe("withAuth", () => {
 
 	it("surfaces a thrown credential resolver instead of reporting a missing key", async () => {
 		const cause = new Error("fetch failed: ECONNRESET");
-		let caught: unknown;
-		try {
-			await withAuth(
+		await expect(
+			withAuth(
 				async () => {
 					throw cause;
 				},
 				async () => "never",
-			);
-		} catch (error) {
-			caught = error;
-		}
-		expect(caught).toBeInstanceOf(Error);
-		expect(caught).not.toBeInstanceOf(MissingApiKeyError);
-		expect((caught as Error).message).toContain("fetch failed: ECONNRESET");
-		expect((caught as Error).cause).toBe(cause);
+			),
+		).rejects.toMatchObject({ name: "ConfigurationError", cause });
+	});
+
+	it("keeps a MissingApiKeyError thrown by the resolver", async () => {
+		const missing = new MissingApiKeyError("openai");
+		await expect(
+			withAuth(
+				async () => {
+					throw missing;
+				},
+				async () => "never",
+			),
+		).rejects.toBe(missing);
 	});
 
 	it("still reports a missing key when the resolver resolves without a credential", async () => {

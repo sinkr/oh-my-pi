@@ -303,6 +303,8 @@ export async function withAuth<T>(
 	try {
 		initialKey = await resolveApiKeyOnce(resolver, signal);
 	} catch (error) {
+		// A resolver that deliberately reports a missing key keeps that type.
+		if (error instanceof AIError.MissingApiKeyError) throw error;
 		// A thrown resolver is a broker/OAuth/network failure, not a missing
 		// key — surface the cause instead of masking it as "No API key".
 		throw new AIError.ConfigurationError(
