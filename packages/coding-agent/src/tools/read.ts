@@ -26,10 +26,10 @@ import {
 	logger,
 	parseHeifImageMimeType,
 	parseImageMetadata,
-	peekFile,
 	prompt,
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
+import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import {
 	cfgIdaAvailable,
 	EXECUTABLE_SNIFF_BYTES,
