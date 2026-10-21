@@ -55,6 +55,8 @@ export interface PrintModeOptions {
 export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 /** Error exits cannot hold automation for the full normal drain budget. */
 export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
+/** Largest setTimeout delay before 32-bit overflow (Node/Bun fire in ~1 ms past this). */
+const MAX_TIMER_MS = 2_147_483_647;
 
 /** Sanitize untrusted text (server names, errors) into one stderr-safe line. */
 function singleLine(text: string): string {
@@ -474,10 +476,16 @@ async function runPrintModeCore(
 	if (admittedAgentTurn && !strictMCPFailure && cfgAsyncPrintWake.get(session.settings)) {
 		const { deadline } = options;
 		const deadlineReached = Promise.withResolvers<true>();
-		const deadlineTimer =
-			deadline === undefined
-				? undefined
-				: setTimeout(() => deadlineReached.resolve(true), Math.max(0, deadline - Date.now()));
+		// setTimeout overflows past 2^31-1 ms and fires in ~1 ms (#12375), and `--max-time 600h`
+		// is valid: wait in bounded slices and recheck the absolute deadline after each one.
+		let deadlineTimer: NodeJS.Timeout | undefined;
+		const armDeadline = (): void => {
+			if (deadline === undefined) return;
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) deadlineReached.resolve(true);
+			else deadlineTimer = setTimeout(armDeadline, Math.min(remaining, MAX_TIMER_MS));
+		};
+		armDeadline();
 		try {
 			await session.waitForIdle();
 			while (session.hasPendingAsyncWork() && !session.isDisposed && !signalTeardownActive()) {

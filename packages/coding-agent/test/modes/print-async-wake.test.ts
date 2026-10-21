@@ -18,9 +18,14 @@ function assistant(text: string): AssistantMessage {
 
 /**
  * Session whose first prompt starts `jobs` background jobs. Each settle delivers
- * one job result, which runs a follow-up turn answering `result <n>`.
+ * one job result, which runs a follow-up turn answering `result <n>`; the first
+ * follow-up turn starts `jobsStartedByFirstWake` more jobs.
  */
-function sessionWithJobs(settings: Settings, jobs: number, options: { jobsNeverFinish?: boolean } = {}) {
+function sessionWithJobs(
+	settings: Settings,
+	jobs: number,
+	options: { jobsNeverFinish?: boolean; jobsStartedByFirstWake?: number; settleMs?: number } = {},
+) {
 	const events: string[] = [];
 	let pending = 0;
 	let last: AssistantMessage | undefined;
@@ -54,8 +59,12 @@ function sessionWithJobs(settings: Settings, jobs: number, options: { jobsNeverF
 		settleAsyncWork: async () => {
 			// a job that never finishes on its own: only the deadline can end the wait
 			if (options.jobsNeverFinish) await Promise.withResolvers<void>().promise;
+			// Real delay on purpose: the oversized-deadline test needs Bun's real setTimeout
+			// overflow (an oversized delay fires in ~1 ms) to beat a settle that takes longer.
+			if (options.settleMs) await Bun.sleep(options.settleMs);
 			delivered++;
 			pending--;
+			if (delivered === 1) pending += options.jobsStartedByFirstWake ?? 0;
 			events.push(`wake:${delivered}`);
 			last = assistant(`result ${delivered}`);
 		},
@@ -110,6 +119,42 @@ describe("print mode async-result wake", () => {
 			"dispose(pending=0)",
 		]);
 		expect(lines.join("")).toBe("result 2\n");
+	});
+
+	test("with async.printWake, a job started by a follow-up turn is waited for and answers last", async () => {
+		const { lines } = captureStdout();
+		const settings = Settings.isolated();
+		cfgAsyncPrintWake.override(settings, true);
+		const { session, events } = sessionWithJobs(settings, 1, { jobsStartedByFirstWake: 1 });
+
+		expect(await runPrintMode(session, { mode: "text", messages: ["go"] })).toBe(0);
+
+		expect(events).toEqual([
+			"prompt:go",
+			"wake:1",
+			"wake:2",
+			"advisor-drain",
+			"advisor-catchup",
+			"dispose(pending=0)",
+		]);
+		expect(lines.join("")).toBe("result 2\n");
+	});
+
+	test("with async.printWake, a --max-time beyond the 32-bit timer range does not expire early", async () => {
+		const { lines } = captureStdout();
+		const settings = Settings.isolated();
+		cfgAsyncPrintWake.override(settings, true);
+		const { session, events } = sessionWithJobs(settings, 1, { settleMs: 30 });
+
+		const code = await runPrintMode(session, {
+			mode: "text",
+			messages: ["go"],
+			deadline: Date.now() + 600 * 60 * 60 * 1000,
+		});
+
+		expect(code).toBe(0);
+		expect(events).toEqual(["prompt:go", "wake:1", "advisor-drain", "advisor-catchup", "dispose(pending=0)"]);
+		expect(lines.join("")).toBe("result 1\n");
 	});
 
 	test("with async.printWake, a run that never reached the model does not wait on background work", async () => {
