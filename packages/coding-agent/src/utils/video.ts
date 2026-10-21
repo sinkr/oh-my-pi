@@ -107,25 +107,44 @@ export interface VideoMetadata {
 /** Raised when ffmpeg/ffprobe is missing or a video operation fails. Message is user-facing. */
 export class VideoError extends Error {}
 
-let cachedFpsModeFlag: string[] | null = null;
+interface FfmpegRelease {
+	readonly major: number;
+	readonly minor: number;
+}
+
+let ffmpegReleaseProbe: { binary: string; release: Promise<FfmpegRelease | undefined> } | undefined;
+
+/** Major and minor release from `ffmpeg -version`, probed once per binary; undefined for unnumbered (git) builds. */
+function ffmpegRelease(): Promise<FfmpegRelease | undefined> {
+	const binary = requireMediaBinary("ffmpeg");
+	if (ffmpegReleaseProbe?.binary !== binary) {
+		ffmpegReleaseProbe = { binary, release: probeFfmpegRelease(binary) };
+	}
+	return ffmpegReleaseProbe.release;
+}
+
+async function probeFfmpegRelease(binary: string): Promise<FfmpegRelease | undefined> {
+	try {
+		const child = Bun.spawn([binary, "-version"], { stdout: "pipe", stderr: "pipe" });
+		const [stdout] = await Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]);
+		const match = /^ffmpeg version n?(\d+)\.(\d+)/.exec(stdout);
+		return match ? { major: Number(match[1]), minor: Number(match[2]) } : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 /**
  * Frame-passthrough flag across the ffmpeg 5.1 rename (`-vsync 0` became
- * `-fps_mode passthrough`, and ffmpeg 9 removed `-vsync` entirely). Probed
- * once from `ffmpeg -version`; unknown output keeps the modern spelling.
+ * `-fps_mode passthrough`, and ffmpeg 9 removed `-vsync` entirely). Unknown
+ * releases keep the modern spelling.
  */
 async function framePassthroughFlag(): Promise<string[]> {
-	if (cachedFpsModeFlag) return cachedFpsModeFlag;
 	try {
-		const ffmpeg = requireMediaBinary("ffmpeg");
-		const child = Bun.spawn([ffmpeg, "-version"], { stdout: "pipe", stderr: "pipe" });
-		const [stdout, ,] = await Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]);
-		const major = Number.parseInt(stdout.split("\n")[0]?.split("version")[1]?.trim().split(".")[0] ?? "", 10);
-		cachedFpsModeFlag = Number.isFinite(major) && major < 5 ? ["-vsync", "0"] : ["-fps_mode", "passthrough"];
-	} catch {
-		cachedFpsModeFlag = ["-fps_mode", "passthrough"];
-	}
-	return cachedFpsModeFlag;
+		const release = await ffmpegRelease();
+		if (release && release.major < 5) return ["-vsync", "0"];
+	} catch {}
+	return ["-fps_mode", "passthrough"];
 }
 
 /** Resolve a system media binary or throw a user-facing install hint. */
@@ -368,6 +387,32 @@ export async function extractVideoFramePng(
 			throw new VideoError(`No frame at ${at} — it may be past the end of the video.`);
 		}
 		return { data: Buffer.from(bytes).toBase64(), mimeType: "image/png" };
+	} finally {
+		await tmp.remove().catch(() => {});
+	}
+}
+
+/**
+ * Decode a HEIC, HEIF or AVIF still, which the image pipeline cannot read, to a full-resolution
+ * JPEG, which keeps a camera photo far below the image size cap where PNG would not. Camera
+ * photos are tiled, and before 8.1 the ffmpeg CLI decodes only one tile of them.
+ */
+export async function decodeStillImageJpeg(absolutePath: string, signal?: AbortSignal): Promise<Uint8Array> {
+	const release = await ffmpegRelease();
+	if (release && (release.major < 8 || (release.major === 8 && release.minor < 1))) {
+		throw new VideoError(
+			`ffmpeg ${release.major}.${release.minor} cannot decode tiled HEIF images such as camera photos; ffmpeg 8.1 or newer can.`,
+		);
+	}
+	const tmp = await TempDir.create("@omp-still-image-");
+	try {
+		const out = tmp.join("image.jpg");
+		await runFfmpeg(["-i", absolutePath, "-frames:v", "1", "-q:v", "3", out], signal);
+		const bytes = await Bun.file(out)
+			.bytes()
+			.catch(() => null);
+		if (!bytes || bytes.length === 0) throw new VideoError("ffmpeg wrote no image.");
+		return bytes;
 	} finally {
 		await tmp.remove().catch(() => {});
 	}

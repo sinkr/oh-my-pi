@@ -8,6 +8,7 @@
  * must not become a containment bypass).
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,7 +18,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter, LocalProtocolHandler, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, parseImageMetadata, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const hasFfprobe = Boolean($which("ffprobe"));
 
@@ -45,6 +46,37 @@ const OTHER_TINY_PNG = Buffer.from(
 );
 const TINY_SVG =
 	'<svg xmlns="http://www.w3.org/2000/svg" width="12" height="7"><rect width="12" height="7" fill="red"/></svg>';
+
+// Red stills: a 1100x8 HEIC that macOS `sips` stores as three tiles, as cameras store
+// photos, and a 16x8 AVIF from ffmpeg's libaom.
+const TILED_HEIC = Buffer.from(
+	"AAAAJGZ0eXBoZWljAAAAAG1pZjFNaVBybWlhZk1pSEJoZWljAAACTG1ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAHBpY3QAAAAAAAAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAAADnBpdG0AAAAAAAQAAABiaWluZgAAAAAABAAAABVpbmZlAgAAAQABAABodmMxAAAAABVpbmZlAgAAAQACAABodmMxAAAAABVpbmZlAgAAAQADAABodmMxAAAAABVpbmZlAgAAAAAEAABncmlkAAAAAB5pcmVmAAAAAAAAABJkaW1nAAQAAwABAAIAAwAAAQ1pcHJwAAAA2GlwY28AAAATY29scm5jbHgAAgACAAaAAAAADGNsbGkAywBAAAAAFGlzcGUAAAAAAAACAAAAAgAAAAAUaXNwZQAAAAAAAARMAAAACAAAAAlpcm90AAAAABBwaXhpAAAAAAMICAgAAABwaHZjQwEDcAAAALAAAAAAAFrwAPz9+PgAAAsDoAABABdAAQwB//8DcAAAAwCwAAADAAADAFpwJKEAAQAiQgEBA3AAAAMAsAAAAwAAAwBaoAQCAIBYh7kWVTcCAgYAgKIAAQAJRAHAYXLIRFNkAAAALWlwbWEAAAAAAAAABAABBIOBAocAAgSDgQKHAAMEg4EChwAEBYECBAaFAAAAEGlkYXQAAAACBEwACAAAAFBpbG9jAQAAAEQAAAQAAQAAAAAAAQAAAoAAAADSAAIAAAAAAAEAAANSAAAA0gADAAAAAAABAAAEJAAAAO8ABAABAAAAAQAAAAAAAAAIAAAAAW1kYXQAAAAAAAACowAAAM4oAa+EDVHmmmFkkkEDDDCiwBp7P/rm//oPsuNmXlF3/zaTVkTH7VnCaaptNde15RCEyTsAAAMAAAMAIKA8DyD1RTpAAAADAAADAF1ANCY9WAAAAwAAAwAAEvA8WAAAAwAAAwAAAwBIwAAAAwAAAwAAAwAAP6AAAAMAAAMAAAMAMCAAAAMAAAMAAAd8AAADAAADAADdgAAAAwAAAwAQ0AAAAwAAAwDOgAAAAwAABtQAAAMAACVgAAADAACUgAAAAwACLgAAAwAFbAAAAwAOGAAAAM4oAa+EDVHmmmFkkkEDDDCiwBp7P/rm//oPsuNmXlF3/zaTVkTH7VnCaaptNde15RCEyTsAAAMAAAMAIKA8DyD1RTpAAAADAAADAF1ANCY9WAAAAwAAAwAAEvA8WAAAAwAAAwAAAwBIwAAAAwAAAwAAAwAAP6AAAAMAAAMAAAMAMCAAAAMAAAMAAAd8AAADAAADAADdgAAAAwAAAwAQ0AAAAwAAAwDOgAAAAwAABtQAAAMAACVgAAADAACUgAAAAwACLgAAAwAFbAAAAwAOGAAAAOsoAa+EDxR40aMFiRIgQGDBgoWAGns/+ub/+g+y42ZeUXf/NpNWRMftWcJpqm0117RcXovX/O+Dh1RiFt3xtwF9AC0nNJMfbUjamlQnNbGheAoeAAADAAAU0DwPIbP85AAAAwAAAwAALKA0Jj1YAAADAAADAAAS8DxYAAADAAADAAADAEjAAAADAAADAAADAAA/oAAAAwAAAwAAAwAwIAAAAwAAAwAAB3wAAAMAAAMAAN2AAAADAAADABDQAAADAAADAM6AAAADAAAG1AAAAwAAJWAAAAMAAJSAAAADAAIuAAADAAVsAAADAA4Y",
+	"base64",
+);
+const TINY_AVIF = Buffer.from(
+	"AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAAD5bWV0YQAAAAAAAAAvaGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAFBpY3R1cmVIYW5kbGVyAAAAAA5waXRtAAAAAAABAAAAHmlsb2MAAAAARAAAAQABAAAAAQAAASEAAAAbAAAAKGlpbmYAAAAAAAEAAAAaaW5mZQIAAAAAAQAAYXYwMUNvbG9yAAAAAGppcHJwAAAAS2lwY28AAAAUaXNwZQAAAAAAAAAQAAAACAAAABBwaXhpAAAAAAMICAgAAAAMYXYxQ4EADAAAAAATY29scm5jbHgAAgACAAIAAAAAF2lwbWEAAAAAAAAAAQABBAECgwQAAAAjbWRhdAoFGAy/tgEyEhgAAABQAAAAD1ltwbcN3z7Hqg==",
+	"base64",
+);
+
+// What this machine's ffmpeg makes of the tiled HEIC: ffmpeg 8.1+ assembles the tiles, 7.x
+// decodes only the first one, older builds and machines without ffmpeg cannot read it.
+const heifTiles = ((): "assembled" | "one-tile" | "unreadable" => {
+	const ffmpeg = $which("ffmpeg");
+	if (!ffmpeg) return "unreadable";
+	const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "read-heif-probe-"));
+	try {
+		fsSync.writeFileSync(path.join(dir, "in.heic"), TILED_HEIC);
+		const decoded = Bun.spawnSync([ffmpeg, "-v", "error", "-i", "in.heic", "-frames:v", "1", "out.png"], {
+			cwd: dir,
+		});
+		if (decoded.exitCode !== 0) return "unreadable";
+		return parseImageMetadata(fsSync.readFileSync(path.join(dir, "out.png")))?.width === 1100
+			? "assembled"
+			: "one-tile";
+	} finally {
+		fsSync.rmSync(dir, { recursive: true, force: true });
+	}
+})();
 
 function makeSession(testDir: string, textOnlyModel = false): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
@@ -193,6 +225,64 @@ describe("read local:// images", () => {
 
 		expect(result.content.some(content => content.type === "image")).toBe(false);
 		expect(joinText(result.content)).toContain("<svg");
+	});
+
+	it.skipIf(heifTiles !== "assembled").each([
+		["photo.heic", TILED_HEIC, "image/heic", 1100],
+		["photo.avif", TINY_AVIF, "image/avif", 16],
+	])("decodes %s whole into an inline JPEG", async (name, bytes, mimeType, width) => {
+		await Bun.write(path.join(localRoot, name), bytes);
+		const tool = new ReadTool(makeSession(testDir));
+
+		const result = await tool.execute("call", { path: `local://${name}` });
+
+		const image = result.content.find(content => content.type === "image");
+		expect(image?.type === "image" ? image.mimeType : undefined).toBe("image/jpeg");
+		const jpeg = image?.type === "image" ? Buffer.from(image.data, "base64") : Buffer.alloc(0);
+		expect(parseImageMetadata(jpeg)).toMatchObject({ width, height: 8 });
+		expect(joinText(result.content)).toContain(`Read image file [${mimeType}] (displayed as image/jpeg)`);
+	});
+
+	it.skipIf(heifTiles !== "one-tile")("refuses a tiled HEIC that this ffmpeg would show as one tile", async () => {
+		await Bun.write(path.join(localRoot, "photo.heic"), TILED_HEIC);
+		const tool = new ReadTool(makeSession(testDir));
+
+		const error = await tool.execute("call", { path: "local://photo.heic" }).catch(e => e);
+
+		expect(String(error?.message ?? error)).toContain("cannot decode tiled HEIF images");
+	});
+
+	it("returns HEIC metadata plus a question hint for text-only models", async () => {
+		await Bun.write(path.join(localRoot, "photo.heic"), TILED_HEIC);
+		const tool = new ReadTool(makeSession(testDir, true));
+
+		const result = await tool.execute("call", { path: "local://photo.heic" });
+
+		const text = joinText(result.content);
+		expect(text).toContain("- MIME: image/heic");
+		expect(text).toContain("local://photo.heic?q=<question>");
+	});
+
+	it("names a conversion when ffmpeg cannot decode a HEIC", async () => {
+		const corrupt = Buffer.concat([TILED_HEIC.subarray(0, 36), new Uint8Array(64)]);
+		await Bun.write(path.join(localRoot, "broken.heic"), corrupt);
+		const tool = new ReadTool(makeSession(testDir));
+
+		const error = await tool.execute("call", { path: "local://broken.heic" }).catch(e => e);
+
+		const message = String(error?.message ?? error);
+		expect(message).toContain("Could not decode HEIC image");
+		expect(message).toContain("Convert it to PNG or JPEG");
+	});
+
+	it("still refuses an MP4-branded file without a video extension as binary", async () => {
+		const mp4Header = Buffer.from("0000001c6674797069736f6d0000020069736f6d69736f326d703431", "hex");
+		await Bun.write(path.join(localRoot, "clip.bin"), Buffer.concat([mp4Header, new Uint8Array(64)]));
+		const tool = new ReadTool(makeSession(testDir));
+
+		const result = await tool.execute("call", { path: "local://clip.bin" });
+
+		expect(joinText(result.content)).toContain("Cannot read binary file");
 	});
 
 	it("still reads a local:// text file as text", async () => {
