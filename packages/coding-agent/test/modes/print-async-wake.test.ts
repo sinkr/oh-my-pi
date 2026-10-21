@@ -19,17 +19,29 @@ function assistant(text: string): AssistantMessage {
 /**
  * Session whose first prompt starts `jobs` background jobs. Each settle delivers
  * one job result, which runs a follow-up turn answering `result <n>`; the first
- * follow-up turn starts `jobsStartedByFirstWake` more jobs.
+ * follow-up turn starts `jobsStartedByFirstWake` more jobs. `retryBackoff` puts the
+ * prompt turn or the first follow-up turn into a retry backoff that, as in the real
+ * session, keeps `waitForIdle()` pending until dispose cancels the retry.
  */
 function sessionWithJobs(
 	settings: Settings,
 	jobs: number,
-	options: { jobsNeverFinish?: boolean; jobsStartedByFirstWake?: number; settleMs?: number } = {},
+	options: {
+		jobsNeverFinish?: boolean;
+		jobsStartedByFirstWake?: number;
+		settleMs?: number;
+		retryBackoff?: "prompt" | "follow-up";
+	} = {},
 ) {
 	const events: string[] = [];
 	let pending = 0;
 	let last: AssistantMessage | undefined;
 	let delivered = 0;
+	let retrying = false;
+	const retryCancelled = Promise.withResolvers<void>();
+	const waitForIdle = async () => {
+		if (retrying) await retryCancelled.promise;
+	};
 	const session = {
 		extensionRunner: undefined,
 		subscribe: () => () => {},
@@ -44,7 +56,7 @@ function sessionWithJobs(
 		},
 		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => events.push("advisor-drain"),
-		waitForIdle: async () => {},
+		waitForIdle,
 		setTextOutputCommitted: () => {},
 		waitForAdvisorCatchup: async () => {
 			events.push("advisor-catchup");
@@ -54,6 +66,7 @@ function sessionWithJobs(
 			events.push(`prompt:${text}`);
 			pending = jobs;
 			last = assistant("started");
+			retrying = options.retryBackoff === "prompt";
 		},
 		hasPendingAsyncWork: () => pending > 0,
 		settleAsyncWork: async () => {
@@ -67,9 +80,12 @@ function sessionWithJobs(
 			if (delivered === 1) pending += options.jobsStartedByFirstWake ?? 0;
 			events.push(`wake:${delivered}`);
 			last = assistant(`result ${delivered}`);
+			if (delivered === 1 && options.retryBackoff === "follow-up") retrying = true;
+			await waitForIdle();
 		},
 		getLastAssistantMessage: () => last,
 		dispose: async () => {
+			retryCancelled.resolve();
 			events.push(`dispose(pending=${pending})`);
 		},
 	};
@@ -199,5 +215,30 @@ describe("print mode async-result wake", () => {
 		expect(code).toBe(1);
 		expect(events).toEqual(["prompt:go", "advisor-drain", "dispose(pending=1)"]);
 		expect(lines.join("")).toBe("");
+	});
+
+	test("with async.printWake, --max-time during a follow-up turn's retry backoff still disposes and fails the run", async () => {
+		const { lines } = captureStdout();
+		const settings = Settings.isolated();
+		cfgAsyncPrintWake.override(settings, true);
+		const { session, events } = sessionWithJobs(settings, 1, { retryBackoff: "follow-up" });
+
+		const code = await runPrintMode(session, { mode: "text", messages: ["go"], deadline: Date.now() + 50 });
+
+		expect(code).toBe(1);
+		expect(events).toEqual(["prompt:go", "wake:1", "advisor-drain", "dispose(pending=0)"]);
+		expect(lines.join("")).toBe("");
+	});
+
+	test("with async.printWake, --max-time during the prompt turn's retry backoff with a job pending still disposes", async () => {
+		captureStdout();
+		const settings = Settings.isolated();
+		cfgAsyncPrintWake.override(settings, true);
+		const { session, events } = sessionWithJobs(settings, 1, { retryBackoff: "prompt" });
+
+		const code = await runPrintMode(session, { mode: "text", messages: ["go"], deadline: Date.now() + 50 });
+
+		expect(code).toBe(1);
+		expect(events).toEqual(["prompt:go", "advisor-drain", "dispose(pending=1)"]);
 	});
 });

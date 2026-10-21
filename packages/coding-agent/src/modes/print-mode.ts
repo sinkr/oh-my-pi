@@ -470,8 +470,9 @@ async function runPrintModeCore(
 	// owned job or delivery remains (a follow-up turn may start new jobs). This runs
 	// before the headless advisor drain because these follow-ups are primary turns
 	// whose answer print mode still reports. The `--max-time` deadline only aborts
-	// running turns, so idle waiting checks it here; reaching it cancels the jobs
-	// (dispose below) and fails the run.
+	// running turns, not idle waiting or a retry backoff sleep, so every wait here
+	// races it; reaching it cancels the jobs and any pending retry (dispose below)
+	// and fails the run.
 	let asyncWaitExpired = false;
 	if (admittedAgentTurn && !strictMCPFailure && cfgAsyncPrintWake.get(session.settings)) {
 		const { deadline } = options;
@@ -486,9 +487,16 @@ async function runPrintModeCore(
 			else deadlineTimer = setTimeout(armDeadline, Math.min(remaining, MAX_TIMER_MS));
 		};
 		armDeadline();
+		// Dispose cancels the jobs and retry recovery; an abandoned wait then resolves or rejects unobserved.
+		const expires = async (work: Promise<void>): Promise<boolean> => {
+			if (!(await Promise.race([work.then(() => false), deadlineReached.promise]))) return false;
+			work.catch(() => {});
+			return true;
+		};
 		try {
-			await session.waitForIdle();
-			while (session.hasPendingAsyncWork() && !session.isDisposed && !signalTeardownActive()) {
+			// Without owned jobs a late primary turn is not this wait's business: it keeps its own exit path.
+			asyncWaitExpired = (await expires(session.waitForIdle())) && session.hasPendingAsyncWork();
+			while (!asyncWaitExpired && session.hasPendingAsyncWork() && !session.isDisposed && !signalTeardownActive()) {
 				// Checked synchronously too: an already-due timer fires only in the timers
 				// phase, after a settle of finished work would have resolved. The deadline
 				// stops new waits; a settle that already finished is kept: its follow-up turn
@@ -498,13 +506,7 @@ async function runPrintModeCore(
 					asyncWaitExpired = true;
 					break;
 				}
-				const settle = session.settleAsyncWork();
-				if (await Promise.race([settle.then(() => false), deadlineReached.promise])) {
-					// Dispose cancels the jobs; the abandoned settle then resolves or rejects unobserved.
-					settle.catch(() => {});
-					asyncWaitExpired = true;
-					break;
-				}
+				asyncWaitExpired = await expires(session.settleAsyncWork());
 			}
 		} finally {
 			clearTimeout(deadlineTimer);
@@ -517,7 +519,9 @@ async function runPrintModeCore(
 	// From this point onward a late blocker must be recorded without starting a
 	// primary turn whose response print mode would never emit.
 	session.prepareForHeadlessAdvisorDrain();
-	await session.waitForIdle();
+	// Past --max-time a follow-up turn can still sit in retry backoff, which this wait
+	// includes and only dispose cancels: skip it so teardown can run.
+	if (!asyncWaitExpired) await session.waitForIdle();
 
 	// Read via the session accessor, not the raw state tail: a classifier
 	// refusal is pruned from active context at settle, and an aborted turn
