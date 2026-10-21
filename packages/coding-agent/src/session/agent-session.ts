@@ -12026,6 +12026,11 @@ export class AgentSession implements SettingsScope {
 		return this.#irc.waitForReplies();
 	}
 
+	/** Whether a message from `from` still waits here for a turn of its own (a reply can still come). */
+	hasQueuedIrcFrom(from: string): boolean {
+		return this.#irc.hasQueuedFrom(from);
+	}
+
 	/** Registers an in-flight IRC wake-turn relay. */
 	trackIrcReply(pending: Promise<void>): void {
 		this.#irc.trackReply(pending);

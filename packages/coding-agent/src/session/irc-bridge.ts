@@ -68,6 +68,19 @@ export class IrcBridge {
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
 	}
 
+	/** Whether a message from `from` is still queued for a turn yet to run. */
+	hasQueuedFrom(from: string): boolean {
+		return [this.#interrupts, this.#asides, this.#deferredWakes].some(queue =>
+			queue.some(
+				record =>
+					record.role === "custom" &&
+					record.details !== null &&
+					typeof record.details === "object" &&
+					Reflect.get(record.details, "from") === from,
+			),
+		);
+	}
+
 	/** Waits until every in-flight wake-turn relay has settled. */
 	async waitForReplies(): Promise<void> {
 		while (this.#pendingReplies.size > 0) {
