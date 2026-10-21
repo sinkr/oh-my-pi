@@ -43,6 +43,8 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 	let text = match ctx.subcommand {
 		Some("status") if is_status_machine_format(ctx.command) => cleaned,
 		Some("status") => condense_status(&cleaned),
+		// Word diffs carry no per-line `+`/`-` prefix, so they cannot be counted.
+		Some("diff" | "show") if is_word_diff(ctx.command) => cleaned,
 		Some("diff") if has_token(ctx.command, "--summary") => cleaned,
 		Some("diff") if is_stat_format(ctx.command) => condense_diff_stat(&cleaned),
 		Some("diff") => {
@@ -144,6 +146,13 @@ fn is_stat_format(command: &str) -> bool {
 	command
 		.split_whitespace()
 		.any(|part| part == "--stat" || part.starts_with("--stat="))
+}
+
+/// `--word-diff-regex` implies `--word-diff` (git-diff(1)).
+fn is_word_diff(command: &str) -> bool {
+	["--word-diff", "--word-diff-regex", "--color-words"]
+		.iter()
+		.any(|flag| has_flag(command, flag))
 }
 
 #[derive(Clone, Copy)]
@@ -2082,6 +2091,32 @@ mod tests {
 			out.text
 		);
 		assert!(out.text.contains("  ----\n"), "{}", out.text);
+	}
+
+	#[test]
+	fn word_diffs_are_not_summarized() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		// Color mode puts a line's old and new words on one line, so a changed
+		// Markdown rule starts `---` with no unified-diff prefix. The hunk
+		// header's section text keeps the input past the small-output
+		// passthrough.
+		let input = format!(
+			"diff --git a/doc.md b/doc.md\nindex 1..2 100644\n--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 \
+			 @@ {}\n\x1b[31m---old\x1b[m\x1b[32m+++new\x1b[m\n",
+			"x".repeat(17 * 1024)
+		);
+		let cleaned = primitives::strip_ansi(&input);
+		for command in [
+			"git diff --color-words",
+			"git diff --word-diff=color",
+			"git diff --word-diff-regex=.",
+			"git show --word-diff HEAD",
+		] {
+			let subcommand = command.split_whitespace().nth(1);
+			let ctx = test_ctx(subcommand, command, &cfg);
+			let out = filter(&ctx, &input, 0);
+			assert_eq!(out.text, cleaned, "{command}");
+		}
 	}
 
 	#[test]
