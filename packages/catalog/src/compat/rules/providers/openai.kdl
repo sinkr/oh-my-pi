@@ -193,6 +193,15 @@ provider "openai" {
 			cache-write 25.0
 		}
 	}
+	// GPT-6 Sol and Luna use the same >272K whole-request multipliers as Astra.
+	// Derive the tier from each API card so upstream price changes carry through.
+	models "gpt-6-sol" "gpt-6-luna" {
+		long-context-cost {
+			input-threshold 272000
+			multiplier 2.0
+			output-multiplier 1.5
+		}
+	}
 	// API Ultrafast is 6x the standard card on both context tiers: GPT-6 Astra
 	// $60/$6/$75/$300 and GPT-6.1 Sol $12/$0.60/$15/$60 per 1M short-context.
 	models "gpt-6-astra*" "gpt-6.1-sol*" {
