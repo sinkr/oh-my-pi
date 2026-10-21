@@ -148,11 +148,22 @@ fn is_stat_format(command: &str) -> bool {
 		.any(|part| part == "--stat" || part.starts_with("--stat="))
 }
 
-/// `--word-diff-regex` implies `--word-diff` (git-diff(1)).
+/// The last word-diff option wins: `--word-diff=none` turns it off again, and
+/// `--word-diff-regex` and `--color-words` turn it on (git-diff(1)).
 fn is_word_diff(command: &str) -> bool {
-	["--word-diff", "--word-diff-regex", "--color-words"]
-		.iter()
-		.any(|flag| has_flag(command, flag))
+	command
+		.split_whitespace()
+		.fold(false, |on, part| match part {
+			"--word-diff=none" => false,
+			"--word-diff" | "--word-diff-regex" | "--color-words" => true,
+			_ if part.starts_with("--word-diff=")
+				|| part.starts_with("--word-diff-regex=")
+				|| part.starts_with("--color-words=") =>
+			{
+				true
+			},
+			_ => on,
+		})
 }
 
 #[derive(Clone, Copy)]
@@ -2117,6 +2128,15 @@ mod tests {
 			let out = filter(&ctx, &input, 0);
 			assert_eq!(out.text, cleaned, "{command}");
 		}
+	}
+
+	#[test]
+	fn word_diff_none_turns_word_diff_off_again() {
+		assert!(!is_word_diff("git diff --word-diff=none"));
+		assert!(!is_word_diff("git diff --color-words --word-diff=none"));
+		assert!(is_word_diff("git diff --word-diff=none --word-diff-regex=."));
+		assert!(is_word_diff("git show --word-diff=plain HEAD"));
+		assert!(!is_word_diff("git diff --stat"));
 	}
 
 	#[test]
