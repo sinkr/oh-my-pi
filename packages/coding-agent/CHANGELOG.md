@@ -60,7 +60,7 @@
 
 ### Fixed
 
-- Fixed a subagent woken after it was parked losing the tools an extension registers at its first prompt (such as HexRays `ida-mcp`'s `ida_*` tools), which also made its first request after waking miss the prompt cache
+- Fixed a subagent woken after it was parked losing the tools an extension registers at its first prompt (such as HexRays `ida-mcp`'s `ida_*` tools), which also made its first request after waking miss the prompt cache ([#16597](https://github.com/can1357/oh-my-pi/pull/16597) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.5] - 2026-10-21
 
