@@ -1387,6 +1387,30 @@ describe("wave 3 commands", () => {
 		expect(compactCalled).toBe(true);
 		expect(output[0]).toContain("Compaction complete.");
 	});
+
+	it("/compact: marks the run failed when session.compact throws", async () => {
+		// Print mode turns a failed compaction into a nonzero exit; the
+		// `failed` marker is what maps the operational failure to that status.
+		const { output, session, runtime } = createRuntime();
+		session.compact = async (_args?: string) => {
+			throw new Error("no available model");
+		};
+		const result = await executeAcpBuiltinSlashCommand("/compact", runtime);
+		expect(result).toEqual({ consumed: true, failed: true });
+		expect(output[0]).toContain("Compaction failed: no available model");
+	});
+
+	it("/handoff: marks the run failed when the handoff fails", async () => {
+		// Same contract as /compact: an operational failure (here: nothing to
+		// hand off) must reach print mode's exit status, not only its output.
+		const { output, session, runtime } = createRuntime();
+		session.handoff = async (_instr?: string) => {
+			throw new Error("nothing to hand off");
+		};
+		const result = await executeAcpBuiltinSlashCommand("/handoff", runtime);
+		expect(result).toEqual({ consumed: true, failed: true });
+		expect(output.join("\n")).toContain("Handoff failed: nothing to hand off");
+	});
 });
 
 describe("wave 4 commands", () => {
