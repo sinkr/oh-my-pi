@@ -296,6 +296,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 			const transition = Promise.withResolvers<void>();
 			state.transition = transition.promise;
 			state.sessionId = "provisional";
+			let replay: Mock<CollabSocket["send"]> | undefined;
 			try {
 				transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 2);
 				transport.onFrame!({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
@@ -308,8 +309,10 @@ describe("collab host registry lifecycle (#6099)", () => {
 					if (completion !== "commit") state.sessionId = original;
 					if (completion === "writer-left") transport.onControl?.({ t: "peer-left", peer: 1 });
 					state.transition = undefined;
+					transition.resolve();
 					if (completion === "relay-reconnect") {
 						transport.onRoomRecreated?.();
+						replay = spyOn(transport, "send");
 						transport.onFrame!(
 							{
 								t: "hello",
@@ -320,10 +323,12 @@ describe("collab host registry lifecycle (#6099)", () => {
 							1,
 						);
 					}
-					transition.resolve();
 					await setImmediate();
 					if (completion === "relay-reconnect") {
 						expect(outcome).toBeUndefined();
+						expect(
+							replay?.mock.calls.filter(([frame]) => typeof frame !== "string" && frame.t === "ui-request"),
+						).toHaveLength(1);
 						transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 1);
 					}
 					if (completion === "writer-left") {
@@ -353,6 +358,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 							: { kind: "unavailable" },
 				);
 			} finally {
+				replay?.mockRestore();
 				state.transition = undefined;
 				transition.resolve();
 			}

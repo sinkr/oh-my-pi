@@ -828,6 +828,7 @@ export class CollabHost {
 		socket.sendBatch(this.#snapshotChunks(snapshotEntries.json, snapshotEntries.bytes), fromPeer);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
+				if (pending.responsePending) continue;
 				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
