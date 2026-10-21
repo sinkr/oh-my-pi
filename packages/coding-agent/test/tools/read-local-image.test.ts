@@ -8,7 +8,6 @@
  * must not become a containment bypass).
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,6 +17,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter, LocalProtocolHandler, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { decodeStillImageJpeg } from "@oh-my-pi/pi-coding-agent/utils/video";
 import { $which, parseImageMetadata, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const hasFfprobe = Boolean($which("ffprobe"));
@@ -60,23 +60,20 @@ const TINY_AVIF = Buffer.from(
 
 // What this machine's ffmpeg makes of the tiled HEIC: ffmpeg 8.1+ assembles the tiles, 7.x
 // decodes only the first one, older builds and machines without ffmpeg cannot read it.
-const heifTiles = ((): "assembled" | "one-tile" | "unreadable" => {
-	const ffmpeg = $which("ffmpeg");
-	if (!ffmpeg) return "unreadable";
-	const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "read-heif-probe-"));
+async function probeHeifTiles(): Promise<"assembled" | "one-tile" | "unreadable"> {
+	if (!$which("ffmpeg")) return "unreadable";
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "read-heif-probe-"));
 	try {
-		fsSync.writeFileSync(path.join(dir, "in.heic"), TILED_HEIC);
-		const decoded = Bun.spawnSync([ffmpeg, "-v", "error", "-i", "in.heic", "-frames:v", "1", "out.png"], {
-			cwd: dir,
-		});
+		await Bun.write(path.join(dir, "in.heic"), TILED_HEIC);
+		const decoded = await Bun.$`ffmpeg -v error -i in.heic -frames:v 1 out.png`.cwd(dir).quiet().nothrow();
 		if (decoded.exitCode !== 0) return "unreadable";
-		return parseImageMetadata(fsSync.readFileSync(path.join(dir, "out.png")))?.width === 1100
-			? "assembled"
-			: "one-tile";
+		const png = await fs.readFile(path.join(dir, "out.png"));
+		return parseImageMetadata(png)?.width === 1100 ? "assembled" : "one-tile";
 	} finally {
-		fsSync.rmSync(dir, { recursive: true, force: true });
+		await fs.rm(dir, { recursive: true, force: true });
 	}
-})();
+}
+const heifTiles = await probeHeifTiles();
 
 function makeSession(testDir: string, textOnlyModel = false): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
@@ -273,6 +270,26 @@ describe("read local:// images", () => {
 		const message = String(error?.message ?? error);
 		expect(message).toContain("Could not decode HEIC image");
 		expect(message).toContain("Convert it to PNG or JPEG");
+	});
+
+	it.skipIf(heifTiles !== "assembled")("decodes again at lower quality when the JPEG is over the cap", async () => {
+		const file = path.join(localRoot, "photo.heic");
+		await Bun.write(file, TILED_HEIC);
+		const full = await decodeStillImageJpeg(file, Number.POSITIVE_INFINITY);
+
+		const smaller = await decodeStillImageJpeg(file, full.length - 1);
+
+		expect(smaller.length).toBeLessThan(full.length);
+		expect(parseImageMetadata(smaller)).toMatchObject({ width: 1100, height: 8 });
+	});
+
+	it.skipIf(heifTiles !== "assembled")("names the decoded size when no quality fits the cap", async () => {
+		const file = path.join(localRoot, "photo.heic");
+		await Bun.write(file, TILED_HEIC);
+
+		const error = await decodeStillImageJpeg(file, 1).catch(e => e);
+
+		expect(String(error?.message ?? error)).toContain("of JPEG, over the 1 B image limit");
 	});
 
 	it("still refuses an MP4-branded file without a video extension as binary", async () => {

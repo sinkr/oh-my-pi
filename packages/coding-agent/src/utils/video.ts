@@ -392,12 +392,20 @@ export async function extractVideoFramePng(
 	}
 }
 
+/** ffmpeg `-q:v` JPEG qualities for HEIF stills: near-lossless, then a pass under half that size. */
+const STILL_IMAGE_JPEG_QUALITIES = [3, 12] as const;
+
 /**
  * Decode a HEIC, HEIF or AVIF still, which the image pipeline cannot read, to a full-resolution
- * JPEG, which keeps a camera photo far below the image size cap where PNG would not. Camera
+ * JPEG of at most `maxBytes`, so the resize note keeps the photo's true size. A dense
+ * high-megapixel photo over the cap at near-lossless quality gets one lower-quality pass. Camera
  * photos are tiled, and before 8.1 the ffmpeg CLI decodes only one tile of them.
  */
-export async function decodeStillImageJpeg(absolutePath: string, signal?: AbortSignal): Promise<Uint8Array> {
+export async function decodeStillImageJpeg(
+	absolutePath: string,
+	maxBytes: number,
+	signal?: AbortSignal,
+): Promise<Uint8Array> {
 	const release = await ffmpegRelease();
 	if (release && (release.major < 8 || (release.major === 8 && release.minor < 1))) {
 		throw new VideoError(
@@ -407,12 +415,19 @@ export async function decodeStillImageJpeg(absolutePath: string, signal?: AbortS
 	const tmp = await TempDir.create("@omp-still-image-");
 	try {
 		const out = tmp.join("image.jpg");
-		await runFfmpeg(["-i", absolutePath, "-frames:v", "1", "-q:v", "3", out], signal);
-		const bytes = await Bun.file(out)
-			.bytes()
-			.catch(() => null);
-		if (!bytes || bytes.length === 0) throw new VideoError("ffmpeg wrote no image.");
-		return bytes;
+		let decodedBytes = 0;
+		for (const quality of STILL_IMAGE_JPEG_QUALITIES) {
+			await runFfmpeg(["-i", absolutePath, "-frames:v", "1", "-q:v", String(quality), out], signal);
+			const bytes = await Bun.file(out)
+				.bytes()
+				.catch(() => null);
+			if (!bytes || bytes.length === 0) throw new VideoError("ffmpeg wrote no image.");
+			if (bytes.length <= maxBytes) return bytes;
+			decodedBytes = bytes.length;
+		}
+		throw new VideoError(
+			`It decodes to ${formatByteSize(decodedBytes)} of JPEG, over the ${formatByteSize(maxBytes)} image limit.`,
+		);
 	} finally {
 		await tmp.remove().catch(() => {});
 	}

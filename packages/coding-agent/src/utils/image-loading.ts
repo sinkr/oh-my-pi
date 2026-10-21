@@ -415,13 +415,13 @@ export async function loadHeifImageInput(
 
 	let jpeg: Uint8Array;
 	try {
-		jpeg = await decodeStillImageJpeg(resolvedPath, signal);
+		jpeg = await decodeStillImageJpeg(resolvedPath, maxBytes, signal);
 	} catch (error) {
 		if (!(error instanceof VideoError) || signal?.aborted) throw error;
 		const format = sourceMimeType.slice("image/".length).toUpperCase();
 		const cause = $which("ffmpeg") ? error.message : "Decoding it needs ffmpeg 8.1 or newer, which is not on PATH.";
 		throw new Error(
-			`Could not decode ${format} image. Convert it to PNG or JPEG (e.g. \`sips -s format png\` on macOS) and read that file.\n${cause}`,
+			`Could not decode ${format} image. Convert it to PNG or JPEG (e.g. \`sips -s format jpeg -Z 4096\` on macOS) and read that file.\n${cause}`,
 		);
 	}
 
