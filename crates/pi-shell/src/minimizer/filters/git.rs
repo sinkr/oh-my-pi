@@ -35,6 +35,17 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 
 #[must_use]
 pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerOutput {
+	filter_for(ctx, ctx.program, input, exit_code)
+}
+
+/// [`filter`] for a wrapper (`gt`) that delegates to git: `overlay_program` is
+/// the command the engine resolves its overlay pipeline for.
+pub(crate) fn filter_for(
+	ctx: &MinimizerCtx<'_>,
+	overlay_program: &str,
+	input: &str,
+	exit_code: i32,
+) -> MinimizerOutput {
 	if is_show_path_content(ctx.command) || is_stash_patch(ctx.command) {
 		return MinimizerOutput::passthrough(input);
 	}
@@ -49,7 +60,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		Some("diff") if is_stat_format(ctx.command) => condense_diff_stat(&cleaned),
 		Some("diff")
 			if diff_listing_mode(ctx.command).is_none()
-				&& keeps_patch_whole(ctx, input, &cleaned, exit_code) =>
+				&& keeps_patch_whole(ctx, overlay_program, input, &cleaned, exit_code) =>
 		{
 			cleaned
 		},
@@ -65,7 +76,9 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 			}
 		},
 		Some("show") if is_show_custom_format(ctx.command) => cleaned,
-		Some("show") if keeps_patch_whole(ctx, input, &cleaned, exit_code) => cleaned,
+		Some("show") if keeps_patch_whole(ctx, overlay_program, input, &cleaned, exit_code) => {
+			cleaned
+		},
 		Some("show") => condense_show(&cleaned),
 		Some("log") if is_log_custom_format(ctx.command) => cleaned,
 		Some("log") => condense_log(&cleaned, 32, 16),
@@ -109,11 +122,13 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 }
 
 /// A patch the agent asked for comes back whole up to
-/// [`primitives::WHOLE_OUTPUT_BYTES`], unless a pipeline overlaid on this
-/// command drops lines (`defs/yadm.toml` caps yadm at 80): that would cut the
-/// patch partway through its first file, where the summary keeps the stat.
+/// [`primitives::WHOLE_OUTPUT_BYTES`], unless the pipeline overlaid on
+/// `overlay_program`'s output drops lines (`defs/yadm.toml` caps yadm at 80):
+/// that would cut the patch partway through its first file, where the summary
+/// keeps the stat.
 pub(crate) fn keeps_patch_whole(
 	ctx: &MinimizerCtx<'_>,
+	overlay_program: &str,
 	input: &str,
 	patch: &str,
 	exit_code: i32,
@@ -121,7 +136,7 @@ pub(crate) fn keeps_patch_whole(
 	patch.len() <= primitives::WHOLE_OUTPUT_BYTES
 		&& !engine::overlay_caps_lines(
 			ctx.config,
-			ctx.program,
+			overlay_program,
 			ctx.subcommand,
 			exit_code,
 			input.len(),
