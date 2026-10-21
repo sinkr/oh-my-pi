@@ -112,6 +112,7 @@ async function startRun(options: {
 	respond?: (request: number, context: Context) => MockResponse;
 	idleTtlMs?: number;
 	deferIrcWakeRelease?: (release: () => void) => void;
+	structured?: boolean;
 }) {
 	const cwd = path.join(root, "home", "work");
 	const artifactsDir = path.join(root, "artifacts");
@@ -147,7 +148,7 @@ async function startRun(options: {
 		id: AGENT_ID,
 		parentAgentId: PARENT_ID,
 		asyncJobManager: manager,
-		structured: false,
+		structured: options.structured ?? false,
 		modelOverride: "mock/mock-model",
 		authStorage,
 		modelRegistry,
@@ -425,6 +426,71 @@ it("keeps a follow-up turn's report when a peer message arrives right after it",
 		expect((await child.peerInbox)?.body).toBe("PEER_REPLY");
 		await settle();
 		expect(await Bun.file(child.artifact).text()).toBe("FOLLOW_UP_REPORT");
+	} finally {
+		child.close();
+	}
+}, 20_000);
+
+it("keeps a structured run's yield when a peer message arrives as a turn of it ends without yielding", async () => {
+	const child = await startRun({
+		structured: true,
+		// Request 1 ends in prose while a peer message arrives; the driver then reminds the agent to yield.
+		beforeResponse: request => {
+			if (request === 1) void IrcBus.global().send({ from: PEER_ID, to: AGENT_ID, body: PEER_BODY });
+		},
+		respond: (request, context) => {
+			if (context.messages.at(-1)?.role === "toolResult") return { content: ["ok"] };
+			if (request === 1) return { content: ["Working on it."] };
+			const data = latestInput(context).includes(PEER_BODY) ? "PEER_PAYLOAD" : "INITIAL";
+			return {
+				content: [{ type: "toolCall", id: `yield-${request}`, name: "yield", arguments: { type: "result", data } }],
+			};
+		},
+	});
+	try {
+		const result = await child.run;
+		expect(result.output).toContain("INITIAL");
+		expect(result.output).not.toContain("PEER_PAYLOAD");
+		await settle();
+		expect(child.mock.calls.some(call => latestInput(call.context).includes(PEER_BODY))).toBe(true);
+	} finally {
+		child.close();
+	}
+}, 20_000);
+
+it("keeps a structured follow-up's yield when a peer message arrives as a turn of it ends without yielding", async () => {
+	let peerSent: Promise<{ outcome: string }> | undefined;
+	const child = await startRun({
+		structured: true,
+		// Request 1 yields the first run. Request 2, the follow-up's first turn, ends in prose
+		// while a peer message arrives; the driver then reminds the agent to yield.
+		beforeResponse: request => {
+			if (request === 2) peerSent = IrcBus.global().send({ from: PEER_ID, to: AGENT_ID, body: PEER_BODY });
+		},
+		respond: (request, context) => {
+			if (context.messages.at(-1)?.role === "toolResult") return { content: ["ok"] };
+			if (request === 2) return { content: ["Working on it."] };
+			const input = latestInput(context);
+			const data = input.includes(PEER_BODY) ? "PEER_PAYLOAD" : request === 1 ? "INITIAL" : "FOLLOW_UP";
+			return {
+				content: [{ type: "toolCall", id: `yield-${request}`, name: "yield", arguments: { type: "result", data } }],
+			};
+		},
+	});
+	try {
+		expect((await child.run).output).toContain("INITIAL");
+		const followUp = await runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
+			message: "report again",
+			artifactsDir: child.artifactsDir,
+		});
+		expect((await peerSent)?.outcome).not.toBe("failed");
+		expect(followUp.output).toContain("FOLLOW_UP");
+		expect(followUp.output).not.toContain("PEER_PAYLOAD");
+		await settle();
+		// The peer's message was answered in a turn of its own.
+		expect(child.mock.calls.some(call => latestInput(call.context).includes(PEER_BODY))).toBe(true);
 	} finally {
 		child.close();
 	}

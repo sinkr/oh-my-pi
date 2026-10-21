@@ -3801,9 +3801,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// then reinstall and reattach for the retry.
 	let attemptUnsubscribe = monitor.attach(session);
 	const structured = options.structured !== false;
-	// As in a first run: a message-result turn's monitor would take a wake
-	// turn's answer as this turn's result, so non-parent wakes wait for it.
-	const releaseIrcWakes = structured ? undefined : session.holdIrcWakes();
+	// As in a first run: this turn's monitor would take a wake turn's answer
+	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
+	const releaseIrcWakes = session.holdIrcWakes();
 	try {
 		try {
 			outcome = await driveSessionToResult(session, monitor, message, {
@@ -3864,7 +3864,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 			startTime,
 		});
 	} finally {
-		releaseIrcWakes?.();
+		releaseIrcWakes();
 	}
 }
 
@@ -4926,10 +4926,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
-			// A message result is the run's last report turn, which a wake turn would
-			// replace; a yield is not. Only a kept-alive agent has wake turns left
-			// to answer held messages in.
-			if (!structured && options.keepAlive !== false) releaseIrcWakes = session.holdIrcWakes();
+			// The run's monitor would take a wake turn's answer (a message result's
+			// last report turn, or a `yield`) as the run's result. Only a kept-alive
+			// agent has wake turns left to answer held messages in.
+			if (options.keepAlive !== false) releaseIrcWakes = session.holdIrcWakes();
 			const outcome = await driveSessionToResult(session, monitor, task, {
 				solutionSpace: options.solutionSpace,
 				structured,
