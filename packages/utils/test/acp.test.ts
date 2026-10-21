@@ -303,7 +303,7 @@ describe("ACP JSON-RPC transport", () => {
 		expect((error as RequestError).code).toBe(-32800);
 	});
 
-	it("answers a peer $/cancel_request with -32800 on the wire", async () => {
+	it("answers a peer $/cancel_request with -32800 on the wire when the dispatcher honors cancellation", async () => {
 		// ACP v1 spec: a cancelled inbound request must still receive a
 		// response. The transport aborts the handler and writes the
 		// `-32800` error itself, so a client that cancels its elicit is
@@ -320,6 +320,7 @@ describe("ACP JSON-RPC transport", () => {
 				await handlerAborted.promise;
 				return {};
 			},
+			{ honorsInboundCancellation: true },
 		);
 		const writer = inbound.writable.getWriter();
 		const reader = outbound.readable.getReader();
@@ -335,6 +336,45 @@ describe("ACP JSON-RPC transport", () => {
 		// The handler was aborted by the cancellation, not just answered around.
 		await handlerAborted.promise;
 		await connection.close();
+		writer.releaseLock();
+		reader.releaseLock();
+	});
+
+	it("keeps an agent request running and answers with its real result after a peer $/cancel_request", async () => {
+		// The agent side's handlers never observe a cancel signal (prompts
+		// are cancelled through `session/cancel`). Answering `-32800` there
+		// would tell the client its prompt was cancelled while the turn kept
+		// streaming, and drop the real stop reason.
+		const inbound = new TransformStream<AnyMessage, AnyMessage>();
+		const outbound = new TransformStream<AnyMessage, AnyMessage>();
+		const finishPrompt = Promise.withResolvers<void>();
+		const promptStarted = Promise.withResolvers<void>();
+		const _agentConnection = new AgentSideConnection(
+			() => ({
+				initialize: params => ({ protocolVersion: params.protocolVersion }),
+				newSession: async () => ({ sessionId: "session-1" }),
+				prompt: async () => {
+					promptStarted.resolve();
+					await finishPrompt.promise;
+					return { stopReason: "end_turn" };
+				},
+				cancel: async () => {},
+			}),
+			{ writable: outbound.writable, readable: inbound.readable },
+		);
+		const writer = inbound.writable.getWriter();
+		const reader = outbound.readable.getReader();
+		await writer.write({
+			jsonrpc: "2.0",
+			id: 7,
+			method: "session/prompt",
+			params: { sessionId: "session-1", prompt: [{ type: "text", text: "hi" }] },
+		});
+		await promptStarted.promise;
+		await writer.write({ jsonrpc: "2.0", method: "$/cancel_request", params: { requestId: 7 } });
+		finishPrompt.resolve();
+		const response = (await reader.read()).value;
+		expect(response).toEqual({ jsonrpc: "2.0", id: 7, result: { stopReason: "end_turn" } });
 		writer.releaseLock();
 		reader.releaseLock();
 	});

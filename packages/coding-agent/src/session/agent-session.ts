@@ -9292,17 +9292,20 @@ export class AgentSession implements SettingsScope {
 		// lifecycle, and a queued steer/follow-up may only resume while a
 		// CLIENT prompt owns the turn: `#clientPromptInFlightCount` covers
 		// exactly `#promptWithMessage` brackets, so a drain scheduled inside
-		// that bracket continues in-loop under the owning prompt — the client
-		// sees and can cancel it. Autonomous brackets (IRC wakes, idle
-		// injections, scheduler continuations) do not count: a drain there
-		// would be an autonomous run the client can neither see nor cancel
-		// (and ACP maps no `queue_update`, so "waits behind the dialog"
-		// guidance would be a lie). Explicit agent-initiated deliveries
-		// re-enable the drain via #allowAcpAgentInitiatedTurns. Non-deferring
-		// hosts (TUI) keep the plain streaming gate: the running turn injects
-		// via its own polls.
-		if (this.#clientBridge?.deferAgentInitiatedTurns === true && !this.#allowAcpAgentInitiatedTurns) {
-			return this.#clientPromptInFlightCount > 0;
+		// that bracket continues under the owning prompt — the client sees
+		// and can cancel it. Autonomous brackets (IRC wakes, idle injections,
+		// scheduler continuations) do not count: a drain there would be an
+		// autonomous run the client can neither see nor cancel. Explicit
+		// agent-initiated deliveries re-enable the drain via
+		// #allowAcpAgentInitiatedTurns. Inside a client bracket the ordinary
+		// gates below still apply (not streaming, user-interrupt suppression,
+		// provider-valid tail for follow-up-only resumes).
+		if (
+			this.#clientBridge?.deferAgentInitiatedTurns === true &&
+			!this.#allowAcpAgentInitiatedTurns &&
+			this.#clientPromptInFlightCount === 0
+		) {
+			return false;
 		}
 		if (this.isStreaming) return false;
 		// A queued steer resumes from ANY tail: Agent.continue() runs #runLoop(undefined),

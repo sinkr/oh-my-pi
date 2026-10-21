@@ -188,10 +188,18 @@ export class ClientSideConnection {
 	#connection: RpcConnection;
 
 	constructor(toClient: (connection: ClientSideConnection) => Client, stream: Stream) {
-		this.#connection = new RpcConnection(stream, async (method, params, notification, signal) => {
-			if (!client) throw RequestError.internalError(undefined, "Client is not initialized");
-			return dispatchClient(client, method, params, notification, signal);
-		});
+		// Client handlers receive the cancel signal (`requestPermission`'s
+		// `options.signal`), so a peer `$/cancel_request` may answer `-32800`
+		// at once. The agent side keeps the default: its handlers ignore the
+		// signal, and `session/cancel` is ACP's cancellation path for prompts.
+		this.#connection = new RpcConnection(
+			stream,
+			async (method, params, notification, signal) => {
+				if (!client) throw RequestError.internalError(undefined, "Client is not initialized");
+				return dispatchClient(client, method, params, notification, signal);
+			},
+			{ honorsInboundCancellation: true },
+		);
 		const client = toClient(this);
 	}
 	/** Signal aborted when the transport closes. */

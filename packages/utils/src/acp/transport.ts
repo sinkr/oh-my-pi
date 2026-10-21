@@ -114,6 +114,18 @@ type Dispatcher = (
 ) => MaybePromise<unknown>;
 type Pending = { resolve(value: unknown): void; reject(reason: unknown): void };
 
+/** Options for {@link RpcConnection}. */
+export interface RpcConnectionOptions {
+	/**
+	 * The dispatcher honors the abort signal it receives for inbound requests.
+	 * Only then does a peer `$/cancel_request` abort the handler and answer the
+	 * request `-32800` immediately; otherwise the handler runs to completion and
+	 * its real result is the response, since answering "cancelled" while the
+	 * work keeps going would hide its outcome from the peer.
+	 */
+	honorsInboundCancellation?: boolean;
+}
+
 /** Bound on clean-EOF inbound drain so `closed` cannot hang if a handler never settles. */
 const INBOUND_DRAIN_TIMEOUT_MS = 30_000;
 
@@ -123,17 +135,18 @@ export class RpcConnection {
 	#pending = new Map<JsonRpcId, Pending>();
 	#inbound = new Set<Promise<void>>();
 	#openInboundIds = new Set<JsonRpcId>();
-	/** Abort controller per inbound request, fired by a peer `$/cancel_request`. */
-	#inboundCancellers = new Map<JsonRpcId, AbortController>();
+	/** Abort controller per inbound request, fired by a peer `$/cancel_request` (opt-in). */
+	#inboundCancellers: Map<JsonRpcId, AbortController> | undefined;
 	#writable: WritableStream<AnyMessage>;
 	#writeTail: Promise<void> = Promise.resolve();
 	#abort = new AbortController();
 	#closed = Promise.withResolvers<void>();
 	#dispatcher: Dispatcher;
 
-	constructor(stream: Stream, dispatcher: Dispatcher) {
+	constructor(stream: Stream, dispatcher: Dispatcher, options?: RpcConnectionOptions) {
 		this.#writable = stream.writable;
 		this.#dispatcher = dispatcher;
+		this.#inboundCancellers = options?.honorsInboundCancellation ? new Map() : undefined;
 		void this.#read(stream.readable);
 	}
 
@@ -291,8 +304,11 @@ export class RpcConnection {
 			// written here, so a late-settling handler lands in `#respond`'s
 			// closed-id no-op instead of answering a request the peer gave
 			// up on.
-			if (message.method === "$/cancel_request") {
-				this.#cancelInbound((message.params as { requestId?: JsonRpcId } | undefined)?.requestId);
+			if (message.method === "$/cancel_request" && this.#inboundCancellers) {
+				this.#cancelInbound(
+					this.#inboundCancellers,
+					(message.params as { requestId?: JsonRpcId } | undefined)?.requestId,
+				);
 			}
 			try {
 				await this.#dispatcher(message.method, message.params, true);
@@ -301,10 +317,11 @@ export class RpcConnection {
 			}
 			return;
 		}
-		const canceller = new AbortController();
-		this.#inboundCancellers.set(message.id, canceller);
+		const cancellers = this.#inboundCancellers;
+		const canceller = cancellers ? new AbortController() : undefined;
+		if (canceller) cancellers?.set(message.id, canceller);
 		try {
-			const result = await this.#dispatcher(message.method, message.params, false, canceller.signal);
+			const result = await this.#dispatcher(message.method, message.params, false, canceller?.signal);
 			await this.#respond(message.id, { result: result ?? {} });
 		} catch (error) {
 			const protocolError =
@@ -313,15 +330,15 @@ export class RpcConnection {
 					: RequestError.internalError({ details: error instanceof Error ? error.message : String(error) });
 			await this.#respond(message.id, { error: protocolError.toErrorResponse() });
 		} finally {
-			this.#inboundCancellers.delete(message.id);
+			cancellers?.delete(message.id);
 		}
 	}
 
-	#cancelInbound(id: JsonRpcId | undefined): void {
+	#cancelInbound(cancellers: Map<JsonRpcId, AbortController>, id: JsonRpcId | undefined): void {
 		if (id === undefined) return;
-		const canceller = this.#inboundCancellers.get(id);
+		const canceller = cancellers.get(id);
 		if (canceller) {
-			this.#inboundCancellers.delete(id);
+			cancellers.delete(id);
 			canceller.abort(RequestError.requestCancelled({ requestId: id }));
 		}
 		// Spec: a cancelled request still gets a response. Answer `-32800`
