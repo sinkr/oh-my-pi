@@ -4894,7 +4894,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			unsubscribe = monitor.attach(session);
-			releaseIrcWakes = session.holdIrcWakes();
 
 			checkAbort();
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
@@ -4914,6 +4913,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
+			// Only a kept-alive agent has wake turns left to answer held messages in.
+			if (options.keepAlive !== false) releaseIrcWakes = session.holdIrcWakes();
 			const outcome = await driveSessionToResult(session, monitor, task, {
 				solutionSpace: options.solutionSpace,
 				structured,

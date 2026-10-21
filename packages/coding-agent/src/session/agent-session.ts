@@ -1406,7 +1406,6 @@ export class AgentSession implements SettingsScope {
 		// non-streaming session, so without this guard it would wake/fold into the still-old context
 		// and race the transition's own reset — same rationale as #drainStrandedQueuedMessages.
 		if (this.#unsubscribeAgent === undefined) return;
-		if (this.#ircWakeHolds > 0 && !this.hasPendingAsyncWork()) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		// Parked wake records resume alongside ordinary stranded asides; they were
 		// already decided wake-intended at deferral time.
@@ -1472,10 +1471,21 @@ export class AgentSession implements SettingsScope {
 	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
-	#wakeForIrc(records: AgentMessage[]): void {
-		if (this.#modeExitDrainSuppressionDepth > 0 || (this.#ircWakeHolds > 0 && !this.hasPendingAsyncWork())) {
-			this.#irc.queueAside(records);
+	#wakeForIrc(wakeRecords: AgentMessage[]): void {
+		if (this.#modeExitDrainSuppressionDepth > 0) {
+			this.#irc.queueAside(wakeRecords);
 			return;
+		}
+		// While a driven run holds wakes, its monitor would take this turn's answer
+		// as the run's result: park a non-parent message for a turn of its own.
+		let records = wakeRecords;
+		if (this.#ircWakeHolds > 0) {
+			const held = records.filter(record => this.#irc.isPeerMessage(record));
+			if (held.length > 0) {
+				this.#irc.queueDeferredWake(held);
+				records = records.filter(record => !this.#irc.isPeerMessage(record));
+				if (records.length === 0) return;
+			}
 		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
 		// already-resumable follow-up can ride the wake turn normally without reordering.
@@ -2203,11 +2213,12 @@ export class AgentSession implements SettingsScope {
 		// boundary injection would drain them. Foreground tools are unaffected.
 		this.agent.hasQueuedAsides = () => this.#irc.hasAsides();
 		this.agent.setAsideMessageProvider(boundary => {
-			// A subagent answers a peer in its own wake turn, never by extending a
-			// turn that already ended: that turn's text is its result.
-			const thunks: AsideMessage[] = this.#irc
-				.drainPending({ keepPeerMessages: boundary === "stop" })
-				.map(record => () => record);
+			// A subagent whose messages get turns of their own (its run holds them,
+			// or its wake observer answers them) never extends a finished turn with
+			// one: that turn's text is its result.
+			const keepPeerMessages =
+				boundary === "stop" && (this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined);
+			const thunks: AsideMessage[] = this.#irc.drainPending({ keepPeerMessages }).map(record => () => record);
 			thunks.push(...this.yieldQueue.drainLazy());
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
@@ -12031,11 +12042,10 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Holds IRC wake turns while the task executor drives this session's run:
-	 * once the session idles with no owned async work, the run is finishing and
-	 * a wake turn would replace its result. Held records stay queued (a later
-	 * turn of the run takes them at a step boundary) and wake once every hold
-	 * is released. Returns the release.
+	 * Holds IRC wakes from anyone but the parent while the task executor drives
+	 * this session's run, whose monitor would take a wake turn's answer as the
+	 * run's result. Held messages wait as deferred wakes and get a monitored turn
+	 * of their own once every hold is released. Returns the release.
 	 */
 	holdIrcWakes(): () => void {
 		this.#ircWakeHolds++;

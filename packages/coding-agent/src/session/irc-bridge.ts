@@ -31,9 +31,10 @@ export class IrcBridge {
 	readonly #host: IrcBridgeHost;
 	#interrupts: AgentMessage[] = [];
 	#asides: AgentMessage[] = [];
-	/** Wake-intended records parked while a pooled yield contract owns the worker.
-	 *  Pooled turns must not flush these (no observer would reply to the sender);
-	 *  they resume into a monitored wake once the contract clears. */
+	/** Wake-intended records parked while a pooled yield contract owns the worker or a
+	 *  driven run holds wakes (`AgentSession.holdIrcWakes`). Turns must not flush these
+	 *  (no observer would reply to the sender); they resume into a monitored wake once
+	 *  the contract clears or the hold is released. */
 	#deferredWakes: AgentMessage[] = [];
 	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
@@ -45,6 +46,11 @@ export class IrcBridge {
 	/** Identifies a consumed user-role steer as an actual parent IRC request, not another agent-authored steer. */
 	isParentSteer(message: AgentMessage): boolean {
 		return this.#parentSteers.has(message);
+	}
+
+	/** Whether `record` came to a subagent from anyone but its parent, or as a broadcast leg. */
+	isPeerMessage(record: AgentMessage): boolean {
+		return this.#peerMessages.has(record);
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -79,7 +85,7 @@ export class IrcBridge {
 	 *  subagent's non-parent messages queued for their own wake turn. */
 	drainPending(options?: { keepPeerMessages?: boolean }): AgentMessage[] {
 		if (options?.keepPeerMessages) {
-			const isPeer = (record: AgentMessage) => this.#peerMessages.has(record);
+			const isPeer = (record: AgentMessage) => this.isPeerMessage(record);
 			const records = [...this.#interrupts, ...this.#asides].filter(record => !isPeer(record));
 			this.#interrupts = this.#interrupts.filter(isPeer);
 			this.#asides = this.#asides.filter(isPeer);

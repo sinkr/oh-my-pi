@@ -267,28 +267,81 @@ it("keeps the report when answering the peer takes tool calls", async () => {
 	}
 }, 20_000);
 
-it("keeps the report when a peer message arrives right after the final report turn", async () => {
-	let sent: Promise<{ outcome: string }> | undefined;
-	const child = await startRun({
-		beforeResponse: request => {
+/** Sends `body` from `from` once the report's turn (request 1) has ended, before the run settles. */
+function afterReport(from: string, body: string) {
+	const sent = Promise.withResolvers<{ outcome: string }>();
+	return {
+		sent: sent.promise,
+		beforeResponse: (request: number) => {
 			if (request !== 1) return;
-			// Deliver once the report's turn has ended but before the run settles.
 			const session = AgentRegistry.global().get(AGENT_ID)?.session;
 			const unsubscribe = session?.subscribe(event => {
 				if (event.type !== "agent_end") return;
 				unsubscribe?.();
-				sent = IrcBus.global().send({ from: PEER_ID, to: AGENT_ID, body: PEER_BODY });
+				sent.resolve(IrcBus.global().send({ from, to: AGENT_ID, body }));
 			});
 		},
-	});
+	};
+}
+
+it("keeps the report when a peer message arrives right after the final report turn", async () => {
+	const peer = afterReport(PEER_ID, PEER_BODY);
+	const child = await startRun({ beforeResponse: peer.beforeResponse });
 	try {
 		const result = await child.run;
-		expect(sent).toBeDefined();
+		expect((await peer.sent).outcome).not.toBe("failed");
 		expect(result.output).toBe(REPORT);
 		expect((await child.peerInbox)?.body).toBe("PEER_REPLY");
 		await settle();
 		expect(await Bun.file(child.artifact).text()).toBe(REPORT);
 		expect(child.deliveries.join("\n")).not.toContain("PEER_REPLY");
+	} finally {
+		child.close();
+	}
+}, 20_000);
+
+it("answers a peer message that arrives while the run waits on background work in a turn of its own", async () => {
+	const job = Promise.withResolvers<void>();
+	const peer = afterReport(PEER_ID, PEER_BODY);
+	const child = await startRun({
+		beforeResponse: request => {
+			// The report turn ends with an owned background job still running.
+			if (request === 1) {
+				manager.register(
+					"bash",
+					"background build",
+					async () => {
+						await job.promise;
+						return "build done";
+					},
+					{ ownerId: AGENT_ID, agentId: AGENT_ID },
+				);
+			}
+			peer.beforeResponse(request);
+		},
+	});
+	try {
+		expect((await peer.sent).outcome).not.toBe("failed");
+		job.resolve();
+		const result = await child.run;
+		expect(result.output).toBe(REPORT);
+		expect((await child.peerInbox)?.body).toBe("PEER_REPLY");
+	} finally {
+		job.resolve();
+		child.close();
+	}
+}, 20_000);
+
+it("still answers the parent's own message that arrives right after the final report turn as the run's result", async () => {
+	const parent = afterReport(PARENT_ID, PARENT_BODY);
+	const child = await startRun({ beforeResponse: parent.beforeResponse });
+	try {
+		const result = await child.run;
+		expect((await parent.sent).outcome).not.toBe("failed");
+		expect(result.output).toBe("PARENT_ANSWER");
+		await settle();
+		// The run's own result carries the answer; no separate wake result follows it.
+		expect(child.deliveries).toEqual([]);
 	} finally {
 		child.close();
 	}
