@@ -406,6 +406,32 @@ it("does not park an agent while it still holds a peer's message for a turn of i
 	}
 }, 20_000);
 
+it("does not park an agent whose released peer message still waits for a pooled yield contract to clear", async () => {
+	const peer = afterReport(PEER_ID, PEER_BODY);
+	const held = Promise.withResolvers<() => void>();
+	const child = await startRun({
+		beforeResponse: peer.beforeResponse,
+		idleTtlMs: 1,
+		deferIrcWakeRelease: release => held.resolve(release),
+	});
+	try {
+		expect((await child.run).output).toBe(REPORT);
+		const release = await held.promise;
+		const session = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!session) throw new Error("kept-alive subagent has no live session");
+		// A pooled worker's yield contract outlives the hold, so the released message stays queued.
+		await session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
+		release();
+		// Real time on purpose: the lifecycle's idle timer is what would park the agent.
+		await Bun.sleep(50);
+		expect(AgentRegistry.global().get(AGENT_ID)?.status).not.toBe("parked");
+		await session.setWorkPoolYieldItems([]);
+		expect((await child.peerInbox)?.body).toBe("PEER_REPLY");
+	} finally {
+		child.close();
+	}
+}, 20_000);
+
 it("keeps a follow-up turn's report when a peer message arrives right after it", async () => {
 	const peer = afterReport(PEER_ID, PEER_BODY);
 	const child = await startRun({

@@ -12063,9 +12063,13 @@ export class AgentSession implements SettingsScope {
 		};
 	}
 
-	/** Whether a {@link holdIrcWakes} hold is active: the lifecycle must not park this session yet. */
-	get ircWakesHeld(): boolean {
-		return this.#ircWakeHolds > 0;
+	/**
+	 * Whether IRC messages still wait here for a turn: under a {@link holdIrcWakes}
+	 * hold, or queued (e.g. behind a pooled yield contract). The lifecycle must not
+	 * park this session yet, since parking would drop them.
+	 */
+	get ircWakesPending(): boolean {
+		return this.#ircWakeHolds > 0 || this.#irc.hasPending();
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
