@@ -489,6 +489,21 @@ fn resolve_pipeline<'a>(
 	builtin_pipelines().find(program, subcommand)
 }
 
+/// Whether the pipeline overlaid on a Rust filter's output for this command
+/// drops whole lines. A filter that would return output whole checks this
+/// first: such an overlay cuts a whole patch partway through, where it would
+/// have kept the head of a summary that starts with the stat.
+pub(crate) fn overlay_caps_lines(
+	config: &MinimizerConfig,
+	program: &str,
+	subcommand: Option<&str>,
+	exit_code: i32,
+	input_bytes: usize,
+) -> bool {
+	resolve_pipeline(config, program, subcommand)
+		.is_some_and(|pipeline| pipeline.caps_lines(exit_code, input_bytes))
+}
+
 // Atomic counter for commands that reached `apply` without a matching filter.
 static UNKNOWN_COMMAND_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -778,13 +793,21 @@ only_on_exit = [0]
 	}
 
 	#[test]
-	fn jq_def_keeps_results_whole_up_to_the_shared_budget() {
-		let jq = builtin_pipelines()
-			.pipelines
-			.iter()
-			.find(|pipeline| pipeline.name == "jq")
-			.expect("builtin jq def");
-		assert_eq!(jq.keep_whole_up_to_bytes, Some(crate::minimizer::primitives::WHOLE_OUTPUT_BYTES));
+	fn jq_whole_budget_ends_at_the_shared_constant() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		// 256 lines of 64 bytes: exactly the budget.
+		let mut at_budget = String::new();
+		for i in 0..256 {
+			let _ = writeln!(at_budget, "{i:063}");
+		}
+		assert_eq!(at_budget.len(), crate::minimizer::primitives::WHOLE_OUTPUT_BYTES);
+		let out = apply("jq -r '.[]' rows.json", &at_budget, 0, &cfg);
+		assert_eq!(out.text, at_budget);
+
+		let past_budget = format!("{at_budget}x");
+		let out = apply("jq -r '.[]' rows.json", &past_budget, 0, &cfg);
+		assert_eq!(out.text.lines().count(), 41, "{:?}", out.text);
+		assert!(out.text.ends_with("[…217ln elided…]\n"), "{:?}", out.text);
 	}
 
 	#[test]
@@ -801,6 +824,30 @@ only_on_exit = [0]
 		);
 		let out = apply("yadm diff", &patch, 0, &cfg);
 		assert!(out.text.contains(".vimrc"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn line_capping_user_overlay_keeps_the_patch_summary() {
+		let cfg = config_from_settings(
+			r#"
+schema_version = 1
+[filters.git_cap]
+match_command = "^git$"
+max_lines = 20
+"#,
+		);
+		let mut patch = String::from(
+			"diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,100 +1,100 @@\n",
+		);
+		for i in 0..100 {
+			let _ = writeln!(patch, "-old {i}\n+new {i}");
+		}
+		patch.push_str(
+			"diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-a\n+b\n",
+		);
+		let out = apply("git diff", &patch, 0, &cfg);
+		assert!(out.text.contains("src/b.rs | 2"), "{:?}", out.text);
+		assert!(out.text.contains("2 files changed"), "{:?}", out.text);
 	}
 
 	// Regression guards for the builtin npx catch-all def (defs/npx.toml). Its

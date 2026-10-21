@@ -280,6 +280,16 @@ impl CompiledPipeline {
 			.is_some_and(|max| input_bytes <= max)
 	}
 
+	/// Whether this pipeline, run on `input_bytes` of output from a run that
+	/// exited with `exit_code`, drops whole lines (`max_lines`, `head_lines`,
+	/// `tail_lines`).
+	#[must_use]
+	pub fn caps_lines(&self, exit_code: i32, input_bytes: usize) -> bool {
+		!self.skipped_by_exit(exit_code)
+			&& !self.skipped_by_size(input_bytes)
+			&& (self.max_lines.is_some() || self.head_lines.is_some() || self.tail_lines.is_some())
+	}
+
 	/// Apply the full 10-stage pipeline to `input`.
 	#[must_use]
 	pub fn apply<'a>(&self, input: &'a str) -> Cow<'a, str> {

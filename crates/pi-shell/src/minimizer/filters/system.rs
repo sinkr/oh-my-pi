@@ -46,7 +46,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		"summary" => compact_summary_output(&cleaned, exit_code),
 		"err" => compact_err_output(&cleaned),
 		"test" => compact_test_output(&cleaned),
-		"diff" if cleaned.len() <= primitives::WHOLE_OUTPUT_BYTES => cleaned,
+		"diff" if git::keeps_patch_whole(ctx, input, &cleaned, exit_code) => cleaned,
 		"diff" => git::compact_diff_output(&cleaned),
 		"format" => compact_format_output(&cleaned),
 		"pipe" => compact_pipe_like_output(&cleaned, exit_code),

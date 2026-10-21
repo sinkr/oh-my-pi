@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
+use crate::minimizer::{MinimizerCtx, MinimizerOutput, engine, primitives};
 
 #[must_use]
 pub fn supports(subcommand: Option<&str>) -> bool {
@@ -49,7 +49,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		Some("diff") if is_stat_format(ctx.command) => condense_diff_stat(&cleaned),
 		Some("diff")
 			if diff_listing_mode(ctx.command).is_none()
-				&& keeps_patch_whole(ctx.program, &cleaned) =>
+				&& keeps_patch_whole(ctx, input, &cleaned, exit_code) =>
 		{
 			cleaned
 		},
@@ -65,7 +65,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 			}
 		},
 		Some("show") if is_show_custom_format(ctx.command) => cleaned,
-		Some("show") if keeps_patch_whole(ctx.program, &cleaned) => cleaned,
+		Some("show") if keeps_patch_whole(ctx, input, &cleaned, exit_code) => cleaned,
 		Some("show") => condense_show(&cleaned),
 		Some("log") if is_log_custom_format(ctx.command) => cleaned,
 		Some("log") => condense_log(&cleaned, 32, 16),
@@ -109,11 +109,23 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 }
 
 /// A patch the agent asked for comes back whole up to
-/// [`primitives::WHOLE_OUTPUT_BYTES`]. `yadm` keeps the summary: its own
-/// pipeline (`defs/yadm.toml`) caps output at 80 lines, which would cut a
-/// whole patch partway through its first file.
-fn keeps_patch_whole(program: &str, patch: &str) -> bool {
-	program != "yadm" && patch.len() <= primitives::WHOLE_OUTPUT_BYTES
+/// [`primitives::WHOLE_OUTPUT_BYTES`], unless a pipeline overlaid on this
+/// command drops lines (`defs/yadm.toml` caps yadm at 80): that would cut the
+/// patch partway through its first file, where the summary keeps the stat.
+pub(crate) fn keeps_patch_whole(
+	ctx: &MinimizerCtx<'_>,
+	input: &str,
+	patch: &str,
+	exit_code: i32,
+) -> bool {
+	patch.len() <= primitives::WHOLE_OUTPUT_BYTES
+		&& !engine::overlay_caps_lines(
+			ctx.config,
+			ctx.program,
+			ctx.subcommand,
+			exit_code,
+			input.len(),
+		)
 }
 
 fn is_show_path_content(command: &str) -> bool {
