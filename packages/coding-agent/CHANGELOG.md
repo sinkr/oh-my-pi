@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.12.5] - 2026-10-21
+
 ### Added
 
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
