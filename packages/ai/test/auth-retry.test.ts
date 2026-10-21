@@ -515,8 +515,36 @@ describe("withAuth", () => {
 	});
 
 	it("still reports a missing key when the resolver resolves without a credential", async () => {
-		await expect(withAuth(async () => undefined, async () => "never")).rejects.toThrow(MissingApiKeyError);
-		await expect(withAuth(async () => "", async () => "never")).rejects.toThrow(MissingApiKeyError);
+		await expect(
+			withAuth(
+				async () => undefined,
+				async () => "never",
+			),
+		).rejects.toThrow(MissingApiKeyError);
+		await expect(
+			withAuth(
+				async () => "",
+				async () => "never",
+			),
+		).rejects.toThrow(MissingApiKeyError);
+	});
+
+	it("keeps the original auth error when the resolver throws while rotating", async () => {
+		const keys: string[] = [];
+		const original = authError();
+		await expect(
+			withAuth(
+				ctx => {
+					if (ctx.error === undefined) return "k0";
+					throw new Error("broker unreachable");
+				},
+				async key => {
+					keys.push(key);
+					throw original;
+				},
+			),
+		).rejects.toBe(original);
+		expect(keys).toEqual(["k0"]);
 	});
 
 	it("honors a custom isAuthError classifier", async () => {
