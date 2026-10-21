@@ -11,12 +11,12 @@
 - Fixed Mermaid flowcharts drawing two edges between the same pair of nodes as one line, with their labels written over each other; each edge now gets its own route, line style, arrowhead and label ([#16731](https://github.com/can1357/oh-my-pi/issues/16731))
 - Fixed `renderMermaidAscii` starting an edge one cell away from its node's side when a labeled sibling edge leaves the same node from another side ([#16730](https://github.com/can1357/oh-my-pi/issues/16730))
 - Fixed Mermaid flowchart parsing swallowing leading dashes of spaceless arrows (`A-->B`, `B-.->C`, `C:::cls-->D`) into the preceding node ID or class name ([#16750](https://github.com/can1357/oh-my-pi/pull/16750) by [@berney](https://github.com/berney))
+- Fixed the shell output minimizer cutting short `git diff`, `git show`, `diff`, `jq` and `ssh` output that fits in 16 KB: it now arrives whole, and the patch summary, the 40-line `jq` cap and the remote head/tail cut apply only to larger output ([#16589](https://github.com/can1357/oh-my-pi/pull/16589) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
 
-- Fixed the shell output minimizer cutting short `git diff`, `git show`, `diff`, `jq` and `ssh` output that fits in 16 KB: it now arrives whole, and the patch summary, the 40-line `jq` cap and the remote head/tail cut apply only to larger output ([#16589](https://github.com/can1357/oh-my-pi/pull/16589) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
 
 ## [18.12.4] - 2026-10-20
