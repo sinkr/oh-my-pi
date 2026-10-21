@@ -115,4 +115,25 @@ describe("read URL: a reader's short-line markdown is not taken for navigation",
 		expect(method).toBe("extracted-document");
 		expect(text).toContain("DOCUMENT_ONLY_MARKER");
 	});
+
+	it("keeps the page when only its footer links a document", async () => {
+		const convert = vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
+			ok: true,
+			content: `# Terms of service\n\n${"TERMS_ONLY_MARKER you agree to these terms. ".repeat(60)}`,
+		});
+		const page = DOCS_PAGE.replace(
+			"</main>",
+			'</main><footer><a href="/legal/terms.pdf">Terms of service</a></footer>',
+		);
+
+		const { method, text } = await readLocal({
+			"/page": () => new Response(page, { headers: { "content-type": "text/html" } }),
+			"/legal/terms.pdf": () => new Response("%PDF-1.4 stub", { headers: { "content-type": "application/pdf" } }),
+		});
+
+		expect(method).toBe("native");
+		expect(text).toContain("LAST_NEEDLE");
+		expect(text).not.toContain("TERMS_ONLY_MARKER");
+		expect(convert).not.toHaveBeenCalled();
+	});
 });

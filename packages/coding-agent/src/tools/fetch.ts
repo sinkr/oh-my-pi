@@ -456,6 +456,22 @@ function extractDocumentLinks(html: string, baseUrl: string): string[] {
 	return links;
 }
 
+/** Markdown link destination: `](dest` or `](<dest>`. */
+const MARKDOWN_LINK_DEST_RE = /\]\(\s*(?:<([^>]*)>|([^)\s]+))/g;
+
+/** Link targets a rendering kept, as written and resolved against the page, to match {@link extractDocumentLinks}. */
+function renderedLinkTargets(markdown: string, baseUrl: string): Set<string> {
+	const targets = new Set<string>();
+	for (const match of markdown.matchAll(MARKDOWN_LINK_DEST_RE)) {
+		const dest = match[1] ?? match[2];
+		targets.add(dest);
+		try {
+			targets.add(new URL(dest, baseUrl).href);
+		} catch {}
+	}
+	return targets;
+}
+
 /**
  * Strip CDATA wrapper and clean text
  */
@@ -1533,12 +1549,20 @@ async function renderUrl(
 			};
 		}
 
-		// Step 6: If rendered output is low quality, try more targeted fallbacks. A wrapper page
-		// around a PDF or DOCX renders as a few short lines in any reader, so its linked document
-		// is tried whatever reader rendered it.
+		// Step 6: If rendered output is low quality, try more targeted fallbacks. A reader's
+		// rendering passes the quality gate even for a wrapper page around a PDF or DOCX, so a
+		// short-line rendering under one displayed page still has its document tried, when the
+		// link sits in the content the reader kept rather than in a dropped nav or footer.
 		const lowQuality = isLowQualityOutput(htmlResult.content, htmlResult.method);
-		const docLinks =
-			lowQuality || isMostlyShortLines(htmlResult.content) ? extractDocumentLinks(rawContent, finalUrl) : [];
+		const wrapperShaped =
+			!lowQuality &&
+			isMostlyShortLines(htmlResult.content) &&
+			htmlResult.content.split("\n").length <= FETCH_DEFAULT_MAX_LINES;
+		let docLinks = lowQuality || wrapperShaped ? extractDocumentLinks(rawContent, finalUrl) : [];
+		if (wrapperShaped) {
+			const rendered = renderedLinkTargets(htmlResult.content, finalUrl);
+			docLinks = docLinks.filter(link => rendered.has(link));
+		}
 		if (docLinks.length > 0) {
 			const docUrl = docLinks[0];
 			const binary = await fetchBinary(docUrl, timeout, signal);
