@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.12.5] - 2026-10-21
+
+### Fixed
+
+- Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
+
 ## [18.12.4] - 2026-10-20
 
 ### Changed
