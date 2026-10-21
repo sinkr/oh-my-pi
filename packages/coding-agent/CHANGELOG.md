@@ -33,7 +33,7 @@
 
 ### Fixed
 
-- Fixed Word and EPUB `read`s, site-specific web scrapers (Stack Overflow, MDN, GitLab, …) and the browser's Markdown page extraction writing identifiers as `snake\_case` or `DOCX\_NEEDLE\_1`: underscores inside words now stay literal
+- Fixed Word and EPUB `read`s, site-specific web scrapers (Stack Overflow, MDN, GitLab, …) and the browser's readable page extraction writing identifiers as `snake\_case` or `DOCX\_NEEDLE\_1` (filtered plain text dropped the underscores): underscores inside words now stay literal
 
 ## [18.12.5] - 2026-10-21
 
