@@ -63,7 +63,15 @@ import type { ThemeColor } from "../theme/schema";
 import { col, keyed, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, hintsRow, overlayCard } from "../native/overlay";
-import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
+import {
+	CLOSE_ACTION,
+	type PickerEvent,
+	picker,
+	pickerAction,
+	pickerEvent,
+	pickerQuery,
+	pickerSize,
+} from "../native/picker";
 import { plainText } from "../native/spans";
 import type { OutlineTarget } from "../chat/transcript-outline";
 import { collectBlocks, targetCopy, turnPreview } from "./copy-selector";
@@ -1471,6 +1479,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 		| undefined;
 	#pickerMemo:
 		| {
+				size: TspPickerProps["size"];
 				view: TreePickerView;
 				preview: readonly NativeChild[];
 				label: LabelInput | null;
@@ -1547,7 +1556,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
-		return cx.supports("picker") ? this.#describePicker() : this.#describeCard();
+		return cx.supports("picker") ? this.#describePicker(cx) : this.#describeCard();
 	}
 
 	/**
@@ -1555,13 +1564,15 @@ export class TreeSelectorComponent extends OverlayPanel {
 	 * the reconciler hoists it into `layer` as a sheet. The label editor
 	 * takes the preview pane while open.
 	 */
-	#describePicker(): NativeNode {
+	#describePicker(cx: DescribeContext): NativeNode {
+		const size = pickerSize(cx, "lg");
 		const view = this.#treeList.pickerView();
 		const label = this.#labelInput;
 		const preview = label ? label.preview : this.#treeList.pickerPreview();
 		const memo = this.#pickerMemo;
 		if (
-			memo?.label === label &&
+			memo?.size === size &&
+			memo.label === label &&
 			memo.preview === preview &&
 			memo.view.items === view.items &&
 			memo.view.order === view.order &&
@@ -1577,7 +1588,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 			...(this.sessionName ? { subtitle: this.sessionName } : {}),
 			icon: "git-branch",
 			noun: "entries",
-			size: "lg",
+			size,
 			layout: "tree",
 			preview: "side",
 			...pickerQuery(this.#treeList.searchInput),
@@ -1605,7 +1616,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 					],
 		};
 		const result = col([keyed(picker(props, preview), "picker")]);
-		this.#pickerMemo = { view, preview, label, node: result };
+		this.#pickerMemo = { size, view, preview, label, node: result };
 		return result;
 	}
 
