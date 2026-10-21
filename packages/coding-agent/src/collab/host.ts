@@ -343,6 +343,9 @@ export class CollabHost {
 	 * Set `retainOnReconnect` only for a request backed by a local dialog whose
 	 * lifetime still owns the signal: authenticated writers can then resume it
 	 * after a transport reconnect. Stop and session replacement always discard it.
+	 * All current production callers opt in. The false default is a safeguard for
+	 * future guest-only callers without a local dialog to own cancellation: their
+	 * waits settle as unavailable when the relay recreates the room.
 	 *
 	 * Refused, and the room ended, once the active session is no longer the
 	 * one this room mirrors: `/resume` runs the new session's `session_switch`
