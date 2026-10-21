@@ -227,8 +227,11 @@ export class SessionStatsTracker {
 					const usage = taskToolUsage(message.details);
 					if (usage) addUsage(usage);
 				} else if (message.toolName === "edit" && message.isError) {
-					const kind = (message.details as { errorKind?: unknown } | undefined)?.errorKind;
-					if (typeof kind === "string") editRejections[kind] = (editRejections[kind] ?? 0) + 1;
+					const { details } = message;
+					if (details && typeof details === "object" && "errorKind" in details) {
+						const kind = details.errorKind;
+						if (typeof kind === "string") editRejections[kind] = (editRejections[kind] ?? 0) + 1;
+					}
 				}
 			} else if (message.role === "assistant") {
 				assistantMessages++;

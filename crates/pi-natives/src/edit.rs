@@ -858,6 +858,15 @@ pub fn edit_grammar(mode: String) -> Result<Option<String>> {
 	Ok(pi_edit::grammar(parse_mode(&mode)?).map(str::to_owned))
 }
 
+/// Every `errorKind` a failed apply outcome can carry.
+#[napi]
+pub fn edit_error_kinds() -> Vec<String> {
+	EditError::KINDS
+		.iter()
+		.map(|kind| (*kind).to_owned())
+		.collect()
+}
+
 /// Auto-generated-file guard: the rejection message when `absolutePath`
 /// (displayed as `displayPath`) must not be edited, else null. Missing or
 /// unreadable files are editable.
