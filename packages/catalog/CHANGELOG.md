@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Step 5 Preview reasoning choices on OpenCode Go and Zen to offer only low, medium, and high ([#14987](https://github.com/can1357/oh-my-pi/issues/14987))
+- Fixed Step 5 Preview reasoning choices on OpenCode Go and Zen to offer only low, medium, and high ([#14987](https://github.com/can1357/oh-my-pi/issues/14987), [#16669](https://github.com/can1357/oh-my-pi/pull/16669) by [@SheetHappiness](https://github.com/SheetHappiness))
 
 ### Added
 
