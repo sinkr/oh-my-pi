@@ -1,5 +1,5 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
@@ -68,15 +68,15 @@ export class IrcBridge {
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
 	}
 
-	/** Whether a message from `from` is still queued for a turn yet to run. */
+	/** Whether an IRC message from `from` is still queued for a turn yet to run. */
 	hasQueuedFrom(from: string): boolean {
 		return [this.#interrupts, this.#asides, this.#deferredWakes].some(queue =>
 			queue.some(
 				record =>
 					record.role === "custom" &&
-					record.details !== null &&
-					typeof record.details === "object" &&
-					Reflect.get(record.details, "from") === from,
+					record.customType === "irc:incoming" &&
+					isRecord(record.details) &&
+					record.details.from === from,
 			),
 		);
 	}
@@ -222,11 +222,27 @@ export class IrcBridge {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const parentId = AgentRegistry.global().get(msg.to)?.parentId;
+		const registry = AgentRegistry.global();
+		const parentId = registry.get(msg.to)?.parentId;
 		const fromParent = parentId === msg.from;
-		// A subagent's result answers its parent. Anyone else's message, or a
-		// broadcast leg (which asks no one in particular), gets its own turn.
-		const peerMessage = parentId !== undefined && (!fromParent || msg.broadcast === true);
+		// A subagent's result answers its parent, and its run may be waiting on its
+		// own descendants, whose questions it must see in-run. Anyone else's
+		// message, or a broadcast leg (which asks no one in particular), gets a
+		// turn of its own.
+		let fromDescendant = false;
+		const seen = new Set<string>();
+		for (
+			let id = registry.get(msg.from)?.parentId;
+			id !== undefined && !seen.has(id);
+			id = registry.get(id)?.parentId
+		) {
+			if (id === msg.to) {
+				fromDescendant = true;
+				break;
+			}
+			seen.add(id);
+		}
+		const peerMessage = parentId !== undefined && (msg.broadcast === true || (!fromParent && !fromDescendant));
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent, mid-turn asides, relays and broadcast legs have no such relay.

@@ -12063,6 +12063,11 @@ export class AgentSession implements SettingsScope {
 		};
 	}
 
+	/** Whether a {@link holdIrcWakes} hold is active: the lifecycle must not park this session yet. */
+	get ircWakesHeld(): boolean {
+		return this.#ircWakeHolds > 0;
+	}
+
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
 	emitIrcRelayObservation(record: CustomMessage): void {
 		this.#irc.emitRelayObservation(record);

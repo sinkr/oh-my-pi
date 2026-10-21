@@ -668,6 +668,12 @@ export class AgentLifecycleManager {
 		clearTimeout(adopted.timer);
 		const timer = setTimeout(() => {
 			adopted.timer = undefined;
+			// A run still publishing its result holds IRC wakes it owes turns to;
+			// parking would dispose them. Try again once the TTL passes anew.
+			if (adopted.ref.session?.ircWakesHeld) {
+				this.#armTimer(id, adopted);
+				return;
+			}
 			void this.park(id);
 		}, adopted.idleTtlMs);
 		timer.unref?.();

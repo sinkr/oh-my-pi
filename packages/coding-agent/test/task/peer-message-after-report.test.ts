@@ -19,13 +19,14 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const AGENT_ID = "Reporter";
 const PARENT_ID = "Main";
 const PEER_ID = "Peer";
+const CHILD_ID = "Reporter.Child";
 const REPORT = "FULL_REPORT: findings one, two, three.";
 const PEER_BODY = "Quick question?";
 const PARENT_BODY = "Parent asks: anything else?";
@@ -109,6 +110,8 @@ function answer(context: Context): MockResponse {
 async function startRun(options: {
 	beforeResponse?: (request: number) => Promise<void> | void;
 	respond?: (request: number, context: Context) => MockResponse;
+	idleTtlMs?: number;
+	deferIrcWakeRelease?: (release: () => void) => void;
 }) {
 	const cwd = path.join(root, "home", "work");
 	const artifactsDir = path.join(root, "artifacts");
@@ -149,7 +152,7 @@ async function startRun(options: {
 		authStorage,
 		modelRegistry,
 		settings: Settings.isolated({
-			"task.agentIdleTtlMs": 0,
+			"task.agentIdleTtlMs": options.idleTtlMs ?? 0,
 			"compaction.enabled": false,
 			"retry.enabled": false,
 			"todo.enabled": false,
@@ -160,12 +163,21 @@ async function startRun(options: {
 		enableLsp: false,
 		enableMCP: false,
 		enableIrc: true,
+		deferIrcWakeRelease: options.deferIrcWakeRelease,
 	});
 	const close = (): void => {
 		unregisterSink();
 		authStorage.close();
 	};
-	return { run, artifact: path.join(artifactsDir, `${AGENT_ID}.md`), deliveries, peerInbox, close, mock };
+	return {
+		run,
+		artifact: path.join(artifactsDir, `${AGENT_ID}.md`),
+		artifactsDir,
+		deliveries,
+		peerInbox,
+		close,
+		mock,
+	};
 }
 
 /** Lets the subagent's current turn, its relays and the parent's deliveries settle. */
@@ -328,6 +340,92 @@ it("answers a peer message that arrives while the run waits on background work i
 		expect((await child.peerInbox)?.body).toBe("PEER_REPLY");
 	} finally {
 		job.resolve();
+		child.close();
+	}
+}, 20_000);
+
+it("lets the agent answer its own child's question while its run waits on that child's work", async () => {
+	const job = Promise.withResolvers<void>();
+	const childAsked = afterReport(CHILD_ID, PEER_BODY);
+	const answering = Promise.withResolvers<void>();
+	AgentRegistry.global().register({
+		id: CHILD_ID,
+		displayName: "child",
+		kind: "sub",
+		parentId: AGENT_ID,
+		session: null,
+	});
+	const child = await startRun({
+		beforeResponse: request => {
+			if (request === 1) {
+				manager.register(
+					"bash",
+					"child's work",
+					async () => {
+						await job.promise;
+						return "child done";
+					},
+					{ ownerId: AGENT_ID, agentId: AGENT_ID },
+				);
+			}
+			// The question is answered before the work it may be blocking finishes.
+			if (request === 2) answering.resolve();
+			childAsked.beforeResponse(request);
+		},
+	});
+	try {
+		expect((await childAsked.sent).outcome).toBe("woken");
+		await answering.promise;
+		job.resolve();
+		expect((await child.run).output).toBe(REPORT);
+	} finally {
+		job.resolve();
+		child.close();
+	}
+}, 20_000);
+
+it("does not park an agent while it still holds a peer's message for a turn of its own", async () => {
+	const peer = afterReport(PEER_ID, PEER_BODY);
+	const held = Promise.withResolvers<() => void>();
+	const child = await startRun({
+		beforeResponse: peer.beforeResponse,
+		idleTtlMs: 1,
+		deferIrcWakeRelease: release => held.resolve(release),
+	});
+	try {
+		expect((await child.run).output).toBe(REPORT);
+		const release = await held.promise;
+		// Real time on purpose: the lifecycle's idle timer is what would park the agent.
+		await Bun.sleep(50);
+		expect(AgentRegistry.global().get(AGENT_ID)?.status).not.toBe("parked");
+		release();
+		expect((await child.peerInbox)?.body).toBe("PEER_REPLY");
+	} finally {
+		child.close();
+	}
+}, 20_000);
+
+it("keeps a follow-up turn's report when a peer message arrives right after it", async () => {
+	const peer = afterReport(PEER_ID, PEER_BODY);
+	const child = await startRun({
+		// Request 2 is the follow-up's report turn.
+		beforeResponse: request => peer.beforeResponse(request - 1),
+		respond: (request, context) => (request === 2 ? { content: ["FOLLOW_UP_REPORT"] } : answer(context)),
+	});
+	try {
+		expect((await child.run).output).toBe(REPORT);
+		const followUp = await runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
+			message: "report again",
+			structured: false,
+			artifactsDir: child.artifactsDir,
+		});
+		expect(followUp.output).toBe("FOLLOW_UP_REPORT");
+		expect((await child.peerInbox)?.body).toBe("PEER_REPLY");
+		await settle();
+		expect(await Bun.file(child.artifact).text()).toBe("FOLLOW_UP_REPORT");
+	} finally {
 		child.close();
 	}
 }, 20_000);
