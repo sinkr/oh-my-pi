@@ -1426,10 +1426,7 @@ describe("commitToBranch preserves agent commits", () => {
 	// own tree can never apply.
 	it("ignores parent-untracked paths the isolation never had", async () => {
 		await fs.mkdir(path.join(parent, "generated"), { recursive: true });
-		await fs.writeFile(
-			path.join(parent, "generated/report.additive.patch"),
-			"parent-only untracked baseline\n",
-		);
+		await fs.writeFile(path.join(parent, "generated/report.additive.patch"), "parent-only untracked baseline\n");
 		const baseline = await captureBaseline(parent);
 		expect(baseline.root.untracked).toContain("generated/report.additive.patch");
 
