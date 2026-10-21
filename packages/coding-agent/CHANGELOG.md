@@ -5,15 +5,20 @@
 ### Added
 
 - Added the `_session/steering` ACP extension (advertised as `_meta.steering.supported`), so clients such as agent-shell can steer a running turn; a steer sent while a permission dialog is open cancels that dialog, and `_meta.steering.queue: "followUp"` queues a follow-up instead ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
+- `/mcp reauth <name>` now works over ACP, RPC, and print mode (`omp -p '/mcp reauth <name>'`): it opens the browser, prints the authorization URL, reconnects the server in the running session, and print mode exits 1 when reauthorization fails ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ### Changed
 
 - ACP `session/cancel` now also cancels prompts that are queued or still dispatching, and stops autonomous runs, instead of being ignored when no client turn is streaming ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 - Idle compaction no longer runs on logged-in OpenAI Codex accounts, whose prompt cache never expires; compacting while idle only threw away a warm cache
+- ACP sessions no longer fail to start when a client-declared MCP server cannot connect; the failure is reported in the session, and an HTTP/SSE server can be repaired with `/mcp reauth` ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
+- `/mcp reauth`, `/mcp test`, and `/mcp unauth` now pick the project entry when a server is defined in both project and user config, and skip project config when `mcp.enableProjectConfig` is off ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
+- `/mcp reauth` removes the server's stale `Authorization` header from its config when it writes the new OAuth binding ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ### Fixed
 
 - Fixed the advisor prompt forbidding all repeated advice, including real escalations: advisors may now re-raise a prior nit or concern as a blocker once new evidence makes it one ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))
+- Fixed Esc no longer interrupting in the TUI after a second MCP OAuth login replaced an unfinished first one ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ## [18.12.5] - 2026-10-21
 
@@ -33,15 +38,6 @@
 
 ### Added
 
-- Added `/mcp reauth <name>` in ACP, RPC, and print mode: it opens the browser and stores credentials through the same engine as the TUI flow, prints the authorization URL as a fallback, reconnects the live server when the host keeps one (binding its recovered tools before the command completes), keeps multi-word server names intact, resolves the ACP session's own server on name collisions, and in print mode runs only from CLI-authored input (`-p`) ahead of the strict `OMP_MCP_REQUIRE_READY` gate so it can repair the server that gate failed — never from the merged stdin/`@file` message, which always prompts the model ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
-- Added a failed print-mode `/mcp reauth` (unknown server, refused operation, transport refusal) exiting 1 instead of 0, so `omp -p` automation does not treat a failed reauthorization as success ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
-- Added resilience for ACP sessions whose client-declared MCP server fails to connect at startup (e.g. an expired client bearer): `session/new` still succeeds, the failure is reported as a session chunk once the client knows the session id, and `/mcp reauth` can recover the kept server entry in the same session ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
-
-### Fixed
-
-- Fixed `/mcp reauth` writing the fresh credential binding against the wrong source: the lookup now prefers the ACP session's own server over a colliding config-file name (and vice versa where they do not correspond), respects `mcp.enableProjectConfig: false` instead of resurrecting an opted-out project entry, and never lets a print/RPC file-manager entry shadow the real project/user config ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
-- Fixed `/mcp reauth` persisting a stale client `Authorization` header (and any resolved `${VAR}` secrets) into `mcp.json` alongside the fresh auth binding; the stale header is stripped on write so the new credential wins on the next load, and an ACP session-owned server definition is never copied into the global user config at all ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
-- Fixed the TUI Esc handler for MCP OAuth flows being replaced by a dead predecessor's handler when a second reauth supersedes an unfinished first: the hook now installs only once the flow's single-flight claim resolves and restores the session default, so Esc keeps interrupting after either flow unwinds ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 - `bash` tool commands now see `PI_SESSION_ID` and `PI_SESSION_FILE`, so a script can find the running session's ID and transcript path ([#16442](https://github.com/can1357/oh-my-pi/pull/16442) by [@johnrichardrinehart](https://github.com/johnrichardrinehart) and [@will-bogusz](https://github.com/will-bogusz))
 - Added GitLab merge request support to `/review` and `/annotate code-review`: pass an MR URL, pick one mentioned in the conversation, or choose "Review a specific PR/MR" in a GitLab checkout to list open MRs (requires `glab`); large MRs link per-file diffs through the new `mr://<host>/<group>/<project>/<iid>/diff` URLs ([#16361](https://github.com/can1357/oh-my-pi/pull/16361) by [@Shadorain](https://github.com/Shadorain))
 - Added MCP tool progress: `tools/call` requests ask the server for `notifications/progress` when the progress can be shown, and updates appear in the running tool card and as an in-place `mcp_progress` status line in Eval cells, including after auto-backgrounding; request deadlines and Eval timeouts are unchanged ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
