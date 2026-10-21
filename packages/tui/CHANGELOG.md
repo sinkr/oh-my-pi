@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Grep, Glob, Find, and AST Grep result headers wrap a long pattern instead of cutting it off, so the match/file counts and `truncated` warning stay visible ([#16635](https://github.com/can1357/oh-my-pi/issues/16635))
+
 ## [18.12.4] - 2026-10-20
 
 ### Added
