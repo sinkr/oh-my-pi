@@ -4,7 +4,7 @@
 
 ### Added
 
-- llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080
+- llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
 ### Fixed
 

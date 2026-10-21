@@ -632,13 +632,17 @@ export async function discoverLlamaCppModels(
 	try {
 		return await discoverLlamaCppModelsAt(providerConfig, providerConfig.baseUrl, ctx);
 	} catch (primaryError) {
-		// An auth rejection means a server answered; probing other ports would
-		// only mask the credential problem.
-		if (isDiscoveryAuthRejection(primaryError)) throw primaryError;
+		// Any HTTP status means a server answered; fall back only when nothing
+		// does, so a failing preferred server (401, 500, …) is never masked.
+		if (primaryError instanceof DiscoveryHttpError) throw primaryError;
 		for (const fallbackBaseUrl of fallbacks) {
 			try {
 				return await discoverLlamaCppModelsAt(providerConfig, fallbackBaseUrl, ctx);
-			} catch {}
+			} catch (fallbackError) {
+				// A fallback server that answered owns the outcome: its auth
+				// rejection must surface as unauthenticated, not as the primary outage.
+				if (fallbackError instanceof DiscoveryHttpError) throw fallbackError;
+			}
 		}
 		throw primaryError;
 	}
