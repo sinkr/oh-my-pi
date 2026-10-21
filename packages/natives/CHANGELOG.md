@@ -2,12 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed minimized `git diff`, `git show` and `diff -u` output dropping a hunk's changes and listing a made-up file when a changed line starts with `-- ` or `++ ` (SQL comments, Markdown `---` rules) ([#16588](https://github.com/can1357/oh-my-pi/pull/16588) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
 
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
-- Fixed minimized `git diff`, `git show` and `diff -u` output dropping a hunk's changes and listing a made-up file when a changed line starts with `-- ` or `++ ` (SQL comments, Markdown `---` rules)
 
 ## [18.12.4] - 2026-10-20
 
