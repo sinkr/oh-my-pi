@@ -17,10 +17,18 @@ import { OverlayPanel } from "../chrome/overlay-box";
 import { Input } from "../components/input";
 import { MenuSelection } from "../components/menu-selection";
 import { centeredViewportRange } from "../components/scroll-viewport";
-import type { TspPickerItem, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspPickerItem, TspPickerProps, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span, text } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
-import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
+import {
+	CLOSE_ACTION,
+	dockedPicker,
+	PICKER_KEY,
+	pickerAction,
+	pickerEvent,
+	pickerQuery,
+	pickerSize,
+} from "../native/picker";
 import { overlayCard } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
 
@@ -79,7 +87,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	#nativeRoot: NativeNode | undefined;
 	/** Picker rows for the whole catalogue; dropped when an auth state changes. */
 	#pickerItems: readonly TspPickerItem[] | undefined;
-	#pickerRoot: NativeNode | undefined;
+	#pickerRoot: { size: TspPickerProps["size"]; node: NativeNode } | undefined;
 	constructor(
 		mode: "login" | "logout",
 		authStorage: OAuthSelectorAuthSource,
@@ -497,19 +505,20 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		};
 	}
 
-	#describePicker(): NativeNode {
-		if (this.#pickerRoot) return this.#pickerRoot;
+	#describePicker(cx: DescribeContext): NativeNode {
+		const size = pickerSize(cx, "md");
+		if (this.#pickerRoot?.size === size) return this.#pickerRoot.node;
 		const all = this.#menu.items;
 		this.#pickerItems ??= all.map(provider => this.#pickerItem(provider));
 		const query = this.#menu.query;
 		const login = this.#mode === "login";
 		const search = this.#shouldRenderSearchStatus() ? pickerQuery(this.#search) : pickerQuery(null);
-		this.#pickerRoot = dockedPicker({
+		const root = dockedPicker({
 			title: login ? "Sign in" : "Sign out",
 			subtitle: login ? "Pick a provider" : "Remove stored credentials",
 			icon: "key-round",
 			noun: "providers",
-			size: "md",
+			size,
 			layout: "cards",
 			preview: "none",
 			...search,
@@ -530,11 +539,12 @@ export class OAuthSelectorComponent extends OverlayPanel {
 				CLOSE_ACTION,
 			],
 		});
-		return this.#pickerRoot;
+		this.#pickerRoot = { size, node: root };
+		return root;
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
-		if (cx.supports("picker")) return this.#describePicker();
+		if (cx.supports("picker")) return this.#describePicker(cx);
 		if (this.#nativeRoot) return this.#nativeRoot;
 		const items = this.#menu.visibleItems;
 		if (!this.#nativeItems || this.#nativeItemsSource !== items) {

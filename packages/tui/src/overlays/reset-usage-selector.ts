@@ -12,7 +12,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { node, span, text } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, hintsRow, overlayCard } from "../native/overlay";
-import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent } from "../native/picker";
+import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent, pickerSize } from "../native/picker";
 import type { TspPickerItem, TspPickerProps, TspSpan } from "@oh-my-pi/pi-wire";
 
 const RESET_SELECTOR_MAX_VISIBLE = 10;
@@ -107,7 +107,7 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 	#nativeItems: readonly NativeNode[] | undefined;
 	#nativeHints: NativeNode | undefined;
 	#nativeRoot: NativeNode | undefined;
-	#pickerRoot: NativeNode | undefined;
+	#pickerRoot: { size: TspPickerProps["size"]; node: NativeNode } | undefined;
 	#pickerItems: readonly TspPickerItem[] | undefined;
 
 	constructor(accounts: ResetUsageAccount[], onSelect: (account: ResetUsageAccount) => void, onCancel: () => void) {
@@ -283,7 +283,7 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
-		if (cx.supports("picker")) return this.#describePicker();
+		if (cx.supports("picker")) return this.#describePicker(cx);
 		if (this.#nativeRoot) return this.#nativeRoot;
 		this.#nativeItems ??= this.#menu.visibleItems.map(account => {
 			const redeemable = account.redeemableCount > 0;
@@ -330,8 +330,9 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 	 * as facts, the active account checked, unusable ones disabled with the
 	 * reason; the first `Spend reset` turns the selected row into a confirm strip.
 	 */
-	#describePicker(): NativeNode {
-		if (this.#pickerRoot) return this.#pickerRoot;
+	#describePicker(cx: DescribeContext): NativeNode {
+		const size = pickerSize(cx, "md");
+		if (this.#pickerRoot?.size === size) return this.#pickerRoot.node;
 		const items = (this.#pickerItems ??= this.#menu.visibleItems.map(account =>
 			accountPickerItem(account, this.#menu.adapter.getKey(account)),
 		));
@@ -345,12 +346,12 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 			if (notes.length > 0) subtitle = oneLine(notes.join(" "));
 		}
 		if (this.#statusMessage) subtitle = [span(oneLine(this.#statusMessage), "warning")];
-		this.#pickerRoot = dockedPicker({
+		const node = dockedPicker({
 			title: "Rate-limit resets",
 			subtitle,
 			icon: "refresh",
 			noun: "accounts",
-			size: "md",
+			size,
 			layout: "cards",
 			preview: "none",
 			query: null,
@@ -367,7 +368,8 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 			actions: [pickerAction("confirm", "Spend reset", "enter", { primary: true }), CLOSE_ACTION],
 			confirm,
 		});
-		return this.#pickerRoot;
+		this.#pickerRoot = { size, node };
+		return node;
 	}
 
 	/** Point the menu at `key`; moving to another account drops a pending confirmation. */

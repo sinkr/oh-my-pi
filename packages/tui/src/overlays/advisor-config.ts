@@ -48,7 +48,7 @@ import { bottomBorder, divider, dividerSplit, PanelRows, row, topBorder, topBord
 import { isLayoutMouseRoutable } from "../components/layout/geometry";
 import { SplitPane } from "../components/layout/split-pane";
 import { Stack } from "../components/layout/stack";
-import type { TspPrefsProps, TspPrefsRow, TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspPickerProps, TspPrefsProps, TspPrefsRow, TspSpan } from "@oh-my-pi/pi-wire";
 import { col, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton, actionHint, hintsRow, type NativeHint, overlayCard } from "../native/overlay";
@@ -58,6 +58,7 @@ import {
 	pickerEvent,
 	routeSelectListPicker,
 	type SelectPickerOptions,
+	pickerSize,
 	selectListPicker,
 } from "../native/picker";
 import { getThinkingLevelMetadata, parseThinkingLevel } from "../thinking";
@@ -480,7 +481,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	 * card.
 	 */
 	describe(cx: DescribeContext): NativeNode {
-		if (cx.supports("prefs")) return this.#describePrefs();
+		if (cx.supports("prefs")) return this.#describePrefs(cx);
 		return this.#describeCard();
 	}
 
@@ -492,7 +493,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		return match ? Number(match[1]) : value === "shared" ? -1 : 0;
 	}
 
-	#describePrefs(): NativeNode {
+	#describePrefs(cx: DescribeContext): NativeNode {
 		const doc = this.#doc;
 		const index = this.#pageIndex();
 		const shared = index < 0;
@@ -647,7 +648,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			this.#screen === "sync-backlog" ||
 			this.#screen === "tools" ||
 			this.#screen === "instructions";
-		const editor = overlay ? this.#prefsEditor() : undefined;
+		const editor = overlay ? this.#prefsEditor(cx) : undefined;
 		const focus =
 			this.#screen === "detail" && this.#active instanceof SelectList
 				? (this.#active.getSelectedItem()?.value ?? null)
@@ -684,25 +685,26 @@ export class AdvisorConfigOverlayComponent implements Component {
 	 * action); the instructions and review-interval editors sit in the page's
 	 * editor card.
 	 */
-	#prefsEditor(): NativeNode {
+	#prefsEditor(cx: DescribeContext): NativeNode {
 		const active = this.#active;
 		const memo = this.#nativeEditor;
+		const size = pickerSize(cx, "md");
 		if (active instanceof ModelBrowser) {
 			const order = active.pickerOrder({ providers: false, rest: active.query.trim() ? "Matches" : "All" });
 			const catalogue = active.pickerItems(this.#modelItems);
 			const preview = active.pickerPreview("compact", this.#modelCurrent);
-			const deps = [active, order, catalogue, preview, active.query, active.cursor, active.pickerSelected];
+			const deps = [active, order, catalogue, preview, active.query, active.cursor, active.pickerSelected, size];
 			if (memo && sameDeps(memo.deps, deps)) return memo.node;
-			const sheet = this.#modelSheet(active, order, catalogue, preview);
+			const sheet = this.#modelSheet(active, order, catalogue, preview, size);
 			this.#nativeEditor = { deps, node: sheet };
 			return sheet;
 		}
 		const options = this.#sheetOptions;
 		if (active instanceof SelectList && options) {
 			const view = active.pickerView();
-			const deps = [active, view.items, view.selected, view.pending, view.query, view.cursor];
+			const deps = [active, view.items, view.selected, view.pending, view.query, view.cursor, size];
 			if (memo && sameDeps(memo.deps, deps)) return memo.node;
-			const props = selectListPicker(active, options);
+			const props = selectListPicker(active, options, size);
 			const sheet = node(
 				"picker",
 				this.#screen === "tools"
@@ -731,6 +733,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		order: ModelPickerOrder,
 		catalogue: ModelPickerCatalogue,
 		preview: readonly NativeChild[],
+		size: TspPickerProps["size"],
 	): NativeNode {
 		const name = this.#doc.advisors[this.#detailIndex]?.name || "This advisor";
 		const fallback = this.#defaultModelLabel ?? "the advisor role default";
@@ -741,7 +744,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 				subtitle: `${name} reviews with this model. Unset, it uses ${fallback}.`,
 				icon: "model",
 				noun: "models",
-				size: "md",
+				size,
 				layout: "rows",
 				preview: "below",
 				query: browser.query,

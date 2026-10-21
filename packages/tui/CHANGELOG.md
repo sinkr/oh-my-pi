@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- In Tern, centered sheets (`/context`, reports, keyboard shortcuts, BTW history, session info, the pause screen) and picker sheets (models, sessions, themes, …) fill the pane when it is narrower than 100 columns instead of floating with margins
+
 ### Fixed
 
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
