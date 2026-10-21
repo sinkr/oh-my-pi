@@ -109,9 +109,11 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 	let lastError: string | undefined;
 	let retried429 = false;
+	// Header names are case-insensitive, so a caller's header replaces ours whatever its spelling.
+	const callerHeaders = new Headers(headers);
 	// A caller's own User-Agent replaces every rotated one, so a refusal of it is final; a
 	// transport error still retries.
-	const rotates = headers["User-Agent"] === undefined;
+	const rotates = !callerHeaders.has("user-agent");
 	for (let attempt = 0; attempt < USER_AGENTS.length; attempt++) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
@@ -121,16 +123,17 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 		const requestSignal = ptree.combineSignals(signal, timeout * 1000);
 
 		try {
+			const requestHeaders = new Headers({
+				"User-Agent": userAgent,
+				Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+				"Accept-Language": "en-US,en;q=0.5",
+				"Accept-Encoding": "identity", // Cloudflare Markdown-for-Agents returns corrupted bytes when compression is negotiated
+			});
+			for (const [name, value] of callerHeaders) requestHeaders.set(name, value);
 			const requestInit: RequestInit = {
 				signal: requestSignal,
 				method,
-				headers: {
-					"User-Agent": userAgent,
-					Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-					"Accept-Language": "en-US,en;q=0.5",
-					"Accept-Encoding": "identity", // Cloudflare Markdown-for-Agents returns corrupted bytes when compression is negotiated
-					...headers,
-				},
+				headers: requestHeaders,
 				redirect: "follow",
 			};
 

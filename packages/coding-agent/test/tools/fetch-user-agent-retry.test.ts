@@ -77,7 +77,7 @@ describe("read URL refused for one user agent", () => {
 		expect(performance.now() - started).toBeLessThan(5_000);
 	});
 
-	it("sends a caller's own User-Agent once instead of repeating a refused request", async () => {
+	it("sends a caller's own User-Agent once instead of repeating a refused request, whatever its spelling", async () => {
 		const agents: (string | null)[] = [];
 		const server = Bun.serve({
 			port: 0,
@@ -88,11 +88,13 @@ describe("read URL refused for one user agent", () => {
 		});
 		servers.push(server);
 
-		const result = await loadPage(`http://127.0.0.1:${server.port}/api`, { headers: { "User-Agent": "omp/test" } });
+		for (const name of ["User-Agent", "user-agent"]) {
+			const result = await loadPage(`http://127.0.0.1:${server.port}/api`, { headers: { [name]: "omp/test" } });
+			expect(result.ok).toBe(false);
+			expect(result.status).toBe(403);
+		}
 
-		expect(result.ok).toBe(false);
-		expect(result.status).toBe(403);
-		expect(agents).toEqual(["omp/test"]);
+		expect(agents).toEqual(["omp/test", "omp/test"]);
 	});
 
 	it("still retries a caller's own User-Agent after a transport error", async () => {
