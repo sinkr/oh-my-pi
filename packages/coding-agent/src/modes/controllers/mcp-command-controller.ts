@@ -82,6 +82,8 @@ import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
 const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
 const MCP_TEST_ESCAPE_GRACE_MS = 5_000;
+/** MCP OAuth Esc handlers mapped to the handler each one restores when its flow unwinds. */
+const mcpOAuthEscapeOriginals = new WeakMap<() => void, (() => void) | undefined>();
 
 /**
  * Hint block for an in-flight `/mcp test`. It remains active until settlement
@@ -935,17 +937,12 @@ export class MCPCommandController {
 		const installed = (): void => {
 			escape.abort(MCP_OAUTH_USER_CANCEL_REASON);
 		};
-		const escapeHandler = installed as unknown as {
-			__mcpOAuthEscapeOriginal?: (() => void) | undefined;
-			__isMcpOAuthEscape?: boolean;
-		};
+		// Chain through any OAuth handler already installed to the session
+		// default underneath it, so unwinding in either order restores the default.
 		const current = this.ctx.editor.onEscape;
-		const currentIsOurs =
-			current !== undefined && (current as { __isMcpOAuthEscape?: boolean }).__isMcpOAuthEscape === true;
-		escapeHandler.__mcpOAuthEscapeOriginal = currentIsOurs
-			? (current as { __mcpOAuthEscapeOriginal?: () => void }).__mcpOAuthEscapeOriginal
-			: current;
-		escapeHandler.__isMcpOAuthEscape = true;
+		const original =
+			current !== undefined && mcpOAuthEscapeOriginals.has(current) ? mcpOAuthEscapeOriginals.get(current) : current;
+		mcpOAuthEscapeOriginals.set(installed, original);
 		const onClaimed = (): void => {
 			this.ctx.editor.onEscape = installed;
 		};
@@ -954,7 +951,7 @@ export class MCPCommandController {
 			// installs its own handler after this one unwinds, and that
 			// handler (and the default it would restore) must survive here.
 			if (this.ctx.editor.onEscape === installed) {
-				this.ctx.editor.onEscape = escapeHandler.__mcpOAuthEscapeOriginal;
+				this.ctx.editor.onEscape = original;
 			}
 		});
 	}

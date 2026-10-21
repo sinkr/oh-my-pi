@@ -54,9 +54,11 @@ export function commandConsumed(options?: { agentInvoked?: boolean; failed?: boo
 	agentInvoked?: boolean;
 	failed?: boolean;
 } {
-	if (options?.agentInvoked) return { consumed: true, agentInvoked: true };
-	if (options?.failed) return { consumed: true, failed: true };
-	return { consumed: true };
+	return {
+		consumed: true,
+		...(options?.agentInvoked ? { agentInvoked: true } : {}),
+		...(options?.failed ? { failed: true } : {}),
+	};
 }
 
 /**

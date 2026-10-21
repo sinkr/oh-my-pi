@@ -183,7 +183,8 @@ type ManagedSessionRecord = {
 	// the newSession/loadSession response has told the client the session id).
 	// Drained by `#emitBootstrapUpdates` behind the bootstrap race guard so
 	// clients (Zed) cannot drop them as notifications for an unknown session.
-	pendingMcpStartupChunks: Array<{ name: string; message: string }>;
+	// `oauthCapable` marks http/sse servers, the only ones `/mcp reauth` can repair.
+	pendingMcpStartupChunks: Array<{ name: string; message: string; oauthCapable: boolean }>;
 	promptTurn: PromptTurnState | undefined;
 	promptQueue: PromptQueueState;
 	liveMessageId: string | undefined;
@@ -2170,14 +2171,17 @@ export class AcpAgent implements Agent {
 		// MCP startup failures queued by `#configureMcpServers` flush here,
 		// behind the bootstrap race guard, so the client can finally attribute
 		// them to a session it knows.
-		for (const { name, message } of record.pendingMcpStartupChunks.splice(0)) {
+		for (const { name, message, oauthCapable } of record.pendingMcpStartupChunks.splice(0)) {
+			const recovery = oauthCapable
+				? `until it is reauthorized (/mcp reauth ${name}) or the client restarts the session`
+				: "until the client restarts the session";
 			await this.#connection.sessionUpdate({
 				sessionId,
 				update: {
 					sessionUpdate: "agent_message_chunk",
 					content: {
 						type: "text",
-						text: `MCP server "${name}" failed to connect: ${message}. Its tools are unavailable until it is reauthorized (/mcp reauth ${name}) or the client restarts the session.`,
+						text: `MCP server "${name}" failed to connect: ${message}. Its tools are unavailable ${recovery}.`,
 					},
 				},
 			});
@@ -2780,7 +2784,8 @@ export class AcpAgent implements Agent {
 		// race `#scheduleBootstrapUpdates` guards). `#emitBootstrapUpdates`
 		// drains the queue behind that guard.
 		for (const [name, message] of result.errors) {
-			record.pendingMcpStartupChunks.push({ name, message });
+			const type = configs[name]?.type;
+			record.pendingMcpStartupChunks.push({ name, message, oauthCapable: type === "http" || type === "sse" });
 		}
 	}
 
