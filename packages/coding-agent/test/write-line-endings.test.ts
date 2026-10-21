@@ -198,6 +198,42 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 		);
 	});
 
+	it("takes the convention from the editor buffer when the bridge can read it", async () => {
+		const filePath = path.join(tmpDir, "Buffer.cs");
+		// Disk is LF; the editor's unsaved buffer was switched to CRLF.
+		await fs.writeFile(filePath, "class A {}\n");
+		const sent: string[] = [];
+		const bridge: ClientBridge = {
+			capabilities: { readTextFile: true, writeTextFile: true },
+			readTextFile: async () => "class A {}\r\n",
+			writeTextFile: async ({ path: target, content }) => {
+				sent.push(content);
+				await Bun.write(target, content);
+			},
+		};
+
+		await new WriteTool(createSession(tmpDir, bridge)).execute("call-1", { path: filePath, content: "class B {}\n" });
+
+		expect(sent).toEqual(["class B {}\r\n"]);
+	});
+
+	it("counts a BOM the editor adds on save", async () => {
+		const filePath = path.join(tmpDir, "Utf8Bom.cs");
+		const bridge: ClientBridge = {
+			capabilities: { writeTextFile: true },
+			writeTextFile: async ({ path: target, content }) => {
+				await Bun.write(target, `\uFEFF${content}`);
+			},
+		};
+
+		const result = await new WriteTool(createSession(tmpDir, bridge)).execute("call-1", {
+			path: filePath,
+			content: "class A {}\n",
+		});
+
+		expect(resultText(result)).toContain("Successfully wrote 14 bytes to Utf8Bom.cs");
+	});
+
 	it("does not write once the call is cancelled during a long first-line scan", async () => {
 		const filePath = path.join(tmpDir, "one-line.txt");
 		const original = `${"a".repeat(200_000)}\r\n`;

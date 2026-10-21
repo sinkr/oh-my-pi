@@ -432,6 +432,31 @@ function hasUtf8Bom(bytes: Uint8Array): boolean {
 }
 
 /**
+ * Convention of the text a write to `absolutePath` replaces. When the write goes to an ACP editor
+ * that can read files, its buffer is that text (as for the read-projection guard), so unsaved
+ * line-ending changes and unsaved new buffers count; otherwise the `fileSize`-byte file on disk
+ * does, and a missing file (`fileSize` undefined) has none.
+ */
+async function readWriteTargetConvention(
+	session: ToolSession,
+	requestedPath: string,
+	absolutePath: string,
+	fileSize: number | undefined,
+	signal: AbortSignal | undefined,
+): Promise<TextFileConvention | undefined> {
+	const bridgeRead = (await shouldRouteWriteThroughBridge(session, requestedPath, absolutePath))
+		? routeReadThroughBridge(session, absolutePath)
+		: undefined;
+	if (bridgeRead) {
+		const text = await bridgeRead.catch(() => undefined);
+		if (text !== undefined) {
+			return { bom: text.startsWith("\uFEFF"), crlf: detectLineEnding(text) === "\r\n" };
+		}
+	}
+	return fileSize === undefined ? undefined : readTextFileConvention(absolutePath, fileSize, signal);
+}
+
+/**
  * Give `content` the CRLF line endings and BOM of the file it replaces, as `edit` keeps them.
  * Models write LF text, so without this replacing a CRLF file rewrites every line and drops its BOM.
  * Each is independent: content with a carriage return keeps its line endings, content that starts
@@ -1059,9 +1084,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			);
 
 			// An unreadable file keeps today's behavior; the write itself reports why it fails.
-			const convention = existing?.isFile()
-				? await readTextFileConvention(absolutePath, existing.size, signal).catch(() => undefined)
-				: undefined;
+			const convention = await readWriteTargetConvention(
+				this.session,
+				path,
+				absolutePath,
+				existing?.isFile() ? existing.size : undefined,
+				signal,
+			).catch(() => undefined);
 			// `untilAborted` has already rejected the call if it was cancelled during the scan; don't write.
 			signal?.throwIfAborted();
 			const { text: writeContent, applied } = applyTextFileConvention(cleanContent, convention);
@@ -1086,10 +1115,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					.bytes()
 					.then(hasUtf8Bom, () => writeContent.startsWith("\uFEFF"));
 				const persistedBytes =
-					bridgeWrite.text === writeContent
-						? writeBytes
-						: Buffer.byteLength(bridgeWrite.text, "utf8") +
-							(diskBom && !bridgeWrite.text.startsWith("\uFEFF") ? 3 : 0);
+					Buffer.byteLength(bridgeWrite.text, "utf8") +
+					(diskBom && !bridgeWrite.text.startsWith("\uFEFF") ? 3 : 0);
 				const writeLine = `Successfully wrote ${persistedBytes} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
