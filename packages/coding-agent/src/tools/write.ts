@@ -402,14 +402,18 @@ const LINE_BREAK_SCAN_BYTES = 64 * 1024;
 /**
  * Read the convention of the `size`-byte file at `absolutePath`: a leading UTF-8 BOM, and CRLF when
  * its first line break is one (the rule `edit` applies). The first {@link BINARY_SNIFF_BYTES} decide
- * whether it is text; a longer first line is scanned to its end. `undefined` for a binary file,
- * whose bytes say nothing about text line endings.
+ * whether it is text; a longer first line is scanned to its end, stopping when `signal` aborts.
+ * `undefined` for a binary file, whose bytes say nothing about text line endings.
  */
-async function readTextFileConvention(absolutePath: string, size: number): Promise<TextFileConvention | undefined> {
+async function readTextFileConvention(
+	absolutePath: string,
+	size: number,
+	signal: AbortSignal | undefined,
+): Promise<TextFileConvention | undefined> {
 	const file = Bun.file(absolutePath);
 	let chunk = await file.slice(0, BINARY_SNIFF_BYTES).bytes();
 	if (isProbablyBinaryHeader(chunk)) return undefined;
-	const bom = chunk[0] === 0xef && chunk[1] === 0xbb && chunk[2] === 0xbf;
+	const bom = hasUtf8Bom(chunk);
 	let offset = 0;
 	let previous: number | undefined;
 	for (;;) {
@@ -417,9 +421,14 @@ async function readTextFileConvention(absolutePath: string, size: number): Promi
 		if (lf !== -1) return { bom, crlf: (lf > 0 ? chunk[lf - 1] : previous) === 0x0d };
 		offset += chunk.length;
 		if (chunk.length === 0 || offset >= size) return { bom, crlf: false };
+		signal?.throwIfAborted();
 		previous = chunk[chunk.length - 1];
 		chunk = await file.slice(offset, offset + LINE_BREAK_SCAN_BYTES).bytes();
 	}
+}
+
+function hasUtf8Bom(bytes: Uint8Array): boolean {
+	return bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
 }
 
 /**
@@ -447,14 +456,15 @@ function applyTextFileConvention(
 }
 
 /**
- * Name each convention `applied` added that `finalText` (what the editor or formatter persisted)
- * still has, so the model knows the file differs from the text it sent. A convention an editor or
- * formatter removed again is not claimed.
+ * Name each convention `applied` added that the persisted file still has, so the model knows the
+ * file differs from the text it sent. `finalText` is what the editor or formatter persisted and
+ * `finalBom` whether the file on disk starts with a BOM (a decoded read-back may have stripped it).
+ * A convention an editor or formatter removed again is not claimed.
  */
-function textFileConventionNote(applied: TextFileConvention, finalText: string): string | undefined {
+function textFileConventionNote(applied: TextFileConvention, finalText: string, finalBom: boolean): string | undefined {
 	const kept: string[] = [];
 	if (applied.crlf && detectLineEnding(finalText) === "\r\n") kept.push("CRLF line endings");
-	if (applied.bom && finalText.startsWith("\uFEFF")) kept.push("UTF-8 BOM");
+	if (applied.bom && finalBom) kept.push("UTF-8 BOM");
 	return kept.length === 0 ? undefined : `Note: kept the replaced file's ${kept.join(" and ")}.`;
 }
 
@@ -1050,8 +1060,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			// An unreadable file keeps today's behavior; the write itself reports why it fails.
 			const convention = existing?.isFile()
-				? await readTextFileConvention(absolutePath, existing.size).catch(() => undefined)
+				? await readTextFileConvention(absolutePath, existing.size, signal).catch(() => undefined)
 				: undefined;
+			// `untilAborted` has already rejected the call if it was cancelled during the scan; don't write.
+			signal?.throwIfAborted();
 			const { text: writeContent, applied } = applyTextFileConvention(cleanContent, convention);
 			const writeBytes = writeContent === cleanContent ? cleanBytes : Buffer.byteLength(writeContent, "utf8");
 
@@ -1068,12 +1080,22 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// hands back a tag that matches what's actually on disk.
 				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
 				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text, displayPath);
-				const writeLine = `Successfully wrote ${writeBytes} bytes to ${displayPath}`;
+				// The read-back decodes the file, which drops a leading BOM: take it from the bytes.
+				const diskBom = await Bun.file(absolutePath)
+					.slice(0, 3)
+					.bytes()
+					.then(hasUtf8Bom, () => writeContent.startsWith("\uFEFF"));
+				const persistedBytes =
+					bridgeWrite.text === writeContent
+						? writeBytes
+						: Buffer.byteLength(bridgeWrite.text, "utf8") +
+							(diskBom && !bridgeWrite.text.startsWith("\uFEFF") ? 3 : 0);
+				const writeLine = `Successfully wrote ${persistedBytes} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
 					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 				}
-				const conventionNote = textFileConventionNote(applied, bridgeWrite.text);
+				const conventionNote = textFileConventionNote(applied, bridgeWrite.text, diskBom);
 				if (conventionNote) {
 					resultText += `\n${conventionNote}`;
 				}
@@ -1104,7 +1126,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 			}
-			const conventionNote = textFileConventionNote(applied, finalContent);
+			const conventionNote = textFileConventionNote(applied, finalContent, finalContent.startsWith("\uFEFF"));
 			if (conventionNote) {
 				resultText += `\n${conventionNote}`;
 			}

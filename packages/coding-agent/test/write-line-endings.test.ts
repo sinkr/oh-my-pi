@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -173,6 +173,75 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 		});
 
 		expect(await fs.readFile(filePath, "latin1")).toBe("class A {}\nclass B {}\n");
+		expect(resultText(result)).toContain("Successfully wrote 22 bytes to Saved.cs");
 		expect(resultText(result)).not.toContain("Note: kept");
+	});
+
+	it("names the BOM and counts its bytes when an editor bridge saves it", async () => {
+		const filePath = path.join(tmpDir, "Kept.cs");
+		await fs.writeFile(filePath, "\uFEFFclass A {}\r\n");
+		const bridge: ClientBridge = {
+			capabilities: { writeTextFile: true },
+			writeTextFile: async ({ path: target, content }) => {
+				await Bun.write(target, content);
+			},
+		};
+
+		const result = await new WriteTool(createSession(tmpDir, bridge)).execute("call-1", {
+			path: filePath,
+			content: "class A {}\n",
+		});
+
+		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFclass A {}\r\n");
+		expect(resultText(result)).toContain(
+			"Successfully wrote 15 bytes to Kept.cs\nNote: kept the replaced file's CRLF line endings and UTF-8 BOM.",
+		);
+	});
+
+	it("does not write once the call is cancelled during a long first-line scan", async () => {
+		const filePath = path.join(tmpDir, "one-line.txt");
+		const original = `${"a".repeat(200_000)}\r\n`;
+		await fs.writeFile(filePath, original);
+		const controller = new AbortController();
+		// `untilAborted` rejects at once and lets the work run on; it removes its abort listener when
+		// that work settles, which is the point to check the file.
+		const settled = Promise.withResolvers<void>();
+		const signal = controller.signal;
+		const removeListener = signal.removeEventListener.bind(signal);
+		signal.removeEventListener = (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+			removeListener(...args);
+			settled.resolve();
+		};
+		// Cancel when the scan reads past the 8 KiB sniff window.
+		const realFile = Bun.file;
+		const fileSpy = spyOn(Bun, "file").mockImplementation(((target: string, options?: BlobPropertyBag) => {
+			const file = realFile(target, options);
+			if (target !== filePath) return file;
+			return new Proxy(file, {
+				get(base, key) {
+					if (key === "slice") {
+						return (start?: number, end?: number) => {
+							if ((start ?? 0) > 0) controller.abort();
+							return base.slice(start, end);
+						};
+					}
+					const value = Reflect.get(base, key, base);
+					return typeof value === "function" ? value.bind(base) : value;
+				},
+			});
+		}) as typeof Bun.file);
+
+		try {
+			const call = new WriteTool(createSession(tmpDir)).execute(
+				"call-1",
+				{ path: filePath, content: "replaced\n" },
+				signal,
+			);
+			await expect(call).rejects.toThrow();
+			await settled.promise;
+		} finally {
+			fileSpy.mockRestore();
+		}
+		expect(await fs.readFile(filePath, "latin1")).toBe(original);
 	});
 });
