@@ -27,6 +27,7 @@ import {
 import { initializeExtensions } from "./runtime-init";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
+import { cfgAsyncPrintWake } from "../tools/settings";
 
 /**
  * Options for print mode.
@@ -46,6 +47,8 @@ export interface PrintModeOptions {
 	planYolo?: boolean;
 	/** Manager returned by session creation; only print mode waits for its servers. */
 	mcpManager?: MCPManager;
+	/** `--max-time` deadline (epoch ms). It aborts running turns; the background-job wait enforces it itself. */
+	deadline?: number;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
@@ -459,6 +462,50 @@ async function runPrintModeCore(
 		if (unavailable.length > 0) reportStrictFailure();
 	}
 
+	// Opt-in (`async.printWake` / `--wait-async`): background jobs the run started
+	// would otherwise be cancelled by the dispose below. Keep the process alive and
+	// let each job's async-result wake the same session for another turn, until no
+	// owned job or delivery remains (a follow-up turn may start new jobs). This runs
+	// before the headless advisor drain because these follow-ups are primary turns
+	// whose answer print mode still reports. The `--max-time` deadline only aborts
+	// running turns, so idle waiting checks it here; reaching it cancels the jobs
+	// (dispose below) and fails the run.
+	let asyncWaitExpired = false;
+	if (admittedAgentTurn && !strictMCPFailure && cfgAsyncPrintWake.get(session.settings)) {
+		const { deadline } = options;
+		const deadlineReached = Promise.withResolvers<true>();
+		const deadlineTimer =
+			deadline === undefined
+				? undefined
+				: setTimeout(() => deadlineReached.resolve(true), Math.max(0, deadline - Date.now()));
+		try {
+			await session.waitForIdle();
+			while (session.hasPendingAsyncWork() && !session.isDisposed && !signalTeardownActive()) {
+				// Checked synchronously too: an already-due timer fires only in the timers
+				// phase, after a settle of finished work would have resolved. The deadline
+				// stops new waits; a settle that already finished is kept: its follow-up turn
+				// ran under the agent-loop deadline (which aborts a turn that crosses it), so
+				// its answer is complete.
+				if (deadline !== undefined && Date.now() >= deadline) {
+					asyncWaitExpired = true;
+					break;
+				}
+				const settle = session.settleAsyncWork();
+				if (await Promise.race([settle.then(() => false), deadlineReached.promise])) {
+					// Dispose cancels the jobs; the abandoned settle then resolves or rejects unobserved.
+					settle.catch(() => {});
+					asyncWaitExpired = true;
+					break;
+				}
+			}
+		} finally {
+			clearTimeout(deadlineTimer);
+		}
+		if (asyncWaitExpired) {
+			writeStderrLine("Error: --max-time reached while waiting for background jobs; they were cancelled.");
+		}
+	}
+
 	// From this point onward a late blocker must be recorded without starting a
 	// primary turn whose response print mode would never emit.
 	session.prepareForHeadlessAdvisorDrain();
@@ -484,7 +531,7 @@ async function runPrintModeCore(
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
 	// stop reason through the event subscription.
-	if (mode === "text" && !terminalFailure && !strictMCPFailure) {
+	if (mode === "text" && !terminalFailure && !strictMCPFailure && !asyncWaitExpired) {
 		if (assistantMsg) {
 			if (
 				assistantMsg.errorMessage &&
@@ -506,8 +553,9 @@ async function runPrintModeCore(
 		session.setTextOutputCommitted(true);
 	}
 
-	// A turn-fatal exit cannot hold automation for the full normal drain budget.
-	if (!strictMCPFailure) {
+	// A turn-fatal exit cannot hold automation for the full normal drain budget. A run
+	// past --max-time skips the drain entirely: its jobs are still live until dispose.
+	if (!strictMCPFailure && !asyncWaitExpired) {
 		// Print mode's drain budget covers a fallback-chain switch; the reviewer's
 		// verdict is the point of a headless advisor run, so wait through recovery,
 		// and wait on `strict` reviewers past the budget like every primary boundary.
@@ -553,5 +601,5 @@ async function runPrintModeCore(
 	}
 
 	await stderrTail;
-	return terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed ? 1 : 0;
+	return terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed || asyncWaitExpired ? 1 : 0;
 }
