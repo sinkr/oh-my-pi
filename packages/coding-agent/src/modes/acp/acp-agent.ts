@@ -57,6 +57,7 @@ import { runExtensionCompact } from "../../extensibility/extensions/compact-hand
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { MCPManager } from "../../mcp/manager";
+import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -340,6 +341,12 @@ type ManagedSessionRecord = {
 	// `#configureMcpServers` call; drained on reconfigure so a stale in-flight
 	// refresh can never land after a newer configuration's tools.
 	mcpRefreshChain: Promise<void> | undefined;
+	// MCP startup failures recorded during `#registerPreparedSession` (before
+	// the newSession/loadSession response has told the client the session id).
+	// Drained by `#emitBootstrapUpdates` behind the bootstrap race guard so
+	// clients (Zed) cannot drop them as notifications for an unknown session.
+	// `oauthCapable` marks http/sse servers, the only ones `/mcp reauth` can repair.
+	pendingMcpStartupChunks: Array<{ name: string; message: string; oauthCapable: boolean }>;
 	promptTurn: PromptTurnState | undefined;
 	promptQueue: PromptQueueState;
 	// Cancellation carriers for client prompts accepted on the wire whose
@@ -1194,6 +1201,25 @@ export class AcpAgent implements Agent {
 			output: output => this.#emitCommandOutput(record, output),
 			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
 			reloadPlugins: () => this.#reloadPluginState(record),
+			// `/mcp reauth` writes config-file credentials: reconnect the live
+			// manager's entry (with its client-supplied auth surface cleared, a
+			// pending automatic attempt superseded, and a name-collision with a
+			// config file entry left alone) via the shared engine helper.
+			reconnectMcpServer: async (name, selected) => {
+				const state = await reconnectMcpManagerServer(record.mcpManager, name, selected);
+				// The tools-changed callback that fired during the reconnect only
+				// *enqueued* the session refresh onto `record.mcpRefreshChain` —
+				// resolving here without awaiting it would let the reauth prompt
+				// report success (and the client's next prompt start) while the
+				// recovered tools are still unbound, and a refresh failure would
+				// surface only in the log behind the success message. The chain's
+				// own catch logs such a failure; here it just orders completion.
+				if (state) await record.mcpRefreshChain;
+				return state;
+			},
+			// ACP-declared servers (`session/new` `mcpServers`) live in this
+			// manager, in no writable config file; `/mcp` lookups must consult it.
+			mcpManager: record.mcpManager,
 			keepTurnOpenUntilIdle: async () => {
 				await record.session.waitForIdle();
 				// `AgentSession.#emit()` does not await listeners, so the retried
@@ -1691,6 +1717,7 @@ export class AcpAgent implements Agent {
 			setToolUIContext,
 			mcpManager: undefined,
 			mcpRefreshChain: undefined,
+			pendingMcpStartupChunks: [],
 			promptTurn: undefined,
 			promptQueue: { promise: Promise.resolve(), release: undefined },
 			liveMessageId: undefined,
@@ -2484,6 +2511,24 @@ export class AcpAgent implements Agent {
 		if (this.#sessions.get(sessionId) !== record) {
 			return;
 		}
+		// MCP startup failures queued by `#configureMcpServers` flush here,
+		// behind the bootstrap race guard, so the client can finally attribute
+		// them to a session it knows.
+		for (const { name, message, oauthCapable } of record.pendingMcpStartupChunks.splice(0)) {
+			const recovery = oauthCapable
+				? `until it is reauthorized (/mcp reauth ${name}) or the client restarts the session`
+				: "until the client restarts the session";
+			await this.#connection.sessionUpdate({
+				sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: {
+						type: "text",
+						text: `MCP server "${name}" failed to connect: ${message}. Its tools are unavailable ${recovery}.`,
+					},
+				},
+			});
+		}
 		await this.#connection.sessionUpdate({
 			sessionId,
 			update: {
@@ -3024,14 +3069,20 @@ export class AcpAgent implements Agent {
 		}
 
 		const manager = new MCPManager(record.session.sessionManager.getCwd());
+		// `/mcp reauth` writes url-keyed credential rows; without the session's
+		// auth storage the manager cannot resolve them on reconnect and a
+		// successful reauthorization would leave the live server disconnected.
+		manager.setAuthStorage(record.session.modelRegistry.authStorage);
 		// MCP servers connect and reconnect independently, so `onToolsChanged` can fire
 		// several times back to back. Each firing is chained onto `record.mcpRefreshChain`
 		// so refreshes apply in order, and each one re-reads `manager.getTools()` at the
 		// time it actually runs rather than the snapshot from when it was queued — so a
 		// refresh can never apply a stale, smaller tool set after a newer one already landed.
-		// The returned promise propagates failures (the initial awaited refresh below must
-		// fail session setup, as the pre-queue code did); the stored chain swallows them
-		// after logging so background firings only warn and the chain never rejects.
+		// The returned promise propagates failures (a session-level
+		// `refreshMCPTools` rejection still fails setup); the stored chain
+		// swallows them after logging so background firings only warn and the
+		// chain never rejects. Connection failures do NOT fail setup — see
+		// below: the record keeps the manager so `/mcp reauth` can recover.
 		const enqueueMcpToolsRefresh = (): Promise<void> => {
 			const run = (record.mcpRefreshChain ?? Promise.resolve()).then(async () => {
 				if (record.mcpManager !== manager) return;
@@ -3061,16 +3112,24 @@ export class AcpAgent implements Agent {
 		}
 
 		const result = await manager.connectServers(configs, sources);
-		if (result.errors.size > 0) {
-			throw new Error(
-				Array.from(result.errors.entries())
-					.map(([name, message]) => `${name}: ${message}`)
-					.join("; "),
-			);
-		}
-
+		// A client-declared server whose initial connect fails (e.g. an expired
+		// client-owned bearer answering 401 inside the startup window) must not
+		// abort session creation: the record keeps the manager with the failed
+		// definition, `/mcp reauth <name>` resolves it from the manager and the
+		// reconnect hook retries with the fresh credential. The client is told
+		// through a chunk instead of the session refusing to load.
 		record.mcpManager = manager;
 		await enqueueMcpToolsRefresh();
+		// The failure chunk is queued, not sent: `#configureMcpServers` runs
+		// inside `#registerPreparedSession`, before the newSession/loadSession
+		// response has given the client this session id — a notification now
+		// would be dropped as "unknown session" by clients like Zed (the same
+		// race `#scheduleBootstrapUpdates` guards). `#emitBootstrapUpdates`
+		// drains the queue behind that guard.
+		for (const [name, message] of result.errors) {
+			const type = configs[name]?.type;
+			record.pendingMcpStartupChunks.push({ name, message, oauthCapable: type === "http" || type === "sse" });
+		}
 	}
 
 	#toMcpConfig(server: McpServer): MCPServerConfig {
