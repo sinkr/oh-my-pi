@@ -10,7 +10,9 @@ import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { ThinkingBudgets } from "@oh-my-pi/pi-catalog/types";
 import { withOfficialAnthropicEndpoint } from "./helpers";
 import { anthropicChunks, type CapturedRequest, captureFetch, completionsChunks } from "./helpers/factory-droid";
 
@@ -36,6 +38,7 @@ async function requestUpstream(
 	chunks: string[],
 	route: "/v1/chat/completions" | "/v1/pi/stream",
 	effort: string,
+	thinkingBudgets?: ThinkingBudgets,
 ): Promise<{ status: number; upstream: CapturedRequest[] }> {
 	const storage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
 	storage.keys.setRuntime(model.provider, "test-key");
@@ -54,7 +57,7 @@ async function requestUpstream(
 			headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
 			body: JSON.stringify(
 				route === "/v1/pi/stream"
-					? { modelId: model.id, context: CONTEXT, options: { reasoning: effort }, stream: false }
+					? { modelId: model.id, context: CONTEXT, options: { reasoning: effort, thinkingBudgets }, stream: false }
 					: {
 							model: `${model.provider}/${model.id}`,
 							messages: [{ role: "user", content: "Hi" }],
@@ -82,6 +85,45 @@ describe("auth-gateway reasoning effort", () => {
 			expect(upstream[0].body.output_config).toMatchObject({ effort: "low" });
 		},
 	);
+
+	it("honors a zero budget on the requested tier after clamping", async () => {
+		const { status, upstream } = await requestUpstream(CLAUDE, anthropicChunks("ok"), "/v1/pi/stream", "minimal", {
+			minimal: 0,
+		});
+		expect(status).toBe(200);
+		expect(upstream[0].body.thinking).toEqual({ type: "disabled" });
+	});
+
+	it.each([
+		{ name: "carries the requested tier's positive budget", budgets: { minimal: 2048 }, expected: 2048 },
+		{ name: "keeps the destination tier's positive override", budgets: { minimal: 0, low: 3072 }, expected: 3072 },
+		{ name: "keeps the destination tier's zero override", budgets: { minimal: 2048, low: 0 }, expected: 0 },
+	])("$name when clamping a budget-based model", async ({ budgets, expected }) => {
+		const model = buildModel({
+			id: "budget-test-model",
+			name: "Budget test model",
+			api: "anthropic-messages",
+			provider: "budget-test-provider",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const { status, upstream } = await requestUpstream(
+			model,
+			anthropicChunks("ok"),
+			"/v1/pi/stream",
+			"minimal",
+			budgets,
+		);
+		expect(status).toBe(200);
+		expect(upstream[0].body.thinking).toMatchObject(
+			expected === 0 ? { type: "disabled" } : { type: "enabled", budget_tokens: expected },
+		);
+	});
 
 	it("keeps the catalog's effort mapping for an effort outside the ladder", async () => {
 		// Kimi K3's ladder is low/high/max; the catalog maps `medium` up to `high`.
