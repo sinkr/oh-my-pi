@@ -256,7 +256,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 			}
 		},
 	);
-	for (const completion of ["rollback", "commit", "stop", "writer-left"] as const) {
+	for (const completion of ["rollback", "commit", "stop", "writer-left", "relay-reconnect"] as const) {
 		it("handles an old-room answer during provisional suspension followed by " + completion, async () => {
 			const { ctx, state } = makeHostContext();
 			const originalConnect = CollabSocket.prototype.connect;
@@ -284,7 +284,9 @@ describe("collab host registry lifecycle (#6099)", () => {
 				1,
 			);
 			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "reader" }, 2);
-			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes", "No"] });
+			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes", "No"] }, undefined, {
+				retainOnReconnect: completion === "relay-reconnect",
+			});
 			if (!answer) throw new Error("host did not retain the dialog");
 			let outcome: CollabGuestUiResult | undefined;
 			void answer.then(result => {
@@ -303,11 +305,27 @@ describe("collab host registry lifecycle (#6099)", () => {
 				if (completion === "stop") {
 					await host.stop("stopped during transition");
 				} else {
-					if (completion === "rollback" || completion === "writer-left") state.sessionId = original;
+					if (completion !== "commit") state.sessionId = original;
 					if (completion === "writer-left") transport.onControl?.({ t: "peer-left", peer: 1 });
 					state.transition = undefined;
+					if (completion === "relay-reconnect") {
+						transport.onRoomRecreated?.();
+						transport.onFrame!(
+							{
+								t: "hello",
+								proto: COLLAB_PROTO,
+								name: "new writer with reused peer id",
+								writeToken: Buffer.from(parsed.writeToken).toString("base64url"),
+							},
+							1,
+						);
+					}
 					transition.resolve();
 					await setImmediate();
+					if (completion === "relay-reconnect") {
+						expect(outcome).toBeUndefined();
+						transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 1);
+					}
 					if (completion === "writer-left") {
 						expect(outcome).toBeUndefined();
 						transport.onFrame!(
@@ -330,7 +348,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 				expect(outcome).toEqual(
 					completion === "rollback"
 						? { kind: "answered", value: "Yes" }
-						: completion === "writer-left"
+						: completion === "writer-left" || completion === "relay-reconnect"
 							? { kind: "answered", value: "No" }
 							: { kind: "unavailable" },
 				);
