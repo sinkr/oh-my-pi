@@ -63,10 +63,15 @@ function isKill(url: InternalUrl): boolean {
 	return (url.rawPathname ?? url.pathname).endsWith("/kill");
 }
 
+/** The write call that cancels `id`, as error messages quote it. */
+function killCall(id: string): string {
+	return `call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed)`;
+}
+
 /** Reading a write-only action never acts (reads may be speculative); the error names the write that does. */
 function writeOnlyError(id: string, action: "kill" | "mode"): string {
 	if (action === "kill")
-		return `proc://${id}/kill is write-only; reading it did not stop anything. To cancel ${id}, call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed); read proc://${id} for its status.`;
+		return `proc://${id}/kill is write-only; reading it did not stop anything. To cancel ${id}, ${killCall(id)}; read proc://${id} for its status.`;
 	return `proc://${id}/mode is write-only. To set a service's mode, call write with ${JSON.stringify({ path: `proc://${id}/mode`, content: "persist" })} (persist, session, or detached); read proc://${id} for its current mode.`;
 }
 
@@ -273,10 +278,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if (action === "stdin") {
-			if (!service)
-				throw new Error(
-					`stdin is only available for services. To cancel, call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed).`,
-				);
+			if (!service) throw new Error(`stdin is only available for services. To cancel, ${killCall(id)}.`);
 			const updated = await sendService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `Sent input to ${serviceStatus(updated)}` }],
