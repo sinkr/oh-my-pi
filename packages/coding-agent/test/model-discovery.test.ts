@@ -1630,6 +1630,33 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(llama?.input).toEqual(["text", "image"]);
 	});
 
+	test("implicit llama.cpp discovery falls back to port 9931 when 8080 is unreachable", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.startsWith("http://127.0.0.1:8080/")) {
+				throw new TypeError("Unable to connect");
+			}
+			if (url === "http://127.0.0.1:9931/models") {
+				return new Response(JSON.stringify({ data: [{ id: "gemma-3-4b" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === "http://127.0.0.1:9931/props") {
+				return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 16384 } }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("llama.cpp", "gemma-3-4b");
+		expect(model?.baseUrl).toBe("http://127.0.0.1:9931/v1");
+		expect(model?.contextWindow).toBe(16384);
+	});
+
 	test("llama.cpp discovery routes Qwen models to chat-completions with the top-level disable dialect", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
