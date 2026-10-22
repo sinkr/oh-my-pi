@@ -39,6 +39,7 @@ import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-
 import { createModelBrowserSource } from "../model-browser-source";
 import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
+import { resolveFileSlashCommand } from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentRegistry } from "../../registry/agent-registry";
@@ -1131,6 +1132,10 @@ export class InputController {
 				return;
 			}
 
+			// `side: true` file commands answer as a /btw side question: off the
+			// transcript and runnable mid-turn, so they never steer the running work.
+			if (await this.#runSideFileCommand(text)) return;
+
 			// Handle skill commands (/skill:name [args]). Enter ⇒ steer (matches the
 			// free-text Enter semantics below); Ctrl+Enter routes through `handleFollowUp`.
 			// During compaction, queue immediately so bash/python/loop-mode branches do
@@ -1420,6 +1425,24 @@ export class InputController {
 		);
 	}
 
+	/**
+	 * Answer `text` as a /btw side question when it invokes a `side: true` file command.
+	 * Extension and custom commands keep precedence over a file command of the same name.
+	 */
+	async #runSideFileCommand(text: string, clearEditor = true): Promise<boolean> {
+		const name = parseSlashCommand(text)?.name;
+		if (!name || !this.ctx.fileSlashCommands.has(name)) return false;
+		const session = this.ctx.session;
+		if (session.extensionRunner?.getCommand(name) !== undefined) return false;
+		if (session.customCommands.some(loaded => loaded.command.name === name)) return false;
+		const resolved = resolveFileSlashCommand(text, session.slashCommands);
+		if (!resolved?.command.side) return false;
+		this.ctx.editor.addToHistory(text);
+		if (clearEditor) this.ctx.editor.setText("");
+		await this.ctx.handleBtwCommand(resolved.text);
+		return true;
+	}
+
 	/** Whether `text` invokes a registered extension command, which runs locally instead of prompting the model. */
 	#isLocalExtensionCommand(text: string): boolean {
 		const extensionCommandSpace = text.indexOf(" ");
@@ -1461,6 +1484,7 @@ export class InputController {
 				}
 			}
 		}
+		if (text && (await this.#runSideFileCommand(text))) return;
 		if (text && (text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text))) {
 			this.ctx.showStatus(
 				`Only ${FOCUSED_VIEW_COMMAND_LIST} run here; other commands run in the main session — press ${formatDoubleTap("left")} to return first`,
@@ -1938,6 +1962,9 @@ export class InputController {
 				return;
 			}
 		}
+
+		// The draft is already detached, so there is no editor text to clear.
+		if (text && (await this.#runSideFileCommand(text, false))) return;
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;

@@ -7,6 +7,7 @@ import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-co
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import type { FileSlashCommand } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 
 import { cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -380,6 +381,85 @@ describe("InputController escape behavior", () => {
 		expect(spies.prompt).not.toHaveBeenCalled();
 		expect(editor.addToHistory).toHaveBeenCalledWith("/btw why is it doing that?");
 		expect(editor.getText()).toBe("");
+	});
+
+	describe("side file commands", () => {
+		const sitrep: FileSlashCommand = {
+			name: "sitrep",
+			description: "Situation report",
+			content: "Situation report. Focus: $ARGUMENTS",
+			side: true,
+			source: "via OMP User",
+		};
+		const plain: FileSlashCommand = { ...sitrep, name: "plain", side: undefined };
+
+		type SideCommandHarness = {
+			fileSlashCommands: Set<string>;
+			session: { isStreaming: boolean; slashCommands: FileSlashCommand[]; extensionRunner: unknown };
+		};
+
+		function withFileCommands(ctx: InteractiveModeContext, commands: FileSlashCommand[]): SideCommandHarness {
+			// Test harness installs a mutable fake context and AgentSession; keep the unchecked cast named.
+			const harness = ctx as unknown as SideCommandHarness;
+			harness.fileSlashCommands = new Set(commands.map(cmd => cmd.name));
+			harness.session.slashCommands = commands;
+			return harness;
+		}
+
+		it("answers a bare side command as a /btw side question while a turn streams", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]).session.isStreaming = true;
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			editor.setText("/sitrep");
+			await editor.onSubmit?.("/sitrep");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:");
+			expect(spies.prompt).not.toHaveBeenCalled();
+			expect(editor.addToHistory).toHaveBeenCalledWith("/sitrep");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("passes arguments into the side question", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep the migration");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus: the migration");
+			expect(spies.onInputCallback).not.toHaveBeenCalled();
+		});
+
+		it("sends a file command without side frontmatter to the main session", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [plain]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/plain");
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
+		});
+
+		it("lets an extension command of the same name win over a side file command", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]).session.extensionRunner = {
+				getCommand: (name: string) => (name === "sitrep" ? { name } : undefined),
+				hasHandlers: () => false,
+			};
+			Object.assign(editor, { clearDraft: vi.fn() });
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep");
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.prompt).toHaveBeenCalledWith("/sitrep", { images: undefined });
+		});
 	});
 
 	it("falls back to aborting the active session when no pending optimistic submission exists", () => {
