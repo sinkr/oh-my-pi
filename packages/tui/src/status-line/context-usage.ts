@@ -212,6 +212,43 @@ export function invalidateToolSchemaMetadata(tools: ToolSchemaSource): void {
 	toolSchemaTokenCache(tools).revision++;
 }
 
+/** Provider-visible text of one tool definition, in wire order. */
+export interface ToolSchemaFragments {
+	/** Name, description, wire schema JSON, then rendered examples; fields that cannot be serialized are omitted. */
+	readonly fragments: string[];
+	/** Why serialization stopped; the schema or examples after that point are missing from `fragments`. */
+	readonly schemaError?: string;
+}
+
+/** Provider-visible text of one tool definition; `indent` only formats the schema JSON. */
+export function toolSchemaFragments(tool: ContextTool, indent?: number): ToolSchemaFragments {
+	// Extension-supplied tools may carry a non-string name/description or a
+	// parameters value whose wire schema stringifies to `undefined` (e.g. a
+	// callable schema that escaped normalization). A non-string fragment is
+	// fatal inside the native tokenizer, so only real strings are kept.
+	const { name, description, parameters } = tool;
+	const fragments: string[] = [];
+	if (typeof name === "string") fragments.push(name);
+	if (typeof description === "string") fragments.push(description);
+	try {
+		const wireTool: AiTool = {
+			name,
+			description,
+			parameters: parameters as AiTool["parameters"],
+			examples: tool.examples,
+		};
+		const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {}, null, indent);
+		if (typeof wireJson === "string") fragments.push(wireJson);
+		// The agent loop appends rendered examples to the wire description.
+		const examplesBlock = renderToolExamples(wireTool);
+		if (examplesBlock) fragments.push(examplesBlock);
+	} catch (error) {
+		// Schema may contain functions or cycles.
+		return { fragments, schemaError: error instanceof Error ? error.message : String(error) };
+	}
+	return { fragments };
+}
+
 /**
  * Estimate provider-visible tool-schema tokens.
  *
@@ -226,33 +263,7 @@ export function estimateToolSchemaTokens(tools: ToolSchemaSource, tokenizer: Tok
 	const cached = cache.byTokenizer.get(tokenizer);
 	if (cached?.revision === cache.revision && cached.sourceRevision === sourceRevision) return cached.tokens;
 
-	const fragments: string[] = [];
-	for (const tool of tools) {
-		// Extension-supplied tools may carry a non-string name/description or a
-		// parameters value whose wire schema stringifies to `undefined` (e.g. a
-		// callable schema that escaped normalization). A non-string fragment is
-		// fatal inside the native tokenizer, so only real strings are counted.
-		const name = tool.name;
-		const description = tool.description;
-		const parameters = tool.parameters;
-		if (typeof name === "string") fragments.push(name);
-		if (typeof description === "string") fragments.push(description);
-		try {
-			const wireTool: AiTool = {
-				name,
-				description,
-				parameters: parameters as AiTool["parameters"],
-				examples: tool.examples,
-			};
-			const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {});
-			if (typeof wireJson === "string") fragments.push(wireJson);
-			// The agent loop appends rendered examples to the wire description.
-			const examplesBlock = renderToolExamples(wireTool);
-			if (examplesBlock) fragments.push(examplesBlock);
-		} catch {
-			// Schema may contain functions or cycles; ignore.
-		}
-	}
+	const fragments = tools.flatMap(tool => toolSchemaFragments(tool).fragments);
 	const tokens = tokenizer.countTokens(fragments);
 	cache.byTokenizer.set(tokenizer, { revision: cache.revision, sourceRevision, tokens });
 	return tokens;

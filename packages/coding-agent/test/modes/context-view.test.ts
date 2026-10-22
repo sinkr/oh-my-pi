@@ -208,6 +208,15 @@ describe("context snapshot tool schemas", () => {
 		const data = buildSessionContextView(session);
 		expect(category(data, "custom-tools").entries[0]?.text).toContain("Schema unavailable");
 	});
+
+	it("charges tool definitions what the usage breakdown charges the roster", () => {
+		const session = sessionWith({ tools: [tool("first"), tool("second")] });
+		const data = buildSessionContextView(session);
+		const definitions = [...category(data, "built-in-tools").entries, ...category(data, "custom-tools").entries];
+		const roster = data.breakdown.categories.find(item => item.id === "systemTools")!.tokens;
+		expect(roster).toBeGreaterThan(0);
+		expect(definitions.reduce((sum, entry) => sum + entry.tokens, 0)).toBe(roster);
+	});
 });
 
 describe("context snapshot assistant reasoning", () => {

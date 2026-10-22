@@ -1,8 +1,6 @@
 import type { AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { AnthropicServerToolContent, AssistantMessage } from "@oh-my-pi/pi-ai";
-import { renderToolExamples } from "@oh-my-pi/pi-ai/dialect";
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
 	CONTEXT_CATEGORIES,
 	type ContextCategoryId,
@@ -11,7 +9,7 @@ import {
 	type ContextViewData,
 	type ContextViewEntry,
 } from "@oh-my-pi/pi-tui/chrome/context-view-model";
-import { type ContextBreakdown, estimateContextToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { type ContextBreakdown, toolSchemaFragments } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "./agent-session";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
@@ -139,22 +137,21 @@ function appendToolDefinitionEntries(session: AgentSession, state: ContextViewSt
 	const toolSourcesByName = new Map(session.getAllToolInfos().map(info => [info.name, info.sourceInfo]));
 	for (const [index, tool] of session.agent.state.tools.entries()) {
 		const categoryId = session.hasBuiltInTool(tool.name) ? "built-in-tools" : "custom-tools";
-		const parts = [tool.name, tool.description];
-		try {
-			parts.push(JSON.stringify(toolWireSchema(tool), null, 2) ?? "[Schema unavailable]");
-			const examples = renderToolExamples(tool);
-			if (examples) parts.push(examples);
-		} catch (error) {
-			parts.push(`Schema unavailable: ${error instanceof Error ? error.message : String(error)}`);
-		}
+		// Count the compact wire text; show the same fragments with an indented schema.
+		const tokens =
+			session.model?.toolSchemasInContext === false
+				? 0
+				: session.agent.tokenizer.countTokens(toolSchemaFragments(tool).fragments);
+		const { fragments, schemaError } = toolSchemaFragments(tool, 2);
+		if (schemaError !== undefined) fragments.push(`Schema unavailable: ${schemaError}`);
 		const source = toolSourcesByName.get(tool.name);
 		appendEntry(state, categoryId, {
 			id: `${categoryId}/${index}`,
 			label: tool.name,
-			text: parts.join("\n\n"),
+			text: fragments.join("\n\n"),
 			info: source?.source ?? "unknown",
 			path: source?.path,
-			tokens: estimateContextToolSchemaTokens([tool], session.agent.tokenizer, session.model),
+			tokens,
 		});
 	}
 }
