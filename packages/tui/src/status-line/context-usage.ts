@@ -4,11 +4,6 @@ import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-age
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { renderToolExamples } from "@oh-my-pi/pi-ai/dialect";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { formatNumber } from "@oh-my-pi/pi-utils";
-import type { ThemeColor } from "../theme";
-import type { TspSpan } from "@oh-my-pi/pi-wire";
-import type { NativeNode } from "../native/node";
-import { node, span, text } from "../native/describe";
 
 interface ContextSkill {
 	readonly name: string;
@@ -74,7 +69,6 @@ interface CategoryInfo {
 	id: CategoryId;
 	label: string;
 	tokens: number;
-	color: ThemeColor;
 }
 
 export interface ContextBreakdown {
@@ -450,11 +444,11 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 	}
 
 	const categories: CategoryInfo[] = [
-		{ id: "systemPrompt", label: "System prompt", tokens: systemPromptTokens, color: "accent" },
-		{ id: "systemTools", label: "System tools", tokens: toolsTokens, color: "warning" },
-		{ id: "systemContext", label: "System context", tokens: systemContextTokens, color: "customMessageLabel" },
-		{ id: "skills", label: "Skills", tokens: skillsTokens, color: "success" },
-		{ id: "messages", label: "Messages", tokens: messagesTokens, color: "userMessageText" },
+		{ id: "systemPrompt", label: "System prompt", tokens: systemPromptTokens },
+		{ id: "systemTools", label: "System tools", tokens: toolsTokens },
+		{ id: "systemContext", label: "System context", tokens: systemContextTokens },
+		{ id: "skills", label: "Skills", tokens: skillsTokens },
+		{ id: "messages", label: "Messages", tokens: messagesTokens },
 	];
 
 	let autoCompactBufferTokens = 0;
@@ -487,182 +481,4 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 		thresholdTokens,
 		snapcompact: options.snapcompact,
 	};
-}
-
-function percentString(part: number, whole: number, fractionDigits = 1): string {
-	if (whole <= 0) return "0%";
-	const pct = (part / whole) * 100;
-	if (pct > 0 && pct < 0.05) return "<0.1%";
-	return `${pct.toFixed(fractionDigits)}%`;
-}
-
-/** One styled run of a legend line: bold (`strong`), a theme color, or plain. */
-interface LegendPart {
-	t: string;
-	s?: ThemeColor | "strong";
-}
-
-/** Snapcompact savings lines of the legend; empty when no snapcompact setting is on. */
-function buildSnapcompactParts(breakdown: ContextBreakdown): LegendPart[][] {
-	const lines: LegendPart[][] = [];
-	const { usedTokens } = breakdown;
-	const snap = breakdown.snapcompact;
-	if (snap) {
-		if (!snap.visionCapable) {
-			lines.push([{ t: "Snapcompact: inactive (model has no image input)", s: "muted" }]);
-		} else {
-			lines.push([{ t: "Snapcompact (estimated wire savings)", s: "muted" }]);
-			if (snap.systemPrompt) {
-				const sp = snap.systemPrompt;
-				const scope = sp.scope === "agents-md" ? "AGENTS.md" : "all";
-				if (sp.applied) {
-					lines.push([
-						{ t: `  System prompt (${scope}): saves ` },
-						{ t: `~${formatNumber(sp.savedTokens)}`, s: "strong" },
-						{ t: " " },
-						{
-							t: `(${formatNumber(sp.textTokens)} text → ${sp.frames} frame${sp.frames === 1 ? "" : "s"} ≈ ${formatNumber(sp.imageTokens)})`,
-							s: "dim",
-						},
-					]);
-				} else {
-					const reason =
-						sp.reason === "budget"
-							? "image budget exhausted"
-							: sp.reason === "empty"
-								? "nothing to image"
-								: "frames would not save tokens";
-					lines.push([{ t: `  System prompt (${scope}): ` }, { t: `stays text (${reason})`, s: "dim" }]);
-				}
-			}
-			if (snap.toolResults) {
-				const tr = snap.toolResults;
-				if (tr.swapped > 0) {
-					lines.push([
-						{ t: "  Tool results: saves " },
-						{ t: `~${formatNumber(tr.savedTokens)}`, s: "strong" },
-						{ t: " " },
-						{
-							t: `(${tr.swapped}/${tr.total} imaged, ${formatNumber(tr.textTokens)} text → ${tr.frames} frames ≈ ${formatNumber(tr.imageTokens)})`,
-							s: "dim",
-						},
-					]);
-				} else {
-					lines.push([{ t: "  Tool results: " }, { t: `none imaged (${tr.total} in history)`, s: "dim" }]);
-				}
-			}
-			if (snap.savedTokens > 0) {
-				lines.push([
-					{ t: "  Next request: " },
-					{ t: `~${formatNumber(Math.max(0, usedTokens - snap.savedTokens))}`, s: "strong" },
-					{ t: " " },
-					{ t: "tokens on the wire", s: "dim" },
-				]);
-			}
-		}
-	}
-
-	return lines;
-}
-
-export function contextSnapcompactLines(breakdown: ContextBreakdown): string[] {
-	return buildSnapcompactParts(breakdown).map(line => line.map(part => part.t).join(""));
-}
-
-interface ContextMeterData extends Pick<
-	ContextBreakdown,
-	"contextWindow" | "usedTokens" | "freeTokens" | "autoCompactBufferTokens" | "thresholdTokens"
-> {
-	categories: readonly Pick<CategoryInfo, "label" | "tokens" | "color">[];
-}
-
-/** Stacked meter parts in grid order: the categories, free space as the empty track, then the hatched buffer. */
-function contextMeterParts(
-	breakdown: ContextMeterData,
-): { value: number; token?: string; label?: string; hatch?: boolean }[] {
-	const window = breakdown.contextWindow;
-	const parts: { value: number; token?: string; label?: string; hatch?: boolean }[] = breakdown.categories
-		.filter(category => category.tokens > 0)
-		.map(category => ({
-			value: category.tokens / window,
-			token: category.color,
-			label: `${category.label} · ${formatNumber(category.tokens)} tokens (${percentString(category.tokens, window)})`,
-		}));
-	parts.push({
-		value: breakdown.freeTokens / window,
-		token: "track",
-		label: `Free space · ${formatNumber(breakdown.freeTokens)} tokens (${percentString(breakdown.freeTokens, window)})`,
-	});
-	if (breakdown.autoCompactBufferTokens > 0) {
-		parts.push({
-			value: breakdown.autoCompactBufferTokens / window,
-			token: "warning",
-			hatch: true,
-			label: `Autocompact buffer · ${formatNumber(breakdown.autoCompactBufferTokens)} tokens (${percentString(breakdown.autoCompactBufferTokens, window)})`,
-		});
-	}
-	return parts;
-}
-
-/** Shared usage and compaction labels for ANSI and native context views. */
-export function contextUsageSummary(
-	breakdown: Pick<ContextBreakdown, "contextWindow" | "usedTokens" | "freeTokens" | "thresholdTokens">,
-) {
-	const { contextWindow: window, usedTokens, freeTokens, thresholdTokens } = breakdown;
-	const room =
-		thresholdTokens === undefined
-			? `${formatNumber(freeTokens)} free`
-			: usedTokens >= thresholdTokens
-				? `Past auto-compaction at ${percentString(thresholdTokens, window, 0)}`
-				: `${formatNumber(thresholdTokens - usedTokens)} left before auto-compaction at ${percentString(thresholdTokens, window, 0)}`;
-	return {
-		used: formatNumber(usedTokens),
-		detail: ` of ${formatNumber(window)} tokens · ${percentString(usedTokens, window, 0)}`,
-		room,
-	};
-}
-
-/** Shared native usage summary and stacked bar; callers provide the category list. */
-export function describeContextMeter(breakdown: ContextMeterData): [NativeNode, NativeNode] {
-	const { contextWindow: window, usedTokens, thresholdTokens } = breakdown;
-	const parts = contextMeterParts(breakdown);
-	const used = Math.min(1, usedTokens / window);
-	const labels = contextUsageSummary(breakdown);
-	const summary = node(
-		"row",
-		{ role: "omp.context.summary", align: "baseline", wrap: true },
-		[
-			text([span(labels.used, "strong"), span(labels.detail, "dim")], {
-				role: "omp.context.used",
-				grow: 1,
-				wrap: "none",
-			}),
-			text(labels.room, { role: "omp.context.room", wrap: "none" }),
-		],
-		"summary",
-	);
-	const marks =
-		thresholdTokens !== undefined
-			? [
-					{
-						at: thresholdTokens / window,
-						tone: "warning" as const,
-						title: `Auto-compaction at ${percentString(thresholdTokens, window, 0)} · ${formatNumber(thresholdTokens)} tokens`,
-					},
-				]
-			: undefined;
-	const bar = node(
-		"meter",
-		{ value: used, style: "bar", size: "lg", parts, ...(marks ? { marks } : {}), aria: "Context usage by category" },
-		undefined,
-		"bar",
-	);
-	return [summary, bar];
-}
-
-/** The `/context` title: the model once one is selected (the body leads with its window). */
-export function contextUsageHead(breakdown: ContextBreakdown): TspSpan[] {
-	if (breakdown.contextWindow <= 0) return [span("Context usage", "strong")];
-	const modelName = breakdown.model?.name ?? breakdown.model?.id ?? "no model";
-	return [span("Context", "strong"), span(` · ${modelName}`, "muted")];
 }

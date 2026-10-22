@@ -18,12 +18,6 @@ import { col, node, row, span, text } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeRevealAt, NativeScroll, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton, selectList } from "../native/overlay";
 import { styledSpans } from "../native/spans";
-import {
-	contextSnapcompactLines,
-	contextUsageHead,
-	contextUsageSummary,
-	describeContextMeter,
-} from "../status-line/context-usage";
 import { ensureThemeSync, theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
@@ -41,6 +35,9 @@ import {
 import {
 	allocateUsage,
 	buildOverviewRows,
+	contextSnapcompactLines,
+	contextUsageSummary,
+	describeContextMeter,
 	legendItem,
 	legendLine,
 	MAP_LEGEND_GAP,
@@ -80,6 +77,7 @@ export class ContextViewer implements Component {
 	/** Attributed usage when it can be drawn against the window (meter and map). */
 	readonly #scaledUsage: ReadonlyMap<ContextViewCategory, number> | undefined;
 	readonly #meter: readonly NativeNode[] | undefined;
+	readonly #modelLabel: string;
 
 	// Navigation.
 	#state: ViewState = "overview";
@@ -144,6 +142,7 @@ export class ContextViewer implements Component {
 		this.#requestRender = options.requestRender;
 		this.#getRows = options.getRows;
 		const { breakdown } = data;
+		this.#modelLabel = safeText(breakdown.model?.name ?? breakdown.model?.id ?? "no model");
 		const window = breakdown.contextWindow;
 		const allocated = allocateUsage(data.categories, breakdown.usedTokens);
 		this.#scaledUsage = window > 0 && Number.isFinite(window) ? allocated : undefined;
@@ -196,9 +195,10 @@ export class ContextViewer implements Component {
 					role: "omp.overlay.report",
 					size: "lg",
 					anchor: "center",
-					head: category
-						? [span("Context", "strong"), span(` · ${safeText(category.label)}`, "muted")]
-						: contextUsageHead(this.#data.breakdown),
+					head: [
+						span("Context", "strong"),
+						span(` · ${category ? safeText(category.label) : this.#modelLabel}`, "muted"),
+					],
 				},
 			};
 		}
@@ -368,13 +368,7 @@ export class ContextViewer implements Component {
 		const terminalRows = Math.max(1, this.#getRows());
 		const summary = this.#layout();
 		this.#panel.title =
-			this.#state === "overview"
-				? safeText(
-						contextUsageHead(this.#data.breakdown)
-							.map(part => part.t)
-							.join(""),
-					)
-				: safeText(this.#category!.label);
+			this.#state === "overview" ? `Context · ${this.#modelLabel}` : safeText(this.#category!.label);
 		this.#header.setHeight(summary.length);
 		this.#header.setLines(summary.map(line => truncateToWidth(theme.fg("dim", line), this.#width)));
 		this.#body.setLines(

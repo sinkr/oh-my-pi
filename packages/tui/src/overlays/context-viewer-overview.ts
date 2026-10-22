@@ -4,11 +4,13 @@
  */
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import type { ContextBreakdown } from "../status-line/context-usage";
 import { type ContextMapCell, planContextMap } from "../chrome/context-map";
 import { CONTEXT_PRESENTATION, type ContextPresentationId } from "../chrome/context-presentation";
-import { item, span } from "../native/describe";
+import { item, node, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { theme } from "../theme/theme";
+import type { ThemeColor } from "../theme";
 import { truncateToWidth, visibleWidth } from "../utils";
 import {
 	type ContextViewCategory,
@@ -94,7 +96,7 @@ export function overviewLabel(category: ContextViewCategory): string {
 	return contextCategoryDescriptor(category.id).overviewLabel ?? category.label;
 }
 
-export function formatShare(tokens: number, window: number): string {
+function formatShare(tokens: number, window: number): string {
 	if (window <= 0) return "—";
 	const percent = (tokens / window) * 100;
 	return percent > 0 && percent < 0.05 ? "<0.1%" : `${percent.toFixed(1)}%`;
@@ -237,4 +239,142 @@ export function mapRowSpans(cells: readonly ContextMapCell<ContextPresentationId
 			`${presentation.color}${cell.full ? "" : " dim"}`,
 		);
 	});
+}
+
+function percentString(part: number, whole: number, fractionDigits = 1): string {
+	if (whole <= 0) return "0%";
+	const pct = (part / whole) * 100;
+	if (pct > 0 && pct < 0.05) return "<0.1%";
+	return `${pct.toFixed(fractionDigits)}%`;
+}
+
+/** Snapcompact savings lines of the Overview; empty when no snapcompact setting is on. */
+export function contextSnapcompactLines(breakdown: ContextBreakdown): string[] {
+	const snap = breakdown.snapcompact;
+	if (!snap) return [];
+	if (!snap.visionCapable) return ["Snapcompact: inactive (model has no image input)"];
+	const lines = ["Snapcompact (estimated wire savings)"];
+	if (snap.systemPrompt) {
+		const sp = snap.systemPrompt;
+		const scope = sp.scope === "agents-md" ? "AGENTS.md" : "all";
+		if (sp.applied) {
+			const frames = `${sp.frames} frame${sp.frames === 1 ? "" : "s"}`;
+			lines.push(
+				`  System prompt (${scope}): saves ~${formatNumber(sp.savedTokens)} (${formatNumber(sp.textTokens)} text → ${frames} ≈ ${formatNumber(sp.imageTokens)})`,
+			);
+		} else {
+			const reason =
+				sp.reason === "budget"
+					? "image budget exhausted"
+					: sp.reason === "empty"
+						? "nothing to image"
+						: "frames would not save tokens";
+			lines.push(`  System prompt (${scope}): stays text (${reason})`);
+		}
+	}
+	if (snap.toolResults) {
+		const tr = snap.toolResults;
+		lines.push(
+			tr.swapped > 0
+				? `  Tool results: saves ~${formatNumber(tr.savedTokens)} (${tr.swapped}/${tr.total} imaged, ${formatNumber(tr.textTokens)} text → ${tr.frames} frames ≈ ${formatNumber(tr.imageTokens)})`
+				: `  Tool results: none imaged (${tr.total} in history)`,
+		);
+	}
+	if (snap.savedTokens > 0) {
+		lines.push(
+			`  Next request: ~${formatNumber(Math.max(0, breakdown.usedTokens - snap.savedTokens))} tokens on the wire`,
+		);
+	}
+	return lines;
+}
+
+interface ContextMeterData extends Pick<
+	ContextBreakdown,
+	"contextWindow" | "usedTokens" | "freeTokens" | "autoCompactBufferTokens" | "thresholdTokens"
+> {
+	categories: readonly { label: string; tokens: number; color: ThemeColor }[];
+}
+
+/** Stacked meter parts in grid order: the categories, free space as the empty track, then the hatched buffer. */
+function contextMeterParts(
+	breakdown: ContextMeterData,
+): { value: number; token?: string; label?: string; hatch?: boolean }[] {
+	const window = breakdown.contextWindow;
+	const parts: { value: number; token?: string; label?: string; hatch?: boolean }[] = breakdown.categories
+		.filter(category => category.tokens > 0)
+		.map(category => ({
+			value: category.tokens / window,
+			token: category.color,
+			label: `${category.label} · ${formatNumber(category.tokens)} tokens (${percentString(category.tokens, window)})`,
+		}));
+	parts.push({
+		value: breakdown.freeTokens / window,
+		token: "track",
+		label: `Free space · ${formatNumber(breakdown.freeTokens)} tokens (${percentString(breakdown.freeTokens, window)})`,
+	});
+	if (breakdown.autoCompactBufferTokens > 0) {
+		parts.push({
+			value: breakdown.autoCompactBufferTokens / window,
+			token: "warning",
+			hatch: true,
+			label: `Autocompact buffer · ${formatNumber(breakdown.autoCompactBufferTokens)} tokens (${percentString(breakdown.autoCompactBufferTokens, window)})`,
+		});
+	}
+	return parts;
+}
+
+/** Shared usage and compaction labels for ANSI and native context views. */
+export function contextUsageSummary(
+	breakdown: Pick<ContextBreakdown, "contextWindow" | "usedTokens" | "freeTokens" | "thresholdTokens">,
+) {
+	const { contextWindow: window, usedTokens, freeTokens, thresholdTokens } = breakdown;
+	const room =
+		thresholdTokens === undefined
+			? `${formatNumber(freeTokens)} free`
+			: usedTokens >= thresholdTokens
+				? `Past auto-compaction at ${percentString(thresholdTokens, window, 0)}`
+				: `${formatNumber(thresholdTokens - usedTokens)} left before auto-compaction at ${percentString(thresholdTokens, window, 0)}`;
+	return {
+		used: formatNumber(usedTokens),
+		detail: ` of ${formatNumber(window)} tokens · ${percentString(usedTokens, window, 0)}`,
+		room,
+	};
+}
+
+/** Native usage summary and stacked bar; callers provide the category list. */
+export function describeContextMeter(breakdown: ContextMeterData): [NativeNode, NativeNode] {
+	const { contextWindow: window, usedTokens, thresholdTokens } = breakdown;
+	const parts = contextMeterParts(breakdown);
+	const used = Math.min(1, usedTokens / window);
+	const labels = contextUsageSummary(breakdown);
+	const summary = node(
+		"row",
+		{ role: "omp.context.summary", align: "baseline", wrap: true },
+		[
+			text([span(labels.used, "strong"), span(labels.detail, "dim")], {
+				role: "omp.context.used",
+				grow: 1,
+				wrap: "none",
+			}),
+			text(labels.room, { role: "omp.context.room", wrap: "none" }),
+		],
+		"summary",
+	);
+	const marks =
+		thresholdTokens !== undefined
+			? [
+					{
+						at: thresholdTokens / window,
+						tone: "warning" as const,
+						title: `Auto-compaction at ${percentString(thresholdTokens, window, 0)} · ${formatNumber(thresholdTokens)} tokens`,
+					},
+				]
+			: undefined;
+	const bar = node(
+		"meter",
+		{ value: used, style: "bar", size: "lg", parts, ...(marks ? { marks } : {}), aria: "Context usage by category" },
+		undefined,
+		"bar",
+	);
+	return [summary, bar];
 }
