@@ -326,10 +326,14 @@ export async function visitEntriesFromFileStream(
 	};
 
 	try {
-		const file = Bun.file(filePath);
-		const source = Number.isFinite(maxBytes) ? file.slice(0, maxBytes) : file;
-		for await (const chunk of source.stream()) {
+		// Capped by hand, not with `file.slice(0, maxBytes)`: on Bun 1.3.14 a slice's
+		// stream can stay pending after delivering its bytes when the file continues
+		// past the slice, so the read never ends.
+		let unread = maxBytes;
+		for await (const streamed of Bun.file(filePath).stream()) {
 			if (stopped) break;
+			const chunk = streamed.byteLength > unread ? streamed.subarray(0, unread) : streamed;
+			unread -= chunk.byteLength;
 			bytesSinceYield += chunk.byteLength;
 			options.onBytesConsumed?.(chunk.byteLength);
 			// Parsing before the chunk closes a line re-scans the unfinished record
@@ -344,6 +348,7 @@ export async function visitEntriesFromFileStream(
 				}
 				sink.append(chunk);
 				await yieldToMacrotask();
+				if (unread === 0) break;
 				continue;
 			}
 			sink.append(chunk);
@@ -371,6 +376,7 @@ export async function visitEntriesFromFileStream(
 			// sink keeps that remainder for the next chunk.
 			await drain();
 			await yieldToMacrotask();
+			if (unread === 0) break;
 		}
 		// A trailing record without a final newline: terminate it so the parser
 		// can complete it (readline yielded it; parseChunk needs the delimiter).
