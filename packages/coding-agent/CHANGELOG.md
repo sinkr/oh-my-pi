@@ -5,6 +5,11 @@
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added `/context`, a read-only viewer for the active prompt, tools, messages, and replayable thinking—including retained Anthropic reasoning and search calls—with estimated token usage and tool results; Skills is estimated separately from the System Prompt, and overview usage is allocated across categories ([#16160](https://github.com/can1357/oh-my-pi/pull/16160) by [@C-W-Z](https://github.com/C-W-Z)).
+
+### Changed
+
+- `/context` now opens the interactive context viewer instead of the static context usage report ([#16160](https://github.com/can1357/oh-my-pi/pull/16160) by [@C-W-Z](https://github.com/C-W-Z)).
 
 ## [18.12.6] - 2026-10-21
 
