@@ -203,9 +203,20 @@ impl ClickOptions<'_> {
 	/// Whether [`Self::send`] asks [`Backend::refuse_menu_press`] first: a
 	/// background click without a menu path, with [`Self::refuse_menu`] set.
 	pub fn checks_menu_press(&self) -> bool {
-		self.menu.is_none() && self.refuse_menu && self.mode == DeliveryMode::Background
+		self.menu.is_none() && refuses_menu_press(self.refuse_menu, self.mode)
 	}
 }
+
+/// Whether input asked to `refuse` a control's menu is refused before a press
+/// that would open one: only in the background, where an open menu would take
+/// the user's keyboard ([`Backend::refuse_menu_press`]).
+pub fn refuses_menu_press(refuse: bool, mode: DeliveryMode) -> bool {
+	refuse && mode == DeliveryMode::Background
+}
+
+/// The [`locate_element_click`] error for an element without bounds; the
+/// worker names the element's ref in it.
+pub const NO_CLICKABLE_BOUNDS: &str = "the element has no clickable bounds";
 
 /// Where `click` goes on `element`: the window holding it, and the click at
 /// its center. Both are read from the element's application.
@@ -218,7 +229,7 @@ pub fn locate_element_click<B: Backend + ?Sized>(
 	let bounds = ax
 		.props(element)?
 		.bounds
-		.ok_or_else(|| DesktopError::ax_failed("the element has no clickable bounds"))?;
+		.ok_or_else(|| DesktopError::ax_failed(NO_CLICKABLE_BOUNDS))?;
 	let windows = backend.windows()?;
 	// Desktop refs and parent traversal can leave the snapshot's original
 	// window; only the live element can establish ownership.

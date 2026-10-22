@@ -690,7 +690,7 @@ fn refuse_menu_press(
 	target: &Target,
 	event: &PointerEvent,
 ) -> CoreResult<()> {
-	if refuse && mode == DeliveryMode::Background {
+	if backend::refuses_menu_press(refuse, mode) {
 		backend.refuse_menu_press(target, event)?;
 	}
 	Ok(())
@@ -1585,7 +1585,18 @@ impl Worker {
 			Request::AxClick { reference, options, .. } => {
 				let h = self.registry.resolve(reference)?;
 				let click = options.click_options();
-				self.backend()?.element_click(&h, &click, token)?;
+				// The backend reads the bounds, after the front app on macOS; the
+				// error names the ref here, where it is known.
+				self
+					.backend()?
+					.element_click(&h, &click, token)
+					.map_err(|error| {
+						if error.message == backend::NO_CLICKABLE_BOUNDS {
+							DesktopError::ax_failed(format!("{reference} has no clickable bounds"))
+						} else {
+							error
+						}
+					})?;
 				Ok(Response::Input(control::take_focus_return()))
 			},
 			Request::AxInput { reference, input, takeover, .. } => {
@@ -2704,6 +2715,8 @@ mod capture_tests {
 		window_queries:         Arc<Mutex<u32>>,
 		/// `window_queries` as each `element_input` began.
 		queries_at_input:       Arc<Mutex<Vec<u32>>>,
+		/// Elements report no bounds.
+		no_bounds:              bool,
 		cancel_on_capabilities: Arc<Mutex<Option<CancellationSource>>>,
 		snapshot_error:         Arc<Mutex<bool>>,
 		cancel_on_snapshot:     Arc<Mutex<Option<CancellationSource>>>,
@@ -2773,6 +2786,7 @@ mod capture_tests {
 				captures: Arc::new(Mutex::new(0)),
 				window_queries: Arc::new(Mutex::new(0)),
 				queries_at_input: Arc::new(Mutex::new(Vec::new())),
+				no_bounds: false,
 				cancel_on_capabilities: Arc::new(Mutex::new(None)),
 				snapshot_error: Arc::new(Mutex::new(false)),
 				cancel_on_snapshot: Arc::new(Mutex::new(None)),
@@ -2837,7 +2851,12 @@ mod capture_tests {
 				description: None,
 				enabled: true,
 				focused: false,
-				bounds: Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
+				bounds: (!self.no_bounds).then_some(AxBounds {
+					x:      10.0,
+					y:      10.0,
+					width:  20.0,
+					height: 20.0,
+				}),
 				actions: Vec::new(),
 				child_count: 0,
 			})
@@ -4045,6 +4064,34 @@ mod capture_tests {
 			let _ = worker.process(&request, &CancellationSource::default().token());
 			assert_eq!(*seen.lock(), [before], "the worker listed windows before the backend ran");
 		}
+	}
+
+	#[test]
+	fn element_click_without_bounds_names_its_ref() {
+		let mut backend = FakeWaylandBackend::new();
+		backend.no_bounds = true;
+		let mut worker = worker_with(backend);
+		let inner: &mut Worker = &mut worker;
+		let (backend, registry) = (&mut inner.backend, &mut inner.registry);
+		let ax = backend
+			.as_mut()
+			.ok()
+			.and_then(|backend| backend.ax())
+			.unwrap();
+		let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
+			.unwrap()
+			.ref_;
+		let (reply, _rx) = flume::bounded(1);
+		let request = Request::AxClick {
+			reference: reference.clone(),
+			options: ParsedPointerOptions::parse(None).unwrap(),
+			reply,
+		};
+		let Err(error) = worker.process(&request, &CancellationSource::default().token()) else {
+			panic!("a click on an element without bounds went out");
+		};
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert_eq!(error.message, format!("{reference} has no clickable bounds"));
 	}
 
 	#[test]
