@@ -2483,7 +2483,11 @@ describe("ModelRegistry", () => {
 			await registry.refresh("online");
 
 			const disabledProbeUrls = requestedUrls.filter(
-				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
+				url =>
+					url.includes("127.0.0.1:11434") ||
+					url.includes("127.0.0.1:8080") ||
+					url.includes("127.0.0.1:9931") ||
+					url.includes("127.0.0.1:1234"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
 		});

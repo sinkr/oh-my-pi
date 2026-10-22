@@ -1630,6 +1630,75 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(llama?.input).toEqual(["text", "image"]);
 	});
 
+	test("implicit llama.cpp discovery falls back to port 9931 when 8080 is unreachable", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.startsWith("http://127.0.0.1:8080/")) {
+				throw new TypeError("Unable to connect");
+			}
+			if (url === "http://127.0.0.1:9931/models") {
+				return new Response(JSON.stringify({ data: [{ id: "gemma-3-4b" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === "http://127.0.0.1:9931/props") {
+				return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 16384 } }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("llama.cpp", "gemma-3-4b");
+		expect(model?.baseUrl).toBe("http://127.0.0.1:9931/v1");
+		expect(model?.contextWindow).toBe(16384);
+	});
+
+	test("implicit llama.cpp discovery reports a 9931 auth rejection as unauthenticated, not an 8080 outage", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.startsWith("http://127.0.0.1:8080/")) {
+				throw new TypeError("Unable to connect");
+			}
+			if (url.startsWith("http://127.0.0.1:9931/")) {
+				return new Response("unauthorized", { status: 401 });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.getProviderDiscoveryState("llama.cpp")?.status).toBe("unauthenticated");
+	});
+
+	test("implicit llama.cpp discovery does not bypass a failing 8080 server for 9931", async () => {
+		const requested: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			requested.push(url);
+			if (url === "http://127.0.0.1:8080/models") {
+				return new Response("internal error", { status: 500 });
+			}
+			if (url === "http://127.0.0.1:8080/props") {
+				return new Response("internal error", { status: 500 });
+			}
+			if (url === "http://127.0.0.1:9931/models") {
+				return new Response(JSON.stringify({ data: [{ id: "other-server-model" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.find("llama.cpp", "other-server-model")).toBeUndefined();
+		expect(registry.getProviderDiscoveryState("llama.cpp")?.status).toBe("unavailable");
+		expect(requested.some(url => url.startsWith("http://127.0.0.1:9931/"))).toBe(false);
+	});
+
 	test("llama.cpp discovery routes Qwen models to chat-completions with the top-level disable dialect", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);

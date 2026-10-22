@@ -2,13 +2,17 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
-
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- llama.cpp login instructions now list both default local base URLs (`http://127.0.0.1:8080`, then `http://127.0.0.1:9931`) ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+
+### Fixed
+
+- Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
 
 ## [18.12.6] - 2026-10-21
 

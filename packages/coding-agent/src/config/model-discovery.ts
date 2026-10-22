@@ -185,6 +185,12 @@ export interface DiscoveryProviderConfig {
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	discovery: ProviderDiscovery;
 	optional?: boolean;
+	/**
+	 * Extra roots probed in order when `baseUrl` yields no reachable server.
+	 * Only the implicit llama.cpp provider sets this, so both its legacy (8080)
+	 * and current (9931) default ports are discovered.
+	 */
+	fallbackBaseUrls?: string[];
 }
 
 /** Registry-provided capabilities the protocol probes need; never the registry itself. */
@@ -615,11 +621,39 @@ async function discoverLlamaCppServerMetadata(
 	}
 }
 
+/** Default llama-server roots probed for the implicit provider: legacy first, then the current default. */
+export const LLAMA_CPP_DEFAULT_BASE_URLS = ["http://127.0.0.1:8080", "http://127.0.0.1:9931"] as const;
+
 export async function discoverLlamaCppModels(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
 ): Promise<Model<Api>[]> {
-	const baseUrl = normalizeLlamaCppBaseUrl(providerConfig.baseUrl);
+	const fallbacks = providerConfig.fallbackBaseUrls ?? [];
+	try {
+		return await discoverLlamaCppModelsAt(providerConfig, providerConfig.baseUrl, ctx);
+	} catch (primaryError) {
+		// Any HTTP status means a server answered; fall back only when nothing
+		// does, so a failing preferred server (401, 500, …) is never masked.
+		if (primaryError instanceof DiscoveryHttpError) throw primaryError;
+		for (const fallbackBaseUrl of fallbacks) {
+			try {
+				return await discoverLlamaCppModelsAt(providerConfig, fallbackBaseUrl, ctx);
+			} catch (fallbackError) {
+				// A fallback server that answered owns the outcome: its auth
+				// rejection must surface as unauthenticated, not as the primary outage.
+				if (fallbackError instanceof DiscoveryHttpError) throw fallbackError;
+			}
+		}
+		throw primaryError;
+	}
+}
+
+async function discoverLlamaCppModelsAt(
+	providerConfig: DiscoveryProviderConfig,
+	configuredBaseUrl: string | undefined,
+	ctx: DiscoveryContext,
+): Promise<Model<Api>[]> {
+	const baseUrl = normalizeLlamaCppBaseUrl(configuredBaseUrl);
 	const modelsUrl = `${baseUrl}/models`;
 
 	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
@@ -1214,8 +1248,7 @@ export async function discoverProxyModels(
 }
 
 export function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
-	const defaultBaseUrl = "http://127.0.0.1:8080";
-	const raw = baseUrl || defaultBaseUrl;
+	const raw = baseUrl || LLAMA_CPP_DEFAULT_BASE_URLS[0];
 	try {
 		const parsed = new URL(raw);
 		const trimmedPath = parsed.pathname.replace(/\/+$/g, "");
