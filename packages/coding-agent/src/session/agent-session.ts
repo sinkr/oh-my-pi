@@ -1019,7 +1019,7 @@ export class AgentSession implements SettingsScope {
 	 * Async-delivery generation, bumped on every session transition that evicts
 	 * this owner's jobs (see {@link AgentSession.#cancelOwnAsyncJobs}). Stamped
 	 * onto each queued async-result follow-up so a delivery formatted or drained
-	 * across a `/new` is dropped regardless of job-id reuse.
+	 * across a `/new` or `/resume` is dropped regardless of job-id reuse.
 	 */
 	#asyncDeliveryEpoch = 0;
 
@@ -1212,6 +1212,8 @@ export class AgentSession implements SettingsScope {
 			this.#sessionTransitionSettled = undefined;
 			this.#resolveSessionTransition = undefined;
 			resolve?.();
+			// Deliveries held while the transcript was swapped go to whichever session it settled on.
+			this.yieldQueue.requestIdleFlush();
 		},
 	};
 	#promptSequence = 0;
@@ -2128,7 +2130,9 @@ export class AgentSession implements SettingsScope {
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
-			isStreaming: () => this.isStreaming,
+			// A transition swaps the transcript under the agent: hold idle deliveries until it
+			// settles, so a result from the outgoing session cannot start a turn in the target.
+			isStreaming: () => this.isStreaming || this.isSessionTransitioning,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -12631,6 +12635,11 @@ export class AgentSession implements SettingsScope {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			// As on /new: the outgoing session's background jobs share this agent id, so their
+			// results would otherwise land in the resumed transcript. Cancelled after the last
+			// step that can roll back, so a rejected switch keeps them; their deliveries were
+			// held by the transition until now.
+			if (switchingToDifferentSession) this.#cancelOwnAsyncJobs();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);

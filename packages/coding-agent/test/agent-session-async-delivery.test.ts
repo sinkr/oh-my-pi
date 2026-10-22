@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -914,6 +914,198 @@ describe("AgentSession owner-routed async delivery", () => {
 		// The stale entry was consumed by the run's aside/flush path and dropped,
 		// not left lingering as pending work.
 		expect(session.hasPendingAsyncWork()).toBe(false);
+	});
+
+	async function startResumableSession(
+		tempDir: TempDir,
+		options: { allowSessionModelFallback?: boolean } = {},
+	): Promise<{
+		manager: AsyncJobManager;
+		mock: MockModel;
+		targetSessionFile: string;
+	}> {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({ retentionMs: 60_000 });
+		AsyncJobManager.setInstance(manager);
+
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendMessage({ role: "user", content: "outgoing session", timestamp: 1 });
+		await sessionManager.flush();
+		const target = SessionManager.create(tempDir.path(), tempDir.path());
+		target.appendMessage({ role: "user", content: "resumed session", timestamp: 2 });
+		await target.flush();
+		const targetSessionFile = target.getSessionFile()!;
+		await target.close();
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+			allowSessionModelFallback: options.allowSessionModelFallback,
+		});
+		return { manager, mock, targetSessionFile };
+	}
+
+	it("cancels the outgoing session's background jobs when resuming another session", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-async-jobs-");
+		const { manager, mock, targetSessionFile } = await startResumableSession(tempDir);
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"outgoing session job",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => gate.resolve(), { once: true });
+				await gate.promise;
+				return "PRIOR SESSION RESULT";
+			},
+			{ id: "outgoing-job", ownerId: "Main" },
+		);
+		expect(session.hasPendingAsyncWork()).toBe(true);
+
+		expect(await session.switchSession(targetSessionFile)).toBe(true);
+		gate.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Main" } });
+		await session.settleAsyncWork();
+
+		expect(manager.getJob("outgoing-job")?.status).toBe("cancelled");
+		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(mock.calls).toHaveLength(0);
+		const leaked = session.sessionManager
+			.getEntries()
+			.some(entry => JSON.stringify(entry).includes("PRIOR SESSION RESULT"));
+		expect(leaked).toBe(false);
+	});
+
+	it("keeps background jobs running across a same-session reload", async () => {
+		using tempDir = TempDir.createSync("@pi-reload-async-jobs-");
+		const { manager } = await startResumableSession(tempDir);
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"current session job",
+			async () => {
+				await gate.promise;
+				return "done";
+			},
+			{ id: "current-job", ownerId: "Main" },
+		);
+
+		await session.reload();
+		expect(manager.getJob("current-job")?.status).toBe("running");
+		gate.resolve();
+		await manager.waitForAll();
+	});
+
+	it("does not start a turn for an outgoing job that finishes while the resumed session loads", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-mid-switch-");
+		const { manager, mock, targetSessionFile } = await startResumableSession(tempDir);
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"outgoing session job",
+			async () => {
+				await gate.promise;
+				return "MID-SWITCH RESULT";
+			},
+			{ id: "mid-switch-job", ownerId: "Main" },
+		);
+		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
+		const spy = vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async file => {
+			await setSessionFile(file);
+			gate.resolve();
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
+			await session.waitForIdle();
+		});
+		try {
+			expect(await session.switchSession(targetSessionFile)).toBe(true);
+			await session.waitForIdle();
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(mock.calls).toHaveLength(0);
+		const leaked = session.sessionManager
+			.getEntries()
+			.some(entry => JSON.stringify(entry).includes("MID-SWITCH RESULT"));
+		expect(leaked).toBe(false);
+	});
+
+	it("keeps background jobs when the resumed session's cwd is rejected", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-cwd-reject-");
+		const { manager, targetSessionFile } = await startResumableSession(tempDir);
+		const target = await SessionManager.open(targetSessionFile);
+		target.setCwdWithoutRelocation(tempDir.join("other-project"));
+		await target.flush();
+		await target.close();
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"outgoing session job",
+			async () => {
+				await gate.promise;
+				return "done";
+			},
+			{ id: "cwd-reject-job", ownerId: "Main" },
+		);
+		const previousSessionFile = session.sessionFile;
+
+		expect(await session.switchSession(targetSessionFile, { onCwdChange: async () => false })).toBe(false);
+		expect(session.sessionFile).toBe(previousSessionFile);
+		expect(manager.getJob("cwd-reject-job")?.status).toBe("running");
+		gate.resolve();
+		await manager.waitForAll();
+	});
+
+	it("keeps background jobs when the model fallback callback rolls the switch back", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-fallback-rollback-");
+		const { manager, targetSessionFile } = await startResumableSession(tempDir, { allowSessionModelFallback: true });
+		const target = await SessionManager.open(targetSessionFile);
+		target.appendModelChange("missing-provider/missing-model");
+		await target.flush();
+		await target.close();
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"outgoing session job",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => gate.resolve(), { once: true });
+				await gate.promise;
+				return "done";
+			},
+			{ id: "fallback-rollback-job", ownerId: "Main" },
+		);
+		const previousSessionFile = session.sessionFile;
+		const failure = new Error("fallback warning callback failed");
+
+		const outcome = await session
+			.switchSession(targetSessionFile, {
+				// `open` above re-recorded the process cwd; skip the cwd check so only the model fails to restore.
+				preserveLocalCwd: true,
+				onModelFallback: () => {
+					throw failure;
+				},
+			})
+			.catch((error: unknown) => error);
+		expect(outcome).toBe(failure);
+		expect(session.sessionFile).toBe(previousSessionFile);
+		expect(manager.getJob("fallback-rollback-job")?.status).toBe("running");
+		gate.resolve();
+		await manager.waitForAll();
 	});
 
 	it("keeps delivery pending until the queued follow-up is injected", async () => {
