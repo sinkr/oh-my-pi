@@ -5,6 +5,7 @@
  * Use tern.com on Windows. No display, user account, recordings or configuration required.
  * --keep retains synthetic captures/logs for inspecting selection bars and full-width footer decoration.
  * This checks renderer geometry, not NativeNode props or the ANSI fallback.
+ * Selectors use Tern renderer classes (`sf-*`); last verified against Tern 0.9.5 (2863c37).
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
