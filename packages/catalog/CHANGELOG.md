@@ -13,6 +13,7 @@
 ### Fixed
 
 - Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
+- Fixed GPT-5.6 Sol requests over 272K input tokens (`openai` and `openai-codex`) being priced at the retired $10/$45 long-context card instead of $8/$30 ([#16742](https://github.com/can1357/oh-my-pi/issues/16742))
 
 ## [18.12.6] - 2026-10-21
 
