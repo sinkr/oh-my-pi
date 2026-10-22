@@ -262,7 +262,7 @@ function appendAssistantMessageEntries(
 					? "assistant-thinking"
 					: "assistant-messages";
 		let text: string;
-		let opaque: string | undefined;
+		let opaqueInfo: string | undefined;
 		if (block.type === "toolCall") {
 			try {
 				text = stringifyJson(block.arguments, 2) ?? "null";
@@ -273,10 +273,10 @@ function appendAssistantMessageEntries(
 			text = `[provider fallback: ${block.from.model} to ${block.to.model}]`;
 		} else if (block.type === "thinking") {
 			text = block.thinking || ENCRYPTED_THINKING;
-			if (block.thinkingSignature) opaque = opaqueSize("signature", block.thinkingSignature);
+			if (block.thinkingSignature) opaqueInfo = opaqueSize("signature", block.thinkingSignature);
 		} else if (block.type === "redactedThinking") {
 			text = ENCRYPTED_THINKING;
-			opaque = opaqueSize("data", block.data);
+			opaqueInfo = opaqueSize("data", block.data);
 		} else text = summarizeBlockForView(block);
 		appendEntry(state, categoryId, {
 			id: `${categoryId}/${entryIdPrefix}/${blockIndex}`,
@@ -286,7 +286,7 @@ function appendAssistantMessageEntries(
 					: categoryId === "assistant-thinking"
 						? `Thinking ${++thinkingIndex}/${thinkingBlockCount} · message ${sourceIndex + 1}`
 						: `${block.type} · message ${sourceIndex + 1}`,
-			info: [info, opaque].filter(Boolean).join(" · ") || undefined,
+			info: [info, opaqueInfo].filter(Boolean).join(" · ") || undefined,
 			text,
 			timestamp: sourceMessage.timestamp,
 			callId: block.type === "toolCall" ? block.id : undefined,

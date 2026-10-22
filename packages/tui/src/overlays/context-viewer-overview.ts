@@ -40,9 +40,9 @@ export interface OverviewRow {
 	readonly category?: ContextViewCategory;
 	readonly child?: boolean;
 	/** Right-aligned token column. */
-	readonly value: string;
+	readonly tokenColumn: string;
 	/** Right-aligned share column, including its leading separator. */
-	readonly share: string;
+	readonly shareColumn: string;
 }
 
 export interface MapGeometry {
@@ -76,7 +76,7 @@ export function allocateUsage(
 	categories: readonly ContextViewCategory[],
 	usage: number,
 ): Map<ContextViewCategory, number> | undefined {
-	const allocated = new Map<ContextViewCategory, number>();
+	const allocation = new Map<ContextViewCategory, number>();
 	const allocate = (siblings: readonly ContextViewCategory[], total: number): boolean => {
 		const shares = allocateTokens(
 			siblings.map(category => category.tokens),
@@ -84,12 +84,12 @@ export function allocateUsage(
 		);
 		if (!shares) return false;
 		for (const [index, category] of siblings.entries()) {
-			allocated.set(category, shares[index]!);
+			allocation.set(category, shares[index]!);
 			if (category.children) allocate(category.children, shares[index]!);
 		}
 		return true;
 	};
-	return allocate(categories, usage) ? allocated : undefined;
+	return allocate(categories, usage) ? allocation : undefined;
 }
 
 export function overviewLabel(category: ContextViewCategory): string {
@@ -102,19 +102,19 @@ function formatShare(tokens: number, window: number): string {
 	return percent > 0 && percent < 0.05 ? "<0.1%" : `${percent.toFixed(1)}%`;
 }
 
-/** Category and child rows, then buffer and free space, with aligned value columns. */
+/** Category and child rows, then buffer and free space, with aligned token and share columns. */
 export function buildOverviewRows(
 	data: ContextViewData,
-	allocated: ReadonlyMap<ContextViewCategory, number> | undefined,
+	allocation: ReadonlyMap<ContextViewCategory, number> | undefined,
 ): OverviewRow[] {
-	const rows: Omit<OverviewRow, "value" | "share">[] = [];
+	const rows: Omit<OverviewRow, "tokenColumn" | "shareColumn">[] = [];
 	for (const category of data.categories) {
 		const openable = contextCategoryDescriptor(category.id).openable !== false;
 		rows.push({
 			key: category.id,
 			id: category.id,
 			label: overviewLabel(category),
-			tokens: allocated?.get(category),
+			tokens: allocation?.get(category),
 			// Empty categories have nothing to open.
 			category: openable && category.entries.length > 0 ? category : undefined,
 		});
@@ -123,7 +123,7 @@ export function buildOverviewRows(
 				key: child.key!,
 				id: category.id,
 				label: child.label,
-				tokens: allocated?.get(child),
+				tokens: allocation?.get(child),
 				category: openable ? child : undefined,
 				child: true,
 			});
@@ -138,44 +138,44 @@ export function buildOverviewRows(
 	);
 	return rows.map(row => ({
 		...row,
-		value: row.tokens === undefined ? "—" : formatNumber(row.tokens).padStart(tokenWidth),
-		share:
+		tokenColumn: row.tokens === undefined ? "—" : formatNumber(row.tokens).padStart(tokenWidth),
+		shareColumn:
 			row.tokens === undefined
 				? ""
 				: `  ${formatShare(row.tokens, data.breakdown.contextWindow).padStart(shareWidth)}`,
 	}));
 }
 
-/** ANSI legend row: cursor, swatch, label padded to `width`, value columns. */
+/** ANSI legend row: cursor, swatch, label padded to `width`, token and share columns. */
 export function legendLine(row: OverviewRow, selected: boolean, width: number): string {
 	const presentation = CONTEXT_PRESENTATION[row.id];
 	const glyph = theme.styledSymbol(presentation.symbol, presentation.color);
 	const cursor = selected ? theme.fg("accent", theme.nav.cursor) : " ".repeat(visibleWidth(theme.nav.cursor));
 	const prefix = `${cursor} ${row.child ? "  " : ""}${glyph} `;
-	const suffix = ` ${theme.fg(selected ? presentation.color : "text", row.value)}${theme.fg(selected ? presentation.color : "dim", row.share)}`;
+	const suffix = ` ${theme.fg(selected ? presentation.color : "text", row.tokenColumn)}${theme.fg(selected ? presentation.color : "dim", row.shareColumn)}`;
 	const budget = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix));
 	const label = truncateToWidth(safeLine(row.label), budget);
 	const name = selected ? theme.fg(presentation.color, theme.bold(label)) : label;
 	return truncateToWidth(`${prefix}${name}${" ".repeat(Math.max(0, budget - visibleWidth(label)))}${suffix}`, width);
 }
 
-/** Native legend item; `meter` swaps map glyphs for the meter's bar glyphs. */
-export function legendItem(row: OverviewRow, selected: boolean, meter: boolean, window: number): NativeNode {
+/** Native legend item; `meterGlyphs` swaps map glyphs for the meter's bar glyphs. */
+export function legendItem(row: OverviewRow, selected: boolean, meterGlyphs: boolean, window: number): NativeNode {
 	const presentation = CONTEXT_PRESENTATION[row.id];
-	const glyph = meter
+	const glyph = meterGlyphs
 		? row.id === "buffer"
 			? "▨"
 			: row.id === "free"
 				? "□"
 				: "■"
 		: theme.symbol(presentation.symbol);
-	const value = row.tokens === undefined ? "—" : `${formatNumber(row.tokens)} · ${formatShare(row.tokens, window)}`;
+	const usage = row.tokens === undefined ? "—" : `${formatNumber(row.tokens)} · ${formatShare(row.tokens, window)}`;
 	return item(row.key, {
 		label: [
 			span(`${row.child ? "  " : ""}${glyph} `, presentation.color),
 			span(safeText(row.label), selected ? `${presentation.color} strong` : undefined),
 		],
-		value: selected ? [span(value, presentation.color)] : value,
+		value: selected ? [span(usage, presentation.color)] : usage,
 	});
 }
 
@@ -199,12 +199,12 @@ export function mapGeometry(width: number, height: number): MapGeometry | undefi
 /** Map cells per row, in window order: categories, free space, then buffer. */
 export function planMapRows(
 	data: ContextViewData,
-	allocated: ReadonlyMap<ContextViewCategory, number>,
+	allocation: ReadonlyMap<ContextViewCategory, number>,
 	geometry: MapGeometry,
 ): ContextMapCell<ContextPresentationId>[][] {
 	const cells = planContextMap<ContextPresentationId>(
 		[
-			...data.categories.map(category => ({ id: category.id, tokens: allocated.get(category) ?? 0 })),
+			...data.categories.map(category => ({ id: category.id, tokens: allocation.get(category) ?? 0 })),
 			{ id: "free", tokens: data.breakdown.freeTokens },
 			{ id: "buffer", tokens: data.breakdown.autoCompactBufferTokens },
 		],
@@ -223,8 +223,8 @@ export function mapRowLine(cells: readonly ContextMapCell<ContextPresentationId>
 		.map(cell => {
 			const presentation = CONTEXT_PRESENTATION[cell.id];
 			const glyph = theme.symbol(presentation.symbol);
-			const value = theme.fg(presentation.color, glyph);
-			return `${cell.full ? value : `\x1b[2m${value}\x1b[22m`}${" ".repeat(Math.max(0, geometry.cellWidth - visibleWidth(glyph)))}`;
+			const painted = theme.fg(presentation.color, glyph);
+			return `${cell.full ? painted : `\x1b[2m${painted}\x1b[22m`}${" ".repeat(Math.max(0, geometry.cellWidth - visibleWidth(glyph)))}`;
 		})
 		.join(geometry.gap);
 }

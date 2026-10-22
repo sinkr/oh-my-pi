@@ -100,7 +100,7 @@ export class ContextViewer implements Component {
 	#disposed = false;
 
 	// Layout shared by both backends.
-	#width = 0;
+	#bodyWidth = 0;
 	#bodyRows = 1;
 	#hour12: boolean | undefined;
 	/** Only ANSI input needs local full-content scroll geometry. */
@@ -283,7 +283,7 @@ export class ContextViewer implements Component {
 		this.#resetEntryLayout();
 		this.#ansiEntryScroll.scrollToTop();
 		this.#state = "entry";
-		if (this.#lastRenderMode === "ansi" && this.#width > 0) this.#ensureAnsiEntryLayout();
+		if (this.#lastRenderMode === "ansi" && this.#bodyWidth > 0) this.#ensureAnsiEntryLayout();
 	}
 
 	#back(): void {
@@ -300,7 +300,7 @@ export class ContextViewer implements Component {
 	#navigate(delta: -1 | 1): void {
 		if (this.#state === "entry") {
 			if (this.#lastRenderMode === "ansi") {
-				if (this.#width > 0) this.#ensureAnsiEntryLayout();
+				if (this.#bodyWidth > 0) this.#ensureAnsiEntryLayout();
 				this.#ansiEntryScroll.scroll(delta);
 			}
 		} else if (this.#state === "overview") {
@@ -332,7 +332,7 @@ export class ContextViewer implements Component {
 	#page(direction: -1 | 1): void {
 		if (this.#state !== "entry") return;
 		if (this.#lastRenderMode === "ansi") {
-			if (this.#width > 0) this.#ensureAnsiEntryLayout();
+			if (this.#bodyWidth > 0) this.#ensureAnsiEntryLayout();
 			// Keep one line of overlap so the reading position stays visible.
 			this.#ansiEntryScroll.scroll(direction * Math.max(1, this.#bodyRows - 1));
 		}
@@ -363,7 +363,7 @@ export class ContextViewer implements Component {
 		return entryPreview(entry, {
 			width,
 			rows: previewRows(entry, this.#bodyRows),
-			sourceWidth: this.#width,
+			sourceWidth: this.#bodyWidth,
 			hour12: this.#hour12,
 		});
 	}
@@ -386,13 +386,13 @@ export class ContextViewer implements Component {
 
 	render(width: number): readonly string[] {
 		this.#lastRenderMode = "ansi";
-		this.#width = Math.max(1, width - 4);
+		this.#bodyWidth = Math.max(1, width - 4);
 		const terminalRows = Math.max(1, this.#getRows());
 		const summary = this.#layout();
 		this.#panel.title =
 			this.#state === "overview" ? `Context · ${this.#modelLabel}` : safeText(this.#category!.label);
 		this.#header.setHeight(summary.length);
-		this.#header.setLines(summary.map(line => truncateToWidth(theme.fg("dim", line), this.#width)));
+		this.#header.setLines(summary.map(line => truncateToWidth(theme.fg("dim", line), this.#bodyWidth)));
 		this.#body.setLines(
 			this.#state === "overview"
 				? this.#renderOverview()
@@ -401,7 +401,7 @@ export class ContextViewer implements Component {
 					: this.#renderEntry(),
 		);
 		this.#body.setHeight(this.#bodyRows);
-		this.#footer.setLines([truncateToWidth(theme.fg("dim", this.#footerHints()), this.#width)]);
+		this.#footer.setLines([truncateToWidth(theme.fg("dim", this.#footerHints()), this.#bodyWidth)]);
 		const rendered = this.#panel.render(width);
 		// Short terminals keep the top border, footer, and bottom border, in that priority.
 		if (terminalRows >= 4) return rendered;
@@ -434,18 +434,18 @@ export class ContextViewer implements Component {
 
 	/** Map on the left when it fits; scrollable legend and Snapcompact diagnostics on the right. */
 	#renderOverview(): string[] {
-		const width = this.#width;
+		const width = this.#bodyWidth;
 		const height = this.#bodyRows;
-		const usage = this.#drawableAllocation;
-		const map = usage ? mapGeometry(width, height) : undefined;
+		const allocation = this.#drawableAllocation;
+		const map = allocation ? mapGeometry(width, height) : undefined;
 		const listWidth = map ? width - map.width - MAP_LEGEND_GAP : width;
-		const source = this.#overviewSelection.items.map(item =>
+		const legendLines = this.#overviewSelection.items.map(item =>
 			legendLine(item, this.#overviewSelection.selectedKey === item.key, Math.max(0, listWidth - 1)),
 		);
 		for (const line of contextSnapcompactLines(this.#data.breakdown))
-			source.push(...wrapTextWithAnsi(theme.fg("dim", line), Math.max(1, listWidth - 1)));
+			legendLines.push(...wrapTextWithAnsi(theme.fg("dim", line), Math.max(1, listWidth - 1)));
 		this.#overviewScroll.setHeight(height);
-		this.#overviewScroll.setLines(source);
+		this.#overviewScroll.setLines(legendLines);
 		this.#overviewScroll.revealRange(
 			{
 				id: this.#overviewSelection.selectedKey ?? "",
@@ -456,8 +456,8 @@ export class ContextViewer implements Component {
 			listWidth,
 		);
 		const legend = this.#overviewScroll.render(listWidth);
-		if (!usage || !map) return [...legend];
-		const mapRows = planMapRows(this.#data, usage, map);
+		if (!allocation || !map) return [...legend];
+		const mapRows = planMapRows(this.#data, allocation, map);
 		const lines: string[] = [];
 		for (let index = 0; index < height; index++) {
 			const cells = mapRows[index];
@@ -470,7 +470,7 @@ export class ContextViewer implements Component {
 
 	/** Entry previews with the selected one marked by a gutter bar. */
 	#renderCategory(): string[] {
-		const contentWidth = Math.max(1, this.#width - 2);
+		const contentWidth = Math.max(1, this.#bodyWidth - 2);
 		this.#prepareAnsiPreview(contentWidth, this.#bodyRows);
 		const range = this.#ansiPreviewCache!.ranges[this.#entrySelection.selectedIndex];
 		if (range)
@@ -523,11 +523,11 @@ export class ContextViewer implements Component {
 
 	#renderEntry(): string[] {
 		this.#ensureAnsiEntryLayout();
-		return [...this.#ansiEntryScroll.render(this.#width)];
+		return [...this.#ansiEntryScroll.render(this.#bodyWidth)];
 	}
 
 	#ensureAnsiEntryLayout(): void {
-		const width = this.#width;
+		const width = this.#bodyWidth;
 		const content = this.#entryBodyText();
 		this.#ansiEntryScroll.setHeight(this.#bodyRows);
 		if (this.#ansiEntryLayoutWidth !== width) {
@@ -549,7 +549,7 @@ export class ContextViewer implements Component {
 
 	describe(cx: DescribeContext): NativeNode {
 		this.#lastRenderMode = "native";
-		this.#width = Math.max(1, cx.cols - 4);
+		this.#bodyWidth = Math.max(1, cx.cols - 4);
 		if (this.#hour12 !== cx.hour12) {
 			this.#hour12 = cx.hour12;
 			this.invalidate();
@@ -594,18 +594,21 @@ export class ContextViewer implements Component {
 			min: { h: 0 },
 			max: { lines: Math.max(1, this.#bodyRows) },
 		});
-		const usage = meter ? undefined : this.#drawableAllocation;
-		const map = usage ? mapGeometry(this.#width, this.#bodyRows) : undefined;
+		// The map stands in for the meter on terminals without one.
+		const mapAllocation = meter ? undefined : this.#drawableAllocation;
+		const map = mapAllocation ? mapGeometry(this.#bodyWidth, this.#bodyRows) : undefined;
 		const body: NativeNode[] = [
-			usage && map ? row([this.#describeMap(usage, map), list], { gap: "lg" }) : list,
+			mapAllocation && map ? row([this.#describeMap(mapAllocation, map), list], { gap: "lg" }) : list,
 			...contextSnapcompactLines(this.#data.breakdown).map(line => text([span(line, "dim")], { wrap: "word" })),
 		];
 		const head = meter ?? this.#summary().map(line => text([span(line, "dim")], { wrap: "word" }));
 		return [...head, node("col", { grow: 1, min: { h: 0 } }, body, "overview")];
 	}
 
-	#describeMap(usage: ReadonlyMap<ContextViewCategory, number>, map: MapGeometry): NativeNode {
-		return col(planMapRows(this.#data, usage, map).map(cells => text(mapRowSpans(cells, map), { wrap: "none" })));
+	#describeMap(allocation: ReadonlyMap<ContextViewCategory, number>, map: MapGeometry): NativeNode {
+		return col(
+			planMapRows(this.#data, allocation, map).map(cells => text(mapRowSpans(cells, map), { wrap: "none" })),
+		);
 	}
 
 	/** Entry previews in a viewport-bounded list; the list owns wheel scrolling. */
@@ -684,14 +687,14 @@ export class ContextViewer implements Component {
 	#nativePreview(entry: ContextViewEntry): { spans: TspSpan[] | undefined; complete: boolean } {
 		const category = this.#category!;
 		let cache = this.#nativePreviewCache;
-		if (cache?.category !== category || cache.width !== this.#width || cache.height !== this.#bodyRows) {
-			cache = { category, width: this.#width, height: this.#bodyRows, previews: new Map() };
+		if (cache?.category !== category || cache.width !== this.#bodyWidth || cache.height !== this.#bodyRows) {
+			cache = { category, width: this.#bodyWidth, height: this.#bodyRows, previews: new Map() };
 			this.#nativePreviewCache = cache;
 		}
 		let preview = cache.previews.get(entry);
 		if (!preview) {
 			const indent = entry.thinkingGroup ? 2 : 0;
-			const content = this.#preview(entry, Math.max(1, this.#width - 1 - NATIVE_ENTRY_GUTTER_COLS - indent));
+			const content = this.#preview(entry, Math.max(1, this.#bodyWidth - 1 - NATIVE_ENTRY_GUTTER_COLS - indent));
 			// Tern owns final wrapping; only omitted source creates a more row.
 			const spans = content.lines.length ? styledSpans(content.lines.join("\n")) : undefined;
 			preview = { spans, complete: content.complete };
