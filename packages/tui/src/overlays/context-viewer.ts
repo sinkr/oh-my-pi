@@ -1,5 +1,6 @@
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { CONTEXT_PRESENTATION, type ContextCategoryId } from "../chrome/context-presentation";
+import { CONTEXT_PRESENTATION } from "../chrome/context-presentation";
+import type { ContextViewCategory, ContextViewData, ContextViewEntry } from "../chrome/context-view-model";
 import { editorKey } from "../chrome/keybinding-hints";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { nativeSlotProps } from "../components/layout/geometry";
@@ -18,7 +19,6 @@ import type { DescribeContext, NativeNode, NativeRevealAt, NativeScroll, NativeU
 import { actionBar, actionButton, selectList } from "../native/overlay";
 import { styledSpans } from "../native/spans";
 import {
-	type ContextBreakdown,
 	contextSnapcompactLines,
 	contextUsageHead,
 	contextUsageSummary,
@@ -52,48 +52,6 @@ import {
 	overviewLabel,
 	planMapRows,
 } from "./context-viewer-overview";
-
-export interface ContextThinkingGroup {
-	readonly id: string;
-	readonly label: string;
-	readonly tokens: number;
-	readonly interrupted?: boolean;
-}
-
-export interface ContextViewEntry {
-	readonly id: string;
-	readonly label: string;
-	readonly text: string;
-	/** Aggregation weight for the unscaled replay estimate; shared blocks contribute through their group. */
-	readonly tokens: number;
-	readonly interrupted?: boolean;
-	readonly thinkingGroup?: ContextThinkingGroup;
-	readonly path?: string;
-	readonly info?: string;
-	readonly timestamp?: number;
-	readonly callId?: string;
-}
-
-export interface ContextViewCategory {
-	id: ContextCategoryId;
-	key?: string;
-	label: string;
-	/** Overview attribution weight, not reported usage; may differ from the entry sum (e.g. Skills subtraction). */
-	tokens: number;
-	entries: ContextViewEntry[];
-	children?: ContextViewCategory[];
-}
-
-export interface ContextViewData {
-	readonly modelLabel: string;
-	readonly window: number;
-	/** Current context usage, which may be provider-anchored or locally estimated. */
-	readonly usage: number;
-	readonly buffer: number;
-	readonly free: number;
-	readonly breakdown: ContextBreakdown;
-	readonly categories: readonly ContextViewCategory[];
-}
 
 type ViewState = "overview" | "category" | "entry";
 

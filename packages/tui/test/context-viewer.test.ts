@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import type { TspText } from "@oh-my-pi/pi-wire";
+import type {
+	ContextThinkingGroup,
+	ContextViewCategory,
+	ContextViewData,
+	ContextViewEntry,
+} from "../src/chrome/context-view-model";
 import {
 	getKeybindings,
 	KeybindingsManager,
@@ -10,13 +16,7 @@ import {
 } from "../src/keybindings";
 import type { NativeNode } from "../src/native/node";
 import { Reconciler } from "../src/native/reconcile";
-import {
-	ContextViewer,
-	type ContextThinkingGroup,
-	type ContextViewData,
-	type ContextViewCategory,
-	type ContextViewEntry,
-} from "../src/overlays/context-viewer";
+import { ContextViewer } from "../src/overlays/context-viewer";
 import { ensureThemeSync, setThemeInstance, theme, type Theme } from "../src/theme/theme";
 import { visibleWidth } from "../src/utils";
 

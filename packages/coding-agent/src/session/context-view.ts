@@ -3,30 +3,19 @@ import type { AnthropicServerToolContent, AssistantMessage } from "@oh-my-pi/pi-
 import { renderToolExamples } from "@oh-my-pi/pi-ai/dialect";
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import type { ContextCategoryId } from "@oh-my-pi/pi-tui/chrome/context-presentation";
-import type {
-	ContextThinkingGroup,
-	ContextViewCategory,
-	ContextViewData,
-	ContextViewEntry,
-} from "@oh-my-pi/pi-tui/overlays/context-viewer";
+import {
+	CONTEXT_CATEGORIES,
+	type ContextCategoryId,
+	type ContextThinkingGroup,
+	type ContextViewCategory,
+	type ContextViewData,
+	type ContextViewEntry,
+} from "@oh-my-pi/pi-tui/chrome/context-view-model";
 import { type ContextBreakdown, estimateContextToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "./agent-session";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
 import { type ContextViewMessage, convertMessagesForContextView } from "./messages";
-
-const CATEGORIES: readonly [ContextCategoryId, string][] = [
-	["system-prompt", "System Prompt"],
-	["skills", "Skills"],
-	["built-in-tools", "Built-in Tools"],
-	["custom-tools", "Custom Tools"],
-	["user-messages", "User / Developer Messages"],
-	["assistant-messages", "Assistant Messages"],
-	["assistant-thinking", "Assistant Thinking"],
-	["tool-calls", "Tool Calls"],
-	["tool-output", "Tool Output"],
-];
 
 const ENCRYPTED_THINKING = "[Encrypted thinking]";
 
@@ -393,7 +382,12 @@ export function buildSessionContextView(
 	session: AgentSession,
 	breakdown: ContextBreakdown = computeSessionContextBreakdown(session, { snapcompactSavings: true }),
 ): ContextViewData {
-	const categories: ContextViewCategory[] = CATEGORIES.map(([id, label]) => ({ id, label, tokens: 0, entries: [] }));
+	const categories: ContextViewCategory[] = CONTEXT_CATEGORIES.map(({ id, label }) => ({
+		id,
+		label,
+		tokens: 0,
+		entries: [],
+	}));
 	const state: ContextViewState = {
 		categoriesById: new Map(categories.map(category => [category.id, category])),
 		toolOutputGroupsByName: new Map(),

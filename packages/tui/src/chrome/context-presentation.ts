@@ -1,5 +1,6 @@
 import type { ThemeColor } from "../theme";
 import type { SymbolKey } from "../theme/symbols";
+import type { ContextCategoryId } from "./context-view-model";
 
 /** Shared category styles for maps and interactive legends; resolve glyphs at render time. */
 const SYSTEM = { color: "accent", symbol: "context.content" } as const;
@@ -20,6 +21,5 @@ export const CONTEXT_PRESENTATION = {
 	"tool-output": OUTPUT,
 	buffer: { color: "warning", symbol: "context.buffer" },
 	free: { color: "dim", symbol: "context.free" },
-} as const satisfies Record<string, { color: ThemeColor; symbol: SymbolKey }>;
-export type ContextPresentationId = keyof typeof CONTEXT_PRESENTATION;
-export type ContextCategoryId = Exclude<ContextPresentationId, "buffer" | "free">;
+} as const satisfies Record<ContextPresentationId, { color: ThemeColor; symbol: SymbolKey }>;
+export type ContextPresentationId = ContextCategoryId | "buffer" | "free";

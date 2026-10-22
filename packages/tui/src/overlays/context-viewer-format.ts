@@ -4,13 +4,13 @@
  */
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { CONTEXT_PRESENTATION, type ContextCategoryId } from "../chrome/context-presentation";
+import { CONTEXT_PRESENTATION } from "../chrome/context-presentation";
+import type { ContextCategoryId, ContextThinkingGroup, ContextViewEntry } from "../chrome/context-view-model";
 import { editorKey } from "../chrome/keybinding-hints";
 import { span } from "../native/describe";
 import { PREVIEW_LIMITS, replaceTabs, shortenEmbeddedPaths, shortenPath } from "../render/render-utils";
 import { theme } from "../theme/theme";
 import { wrapTextWithAnsi } from "../utils";
-import type { ContextThinkingGroup, ContextViewEntry } from "./context-viewer";
 
 const TIMESTAMP_FORMAT = {
 	year: "numeric",

@@ -1,5 +1,6 @@
 import { ProcessTerminal, TUI } from "../../../src/index";
-import { ContextViewer, type ContextViewData } from "../../../src/overlays/context-viewer";
+import type { ContextViewData } from "../../../src/chrome/context-view-model";
+import { ContextViewer } from "../../../src/overlays/context-viewer";
 
 // Only synthetic data: never read a user's session or configuration.
 const terminal = new ProcessTerminal();

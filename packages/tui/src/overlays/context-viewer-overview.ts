@@ -10,7 +10,11 @@ import { item, span } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { theme } from "../theme/theme";
 import { truncateToWidth, visibleWidth } from "../utils";
-import type { ContextViewCategory, ContextViewData } from "./context-viewer";
+import {
+	type ContextViewCategory,
+	type ContextViewData,
+	contextCategoryDescriptor,
+} from "../chrome/context-view-model";
 import { safeLine, safeText } from "./context-viewer-format";
 
 /** The map is hidden below this body width. */
@@ -86,9 +90,8 @@ export function allocateUsage(
 	return allocate(categories, usage) ? allocated : undefined;
 }
 
-/** Only Overview excludes the Skills attribution; content views retain complete system blocks. */
 export function overviewLabel(category: ContextViewCategory): string {
-	return category.id === "system-prompt" ? `${category.label} (excluding Skills)` : category.label;
+	return contextCategoryDescriptor(category.id).overviewLabel ?? category.label;
 }
 
 export function formatShare(tokens: number, window: number): string {
@@ -104,13 +107,14 @@ export function buildOverviewRows(
 ): OverviewRow[] {
 	const rows: Omit<OverviewRow, "value" | "share">[] = [];
 	for (const category of data.categories) {
+		const openable = contextCategoryDescriptor(category.id).openable !== false;
 		rows.push({
 			key: category.id,
 			id: category.id,
 			label: overviewLabel(category),
 			tokens: allocated?.get(category),
-			// Skills is an estimate without entries; empty categories have nothing to open.
-			category: category.id === "skills" || category.entries.length === 0 ? undefined : category,
+			// Empty categories have nothing to open.
+			category: openable && category.entries.length > 0 ? category : undefined,
 		});
 		for (const child of category.children ?? [])
 			rows.push({
@@ -118,7 +122,7 @@ export function buildOverviewRows(
 				id: category.id,
 				label: child.label,
 				tokens: allocated?.get(child),
-				category: category.id === "skills" || child.id === "skills" ? undefined : child,
+				category: openable ? child : undefined,
 				child: true,
 			});
 	}

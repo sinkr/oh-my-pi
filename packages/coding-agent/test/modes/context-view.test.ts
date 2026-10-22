@@ -10,7 +10,7 @@ import { buildSessionContextView } from "../../src/session/context-view";
 import { buildSystemPrompt } from "../../src/system-prompt";
 import type { Skill } from "../../src/extensibility/skills";
 import { computeSessionContextBreakdown } from "../../src/session/context-usage-runtime";
-import type { ContextViewData } from "@oh-my-pi/pi-tui/overlays/context-viewer";
+import type { ContextViewData } from "@oh-my-pi/pi-tui/chrome/context-view-model";
 
 const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 const sessions: AgentSession[] = [];
