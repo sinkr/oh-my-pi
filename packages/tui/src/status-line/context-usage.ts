@@ -5,12 +5,10 @@ import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { renderToolExamples } from "@oh-my-pi/pi-ai/dialect";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import type { Theme, ThemeColor } from "../theme";
-import { Container } from "../tui";
-import { Text } from "../components/text";
-import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
-import type { DescribeContext, NativeNode } from "../native/node";
-import { col, node, row, span, text } from "../native/describe";
+import type { ThemeColor } from "../theme";
+import type { TspText } from "@oh-my-pi/pi-wire";
+import type { NativeNode } from "../native/node";
+import { node, span, text } from "../native/describe";
 
 interface ContextSkill {
 	readonly name: string;
@@ -70,16 +68,6 @@ export interface ContextUsageOptions {
 	snapcompact?: ContextSavingsEstimate;
 }
 
-const GRID_COLS = 20;
-const GRID_ROWS = 10;
-const GRID_CELLS = GRID_COLS * GRID_ROWS;
-const GRID_GUTTER = "   ";
-
-const CELL_FILLED = "⛁";
-const CELL_FILLED_MESSAGES = "⛃";
-const CELL_FREE = "⛶";
-const CELL_BUFFER = "⛝";
-
 type CategoryId = "systemPrompt" | "systemContext" | "systemTools" | "skills" | "messages";
 
 interface CategoryInfo {
@@ -87,7 +75,6 @@ interface CategoryInfo {
 	label: string;
 	tokens: number;
 	color: ThemeColor;
-	glyph: string;
 }
 
 export interface ContextBreakdown {
@@ -452,23 +439,11 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 	}
 
 	const categories: CategoryInfo[] = [
-		{ id: "systemPrompt", label: "System prompt", tokens: systemPromptTokens, color: "accent", glyph: CELL_FILLED },
-		{ id: "systemTools", label: "System tools", tokens: toolsTokens, color: "warning", glyph: CELL_FILLED },
-		{
-			id: "systemContext",
-			label: "System context",
-			tokens: systemContextTokens,
-			color: "customMessageLabel",
-			glyph: CELL_FILLED,
-		},
-		{ id: "skills", label: "Skills", tokens: skillsTokens, color: "success", glyph: CELL_FILLED },
-		{
-			id: "messages",
-			label: "Messages",
-			tokens: messagesTokens,
-			color: "userMessageText",
-			glyph: CELL_FILLED_MESSAGES,
-		},
+		{ id: "systemPrompt", label: "System prompt", tokens: systemPromptTokens, color: "accent" },
+		{ id: "systemTools", label: "System tools", tokens: toolsTokens, color: "warning" },
+		{ id: "systemContext", label: "System context", tokens: systemContextTokens, color: "customMessageLabel" },
+		{ id: "skills", label: "Skills", tokens: skillsTokens, color: "success" },
+		{ id: "messages", label: "Messages", tokens: messagesTokens, color: "userMessageText" },
 	];
 
 	let autoCompactBufferTokens = 0;
@@ -503,78 +478,6 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 	};
 }
 
-interface CellSpec {
-	glyph: string;
-	color: ThemeColor;
-}
-
-function planCells(breakdown: ContextBreakdown): CellSpec[] {
-	const cells: CellSpec[] = [];
-	const window = breakdown.contextWindow;
-
-	if (window <= 0) {
-		for (let i = 0; i < GRID_CELLS; i++) {
-			cells.push({ glyph: CELL_FREE, color: "dim" });
-		}
-		return cells;
-	}
-
-	const tokensPerCell = window / GRID_CELLS;
-
-	const ratioCells = (tokens: number): number => {
-		if (tokens <= 0) return 0;
-		return Math.max(1, Math.round(tokens / tokensPerCell));
-	};
-
-	const categoryCounts = breakdown.categories.map(category => ({
-		category,
-		count: ratioCells(category.tokens),
-	}));
-
-	let bufferCount = ratioCells(breakdown.autoCompactBufferTokens);
-
-	let usedCount = categoryCounts.reduce((sum, c) => sum + c.count, 0);
-
-	// Prevent the visualization from over-running the grid.
-	const maxUsable = GRID_CELLS - bufferCount;
-	if (usedCount > maxUsable) {
-		// Scale categories proportionally down to fit.
-		let overflow = usedCount - maxUsable;
-		// Trim from the largest categories first to preserve visibility for small ones.
-		const order = [...categoryCounts].sort((a, b) => b.count - a.count);
-		for (const entry of order) {
-			while (overflow > 0 && entry.count > 1) {
-				entry.count -= 1;
-				overflow -= 1;
-			}
-		}
-		usedCount = categoryCounts.reduce((sum, c) => sum + c.count, 0);
-		if (usedCount + bufferCount > GRID_CELLS) {
-			bufferCount = Math.max(0, GRID_CELLS - usedCount);
-		}
-	}
-
-	for (const { category, count } of categoryCounts) {
-		for (let i = 0; i < count; i++) {
-			cells.push({ glyph: category.glyph, color: category.color });
-		}
-	}
-
-	const freeCount = Math.max(0, GRID_CELLS - cells.length - bufferCount);
-	for (let i = 0; i < freeCount; i++) {
-		cells.push({ glyph: CELL_FREE, color: "dim" });
-	}
-	for (let i = 0; i < bufferCount; i++) {
-		cells.push({ glyph: CELL_BUFFER, color: "warning" });
-	}
-
-	// Pad to exactly GRID_CELLS in case rounding undershot.
-	while (cells.length < GRID_CELLS) {
-		cells.push({ glyph: CELL_FREE, color: "dim" });
-	}
-	return cells.slice(0, GRID_CELLS);
-}
-
 function percentString(part: number, whole: number, fractionDigits = 1): string {
 	if (whole <= 0) return "0%";
 	const pct = (part / whole) * 100;
@@ -586,62 +489,6 @@ function percentString(part: number, whole: number, fractionDigits = 1): string 
 interface LegendPart {
 	t: string;
 	s?: ThemeColor | "strong";
-}
-
-/** Legend lines as styled runs, shared by the ANSI panel and the native description. */
-function buildLegendParts(breakdown: ContextBreakdown): LegendPart[][] {
-	const lines: LegendPart[][] = [];
-	const { model, contextWindow, categories, usedTokens, autoCompactBufferTokens, freeTokens } = breakdown;
-
-	const modelName = model?.name ?? model?.id ?? "no model";
-	const modelId = model?.id ?? "unknown";
-	const windowLabel = formatNumber(contextWindow).toLowerCase();
-
-	lines.push([
-		{ t: `${modelName}`, s: "strong" },
-		{ t: ` (${windowLabel} context)`, s: "dim" },
-	]);
-	lines.push([{ t: `${modelId}[${windowLabel}]`, s: "muted" }]);
-	lines.push([
-		{ t: formatNumber(usedTokens), s: "strong" },
-		{ t: `/${windowLabel} tokens`, s: "dim" },
-		{ t: ` (${percentString(usedTokens, contextWindow)})`, s: "muted" },
-	]);
-	lines.push([]);
-	lines.push([{ t: "Estimated usage by category", s: "muted" }]);
-
-	for (const category of categories) {
-		const pct = percentString(category.tokens, contextWindow);
-		lines.push([
-			{ t: category.glyph, s: category.color },
-			{ t: ` ${category.label}: ` },
-			{ t: formatNumber(category.tokens), s: "strong" },
-			{ t: " " },
-			{ t: `tokens (${pct})`, s: "dim" },
-		]);
-	}
-
-	lines.push([
-		{ t: CELL_FREE, s: "dim" },
-		{ t: " Free space: " },
-		{ t: formatNumber(freeTokens), s: "strong" },
-		{ t: " " },
-		{ t: `(${percentString(freeTokens, contextWindow)})`, s: "dim" },
-	]);
-
-	if (autoCompactBufferTokens > 0) {
-		lines.push([
-			{ t: CELL_BUFFER, s: "warning" },
-			{ t: " Autocompact buffer: " },
-			{ t: formatNumber(autoCompactBufferTokens), s: "strong" },
-			{ t: " " },
-			{ t: `tokens (${percentString(autoCompactBufferTokens, contextWindow)})`, s: "dim" },
-		]);
-	}
-
-	const snap = buildSnapcompactParts(breakdown);
-	if (snap.length > 0) lines.push([], ...snap);
-	return lines;
 }
 
 /** Snapcompact savings lines of the legend; empty when no snapcompact setting is on. */
@@ -711,16 +558,6 @@ export function contextSnapcompactLines(breakdown: ContextBreakdown): string[] {
 	return buildSnapcompactParts(breakdown).map(line => line.map(part => part.t).join(""));
 }
 
-function buildLegendLines(breakdown: ContextBreakdown, theme: Theme): string[] {
-	return buildLegendParts(breakdown).map(line => {
-		let out = "";
-		for (const part of line) {
-			out += part.s === "strong" ? theme.bold(part.t) : part.s ? theme.fg(part.s, part.t) : part.t;
-		}
-		return out;
-	});
-}
-
 interface ContextMeterData extends Pick<
 	ContextBreakdown,
 	"contextWindow" | "usedTokens" | "freeTokens" | "autoCompactBufferTokens" | "thresholdTokens"
@@ -754,101 +591,6 @@ function contextMeterParts(
 		});
 	}
 	return parts;
-}
-
-/**
- * One line of the native `/context` breakdown: a swatch in the part's bar
- * color, its name, its tokens and its share of the window; the exact count
- * is its tooltip.
- */
-function contextShareRow(
-	key: string,
-	role: string,
-	swatch: TspSpan,
-	label: string,
-	tokens: number,
-	window: number,
-): NativeNode {
-	return node(
-		"row",
-		{ role, align: "center", title: `${label} · ${tokens.toLocaleString("en-US")} tokens` },
-		[
-			text([swatch], { role: "omp.context.swatch", wrap: "none" }),
-			text(label, { role: "omp.context.label", grow: 1, wrap: "none", truncate: "end" }),
-			text(formatNumber(tokens), { role: "omp.context.tokens", wrap: "none" }),
-			text(percentString(tokens, window), { role: "omp.context.share", wrap: "none" }),
-		],
-		key,
-	);
-}
-
-/**
- * The snapcompact estimate as a titled group of lines (what is imaged, how,
- * and what it saves), or a note saying why it is inactive; `undefined` when
- * no snapcompact setting is on.
- */
-function describeSnapcompact(breakdown: ContextBreakdown): NativeNode | undefined {
-	const snap = breakdown.snapcompact;
-	if (!snap) return undefined;
-	const head = text([span("Snapcompact", "strong"), span(" · estimated savings on the wire", "dim")], {
-		role: "omp.context.snap.head",
-	});
-	if (!snap.visionCapable) {
-		const note = text("Inactive: the model has no image input.", { role: "omp.context.snap.note" });
-		return node("col", { role: "omp.context.snap" }, [head, note], "snapcompact");
-	}
-	const lines: { label: string; detail: string; value?: TspSpan }[] = [];
-	const sp = snap.systemPrompt;
-	if (sp) {
-		const label = `System prompt · ${sp.scope === "agents-md" ? "AGENTS.md" : "all"}`;
-		if (sp.applied) {
-			lines.push({
-				label,
-				detail: `${formatNumber(sp.textTokens)} text → ${sp.frames} frame${sp.frames === 1 ? "" : "s"} ≈ ${formatNumber(sp.imageTokens)}`,
-				value: span(`−${formatNumber(sp.savedTokens)}`, "success"),
-			});
-		} else {
-			const reason =
-				sp.reason === "budget"
-					? "image budget exhausted"
-					: sp.reason === "empty"
-						? "nothing to image"
-						: "frames would not save tokens";
-			lines.push({ label, detail: `Stays text: ${reason}` });
-		}
-	}
-	const tr = snap.toolResults;
-	if (tr) {
-		lines.push(
-			tr.swapped > 0
-				? {
-						label: "Tool results",
-						detail: `${tr.swapped} of ${tr.total} imaged · ${formatNumber(tr.textTokens)} text → ${tr.frames} frames ≈ ${formatNumber(tr.imageTokens)}`,
-						value: span(`−${formatNumber(tr.savedTokens)}`, "success"),
-					}
-				: { label: "Tool results", detail: `None imaged · ${tr.total} in history` },
-		);
-	}
-	if (snap.savedTokens > 0) {
-		lines.push({
-			label: "Next request",
-			detail: "tokens on the wire",
-			value: span(`~${formatNumber(Math.max(0, breakdown.usedTokens - snap.savedTokens))}`, "strong"),
-		});
-	}
-	const rows = lines.map((line, index) =>
-		node(
-			"row",
-			{ role: "omp.context.snap.row", align: "baseline" },
-			[
-				text(line.label, { role: "omp.context.label", wrap: "none" }),
-				text(line.detail, { role: "omp.context.detail", grow: 1, wrap: "none", truncate: "end" }),
-				...(line.value ? [text([line.value], { role: "omp.context.tokens", wrap: "none" })] : []),
-			],
-			`snap-${index}`,
-		),
-	);
-	return node("col", { role: "omp.context.snap" }, [head, ...rows], "snapcompact");
 }
 
 /** Shared usage and compaction labels for ANSI and native context views. */
@@ -907,143 +649,9 @@ export function describeContextMeter(breakdown: ContextMeterData): [NativeNode, 
 	return [summary, bar];
 }
 
-/**
- * The `/context` body for terminals that draw `meter`: the tokens used as
- * the figure that leads, beside the room left before auto-compaction; one
- * stacked bar of the parts (categories, free space as the empty track, the
- * hatched buffer) ticked where compaction fires; the breakdown in the bar's
- * order with free space and the buffer under it; then the snapcompact
- * estimate when one is on. {@link contextUsageHead} names the model.
- */
-function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
-	const { contextWindow: window, freeTokens, autoCompactBufferTokens } = breakdown;
-	const shares = breakdown.categories.map(category =>
-		contextShareRow(
-			category.id,
-			"omp.context.cat",
-			span("■", category.color),
-			category.label,
-			category.tokens,
-			window,
-		),
-	);
-	shares.push(contextShareRow("free", "omp.context.cat.free", span("□", "dim"), "Free space", freeTokens, window));
-	if (autoCompactBufferTokens > 0) {
-		shares.push(
-			contextShareRow(
-				"buffer",
-				"omp.context.cat.buffer",
-				span("▨", "warning"),
-				"Autocompact buffer",
-				autoCompactBufferTokens,
-				window,
-			),
-		);
-	}
-	const children = [...describeContextMeter(breakdown), node("col", { role: "omp.context.cats" }, shares, "cats")];
-	const snap = describeSnapcompact(breakdown);
-	if (snap) children.push(snap);
-	return col(children, { role: "omp.context" });
-}
-
 /** The `/context` title: the model once one is selected (the body leads with its window). */
 export function contextUsageHead(breakdown: ContextBreakdown): TspText {
 	if (breakdown.contextWindow <= 0) return [span("Context usage", "strong")];
 	const modelName = breakdown.model?.name ?? breakdown.model?.id ?? "no model";
 	return [span("Context", "strong"), span(` · ${modelName}`, "muted")];
-}
-
-/**
- * Native context-usage panel for terminals without `meter`: the cell grid as
- * unwrapped styled rows beside the legend. The terminal places the legend
- * beside the grid, or below it when narrow.
- */
-export function describeContextUsage(breakdown: ContextBreakdown): NativeNode {
-	if (breakdown.contextWindow <= 0) {
-		return text([{ t: "Context usage is unavailable: no model is selected for this session.", s: "muted" }]);
-	}
-	const cells = planCells(breakdown);
-	const grid: NativeNode[] = [];
-	for (let gridRow = 0; gridRow < GRID_ROWS; gridRow++) {
-		const spans: TspSpan[] = [];
-		for (let gridCol = 0; gridCol < GRID_COLS; gridCol++) {
-			const cell = cells[gridRow * GRID_COLS + gridCol]!;
-			spans.push({ t: gridCol === 0 ? cell.glyph : ` ${cell.glyph}`, s: cell.color });
-		}
-		grid.push(node("text", { spans, wrap: "none" }, undefined, `row-${gridRow}`));
-	}
-	const legend = buildLegendParts(breakdown).map((line, index) =>
-		node("text", { spans: line.length > 0 ? line : [{ t: " " }] }, undefined, `legend-${index}`),
-	);
-	return row([col(grid), col(legend)], {
-		gap: "lg",
-		wrap: true,
-		role: "omp.context.usage",
-	});
-}
-
-/**
- * The `/context` report body, without a frame or title of its own (the panel
- * showing it is titled {@link contextUsageHead}): ANSI renders the cell grid
- * beside the legend; natively it is drawn with `meter`s where the terminal has
- * them and as the glyph grid otherwise.
- */
-export class ContextUsageView extends Container {
-	readonly #breakdown: ContextBreakdown;
-	#native: { meter: boolean; node: NativeNode } | undefined;
-
-	constructor(breakdown: ContextBreakdown, theme: Theme) {
-		super();
-		this.#breakdown = breakdown;
-		this.addChild(new Text(renderContextUsage(breakdown, theme), 0, 0));
-	}
-
-	override describe(cx: DescribeContext): NativeNode {
-		const meter = cx.supports("meter");
-		if (this.#native?.meter === meter) return this.#native.node;
-		const breakdown = this.#breakdown;
-		const described =
-			meter && breakdown.contextWindow > 0 ? describeContextFrame(breakdown) : describeContextUsage(breakdown);
-		this.#native = { meter, node: described };
-		return described;
-	}
-}
-
-/**
- * Render a colorful context-usage panel as ANSI text. Output is a series of
- * lines pairing the grid (left) with the legend (right).
- */
-export function renderContextUsage(breakdown: ContextBreakdown, theme: Theme): string {
-	if (breakdown.contextWindow <= 0) {
-		return theme.fg("muted", "Context usage is unavailable: no model is selected for this session.");
-	}
-
-	const cells = planCells(breakdown);
-	const legend = buildLegendLines(breakdown, theme);
-
-	const totalLines = Math.max(GRID_ROWS, legend.length);
-	const lines: string[] = [];
-
-	for (let row = 0; row < totalLines; row++) {
-		let gridSegment = "";
-		if (row < GRID_ROWS) {
-			const rowCells: string[] = [];
-			for (let col = 0; col < GRID_COLS; col++) {
-				const cell = cells[row * GRID_COLS + col];
-				rowCells.push(theme.fg(cell.color, cell.glyph));
-			}
-			gridSegment = rowCells.join(" ");
-		} else {
-			// Pad with blanks the same visible width as a grid row so legend lines
-			// past the grid stay aligned with their column.
-			const blank = " ".repeat(GRID_COLS * 2 - 1);
-			gridSegment = blank;
-		}
-
-		const legendSegment = legend[row] ?? "";
-		const line = legendSegment.length > 0 ? `${gridSegment}${GRID_GUTTER}${legendSegment}` : gridSegment;
-		lines.push(line);
-	}
-
-	return lines.join("\n");
 }

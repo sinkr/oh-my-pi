@@ -21,11 +21,11 @@ import {
 	type NonMessageTokenSource,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
+	contextSnapcompactLines,
 	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	getToolSchemaMetadataRevision,
 	invalidateToolSchemaMetadata,
-	renderContextUsage,
 } from "../src/status-line/context-usage";
 
 const tokenizer = new Tokenizer();
@@ -126,12 +126,7 @@ describe("estimateToolSchemaTokens", () => {
  * Contract: the /context panel surfaces estimated snapcompact wire savings —
  * applied swaps show "saves" figures, inactive states say why.
  */
-describe("renderContextUsage snapcompact section", () => {
-	const themeStub = {
-		fg: (_color: string, text: string) => text,
-		bold: (text: string) => text,
-	} as never;
-
+describe("contextSnapcompactLines", () => {
 	function breakdownWith(snapcompact: ContextBreakdown["snapcompact"]): ContextBreakdown {
 		return {
 			model: { id: "test-model", name: "Test Model", contextWindow: 200000 } as never,
@@ -145,7 +140,7 @@ describe("renderContextUsage snapcompact section", () => {
 	}
 
 	it("renders savings, skip reasons, and the wire total", () => {
-		const output = renderContextUsage(
+		const output = contextSnapcompactLines(
 			breakdownWith({
 				visionCapable: true,
 				systemPrompt: {
@@ -159,8 +154,7 @@ describe("renderContextUsage snapcompact section", () => {
 				toolResults: { total: 3, swapped: 0, textTokens: 0, frames: 0, imageTokens: 0, savedTokens: 0 },
 				savedTokens: 3168,
 			}),
-			themeStub,
-		);
+		).join("\n");
 		expect(output).toContain("Snapcompact (estimated wire savings)");
 		expect(output).toContain("System prompt (all): saves ~3.2K (9.8K text → 2 frames ≈ 6.6K)");
 		expect(output).toContain("Tool results: none imaged (3 in history)");
@@ -169,13 +163,12 @@ describe("renderContextUsage snapcompact section", () => {
 	});
 
 	it("reports text-only models as inactive", () => {
-		const output = renderContextUsage(breakdownWith({ visionCapable: false, savedTokens: 0 }), themeStub);
+		const output = contextSnapcompactLines(breakdownWith({ visionCapable: false, savedTokens: 0 })).join("\n");
 		expect(output).toContain("Snapcompact: inactive (model has no image input)");
 	});
 
 	it("omits the section entirely when no snapcompact setting is on", () => {
-		const output = renderContextUsage(breakdownWith(undefined), themeStub);
-		expect(output).not.toContain("Snapcompact");
+		expect(contextSnapcompactLines(breakdownWith(undefined))).toEqual([]);
 	});
 });
 
