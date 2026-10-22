@@ -939,6 +939,7 @@ export class ExtensionUiController {
 		const remote = host.requestGuestUi(
 			request,
 			signal ? AbortSignal.any([signal, remoteAbort.signal]) : remoteAbort.signal,
+			{ retainOnReconnect: true },
 		);
 		if (!remote) return local(signal);
 		const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
@@ -1100,7 +1101,7 @@ export class ExtensionUiController {
 		request: CollabUiRequestDraft,
 		signal: AbortSignal,
 	): Promise<GuestUiResult> {
-		const remote = host.requestGuestUi(request, signal);
+		const remote = host.requestGuestUi(request, signal, { retainOnReconnect: true });
 		if (!remote) return { kind: "unavailable" };
 		const result = await remote;
 		if (result.kind === "unavailable") return { kind: "unavailable" };
