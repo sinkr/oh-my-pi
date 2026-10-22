@@ -29,7 +29,7 @@ describe("xiaomi oauth validation", () => {
 		expect(capturedSignals[1]?.aborted).toBe(false);
 	});
 
-	it("sends Authorization: Bearer for standard sk- keys as well", async () => {
+	it("validates standard sk- keys after the MiMo V2.5 retirement with Bearer auth", async () => {
 		const capturedHeaders: Record<string, string>[] = [];
 		const capturedUrls: string[] = [];
 		const capturedBodies: string[] = [];
@@ -37,6 +37,9 @@ describe("xiaomi oauth validation", () => {
 			capturedUrls.push(typeof input === "string" ? input : input.toString());
 			capturedHeaders.push((init?.headers ?? {}) as Record<string, string>);
 			capturedBodies.push(String(init?.body));
+			if (JSON.parse(String(init?.body)).model !== "mimo-v2.6-flash") {
+				return Response.json({ error: { code: "400", message: "Unsupported model mimo-v2.5" } }, { status: 400 });
+			}
 			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 		});
 
@@ -48,7 +51,7 @@ describe("xiaomi oauth validation", () => {
 
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(capturedUrls[0]).toBe("https://api.xiaomimimo.com/v1/chat/completions");
-		expect(JSON.parse(capturedBodies[0]).model).toBe("mimo-v2.5");
+		expect(JSON.parse(capturedBodies[0]).model).toBe("mimo-v2.6-flash");
 		const headers = capturedHeaders[0];
 		expect(headers.Authorization).toBe("Bearer sk-test-key");
 		expect(headers["x-api-key"]).toBeUndefined();
