@@ -280,16 +280,36 @@ pub fn determine_label_line(graph: &mut AsciiGraph, edge: EdgeId) {
 
 	let min_x = largest_line[0].x.min(largest_line[1].x);
 	let max_x = largest_line[0].x.max(largest_line[1].x);
-	let middle_x = min_x + (max_x - min_x).div_euclid(2);
+	let column = label_column(graph, min_x, max_x);
 	let required_width = label_width.saturating_add(2);
 	graph
 		.column_width
-		.entry(middle_x)
+		.entry(column)
 		.and_modify(|width| *width = (*width).max(required_width))
 		.or_insert(required_width);
 	if let Some(edge) = graph.edges.get_mut(edge) {
 		edge.label_line = largest_line.to_vec();
 	}
+}
+
+/// Column in `min_x..=max_x` a label widens: the middle one, else the nearest
+/// that is not a node border column (ties go to gap columns, which do not
+/// resize any box). [`super::draw::draw_node`] sizes a box from its left and
+/// center columns only, so a wider border column would push edges attached to
+/// that border off the drawn box. Falls back to the middle column when every
+/// candidate is a border.
+fn label_column(graph: &AsciiGraph, min_x: i32, max_x: i32) -> i32 {
+	let middle = min_x + (max_x - min_x).div_euclid(2);
+	let lefts: Vec<i32> = graph
+		.nodes
+		.iter()
+		.filter_map(|node| node.grid_coord)
+		.map(|gc| gc.x)
+		.collect();
+	(min_x..=max_x)
+		.filter(|&x| !lefts.iter().any(|&left| x == left || x == left + 2))
+		.min_by_key(|&x| ((x - middle).abs(), lefts.iter().any(|&left| x == left + 1)))
+		.unwrap_or(middle)
 }
 
 #[cfg(test)]

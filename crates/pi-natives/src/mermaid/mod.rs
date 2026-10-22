@@ -293,6 +293,21 @@ mod tests {
 		}
 	}
 
+	/// A label on the sibling edge must not widen the source's border column,
+	/// or the side edge would start past the drawn border (#16730).
+	#[test]
+	fn side_edge_starts_on_border_when_sibling_label_spans_it() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art =
+			render("flowchart LR\nC[Signed in?] -->|no| D[Cognito]\nC -->|yes| E[App]", &options)
+				.unwrap();
+		assert!(
+			art.lines()
+				.any(|line| line.contains("│ Signed in? ├─no─►│ Cognito │")),
+			"{art}"
+		);
+	}
+
 	/// One case of `fixtures/mermaid.json`: the exact output (or error
 	/// message) for a source and option set. Originally captured from the
 	/// TypeScript renderer; flowchart layouts have since been re-baselined
