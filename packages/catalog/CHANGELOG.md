@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash
+- Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
 
 ### Added
 

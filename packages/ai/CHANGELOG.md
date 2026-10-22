@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Xiaomi MiMo API-key login failing with `Unsupported model mimo-v2.5` after the V2.5 retirement
+- Fixed Xiaomi MiMo API-key login failing with `Unsupported model mimo-v2.5` after the V2.5 retirement ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
 
 ### Added
 
