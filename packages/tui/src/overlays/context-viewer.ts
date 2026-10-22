@@ -15,7 +15,14 @@ import {
 } from "../keybinding-matchers";
 import { getKeybindings } from "../keybindings";
 import { col, node, row, span, text } from "../native/describe";
-import type { DescribeContext, NativeNode, NativeRevealAt, NativeScroll, NativeUiEvent } from "../native/node";
+import type {
+	DescribeContext,
+	NativeNode,
+	NativeReveal,
+	NativeRevealAt,
+	NativeScroll,
+	NativeUiEvent,
+} from "../native/node";
 import { actionBar, actionButton, selectList } from "../native/overlay";
 import { styledSpans } from "../native/spans";
 import { ensureThemeSync, theme } from "../theme/theme";
@@ -131,6 +138,8 @@ export class ContextViewer implements Component {
 	// Native scroll requests, not a viewport offset. The reconciler repeats each
 	// line step by the increment in `n`.
 	#nativeScroll: NativeScroll = { by: "start", n: 0 };
+	/** Native reveal of the legend's first or last row when keyboard navigation hits the list edge. */
+	#overviewEdgeReveal: { key: string; reveal: NativeReveal } | undefined;
 
 	constructor(
 		data: ContextViewData,
@@ -295,7 +304,20 @@ export class ContextViewer implements Component {
 				this.#ansiEntryScroll.scroll(delta);
 			}
 		} else if (this.#state === "overview") {
-			if (!this.#overview.move(delta)) this.#overviewScroll.scroll(delta);
+			// Native reveals the moved selection itself; act only at the list edge, matching ANSI.
+			if (this.#overview.move(delta)) return;
+			this.#overviewScroll.scroll(delta);
+			// Past the edge selectable row only unselectable rows (Buffer, Free Space) remain: bring the
+			// edge row of the legend into view in one press.
+			const rows = this.#overview.items;
+			const target = delta > 0 ? rows.at(-1) : rows[0];
+			if (target) {
+				this.#overviewEdgeReveal = {
+					key: target.key,
+					reveal: { at: delta > 0 ? "end" : "start", n: (this.#overviewEdgeReveal?.reveal.n ?? 0) + 1 },
+				};
+			}
+			return;
 		} else {
 			this.#entries.move(delta);
 			return;
@@ -542,17 +564,30 @@ export class ContextViewer implements Component {
 		);
 		return col(children, {
 			role: "omp.context",
-			...(this.#state === "category" ? { grow: 1, min: { h: 0 } } : {}),
+			// Overview and category lists own their scrollers, so the pinned actions never cover a revealed row.
+			...(this.#state !== "entry" ? { grow: 1, min: { h: 0 } } : {}),
 		});
 	}
 
 	/** Meter (or summary text) above a scrollable legend, with the map beside it when there is no meter. */
 	#describeOverview(cx: DescribeContext): NativeNode[] {
 		const meter = cx.supports("meter") ? this.#meter : undefined;
-		const items = this.#overview.items.map(item =>
-			legendItem(item, this.#overview.selectedKey === item.key, !!meter, this.#data.breakdown.contextWindow),
-		);
-		const list = selectList("categories", items, { selected: this.#overview.selectedKey, grow: 1 });
+		const items = this.#overview.items.map(item => {
+			const legend = legendItem(
+				item,
+				this.#overview.selectedKey === item.key,
+				!!meter,
+				this.#data.breakdown.contextWindow,
+			);
+			const edge = this.#overviewEdgeReveal;
+			return edge?.key === item.key ? { ...legend, reveal: edge.reveal } : legend;
+		});
+		const list = selectList("categories", items, {
+			selected: this.#overview.selectedKey,
+			grow: 1,
+			min: { h: 0 },
+			max: { lines: Math.max(1, this.#height) },
+		});
 		const usage = meter ? undefined : this.#scaledUsage;
 		const map = usage ? mapGeometry(this.#width, this.#height) : undefined;
 		const body: NativeNode[] = [
@@ -560,7 +595,7 @@ export class ContextViewer implements Component {
 			...contextSnapcompactLines(this.#data.breakdown).map(line => text([span(line, "dim")], { wrap: "word" })),
 		];
 		const head = meter ?? this.#summary().map(line => text([span(line, "dim")], { wrap: "word" }));
-		return [...head, { ...node("col", { grow: 1 }, body, "overview"), scroll: this.#nativeScroll }];
+		return [...head, node("col", { grow: 1, min: { h: 0 } }, body, "overview")];
 	}
 
 	#describeMap(usage: ReadonlyMap<ContextViewCategory, number>, map: MapGeometry): NativeNode {

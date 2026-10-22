@@ -383,6 +383,33 @@ describe("ContextViewer preview and scrolling", () => {
 		}
 	});
 
+	it("reveals the Native legend's edge rows only when the selection cannot move", () => {
+		const h = harness();
+		const reconciler = new Reconciler("context-overview-edge");
+		const edgeReveals = () =>
+			reconciler
+				.reconcile({ main: [h.viewer], dock: [], layer: [] }, cx)
+				.filter(op => op[0] === "reveal" && op[2] !== "nearest")
+				.map(op => op[2]);
+		edgeReveals();
+		h.viewer.handleInput("\x1b[B");
+		expect(selected(h.viewer.describe(cx))).toBe("built-in-tools");
+		expect(edgeReveals()).toEqual([]);
+		select(h.viewer, "tool-output/bash", false);
+		edgeReveals();
+		// Each press past the last category brings Buffer and Free Space into view again.
+		for (const _ of [1, 2]) {
+			h.viewer.handleInput("\x1b[B");
+			expect(selected(h.viewer.describe(cx))).toBe("tool-output/bash");
+			expect(edgeReveals()).toEqual(["end"]);
+		}
+		select(h.viewer, "system-prompt", false);
+		edgeReveals();
+		h.viewer.handleInput("\x1b[A");
+		expect(selected(h.viewer.describe(cx))).toBe("system-prompt");
+		expect(edgeReveals()).toEqual(["start"]);
+	});
+
 	it("pages the full-content view in both renderers and keeps list selection single-step", () => {
 		const h = harness();
 		const pageDown = "\x1b[6~";

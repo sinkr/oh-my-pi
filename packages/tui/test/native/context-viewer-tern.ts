@@ -263,8 +263,64 @@ try {
 	assert(selectedTree.count === 1 && selectedTree.nodes[0]!.text.includes("[ENTRY-1]"), "Down did not select ENTRY-1");
 	assert(contains(afterKey.viewport, await selected()), "Keyboard after wheel did not reveal the selected entry");
 	fixed(initial.footer, afterKey.footer, "Footer after keyboard reveal");
+
+	// Overview: the legend owns a scroller ending above the pinned actions, keyboard selection stays
+	// fully visible, and pressing past the last category reveals the unselectable Free Space row.
+	await ctl("key", "escape");
+	const legendRows = 1 + 20 + 2;
+	const dumpOne = async (selector: string): Promise<Element> => {
+		const dump: Layout = JSON.parse(await ctl("dump", selector));
+		assert.equal(dump.elements.length, 1, `Expected one ${selector}, got ${dump.elements.length}`);
+		return dump.elements[0]!;
+	};
+	const legendItems = async (): Promise<Element[]> =>
+		(JSON.parse(await ctl("dump", ".sf-ov-card .sf-list-slot > .sf-item")) as Layout).elements;
+	const pickText = async (): Promise<string> =>
+		(JSON.parse(await ctl("tree", ".sf-ov-card .sf-item.sel")) as TreeResponse).nodes[0]?.text ?? "";
+	await until("Overview legend", async () => (await legendItems()).length === legendRows);
+	const legendGeometry = async (): Promise<{ scroller: Element; pick: Element }> => {
+		const scroller = await dumpOne(".sf-ov-card .sf-list-scroll");
+		const footer = await dumpOne('[data-role="omp.actions"]');
+		assert(
+			scroller.rect[1] + scroller.rect[3] <= footer.rect[1] + tolerance,
+			`Legend scroller overlaps footer: ${scroller.rect}; footer ${footer.rect}`,
+		);
+		return { scroller, pick: await dumpOne(".sf-ov-card .sf-item.sel") };
+	};
+	const initialLegend = await legendGeometry();
+	assert(
+		!contains(initialLegend.scroller, (await legendItems()).at(-1)!),
+		"Fixture legend fits without scrolling; the edge case is not exercised",
+	);
+	let moves = 0;
+	let edgeRevealed = false;
+	for (let press = 0; press < legendRows + 2 && !edgeRevealed; press++) {
+		const before = await pickText();
+		await ctl("key", "down");
+		await Bun.sleep(300);
+		if ((await pickText()) !== before) {
+			moves++;
+			await until(`Overview selection ${moves} visible above the actions`, async () => {
+				const { scroller, pick } = await legendGeometry();
+				return contains(scroller, pick);
+			});
+		} else {
+			await until("Free Space revealed past the last category", async () => {
+				const { scroller } = await legendGeometry();
+				return contains(scroller, (await legendItems()).at(-1)!);
+			});
+			edgeRevealed = true;
+		}
+	}
+	assert(edgeRevealed, "Down never reached the last selectable legend row");
+	assert(moves > 3, `Overview selection moved only ${moves} rows`);
+	await ctl("key", "up");
+	await until("Up brings the selection back into the legend", async () => {
+		const { scroller, pick } = await legendGeometry();
+		return contains(scroller, pick);
+	});
 	console.log(
-		`PASS Native ContextViewer: footer outside viewport, real wheel moved content ${movement}px, fixed footer, keyboard reveal`,
+		`PASS Native ContextViewer: footer outside viewport, real wheel moved content ${movement}px, fixed footer, keyboard reveal, Overview selection above actions over ${moves} rows, Free Space reached by keyboard`,
 	);
 	if (keep)
 		console.log(

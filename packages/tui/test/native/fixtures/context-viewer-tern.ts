@@ -27,6 +27,14 @@ const data: ContextViewData = {
 				info: index < 2 || index % 3 === 0 ? "short metadata" : "metadata detail\n".repeat(10),
 				text: `${index % 3 === 0 ? "Short complete content" : "中文字 long output ".repeat(80)}\nTAIL-${index}`,
 			})),
+			// Enough tool groups that the Overview legend overflows its scroller.
+			children: Array.from({ length: 20 }, (_, index) => ({
+				id: "tool-output",
+				key: `tool-output/tool-${index}`,
+				label: `TOOL-${index}`,
+				tokens: 5,
+				entries: [{ id: `tool-entry-${index}`, label: `TOOL-${index}`, tokens: 5, text: `tool ${index}` }],
+			})),
 		},
 	],
 };
