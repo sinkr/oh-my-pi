@@ -24,6 +24,7 @@ import {
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { KindApiKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
@@ -890,6 +891,62 @@ function extractOpenAIModelsListOutputTask(item: {
 			return undefined;
 	}
 }
+/**
+ * Reasoning tiers omp can send as `reasoning_effort` on OpenAI-compatible
+ * chat routes. `none` is the wire off-switch rather than an effort tier,
+ * `minimal` is rejected upstream by the GPT-6 generation, and `ultra` has no
+ * omp effort equivalent (it fans out to subagents), so all three are dropped
+ * from server-advertised ladders.
+ */
+const ADVERTISED_REASONING_EFFORTS: readonly Effort[] = [
+	Effort.Low,
+	Effort.Medium,
+	Effort.High,
+	Effort.XHigh,
+	Effort.Max,
+];
+
+function advertisedReasoningEffort(value: unknown): Effort | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.toLowerCase();
+	return (ADVERTISED_REASONING_EFFORTS as readonly string[]).includes(normalized) ? (normalized as Effort) : undefined;
+}
+
+function extractReasoningLevels(value: unknown): Effort[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const efforts: Effort[] = [];
+	for (const entry of value) {
+		const effort = isRecord(entry) ? advertisedReasoningEffort(entry.effort) : advertisedReasoningEffort(entry);
+		if (effort !== undefined && !efforts.includes(effort)) efforts.push(effort);
+	}
+	if (efforts.length === 0) return undefined;
+	// Report the canonical least-to-most order regardless of wire order.
+	efforts.sort(
+		(left, right) => ADVERTISED_REASONING_EFFORTS.indexOf(left) - ADVERTISED_REASONING_EFFORTS.indexOf(right),
+	);
+	return efforts;
+}
+
+/**
+ * Read server-advertised reasoning support from an OpenAI-compatible
+ * `/v1/models` row. codex-lb nests the Codex registry fields under `metadata`
+ * (`supported_reasoning_levels: [{ effort }]`, `default_reasoning_level`);
+ * other gateways may advertise the same fields top-level. Returns undefined
+ * when the row advertises no usable effort tier.
+ */
+function extractAdvertisedReasoning(item: {
+	metadata?: unknown;
+	supported_reasoning_levels?: unknown;
+	default_reasoning_level?: unknown;
+}): { efforts: Effort[]; defaultLevel?: Effort } | undefined {
+	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+	const efforts = extractReasoningLevels(metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels);
+	if (efforts === undefined) return undefined;
+	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
+	const defaultLevel = advertisedReasoningEffort(rawDefault);
+	if (defaultLevel !== undefined && efforts.includes(defaultLevel)) return { efforts, defaultLevel };
+	return { efforts };
+}
 
 export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
@@ -953,6 +1010,9 @@ export async function discoverOpenAIModelsList(
 						output_modalities?: unknown;
 						architecture?: unknown;
 						mode?: unknown;
+						metadata?: unknown;
+						supported_reasoning_levels?: unknown;
+						default_reasoning_level?: unknown;
 					}>;
 				};
 			}),
@@ -1047,14 +1107,28 @@ export async function discoverOpenAIModelsList(
 				? resolveLiteLLMApi(undefined, id, providerConfig.api)
 				: providerConfig.api;
 		const contextWindow = reportedContextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
+		// A row that advertises its own reasoning ladder (codex-lb `metadata`
+		// fields, or the top-level equivalents) is authoritative for its route:
+		// ids absent from the bundled catalog would otherwise stay non-reasoning
+		// and never send `reasoning_effort`.
+		const advertisedReasoning = extractAdvertisedReasoning(item);
 		specs.push({
 			id,
 			name: reference?.name ?? id,
 			api,
 			provider: providerConfig.provider,
 			baseUrl,
-			reasoning: reference?.reasoning ?? false,
-			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
+			reasoning: reference?.reasoning === true || advertisedReasoning !== undefined,
+			thinking:
+				advertisedReasoning !== undefined
+					? {
+							mode: "effort" as const,
+							efforts: advertisedReasoning.efforts,
+							...(advertisedReasoning.defaultLevel !== undefined
+								? { defaultLevel: advertisedReasoning.defaultLevel }
+								: {}),
+						}
+					: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input,
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 			// Proxy/gateway pricing is provider-specific and rarely matches
@@ -1073,7 +1147,7 @@ export async function discoverOpenAIModelsList(
 			compat: {
 				supportsStore: false,
 				supportsDeveloperRole: false,
-				supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? false,
+				supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? advertisedReasoning !== undefined,
 				...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
 				...(referenceCompat?.omitReasoningEffort !== undefined
 					? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
