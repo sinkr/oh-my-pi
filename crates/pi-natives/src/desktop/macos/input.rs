@@ -2093,11 +2093,9 @@ fn background_gesture(
 	visit: skylight::TargetVisit<'_>,
 	post: Post<'_>,
 ) -> CoreResult<()> {
-	// Every pointer kind goes through the same check right before it posts. A
-	// left click has posted its hover primer by then; the others nothing.
-	let left = matches!(event, PointerEvent::Click { button: MouseButton::Left, .. });
+	// Every pointer kind goes through the same check right before it posts.
 	let before_post = pointer_rechecks(
-		(prepared, left),
+		(prepared, rechecks_report_sent(&event)),
 		entry_front,
 		(pid, wid, &window.app),
 		skylight::front_pid,
@@ -2205,20 +2203,38 @@ fn pointer_recheck(
 	Ok(())
 }
 
-/// [`pointer_recheck`] for a gesture that may check more than once, as a right
-/// or middle click does before its hover and again before each press: every
-/// check after the first reports that input may already have landed, as does
-/// the first when `sent_first` (a left click's posted hover primer).
+/// How the checks `event` makes report earlier input, as `(first, later)`. A
+/// left click has posted its hover primer by its first check, so every check
+/// says input may already have landed. A right or middle click checks before
+/// its hover and again before each press, so every check after the first says
+/// that. Any other gesture posts no pointer event between its checks (a drag
+/// or hold checks again before each held key, ahead of its press), so each
+/// says nothing was sent.
+const fn rechecks_report_sent(event: &PointerEvent) -> (bool, bool) {
+	match event {
+		PointerEvent::Click { button: MouseButton::Left, .. } => (true, true),
+		PointerEvent::Click { .. } => (false, true),
+		_ => (false, false),
+	}
+}
+
+/// [`pointer_recheck`] for a gesture that may check more than once: the first
+/// check reports `sent_first` and every later one `sent_later`
+/// ([`rechecks_report_sent`]).
 fn pointer_rechecks<'a>(
-	(prepared, sent_first): (bool, bool),
+	(prepared, (sent_first, sent_later)): (bool, (bool, bool)),
 	entry_front: EntryFront,
 	(pid, wid, app): (libc::pid_t, u32, &'a str),
 	front: impl Fn() -> Option<libc::pid_t> + 'a,
 	visited: impl Fn() -> bool + 'a,
 ) -> impl Fn() -> CoreResult<()> + 'a {
-	let checks = std::cell::Cell::new(0_u32);
+	let checked = std::cell::Cell::new(false);
 	move || {
-		let sent = sent_first || checks.replace(checks.get() + 1) > 0;
+		let sent = if checked.replace(true) {
+			sent_later
+		} else {
+			sent_first
+		};
 		pointer_recheck((prepared, sent), entry_front, (pid, wid, app), &front, &visited)
 	}
 }
@@ -5319,7 +5335,7 @@ mod tests {
 			.admit(7, &token)
 			.expect("the user has not used TextEdit");
 		let before_press = pointer_rechecks(
-			(false, false),
+			(false, rechecks_report_sent(&right_double_click())),
 			EntryFront(Some(9)),
 			(7, 42, "TextEdit"),
 			|| Some(9),
@@ -5346,7 +5362,7 @@ mod tests {
 		// click in it, after the first press of a right double click.
 		let front = std::cell::Cell::new(9);
 		let before_press = pointer_rechecks(
-			(false, false),
+			(false, rechecks_report_sent(&right_double_click())),
 			EntryFront(Some(9)),
 			(7, 42, "TextEdit"),
 			|| Some(front.get()),
@@ -5363,6 +5379,51 @@ mod tests {
 		.unwrap_err();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(error.message.contains("may already have landed"), "{}", error.message);
+	}
+
+	fn right_double_click() -> PointerEvent {
+		PointerEvent::Click {
+			x:         10.0,
+			y:         10.0,
+			button:    MouseButton::Right,
+			count:     2,
+			modifiers: Modifiers::default(),
+		}
+	}
+
+	#[test]
+	fn a_drag_or_holds_held_key_check_says_nothing_was_sent_before_anything_was() {
+		use crate::desktop::error::ErrorCode;
+		let hold = PointerEvent::Hold {
+			x:        10.0,
+			y:        10.0,
+			button:   MouseButton::Left,
+			keys:     vec![KeyName::Shift],
+			duration: Duration::from_millis(1),
+		};
+		let drag = PointerEvent::Drag {
+			path:      vec![(10.0, 10.0), (20.0, 20.0)],
+			button:    MouseButton::Left,
+			modifiers: Modifiers::default(),
+			keys:      vec![KeyName::Shift],
+		};
+		for event in [hold, drag] {
+			// TextEdit (7) comes forward after the gesture's own check, before
+			// its first held key, which is checked again before it goes out.
+			let front = std::cell::Cell::new(9);
+			let recheck = pointer_rechecks(
+				(false, rechecks_report_sent(&event)),
+				EntryFront(Some(9)),
+				(7, 42, "TextEdit"),
+				|| Some(front.get()),
+				|| false,
+			);
+			recheck().unwrap();
+			front.set(7);
+			let error = recheck().unwrap_err();
+			assert_eq!(error.code, ErrorCode::UserIntervened, "{event:?}");
+			assert!(error.message.contains("nothing was sent"), "{event:?}: {}", error.message);
+		}
 	}
 
 	#[test]
