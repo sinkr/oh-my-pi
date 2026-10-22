@@ -47,7 +47,7 @@ export function entryHeaderLine(entry: ContextViewEntry, category: ContextCatego
 	const color = CONTEXT_PRESENTATION[category].color;
 	return (
 		theme.fg("dim", "[") +
-		theme.fg(color, theme.bold(safeLine(shortenPath(entry.label)))) +
+		theme.fg(color, theme.bold(safeLine(entry.label))) +
 		theme.fg("dim", `] ${tokenEstimate(entry)}`)
 	);
 }
@@ -55,11 +55,7 @@ export function entryHeaderLine(entry: ContextViewEntry, category: ContextCatego
 /** `[label] N tokens` as spans. */
 export function entryHeaderSpans(entry: ContextViewEntry, category: ContextCategoryId): TspSpan[] {
 	const color = CONTEXT_PRESENTATION[category].color;
-	return [
-		span("[", "dim"),
-		span(safeLine(shortenPath(entry.label)), `${color} strong`),
-		span(`] ${tokenEstimate(entry)}`, "dim"),
-	];
+	return [span("[", "dim"), span(safeLine(entry.label), `${color} strong`), span(`] ${tokenEstimate(entry)}`, "dim")];
 }
 
 export function groupHeaderLine(group: ContextThinkingGroup, category: ContextCategoryId): string {

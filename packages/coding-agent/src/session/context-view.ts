@@ -1,5 +1,5 @@
 import type { AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { AnthropicServerToolContent, AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AnthropicServerToolContent, AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import {
 	CONTEXT_CATEGORIES,
@@ -22,23 +22,14 @@ function opaqueSize(name: string, value: string): string {
 	return `${name} · ${value.length.toLocaleString("en-US")} chars`;
 }
 
-/** Summarize message content without retaining binary data or message objects. */
-function summarizeContentForView(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((block: unknown) => {
-			if (block === null || typeof block !== "object") return "[Unknown content]";
-			const item = block as Record<string, unknown>;
-			if (item.type === "text") return typeof item.text === "string" ? item.text : "";
-			const facts = [String(item.type ?? "media")];
-			if (typeof item.mimeType === "string") facts.push(item.mimeType);
-			if (typeof item.width === "number" && typeof item.height === "number")
-				facts.push(`${item.width}×${item.height}`);
-			if (typeof item.data === "string") facts.push(`~${Math.floor((item.data.length * 3) / 4)} bytes`);
-			return `[${facts.join(" · ")}]`;
-		})
-		.join("\n");
+/** One text or image block as readable text, without retaining binary data. */
+function summarizeBlockForView(block: TextContent | ImageContent): string {
+	if (block.type === "text") return block.text;
+	return `[image · ${block.mimeType} · ~${Math.floor((block.data.length * 3) / 4)} bytes]`;
+}
+
+function summarizeContentForView(content: string | readonly (TextContent | ImageContent)[]): string {
+	return typeof content === "string" ? content : content.map(summarizeBlockForView).join("\n");
 }
 
 interface AssistantBlockEstimate {
@@ -286,7 +277,7 @@ function appendAssistantMessageEntries(
 		} else if (block.type === "redactedThinking") {
 			text = ENCRYPTED_THINKING;
 			opaque = opaqueSize("data", block.data);
-		} else text = summarizeContentForView([block]);
+		} else text = summarizeBlockForView(block);
 		appendEntry(state, categoryId, {
 			id: `${categoryId}/${entryIdPrefix}/${blockIndex}`,
 			label:
