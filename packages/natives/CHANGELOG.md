@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Mermaid flowcharts drawing two edges between the same pair of nodes as one line, with their labels written over each other; each edge now gets its own route, line style, arrowhead and label ([#16731](https://github.com/can1357/oh-my-pi/issues/16731))
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed

@@ -264,6 +264,35 @@ mod tests {
 		assert!(!art.contains('\u{200b}'), "{art}");
 	}
 
+	#[test]
+	fn parallel_edges_keep_separate_routes_and_labels() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		for source in [
+			"flowchart LR\nA -->|first label| B\nA -.->|second label| B",
+			"flowchart TD\nA -->|first label| B\nA -.->|second label| B",
+			"flowchart LR\nA -->|first label| B\nB -.->|second label| A",
+		] {
+			let art = render(source, &options).unwrap();
+			assert!(art.contains("first label") && art.contains("second label"), "{art}");
+		}
+
+		let is_arrowhead = |c: char| matches!(c, '►' | '◄' | '▲' | '▼');
+		for source in [
+			"flowchart LR\nA --> B\nA -.-> B",
+			// Same style and unlabeled: TD would otherwise bundle the pair.
+			"flowchart TD\nA --> B\nA --> B",
+			"flowchart LR\nA --> B\nB -.-> A",
+		] {
+			let art = render(source, &options).unwrap();
+			assert_eq!(art.chars().filter(|&c| is_arrowhead(c)).count(), 2, "{art}");
+			assert!(
+				art.lines()
+					.all(|line| line.chars().filter(|&c| is_arrowhead(c)).count() < 2),
+				"each edge must end on its own route:\n{art}"
+			);
+		}
+	}
+
 	/// One case of `fixtures/mermaid.json`: the exact output (or error
 	/// message) for a source and option set. Originally captured from the
 	/// TypeScript renderer; flowchart layouts have since been re-baselined
