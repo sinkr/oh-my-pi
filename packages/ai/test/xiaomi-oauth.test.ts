@@ -1,8 +1,48 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { loginXiaomi } from "@oh-my-pi/pi-ai/registry/oauth/xiaomi";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import * as authRules from "@oh-my-pi/pi-catalog/compat/auth";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("xiaomi oauth validation", () => {
+	it("uses the regional auth probe URLs and models independently of catalog defaults", async () => {
+		const probes: Record<string, { baseUrl: string; model: string }> = {
+			"xiaomi-token-plan-sgp": { baseUrl: "https://sgp-probe.invalid/v1", model: "sgp-plan-validation" },
+			"xiaomi-token-plan-ams": { baseUrl: "https://ams-probe.invalid/v1", model: "ams-plan-validation" },
+			"xiaomi-token-plan-cn": { baseUrl: "https://cn-probe.invalid/v1", model: "cn-plan-validation" },
+		};
+		const originalAuthPolicyFor = authRules.authPolicyFor;
+		vi.spyOn(authRules, "authPolicyFor").mockImplementation(provider => {
+			const policy = originalAuthPolicyFor(provider);
+			const probe = probes[provider];
+			if (!probe || policy?.login?.kind !== "api-key" || policy.login.validate?.kind !== "chat-completions") {
+				return policy;
+			}
+			return {
+				...policy,
+				login: { ...policy.login, validate: { ...policy.login.validate, ...probe } },
+			};
+		});
+
+		const seen: { url: string; model: string }[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			seen.push({ url, model: JSON.parse(String(init?.body)).model });
+			return new Response("{}", { status: url === "https://cn-probe.invalid/v1/chat/completions" ? 200 : 401 });
+		};
+
+		await loginXiaomi({ onPrompt: async () => "tp-test-key", fetch: fetchMock });
+
+		expect(seen).toEqual([
+			{ url: "https://sgp-probe.invalid/v1/chat/completions", model: "sgp-plan-validation" },
+			{ url: "https://ams-probe.invalid/v1/chat/completions", model: "ams-plan-validation" },
+			{ url: "https://cn-probe.invalid/v1/chat/completions", model: "cn-plan-validation" },
+		]);
+	});
+
 	it("uses a fresh AbortSignal per endpoint so SGP timeout doesn't abort AMS fallback", async () => {
 		const capturedSignals: (AbortSignal | undefined)[] = [];
 		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
