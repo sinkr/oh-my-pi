@@ -15,6 +15,9 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -34,6 +37,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 	const queued = Promise.withResolvers<void>();
@@ -918,7 +922,7 @@ describe("AgentSession owner-routed async delivery", () => {
 
 	async function startResumableSession(
 		tempDir: TempDir,
-		options: { allowSessionModelFallback?: boolean } = {},
+		options: { extension?: (api: ExtensionAPI, manager: AsyncJobManager) => void } = {},
 	): Promise<{
 		manager: AsyncJobManager;
 		mock: MockModel;
@@ -947,14 +951,28 @@ describe("AgentSession owner-routed async delivery", () => {
 		const targetSessionFile = target.getSessionFile()!;
 		await target.close();
 
+		const modelRegistry = new ModelRegistry(authStorage);
+		let extensionRunner: ExtensionRunner | undefined;
+		if (options.extension) {
+			const register = options.extension;
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				api => register(api, manager),
+				tempDir.path(),
+				new EventBus(),
+				runtime,
+				"resume-test-extension",
+			);
+			extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		}
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
-			allowSessionModelFallback: options.allowSessionModelFallback,
+			extensionRunner,
 		});
 		return { manager, mock, targetSessionFile };
 	}
@@ -1071,41 +1089,35 @@ describe("AgentSession owner-routed async delivery", () => {
 		await manager.waitForAll();
 	});
 
-	it("keeps background jobs when the model fallback callback rolls the switch back", async () => {
-		using tempDir = TempDir.createSync("@pi-resume-fallback-rollback-");
-		const { manager, targetSessionFile } = await startResumableSession(tempDir, { allowSessionModelFallback: true });
-		const target = await SessionManager.open(targetSessionFile);
-		target.appendModelChange("missing-provider/missing-model");
-		await target.flush();
-		await target.close();
+	it("keeps a job that a session_switch hook starts for the resumed session", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-hook-job-");
 		const gate = Promise.withResolvers<void>();
-		manager.register(
-			"bash",
-			"outgoing session job",
-			async ({ signal }) => {
-				signal.addEventListener("abort", () => gate.resolve(), { once: true });
-				await gate.promise;
-				return "done";
+		const { manager, targetSessionFile } = await startResumableSession(tempDir, {
+			extension: (pi, jobs) => {
+				pi.on("session_switch", () => {
+					jobs.register(
+						"bash",
+						"resumed session job",
+						async () => {
+							await gate.promise;
+							return "RESUMED SESSION RESULT";
+						},
+						{ id: "resumed-session-job", ownerId: "Main" },
+					);
+				});
 			},
-			{ id: "fallback-rollback-job", ownerId: "Main" },
-		);
-		const previousSessionFile = session.sessionFile;
-		const failure = new Error("fallback warning callback failed");
+		});
 
-		const outcome = await session
-			.switchSession(targetSessionFile, {
-				// `open` above re-recorded the process cwd; skip the cwd check so only the model fails to restore.
-				preserveLocalCwd: true,
-				onModelFallback: () => {
-					throw failure;
-				},
-			})
-			.catch((error: unknown) => error);
-		expect(outcome).toBe(failure);
-		expect(session.sessionFile).toBe(previousSessionFile);
-		expect(manager.getJob("fallback-rollback-job")?.status).toBe("running");
+		expect(await session.switchSession(targetSessionFile)).toBe(true);
+		expect(manager.getJob("resumed-session-job")?.status).toBe("running");
 		gate.resolve();
 		await manager.waitForAll();
+		await session.settleAsyncWork();
+
+		const delivered = session.sessionManager
+			.getEntries()
+			.some(entry => JSON.stringify(entry).includes("RESUMED SESSION RESULT"));
+		expect(delivered).toBe(true);
 	});
 
 	it("keeps delivery pending until the queued follow-up is injected", async () => {

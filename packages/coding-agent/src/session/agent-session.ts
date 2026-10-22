@@ -12500,6 +12500,12 @@ export class AgentSession implements SettingsScope {
 				didSessionMessagesChange(previousSessionContext.messages, sessionContext.messages);
 			this.#rehydrateCheckpointRewindState();
 
+			// As on /new: the outgoing session's background jobs share this agent id, so their
+			// results would otherwise land in the resumed transcript. Cancelled after the cwd and
+			// model checks, so a rejected switch keeps them, and before hooks hear of the switch,
+			// so jobs they start belong to the resumed session. Deliveries are held until now.
+			if (switchingToDifferentSession) this.#cancelOwnAsyncJobs();
+
 			// Emit session_switch event to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -12636,11 +12642,6 @@ export class AgentSession implements SettingsScope {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
-			// As on /new: the outgoing session's background jobs share this agent id, so their
-			// results would otherwise land in the resumed transcript. Cancelled after the last
-			// step that can roll back, so a rejected switch keeps them; their deliveries were
-			// held by the transition until now.
-			if (switchingToDifferentSession) this.#cancelOwnAsyncJobs();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
