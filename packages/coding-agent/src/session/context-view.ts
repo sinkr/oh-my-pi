@@ -78,19 +78,19 @@ function estimateAssistantBlocks(
 	return { blockTokenEstimates, thinkingBlockCount, reasoningReplayTokens, isInterruptedThinkingPlaceholder };
 }
 
-interface ContextViewState {
+interface SnapshotBuildState {
 	categoriesById: Map<ContextCategoryId, ContextViewCategory>;
 	toolOutputGroupsByName: Map<string, ContextViewCategory>;
 	serverToolNamesByCallId: Map<string, string>;
 }
 
-function appendEntry(state: ContextViewState, categoryId: ContextCategoryId, entry: ContextViewEntry): void {
+function appendEntry(state: SnapshotBuildState, categoryId: ContextCategoryId, entry: ContextViewEntry): void {
 	const category = state.categoriesById.get(categoryId)!;
 	category.entries.push(entry);
 	category.tokens += entry.tokens;
 }
 
-function appendToolOutput(state: ContextViewState, toolName: string, entry: ContextViewEntry): void {
+function appendToolOutput(state: SnapshotBuildState, toolName: string, entry: ContextViewEntry): void {
 	let group = state.toolOutputGroupsByName.get(toolName);
 	if (!group) {
 		group = {
@@ -107,7 +107,7 @@ function appendToolOutput(state: ContextViewState, toolName: string, entry: Cont
 	appendEntry(state, "tool-output", entry);
 }
 
-function appendSystemPromptEntries(session: AgentSession, state: ContextViewState, skillListingTokens: number): void {
+function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState, skillListingTokens: number): void {
 	for (const [index, block] of session.systemPrompt.entries()) {
 		appendEntry(state, "system-prompt", {
 			id: `system-prompt/${index}`,
@@ -124,7 +124,7 @@ function appendSystemPromptEntries(session: AgentSession, state: ContextViewStat
 	systemPromptCategory.tokens = Math.max(0, systemPromptCategory.tokens - skillListingTokens);
 }
 
-function appendToolDefinitionEntries(session: AgentSession, state: ContextViewState): void {
+function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuildState): void {
 	const toolSourcesByName = new Map(session.getAllToolInfos().map(info => [info.name, info.sourceInfo]));
 	for (const [index, tool] of session.agent.state.tools.entries()) {
 		const categoryId = session.hasBuiltInTool(tool.name) ? "built-in-tools" : "custom-tools";
@@ -165,7 +165,7 @@ const OPAQUE_SERVER_TOOL_FIELDS: Record<string, true> = {
 };
 
 function appendServerToolEntry(
-	state: ContextViewState,
+	state: SnapshotBuildState,
 	block: AnthropicServerToolContent["block"],
 	entryIdSuffix: string,
 	sourceMessage: AgentMessage,
@@ -210,7 +210,7 @@ function appendServerToolEntry(
 
 function appendAssistantMessageEntries(
 	session: AgentSession,
-	state: ContextViewState,
+	state: SnapshotBuildState,
 	message: AssistantMessage,
 	{ sourceIndex, convertedIndex }: ContextViewMessage,
 	isLatestSurviving: boolean,
@@ -304,7 +304,7 @@ function appendAssistantMessageEntries(
 	}
 }
 
-function appendMessageEntries(session: AgentSession, state: ContextViewState): void {
+function appendMessageEntries(session: AgentSession, state: SnapshotBuildState): void {
 	const tokenizer = session.agent.tokenizer;
 	const sourceMessages = session.agent.state.messages;
 	const convertedMessages = convertMessagesForContextView(sourceMessages);
@@ -357,7 +357,7 @@ function appendMessageEntries(session: AgentSession, state: ContextViewState): v
 	}
 }
 
-function finalizeToolOutputGroups(state: ContextViewState): void {
+function finalizeToolOutputGroups(state: SnapshotBuildState): void {
 	const toolOutputCategory = state.categoriesById.get("tool-output")!;
 	const chronological = (a: ContextViewEntry, b: ContextViewEntry): number => (a.timestamp ?? 0) - (b.timestamp ?? 0);
 	toolOutputCategory.entries.sort(chronological);
@@ -376,7 +376,7 @@ export function buildSessionContextView(
 		tokens: 0,
 		entries: [],
 	}));
-	const state: ContextViewState = {
+	const state: SnapshotBuildState = {
 		categoriesById: new Map(categories.map(category => [category.id, category])),
 		toolOutputGroupsByName: new Map(),
 		serverToolNamesByCallId: new Map(),

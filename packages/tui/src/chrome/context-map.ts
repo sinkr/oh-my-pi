@@ -11,35 +11,35 @@ export interface ContextMapCell<T> {
 
 export function planContextMap<T>(
 	segments: readonly ContextMapSegment<T>[],
-	scale: number,
+	windowTokens: number,
 	columns: number,
 	rows: number,
 ): ContextMapCell<T>[] {
 	if (
-		!Number.isFinite(scale) ||
-		scale <= 0 ||
+		!Number.isFinite(windowTokens) ||
+		windowTokens <= 0 ||
 		!Number.isInteger(columns) ||
 		!Number.isInteger(rows) ||
 		columns <= 0 ||
 		rows <= 0
 	)
 		return [];
-	const count = columns * rows;
-	const step = scale / count;
+	const cellCount = columns * rows;
+	const tokensPerCell = windowTokens / cellCount;
 	const ranges: { id: T; start: number; end: number }[] = [];
 	let cursor = 0;
 	for (const segment of segments) {
 		if (!Number.isFinite(segment.tokens) || segment.tokens <= 0) continue;
-		const end = Math.min(scale, cursor + segment.tokens);
+		const end = Math.min(windowTokens, cursor + segment.tokens);
 		if (end > cursor) ranges.push({ id: segment.id, start: cursor, end });
 		cursor = end;
-		if (cursor >= scale) break;
+		if (cursor >= windowTokens) break;
 	}
 	const cells: ContextMapCell<T>[] = [];
 	let first = 0;
-	for (let index = 0; index < count; index++) {
-		const start = index * step;
-		const end = (index + 1) * step;
+	for (let index = 0; index < cellCount; index++) {
+		const start = index * tokensPerCell;
+		const end = (index + 1) * tokensPerCell;
 		while (first < ranges.length && ranges[first]!.end <= start) first++;
 		let winner: T | undefined;
 		let overlap = 0;
@@ -51,7 +51,7 @@ export function planContextMap<T>(
 				winner = range.id;
 			}
 		}
-		if (winner !== undefined) cells.push({ id: winner, full: overlap / step >= 0.7 });
+		if (winner !== undefined) cells.push({ id: winner, full: overlap / tokensPerCell >= 0.7 });
 	}
 	return cells;
 }

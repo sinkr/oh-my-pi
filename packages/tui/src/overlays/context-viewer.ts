@@ -82,15 +82,15 @@ export class ContextViewer implements Component {
 	readonly #requestRender: () => void;
 	readonly #getRows: () => number;
 	/** Attributed usage when it can be drawn against the window (meter and map). */
-	readonly #scaledUsage: ReadonlyMap<ContextViewCategory, number> | undefined;
+	readonly #drawableAllocation: ReadonlyMap<ContextViewCategory, number> | undefined;
 	readonly #meter: readonly NativeNode[] | undefined;
 	readonly #modelLabel: string;
 
 	// Navigation.
 	#state: ViewState = "overview";
-	readonly #overview: MenuSelection<OverviewRow>;
+	readonly #overviewSelection: MenuSelection<OverviewRow>;
 	#category: ContextViewCategory | undefined;
-	readonly #entries = new MenuSelection<ContextViewEntry>([], {
+	readonly #entrySelection = new MenuSelection<ContextViewEntry>([], {
 		getKey: entry => entry.id,
 		getSearchText: entry => entry.label,
 	});
@@ -101,7 +101,7 @@ export class ContextViewer implements Component {
 
 	// Layout shared by both backends.
 	#width = 0;
-	#height = 1;
+	#bodyRows = 1;
 	#hour12: boolean | undefined;
 	/** Only ANSI input needs local full-content scroll geometry. */
 	#lastRenderMode: "ansi" | "native" = "ansi";
@@ -153,20 +153,20 @@ export class ContextViewer implements Component {
 		const { breakdown } = data;
 		this.#modelLabel = safeText(breakdown.model?.name ?? breakdown.model?.id ?? "no model");
 		const window = breakdown.contextWindow;
-		const allocated = allocateUsage(data.categories, breakdown.usedTokens);
-		this.#scaledUsage = window > 0 && Number.isFinite(window) ? allocated : undefined;
-		const scaled = this.#scaledUsage;
-		this.#meter = scaled
+		const allocation = allocateUsage(data.categories, breakdown.usedTokens);
+		this.#drawableAllocation = window > 0 && Number.isFinite(window) ? allocation : undefined;
+		const drawable = this.#drawableAllocation;
+		this.#meter = drawable
 			? describeContextMeter({
 					...breakdown,
 					categories: data.categories.map(category => ({
 						label: safeText(overviewLabel(category)),
-						tokens: scaled.get(category)!,
+						tokens: drawable.get(category)!,
 						color: CONTEXT_PRESENTATION[category.id].color,
 					})),
 				})
 			: undefined;
-		this.#overview = new MenuSelection(buildOverviewRows(data, allocated), {
+		this.#overviewSelection = new MenuSelection(buildOverviewRows(data, allocation), {
 			getKey: item => item.key,
 			getSearchText: item => item.label,
 			isDisabled: item => !item.category,
@@ -245,15 +245,15 @@ export class ContextViewer implements Component {
 			else if (event.act === "back") this.#back();
 			else if (this.#state === "category" && (event.act === "select-entry" || event.act === "open-entry")) {
 				const id = event.key.startsWith(NATIVE_ENTRY_KEYPATH) ? event.key.slice(NATIVE_ENTRY_KEYPATH.length) : "";
-				const entry = this.#entries.items.find(entry => entry.id === id);
+				const entry = this.#entrySelection.items.find(entry => entry.id === id);
 				if (!entry) return;
-				this.#entries.setSelectedKey(entry.id);
+				this.#entrySelection.setSelectedKey(entry.id);
 				if (event.act === "open-entry") this.#activate();
 			}
 		} else if (this.#state === "overview" && (event.type === "select" || event.type === "activate")) {
-			const item = this.#overview.items.find(item => item.key === event.item);
+			const item = this.#overviewSelection.items.find(item => item.key === event.item);
 			if (!item?.category) return;
-			this.#overview.setSelectedKey(event.item);
+			this.#overviewSelection.setSelectedKey(event.item);
 			if (event.type === "activate") this.#activate();
 		}
 		this.#requestRender();
@@ -261,17 +261,17 @@ export class ContextViewer implements Component {
 
 	#activate(): void {
 		if (this.#state === "overview") {
-			const activation = this.#overview.requestActivation();
+			const activation = this.#overviewSelection.requestActivation();
 			if (activation.kind !== "confirmed" || !activation.item.category) return;
 			this.#category = activation.item.category;
-			this.#entries.setItems(this.#category.entries, this.#category.entries[0]?.id);
+			this.#entrySelection.setItems(this.#category.entries, this.#category.entries[0]?.id);
 			this.#nativePreviewRevealAt = "nearest";
 			this.#ansiPreviewCache = undefined;
 			this.#ansiPreviewScroll.scrollToTop();
 			if (this.#category.entries.length === 1) this.#openEntry(this.#category.entries[0]!, "overview");
 			else this.#state = "category";
 		} else if (this.#state === "category") {
-			const entry = this.#entries.selectedItem;
+			const entry = this.#entrySelection.selectedItem;
 			if (!entry) return;
 			this.#openEntry(entry, "category");
 		}
@@ -305,11 +305,11 @@ export class ContextViewer implements Component {
 			}
 		} else if (this.#state === "overview") {
 			// Native reveals the moved selection itself; act only at the list edge, matching ANSI.
-			if (this.#overview.move(delta)) return;
+			if (this.#overviewSelection.move(delta)) return;
 			this.#overviewScroll.scroll(delta);
 			// Past the edge selectable row only unselectable rows (Buffer, Free Space) remain: bring the
 			// edge row of the legend into view in one press.
-			const rows = this.#overview.items;
+			const rows = this.#overviewSelection.items;
 			const target = delta > 0 ? rows.at(-1) : rows[0];
 			if (target) {
 				this.#overviewEdgeReveal = {
@@ -319,7 +319,7 @@ export class ContextViewer implements Component {
 			}
 			return;
 		} else {
-			this.#entries.move(delta);
+			this.#entrySelection.move(delta);
 			return;
 		}
 		this.#nativeScroll = {
@@ -334,7 +334,7 @@ export class ContextViewer implements Component {
 		if (this.#lastRenderMode === "ansi") {
 			if (this.#width > 0) this.#ensureAnsiEntryLayout();
 			// Keep one line of overlap so the reading position stays visible.
-			this.#ansiEntryScroll.scroll(direction * Math.max(1, this.#height - 1));
+			this.#ansiEntryScroll.scroll(direction * Math.max(1, this.#bodyRows - 1));
 		}
 		this.#nativeScroll = {
 			by: direction > 0 ? "page-down" : "page-up",
@@ -348,7 +348,7 @@ export class ContextViewer implements Component {
 	#layout(): string[] {
 		const rows = Math.max(1, this.#getRows());
 		const summary = this.#summary().slice(0, Math.max(0, rows - 5));
-		this.#height = Math.max(0, rows - summary.length - 4);
+		this.#bodyRows = Math.max(0, rows - summary.length - 4);
 		return summary;
 	}
 
@@ -362,7 +362,7 @@ export class ContextViewer implements Component {
 	#preview(entry: ContextViewEntry, width: number): { lines: string[]; complete: boolean } {
 		return entryPreview(entry, {
 			width,
-			rows: previewRows(entry, this.#height),
+			rows: previewRows(entry, this.#bodyRows),
 			sourceWidth: this.#width,
 			hour12: this.#hour12,
 		});
@@ -400,7 +400,7 @@ export class ContextViewer implements Component {
 					? this.#renderCategory()
 					: this.#renderEntry(),
 		);
-		this.#body.setHeight(this.#height);
+		this.#body.setHeight(this.#bodyRows);
 		this.#footer.setLines([truncateToWidth(theme.fg("dim", this.#footerHints()), this.#width)]);
 		const rendered = this.#panel.render(width);
 		// Short terminals keep the top border, footer, and bottom border, in that priority.
@@ -413,8 +413,8 @@ export class ContextViewer implements Component {
 		const navigation = [editorKey("tui.select.up"), editorKey("tui.select.down")].filter(Boolean).join("/");
 		const canOpen =
 			this.#state === "overview"
-				? !!this.#overview.selectedItem?.category
-				: this.#state === "category" && !!this.#entries.selectedItem;
+				? !!this.#overviewSelection.selectedItem?.category
+				: this.#state === "category" && !!this.#entrySelection.selectedItem;
 		const confirm = canOpen ? editorKey("tui.select.confirm") : "";
 		const cancel = editorKey("tui.select.cancel");
 		const movement = this.#state === "overview" ? "select/scroll" : this.#state === "category" ? "select" : "scroll";
@@ -435,12 +435,12 @@ export class ContextViewer implements Component {
 	/** Map on the left when it fits; scrollable legend and Snapcompact diagnostics on the right. */
 	#renderOverview(): string[] {
 		const width = this.#width;
-		const height = this.#height;
-		const usage = this.#scaledUsage;
+		const height = this.#bodyRows;
+		const usage = this.#drawableAllocation;
 		const map = usage ? mapGeometry(width, height) : undefined;
 		const listWidth = map ? width - map.width - MAP_LEGEND_GAP : width;
-		const source = this.#overview.items.map(item =>
-			legendLine(item, this.#overview.selectedKey === item.key, Math.max(0, listWidth - 1)),
+		const source = this.#overviewSelection.items.map(item =>
+			legendLine(item, this.#overviewSelection.selectedKey === item.key, Math.max(0, listWidth - 1)),
 		);
 		for (const line of contextSnapcompactLines(this.#data.breakdown))
 			source.push(...wrapTextWithAnsi(theme.fg("dim", line), Math.max(1, listWidth - 1)));
@@ -448,9 +448,9 @@ export class ContextViewer implements Component {
 		this.#overviewScroll.setLines(source);
 		this.#overviewScroll.revealRange(
 			{
-				id: this.#overview.selectedKey ?? "",
-				start: this.#overview.selectedIndex,
-				end: this.#overview.selectedIndex + 1,
+				id: this.#overviewSelection.selectedKey ?? "",
+				start: this.#overviewSelection.selectedIndex,
+				end: this.#overviewSelection.selectedIndex + 1,
 				margin: 0,
 			},
 			listWidth,
@@ -471,11 +471,17 @@ export class ContextViewer implements Component {
 	/** Entry previews with the selected one marked by a gutter bar. */
 	#renderCategory(): string[] {
 		const contentWidth = Math.max(1, this.#width - 2);
-		this.#prepareAnsiPreview(contentWidth, this.#height);
-		const range = this.#ansiPreviewCache!.ranges[this.#entries.selectedIndex];
+		this.#prepareAnsiPreview(contentWidth, this.#bodyRows);
+		const range = this.#ansiPreviewCache!.ranges[this.#entrySelection.selectedIndex];
 		if (range)
 			this.#ansiPreviewScroll.revealRange(
-				{ id: this.#entries.selectedKey!, start: range.start, end: range.end, margin: 0, oversized: "start" },
+				{
+					id: this.#entrySelection.selectedKey!,
+					start: range.start,
+					end: range.end,
+					margin: 0,
+					oversized: "start",
+				},
 				contentWidth,
 			);
 		const offset = this.#ansiPreviewScroll.getScrollOffset();
@@ -523,7 +529,7 @@ export class ContextViewer implements Component {
 	#ensureAnsiEntryLayout(): void {
 		const width = this.#width;
 		const content = this.#entryBodyText();
-		this.#ansiEntryScroll.setHeight(this.#height);
+		this.#ansiEntryScroll.setHeight(this.#bodyRows);
 		if (this.#ansiEntryLayoutWidth !== width) {
 			const entry = this.#entry!;
 			const contentWidth = Math.max(1, width - 1);
@@ -572,10 +578,10 @@ export class ContextViewer implements Component {
 	/** Meter (or summary text) above a scrollable legend, with the map beside it when there is no meter. */
 	#describeOverview(cx: DescribeContext): NativeNode[] {
 		const meter = cx.supports("meter") ? this.#meter : undefined;
-		const items = this.#overview.items.map(item => {
+		const items = this.#overviewSelection.items.map(item => {
 			const legend = legendItem(
 				item,
-				this.#overview.selectedKey === item.key,
+				this.#overviewSelection.selectedKey === item.key,
 				!!meter,
 				this.#data.breakdown.contextWindow,
 			);
@@ -583,13 +589,13 @@ export class ContextViewer implements Component {
 			return edge?.key === item.key ? { ...legend, reveal: edge.reveal } : legend;
 		});
 		const list = selectList("categories", items, {
-			selected: this.#overview.selectedKey,
+			selected: this.#overviewSelection.selectedKey,
 			grow: 1,
 			min: { h: 0 },
-			max: { lines: Math.max(1, this.#height) },
+			max: { lines: Math.max(1, this.#bodyRows) },
 		});
-		const usage = meter ? undefined : this.#scaledUsage;
-		const map = usage ? mapGeometry(this.#width, this.#height) : undefined;
+		const usage = meter ? undefined : this.#drawableAllocation;
+		const map = usage ? mapGeometry(this.#width, this.#bodyRows) : undefined;
 		const body: NativeNode[] = [
 			usage && map ? row([this.#describeMap(usage, map), list], { gap: "lg" }) : list,
 			...contextSnapcompactLines(this.#data.breakdown).map(line => text([span(line, "dim")], { wrap: "word" })),
@@ -605,7 +611,7 @@ export class ContextViewer implements Component {
 	/** Entry previews in a viewport-bounded list; the list owns wheel scrolling. */
 	#describeCategory(): NativeNode {
 		const groups = new Set<string>();
-		const items = this.#entries.items.flatMap((entry, index) => [
+		const items = this.#entrySelection.items.flatMap((entry, index) => [
 			this.#describePreview(entry, groups),
 			{ ...text(" ", { wrap: "none" }), key: `separator-${index}` },
 		]);
@@ -615,8 +621,8 @@ export class ContextViewer implements Component {
 			{
 				grow: 1,
 				min: { h: 0 },
-				max: { lines: Math.max(1, this.#height) },
-				hidden: this.#height === 0 ? true : undefined,
+				max: { lines: Math.max(1, this.#bodyRows) },
+				hidden: this.#bodyRows === 0 ? true : undefined,
 			},
 			[
 				node(
@@ -637,7 +643,7 @@ export class ContextViewer implements Component {
 	/** One entry: group heading on its first member, entry heading, preview, and truncation hint. */
 	#describePreview(entry: ContextViewEntry, groups: Set<string>): NativeNode {
 		const category = this.#category!.id;
-		const selected = entry.id === this.#entries.selectedKey;
+		const selected = entry.id === this.#entrySelection.selectedKey;
 		const group = entry.thinkingGroup;
 		const parts: NativeNode[] = [];
 		if (group && !groups.has(group.id)) {
@@ -678,8 +684,8 @@ export class ContextViewer implements Component {
 	#nativePreview(entry: ContextViewEntry): { spans: TspSpan[] | undefined; complete: boolean } {
 		const category = this.#category!;
 		let cache = this.#nativePreviewCache;
-		if (cache?.category !== category || cache.width !== this.#width || cache.height !== this.#height) {
-			cache = { category, width: this.#width, height: this.#height, previews: new Map() };
+		if (cache?.category !== category || cache.width !== this.#width || cache.height !== this.#bodyRows) {
+			cache = { category, width: this.#width, height: this.#bodyRows, previews: new Map() };
 			this.#nativePreviewCache = cache;
 		}
 		let preview = cache.previews.get(entry);
