@@ -2315,6 +2315,7 @@ export class AgentSession implements SettingsScope {
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
 			sessionId: () => this.sessionId,
+			costGate: () => this.#costGate,
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			transformContext: (messages, signal) => this.#transformContext(messages, signal),
 			convertToLlm: messages => this.#convertToLlm(messages),
@@ -3270,7 +3271,7 @@ export class AgentSession implements SettingsScope {
 		return this.#admittedSubmissionCount > 0;
 	}
 
-	/** The session tree's cost gate; a root session's follows its session file across new/resume/fork/branch. */
+	/** The session tree's cost gate; a root session's is replaced on `/new` and on a switch to another saved session. */
 	get costGate(): CostGate {
 		return this.#costGate;
 	}
@@ -3302,9 +3303,11 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * After a transition to another session file, a root session's spend starts from
-	 * that file's recorded spend. Requests still in flight finish on the gate they
-	 * started on; subagents keep the tree's gate they were given.
+	 * After `/new` or a switch to another saved session, a root session's spend starts
+	 * from that file's recorded spend. Fork, branch and `/btw` continue the same
+	 * conversation in this process and keep the gate, so they never restore budget.
+	 * Requests still in flight finish on the gate they started on; subagents keep
+	 * the tree's gate they were given.
 	 */
 	#reseedCostGate(): void {
 		if (this.#ownsCostGate) this.#costGate = this.#createCostGate();
@@ -10996,7 +10999,6 @@ export class AgentSession implements SettingsScope {
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
 
-			this.#reseedCostGate();
 			// Emit session_switch event with reason "fork" to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -12928,7 +12930,6 @@ export class AgentSession implements SettingsScope {
 			// Reload messages from entries (works for both file and in-memory mode)
 			const sessionContext = this.buildDisplaySessionContext();
 
-			this.#reseedCostGate();
 			// Emit session_branch event to hooks (after branch completes)
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -13050,7 +13051,6 @@ export class AgentSession implements SettingsScope {
 
 			const sessionContext = this.buildDisplaySessionContext();
 
-			this.#reseedCostGate();
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
 					type: "session_branch",

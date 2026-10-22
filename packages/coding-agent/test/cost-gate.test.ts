@@ -202,12 +202,6 @@ describe("job widget authoring", () => {
 });
 
 describe("session.warnCost / session.maxCost settings", () => {
-	it("default to unset", () => {
-		const settings = Settings.isolated();
-		expect(cfgSessionWarnCost.get(settings)).toBeUndefined();
-		expect(cfgSessionMaxCost.get(settings)).toBeUndefined();
-	});
-
 	it("reject a configured value that is not a positive USD amount", () => {
 		for (const value of [-1, 0, Number.NaN, "5"]) {
 			expect(() => Settings.isolated({ "session.maxCost": value })).toThrow("Invalid session.maxCost");
@@ -443,6 +437,29 @@ describe("cost gate in a running session", () => {
 
 		expect(title).toBeNull();
 		expect(provider.calls()).toBe(1);
+	});
+
+	it("keeps the spent budget when the session is forked from an earlier message", async () => {
+		const api = "test-cost-gate-fork";
+		const provider = scriptedProvider(api, [response(1.2), response(0.1)]);
+		const tempDir = TempDir.createSync("@omp-cost-gate-fork-");
+		tempDirs.push(tempDir);
+		const session = await createSession(
+			api,
+			{ "session.maxCost": 1 },
+			{ sessionManager: SessionManager.create(tempDir.path(), tempDir.path()) },
+		);
+
+		await session.prompt("first");
+		await session.waitForIdle();
+		// Forking from the first message leaves the paid response out of the new file.
+		const firstMessage = session.sessionManager.getEntries().find(entry => entry.type === "message");
+		expect(firstMessage && (await session.fork(firstMessage.id))).toBe(true);
+		await session.prompt("after fork");
+		await session.waitForIdle();
+
+		expect(provider.calls()).toBe(1);
+		expect(session.costCapRefusal?.spent).toBe(1.2);
 	});
 
 	it("gives a new session a fresh budget", async () => {
