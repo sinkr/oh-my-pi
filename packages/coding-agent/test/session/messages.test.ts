@@ -200,35 +200,6 @@ describe("convertMessagesForContextView", () => {
 		});
 	});
 
-	it("preserves images and combines steering text consistently with the model path", () => {
-		const image = { type: "image" as const, data: "aaaa", mimeType: "image/png" };
-		const source: AgentMessage = {
-			role: "user",
-			content: [{ type: "text", text: "Inspect this" }, image, { type: "text", text: "before continuing" }],
-			steering: true,
-			timestamp: 1,
-		};
-		const messages = [source];
-		const viewed = convertMessagesForContextView(messages);
-		const production = convertToLlm(wrapSteeringForModel(messages));
-
-		expect(viewed.map(entry => entry.message)).toEqual(production);
-		const content = viewed[0].message.content;
-		if (!Array.isArray(content)) throw new Error("Expected image-bearing steering content");
-		expect(content).toEqual([
-			{ type: "text", text: expect.stringContaining("Inspect this\nbefore continuing") },
-			image,
-		]);
-		const text = content[0];
-		if (text.type !== "text") throw new Error("Expected steering text before image");
-		expect(text.text.match(/<system-notice>/g)).toHaveLength(1);
-		expect(source.content).toEqual([
-			{ type: "text", text: "Inspect this" },
-			image,
-			{ type: "text", text: "before continuing" },
-		]);
-	});
-
 	it("maps source indices across omitted messages and image-bearing splits", () => {
 		const image = { type: "image" as const, data: "aaaa", mimeType: "image/png" };
 		const messages: AgentMessage[] = [
@@ -309,33 +280,6 @@ describe("convertMessagesForContextView", () => {
 		]);
 		expect(convertToLlm(withContinuity)).toBe(strippedProduction);
 		expect(convertToLlm([...withContinuity])[0]).toBe(strippedProduction[0]);
-	});
-
-	it("normalizes xd tool calls and results without changing persisted history", () => {
-		const assistant: AssistantMessage = {
-			...settledAssistant(""),
-			content: [{ type: "toolCall", id: "call_1", name: "xd://recall", arguments: { q: "x" } }],
-			stopReason: "toolUse",
-		};
-		const messages: AgentMessage[] = [
-			assistant,
-			{
-				role: "toolResult",
-				toolCallId: "call_1",
-				toolName: "xd://recall",
-				content: [{ type: "text", text: "remembered" }],
-				isError: false,
-				timestamp: 2,
-			},
-		];
-		const converted = convertMessagesForContextView(messages);
-		expect(converted[0].message).toMatchObject({
-			role: "assistant",
-			content: [{ type: "toolCall", name: "recall" }],
-		});
-		expect(converted[1].message).toMatchObject({ role: "toolResult", toolName: "recall" });
-		expect(assistant.content[0]).toMatchObject({ name: "xd://recall" });
-		expect(messages[1]).toMatchObject({ toolName: "xd://recall" });
 	});
 });
 

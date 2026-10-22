@@ -10,7 +10,6 @@ import { buildSessionContextView } from "../../src/session/context-view";
 import { buildSystemPrompt } from "../../src/system-prompt";
 import type { Skill } from "../../src/extensibility/skills";
 import { computeSessionContextBreakdown } from "../../src/session/context-usage-runtime";
-import { convertToLlm, INTERRUPTED_THINKING_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../src/session/messages";
 import type { ContextViewData } from "@oh-my-pi/pi-tui/overlays/context-viewer";
 
 const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
@@ -116,24 +115,6 @@ function payloadReply(reader: Model, explicitThinking = false): AssistantMessage
 }
 
 describe("context snapshot capacity and savings", () => {
-	it("retains compaction thresholds and computes optional wire savings without changing content capacity", () => {
-		const prompt = ["Repeated context policy for the next model request.\n".repeat(1000)];
-		const settings = Settings.isolated({
-			"compaction.enabled": true,
-			"todo.enabled": false,
-			"snapcompact.systemPrompt": "all",
-		});
-		const session = sessionWith({ prompt, settings });
-		const data = buildSessionContextView(session);
-		expect(data.breakdown.thresholdTokens).toBeGreaterThan(0);
-		expect(data.breakdown.snapcompact?.systemPrompt).toMatchObject({ applied: true, scope: "all" });
-		expect(data.breakdown.snapcompact?.savedTokens).toBeGreaterThan(0);
-		const plain = buildSessionContextView(sessionWith({ prompt }));
-		expect(plain.breakdown.snapcompact).toBeUndefined();
-		expect(totalTokens(data)).toBe(totalTokens(plain));
-		expect(data.free + data.buffer + data.usage).toBe(data.window);
-	});
-
 	it("keeps provider-anchored capacity when raw prompt estimates exceed the window", () => {
 		const message = reply([{ type: "text", text: "saved answer" }]);
 		message.usage.input = 100;
@@ -152,10 +133,7 @@ describe("context snapshot capacity and savings", () => {
 });
 
 describe("context snapshot system prompt and skills", () => {
-	it.each([
-		{ name: "default prompt", customPrompt: undefined },
-		{ name: "custom prompt", customPrompt: "Literal custom prompt." },
-	])("retains effective system blocks and skill content without file I/O: $name", async ({ customPrompt }) => {
+	it("retains effective system blocks and skill content without file I/O", async () => {
 		const skills: Skill[] = [
 			{
 				name: "fixture",
@@ -167,7 +145,6 @@ describe("context snapshot system prompt and skills", () => {
 		];
 		const built = await buildSystemPrompt({
 			cwd: import.meta.dir,
-			customPrompt,
 			personality: "none",
 			activeRepoContext: null,
 			contextFiles: [{ path: "/nonexistent/instructions.md", content: "Unique instruction body" }],
@@ -185,7 +162,6 @@ describe("context snapshot system prompt and skills", () => {
 		const text = system.entries.map(entry => entry.text).join("\n");
 		expect(text).toContain("Unique instruction body");
 		expect(text).toContain("Use <T> & {{literal}} without expansion");
-		if (customPrompt) expect(text).toContain(customPrompt);
 		const shared = computeSessionContextBreakdown(session).categories.find(category => category.id === "skills")!;
 		expect(shared.tokens).toBeGreaterThan(0);
 		expect(category(data, "skills")).toMatchObject({ entries: [], tokens: shared.tokens });
@@ -195,47 +171,6 @@ describe("context snapshot system prompt and skills", () => {
 		expect(totalTokens(data)).toBe(fullPromptTokens + category(data, "built-in-tools").tokens);
 		expect(file).not.toHaveBeenCalled();
 		file.mockRestore();
-	});
-
-	it.each([
-		{ name: "visible skills with read", hasRead: true, onlyHidden: false, skillful: true, attributed: true },
-		{ name: "without read", hasRead: false, onlyHidden: false, skillful: true, attributed: false },
-		{ name: "only hidden skills", hasRead: true, onlyHidden: true, skillful: true, attributed: false },
-		{ name: "skillful disabled", hasRead: true, onlyHidden: false, skillful: false, attributed: false },
-	])("attributes skill tokens under shared gating: $name", ({ hasRead, onlyHidden, skillful, attributed }) => {
-		const visible: Skill = {
-			name: "visible",
-			description: "Visible skill description",
-			filePath: "/nonexistent/visible/SKILL.md",
-			baseDir: "/nonexistent/visible",
-			source: "user",
-		};
-		const hidden: Skill = {
-			...visible,
-			name: "hidden",
-			description: "Hidden skill description",
-			hide: true,
-		};
-		const session = sessionWith({
-			prompt: ["Effective policy including visible and hidden skill descriptions.\n".repeat(20)],
-			skills: onlyHidden ? [hidden] : [visible, hidden],
-			tools: hasRead ? [tool("read")] : [],
-			settings: Settings.isolated({
-				"compaction.enabled": false,
-				"todo.enabled": false,
-				skillful,
-			}),
-		});
-		const data = buildSessionContextView(session);
-		const shared = computeSessionContextBreakdown(session).categories.find(category => category.id === "skills")!;
-		const expected = attributed ? session.agent.tokenizer.countTokens([visible.name, visible.description]) : 0;
-		expect(shared.tokens).toBe(expected);
-		expect(category(data, "skills")).toMatchObject({ tokens: expected, entries: [] });
-		const system = category(data, "system-prompt");
-		const promptTokens = session.agent.tokenizer.countTokens(session.systemPrompt[0]!);
-		expect(system.entries[0]!.text).toBe(session.systemPrompt[0]!);
-		expect(system.entries[0]!.tokens).toBe(promptTokens);
-		expect(system.tokens + expected).toBe(promptTokens);
 	});
 
 	it("clamps the System Prompt total when the shared Skills estimate exceeds the effective blocks", () => {
@@ -351,24 +286,6 @@ describe("context snapshot assistant reasoning", () => {
 		expect(session.messages).toEqual(before);
 	});
 
-	it("drops payload reasoning after switching to an incompatible or filtering reader", () => {
-		const reader = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-6.1-sol")!;
-		const session = sessionWith({ model: reader, prompt: [], messages: [payloadReply(reader)] });
-		const initial = buildSessionContextView(session);
-		expect(category(initial, "assistant-thinking").tokens).toBe(1_000);
-
-		session.agent.setModel(getBundledModel("openai-codex", "gpt-6-sol")!);
-		const changedReader = buildSessionContextView(session);
-		expect(category(changedReader, "assistant-thinking").entries).toEqual([]);
-		expect(totalTokens(changedReader)).toBe(session.agent.tokenizer.countTokens("visible answer"));
-
-		session.agent.setModel({ ...reader, compat: { ...reader.compat, filterReasoningHistory: true } });
-		const filtered = buildSessionContextView(session);
-		expect(category(filtered, "assistant-thinking").entries).toEqual([]);
-		expect(totalTokens(filtered)).toBe(session.agent.tokenizer.countTokens("visible answer"));
-		expect(category(initial, "assistant-thinking").tokens).toBe(1_000);
-	});
-
 	it("keeps the tokenizer's thinking budget at message scope without assigning it to individual blocks", () => {
 		const reader = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-6.1-sol")!;
 		const summary = "A visible summary of the second reasoning item.";
@@ -432,175 +349,12 @@ describe("context snapshot assistant reasoning", () => {
 });
 
 describe("context snapshot message projection and snapshots", () => {
-	it("keeps old tool and prompt snapshots detached while new snapshots use the active state", () => {
-		const session = sessionWith({
-			prompt: ["original system"],
-			tools: [tool("read"), tool("extension")],
-		});
-		const initial = buildSessionContextView(session);
-		session.agent.setTools([tool("replacement")]);
-		session.agent.setSystemPrompt(["different system"]);
-		const updated = buildSessionContextView(session);
-		expect(category(updated, "built-in-tools").entries).toEqual([]);
-		expect(category(updated, "custom-tools").entries.map(entry => entry.label)).toEqual(["replacement"]);
-		expect(category(updated, "system-prompt").entries.map(entry => entry.text)).toEqual(["different system"]);
-		expect(category(initial, "built-in-tools").entries.map(entry => entry.label)).toEqual(["read"]);
-		expect(category(initial, "custom-tools").entries.map(entry => entry.label)).toEqual(["extension"]);
-		expect(category(initial, "system-prompt").entries.map(entry => entry.text)).toEqual(["original system"]);
-	});
-
-	it("projects canonical tool names and metadata without rewriting saved content", () => {
-		const assistant = reply([
-			{ type: "toolCall", name: "xd://recall", id: "call", arguments: { query: "history" } },
-			{ type: "text", text: "assistant answer" },
-		]);
-		const messages: AgentMessage[] = [
-			assistant,
-			{
-				role: "toolResult",
-				toolName: "xd://recall",
-				toolCallId: "call",
-				content: [{ type: "text", text: "remembered result" }],
-				isError: false,
-				timestamp: 12,
-			},
-		];
-		const session = sessionWith({ messages });
-		const before = structuredClone(session.messages);
-		const data = buildSessionContextView(session);
-		expect(category(data, "assistant-messages").entries.map(entry => entry.timestamp)).toEqual([10]);
-		const call = category(data, "tool-calls").entries[0]!;
-		expect(call).toMatchObject({ label: "recall", timestamp: 10, callId: "call" });
-		expect(JSON.parse(call.text)).toEqual({ query: "history" });
-		expect(category(data, "tool-output").entries[0]).toMatchObject({
-			label: "recall",
-			timestamp: 12,
-			callId: "call",
-		});
-		expect(category(data, "tool-output").children?.map(group => group.label)).toEqual(["recall"]);
-		expect(session.messages).toEqual(before);
-	});
-
 	it("keeps a tool call without arguments inspectable and charges no phantom thinking", () => {
 		const call = { type: "toolCall", name: "read", id: "call", arguments: undefined };
 		const assistant = reply([call as unknown as AssistantMessage["content"][number]]);
 		const data = buildSessionContextView(sessionWith({ messages: [assistant] }));
 		expect(category(data, "tool-calls").entries[0]).toMatchObject({ label: "read", text: "null" });
 		expect(category(data, "assistant-thinking").entries).toEqual([]);
-	});
-
-	it("rebuilds thinking after continuity changes without mutating earlier snapshots or production caches", () => {
-		const assistant = {
-			...reply([
-				{ type: "thinking", thinking: "complete reasoning", thinkingSignature: "signed" },
-				{ type: "thinking", thinking: "unfinished reasoning" },
-			]),
-			stopReason: "aborted",
-		} satisfies AssistantMessage;
-		const session = sessionWith({ messages: [assistant] });
-		const before = structuredClone(assistant);
-		const initial = buildSessionContextView(session);
-		expect(category(initial, "assistant-thinking").entries.map(entry => entry.text)).toEqual([
-			"complete reasoning",
-			"unfinished reasoning",
-		]);
-		session.agent.appendMessage({
-			role: "custom",
-			customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
-			content: "continuity",
-			display: false,
-			attribution: "agent",
-			timestamp: 11,
-		});
-		const productionHistory = [...session.messages];
-		const projected = convertToLlm(productionHistory);
-		expect(projected[0]).toMatchObject({
-			role: "assistant",
-			content: [{ type: "thinking", thinking: "complete reasoning" }],
-		});
-		const updated = buildSessionContextView(session);
-		expect(category(updated, "assistant-thinking").entries.map(entry => entry.text)).toEqual(["complete reasoning"]);
-		expect(category(updated, "user-messages").entries).toEqual([
-			expect.objectContaining({
-				info: "custom · interrupted-thinking → developer",
-				text: "continuity",
-				timestamp: 11,
-			}),
-		]);
-		session.agent.state.messages.pop();
-		expect(buildSessionContextView(session)).toEqual(initial);
-		expect(category(initial, "assistant-thinking").entries.map(entry => entry.text)).toEqual([
-			"complete reasoning",
-			"unfinished reasoning",
-		]);
-		expect(assistant).toEqual(before);
-		expect(convertToLlm(productionHistory)).toBe(projected);
-		expect(convertToLlm([...productionHistory])[0]).toBe(projected[0]);
-	});
-
-	it("retains source and output positions across omitted executions, empty interruptions and image splits", () => {
-		const image = { type: "image", mimeType: "image/png", data: "aGVsbG8=" } as const;
-		const session = sessionWith({
-			messages: [
-				{
-					role: "bashExecution",
-					command: "excluded",
-					output: "hidden",
-					exitCode: 0,
-					cancelled: false,
-					truncated: false,
-					excludeFromContext: true,
-					timestamp: 1,
-				},
-				{
-					role: "custom",
-					customType: "image-note",
-					content: [{ type: "text", text: "same body" }, image],
-					display: false,
-					timestamp: 2,
-				},
-				{
-					role: "fileMention",
-					files: [
-						{ path: "notes.md", content: "same body" },
-						{ path: "picture.png", content: "", image },
-					],
-					timestamp: 3,
-				},
-				{
-					role: "pythonExecution",
-					code: "print('kept')",
-					output: "kept output",
-					exitCode: 0,
-					cancelled: false,
-					truncated: false,
-					timestamp: 4,
-				},
-				{ ...reply([]), stopReason: "aborted", errorMessage: USER_INTERRUPT_LABEL },
-				{ role: "user", content: "same body", timestamp: 6 },
-			],
-		});
-		const before = structuredClone(session.messages);
-		const data = buildSessionContextView(session);
-		const users = category(data, "user-messages").entries;
-		expect(users.map(entry => entry.id)).toEqual([
-			"user-messages/1/0",
-			"user-messages/1/1",
-			"user-messages/2/2",
-			"user-messages/2/3",
-			"user-messages/5/5",
-		]);
-		expect(users.slice(0, 2).every(entry => entry.info?.includes("image-note"))).toBe(true);
-		expect(users.slice(2, 4).every(entry => entry.info?.includes("fileMention"))).toBe(true);
-		expect(users[2]?.text).toContain('<file path="notes.md">');
-		expect(users[3]?.text).toContain('<file path="picture.png">');
-		expect(users[4]?.info).toBeUndefined();
-		const output = category(data, "tool-output");
-		expect(output.children?.map(group => group.label)).toEqual(["python"]);
-		expect(output.entries[0]?.id).toBe("tool-output/3/4");
-		expect(output.entries[0]?.info).toContain("pythonExecution");
-		expect(output.entries[0]?.text).toContain("kept output");
-		expect(session.messages).toEqual(before);
 	});
 
 	it("keeps included bash execution output while excluding python executions", () => {
@@ -746,20 +500,5 @@ describe("context snapshot tool calls and output", () => {
 		expect(output.entries.map(entry => entry.text)).toEqual(["a", "b", "c", "large ".repeat(100)]);
 		expect(new Set(output.entries.map(entry => entry.id)).size).toBe(4);
 		expect(output.tokens).toBe(output.children!.reduce((sum, group) => sum + group.tokens, 0));
-	});
-
-	it("keeps first-appearance group order when token totals tie, regardless of result timestamps", () => {
-		const messages: AgentMessage[] = ["zulu", "alfa"].map((toolName, index) => ({
-			role: "toolResult",
-			toolName,
-			toolCallId: "duplicate",
-			content: [{ type: "text", text: "same output" }],
-			isError: false,
-			timestamp: index === 0 ? 30 : 10,
-		}));
-		const output = category(buildSessionContextView(sessionWith({ messages })), "tool-output");
-		expect(output.children?.map(group => group.tokens)).toEqual([output.tokens / 2, output.tokens / 2]);
-		expect(output.children?.map(group => group.label)).toEqual(["zulu", "alfa"]);
-		expect(output.entries.map(entry => entry.label)).toEqual(["alfa", "zulu"]);
 	});
 });

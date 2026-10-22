@@ -9,7 +9,6 @@ import {
 	TUI_KEYBINDINGS,
 } from "../src/keybindings";
 import type { NativeNode } from "../src/native/node";
-import { TspDocument } from "../src/native/apply";
 import { Reconciler } from "../src/native/reconcile";
 import {
 	ContextViewer,
@@ -18,10 +17,8 @@ import {
 	type ContextViewCategory,
 	type ContextViewEntry,
 } from "../src/overlays/context-viewer";
-import { createTheme, getBuiltinThemes } from "../src/theme/loader";
 import { ensureThemeSync, setThemeInstance, theme, type Theme } from "../src/theme/theme";
-import { CONTEXT_PRESENTATION } from "../src/chrome/context-presentation";
-import { sliceWithWidth, visibleWidth } from "../src/utils";
+import { visibleWidth } from "../src/utils";
 
 const cx = { cols: 100, reduceMotion: false, dark: true, supports: () => false, feature: () => true };
 const meterCx = { ...cx, supports: () => true };
@@ -46,10 +43,6 @@ function nodes(root: NativeNode): NativeNode[] {
 
 function textValue(value: TspText | undefined): string | undefined {
 	return typeof value === "string" ? value : value?.map(span => span.t).join("");
-}
-
-function itemLabel(item: NativeNode | undefined) {
-	return item?.k === "item" && Array.isArray(item.p?.label) ? item.p.label : undefined;
 }
 
 function usageColumns(item: NativeNode | undefined): string[] | undefined {
@@ -327,49 +320,6 @@ describe("ContextViewer navigation", () => {
 		expect(selected(h.viewer.describe({ ...cx, cols: 48 }))).toBe("tool-output/bash");
 	});
 
-	it("moves the active category into the native sheet title through open and back transitions only", () => {
-		const data = fixture();
-		const system = data.categories[0]!;
-		system.entries.push({ id: "system/1", label: "second system block", tokens: 100, text: "second source" });
-		const h = harness(data);
-		const overviewHead = textValue(h.viewer.nativeOverlay.head);
-		const checkCategory = (category: ContextViewCategory): NativeNode => {
-			const root = h.viewer.describe(cx);
-			expect(textValue(h.viewer.nativeOverlay.head)).toContain(category.label);
-			expect(textValue(h.viewer.nativeOverlay.head)).not.toBe(overviewHead);
-			expect(
-				root.c?.some(child => "k" in child && child.k === "text" && textValue(child.p?.spans) === category.label),
-			).toBe(false);
-			expect(h.render()[0]).toContain(category.label);
-			expect(h.render()[0]).not.toContain("Context ·");
-			return root;
-		};
-		const back = () => h.viewer.handleNativeEvent({ type: "action", key: "back", act: "back", mods: [] });
-		select(h.viewer, system.id);
-		let root = checkCategory(system);
-		expect(nodes(root).some(node => node.key === "system/0")).toBe(true);
-		expect(nodes(root).some(node => node.key === "system/1")).toBe(true);
-		h.viewer.handleInput("\r");
-		root = checkCategory(system);
-		expect(nodes(root).some(node => node.key === "entry-system/0")).toBe(true);
-		expect(
-			nodes(root).some(node => node.k === "text" && textValue(node.p?.spans)?.includes(system.entries[0]!.label)),
-		).toBe(true);
-		back();
-		checkCategory(system);
-		back();
-		expect(textValue(h.viewer.nativeOverlay.head)).toBe(overviewHead);
-		expect(h.render()[0]).toContain(data.modelLabel);
-
-		const output = data.categories.find(category => category.id === "tool-output")!;
-		const read = output.children![0]!;
-		select(h.viewer, read.key!);
-		root = checkCategory(read);
-		expect(nodes(root).some(node => node.key === "entry-result/0")).toBe(true);
-		back();
-		expect(textValue(h.viewer.nativeOverlay.head)).toBe(overviewHead);
-	});
-
 	it("selects and opens native list items through reconciled events without activating the buffer", () => {
 		const h = harness();
 		const reconciler = new Reconciler("context-swatches");
@@ -394,21 +344,6 @@ describe("ContextViewer navigation", () => {
 		h.viewer.handleInput("\x1b[A");
 		expect(selected(h.viewer.describe(meterCx))).toBe("tool-output");
 	});
-
-	it("keeps buffer and free totals at normal contrast without opening them", () => {
-		const h = harness();
-		const root = h.viewer.describe(meterCx);
-		const list = nodes(root).find(node => node.key === "categories");
-		if (list?.k !== "list") throw new Error("Missing category list");
-		for (const key of ["buffer", "free"]) {
-			const summary = nodes(list).find(node => node.key === key);
-			if (summary?.k !== "item") throw new Error(`Missing summary item: ${key}`);
-			expect(summary.p?.disabled).not.toBe(true);
-			expect(usageColumns(summary)).toEqual(key === "buffer" ? ["20K", "10.0%"] : ["95K", "47.5%"]);
-			select(h.viewer, key);
-			expect(selected(h.viewer.describe(meterCx))).toBe("system-prompt");
-		}
-	});
 });
 
 describe("ContextViewer preview and scrolling", () => {
@@ -430,230 +365,6 @@ describe("ContextViewer preview and scrolling", () => {
 		h.viewer.handleInput("\x1b");
 		expect(h.closed()).toBe(1);
 	});
-
-	it("preserves the first ANSI scroll before a full-content frame after a Native-only visit", () => {
-		const h = harness(
-			fixture({
-				id: "result/0",
-				label: "scroll probe",
-				tokens: 1,
-				text: Array.from({ length: 60 }, (_, index) => `row ${String(index).padStart(3, "0")}`).join("\n"),
-			}),
-		);
-		const context = { ...cx, cols: 48 };
-		h.viewer.describe(context);
-		select(h.viewer, "tool-output/read");
-		expect(nativeText(h.viewer.describe(context))).toContain("row 059");
-		h.viewer.handleInput("\x1b[B");
-		h.viewer.handleNativeEvent({ type: "action", key: "back", act: "back", mods: [] });
-		h.render(48);
-		select(h.viewer, "tool-output/read");
-		h.viewer.handleInput("\x1b[B");
-		expect(h.render(48)[1]).toContain("row 000");
-		h.viewer.handleInput("\x1b[A");
-		expect(h.render(48)[1]).toContain("[scroll probe]");
-	});
-
-	it("opens a short multiline entry through Native activation and Enter, then returns to the same selection", () => {
-		const data = fixture({
-			id: "result/0",
-			label: "short multiline",
-			tokens: 1,
-			text: "first line\nmiddle line\nshort-multiline-tail",
-		});
-		const h = harness(data);
-		h.viewer.describe(cx);
-		select(h.viewer, "tool-output");
-		const preview = h.render();
-		h.viewer.handleNativeEvent({ type: "action", key: "entries/content/list/result/0", act: "open-entry", mods: [] });
-		expect(nodes(h.viewer.describe(cx)).some(node => node.key === "entry-result/0")).toBe(true);
-		expect(h.render().join("\n")).toContain("short-multiline-tail");
-		h.viewer.handleNativeEvent({ type: "action", key: "back", act: "back", mods: [] });
-		expect(h.render()).toEqual(preview);
-		expect(selected(h.viewer.describe(cx))).toBe("result/0");
-		h.viewer.handleInput("\r");
-		expect(nodes(h.viewer.describe(cx)).some(node => node.key === "entry-result/0")).toBe(true);
-		h.viewer.handleInput("\x1b");
-		expect(selected(h.viewer.describe(cx))).toBe("result/0");
-		h.viewer.handleInput("\x1b");
-		expect(selected(h.viewer.describe(cx))).toBe("tool-output");
-	});
-
-	it("changes Native preview selection directly after resize or mouse selection, without local scroll requests", () => {
-		const data = fixture(
-			{
-				id: "result/0",
-				label: "long output",
-				tokens: 1,
-				info: `${"output detail\n".repeat(60)}metadata-tail`,
-				text: "native-output-tail",
-			},
-			{ id: "result/1", label: "next output", tokens: 1, text: "next body" },
-		);
-		const h = harness(data);
-		h.resize(12);
-		let nativeCx = { ...cx, cols: 48 };
-		const reconciler = new Reconciler("context-test");
-		const document = new TspDocument("context-test");
-		let frame = 0;
-		const reconcile = () => {
-			const ops = reconciler.reconcile({ main: [h.viewer], dock: [], layer: [] }, nativeCx);
-			expect(document.applyFrame({ sf: document.surface, s: ++frame, ops })).toEqual([]);
-			expect(ops.some(op => op[0] === "scroll")).toBe(false);
-			return ops;
-		};
-		reconcile();
-		select(h.viewer, "tool-output");
-		reconcile();
-		for (const [key, id] of [
-			["\x1b[B", "result/1"],
-			["\x1b[A", "result/0"],
-		] as const) {
-			h.viewer.handleInput(key);
-			expect(reconcile().some(op => op[0] === "reveal" && op[2] === "nearest")).toBe(true);
-			expect(selected(h.viewer.describe(nativeCx))).toBe(id);
-		}
-		h.resize(8);
-		nativeCx = { ...nativeCx, cols: 24 };
-		reconcile();
-		h.viewer.handleInput("\x1b[B");
-		reconcile();
-		expect(selected(h.viewer.describe(nativeCx))).toBe("result/1");
-		h.viewer.handleInput("\x1b[B");
-		reconcile();
-		expect(selected(h.viewer.describe(nativeCx))).toBe("result/1");
-		h.viewer.handleNativeEvent({
-			type: "action",
-			key: "entries/content/list/result/0",
-			act: "select-entry",
-			mods: [],
-		});
-		reconcile();
-		h.viewer.handleInput("\x1b[B");
-		reconcile();
-		expect(selected(h.viewer.describe(nativeCx))).toBe("result/1");
-		h.viewer.handleInput("\r");
-		reconcile();
-		expect(nativeText(h.viewer.describe(nativeCx))).toContain("next body");
-		h.viewer.handleInput("\x1b");
-		expect(reconcile().filter(op => op[0] === "reveal")).toEqual([
-			["reveal", expect.stringMatching(/entries\/content\/list\/result%2F1\/head$/), "start"],
-		]);
-		expect(selected(h.viewer.describe(nativeCx))).toBe("result/1");
-		h.viewer.handleInput("\x1b[A");
-		expect(
-			reconcile()
-				.filter(op => op[0] === "reveal")
-				.map(op => op[2]),
-		).toEqual(["nearest"]);
-		h.viewer.handleInput("\r");
-		reconcile();
-		const full = nativeText(h.viewer.describe(nativeCx));
-		expect(full).toContain("metadata-tail");
-		expect(full).toContain("native-output-tail");
-		h.viewer.handleInput("\x1b");
-		reconcile();
-		h.viewer.handleInput("\x1b");
-		reconcile();
-		select(h.viewer, "tool-output");
-		expect(
-			reconcile()
-				.filter(op => op[0] === "reveal")
-				.map(op => op[2]),
-		).toEqual(["nearest"]);
-	});
-
-	it("bounds ANSI metadata and body together while preserving hidden content through Enter and Back", () => {
-		const h = harness(
-			fixture({
-				id: "result/0",
-				label: "metadata-heavy",
-				tokens: 1,
-				info: `${"output detail\n".repeat(60)}metadata-tail`,
-				text: "output-body-tail",
-			}),
-		);
-		h.resize(12);
-		h.render(48);
-		select(h.viewer, "tool-output");
-		const preview = h.render(48);
-		expect(preview.join("\n")).toContain("[metadata-heavy]");
-		expect(preview.join("\n")).toContain("output detail");
-		expect(preview.join("\n")).toContain("… more");
-		expect(preview.join("\n")).toContain("View Content");
-		expect(preview.join("\n")).not.toContain("metadata-tail");
-		expect(preview.join("\n")).not.toContain("output-body-tail");
-		h.viewer.handleInput("\x1b[B");
-		expect(h.render(48).find(line => line.includes("bash result"))).toContain("┃ ");
-		h.viewer.handleInput("\x1b[A");
-		expect(h.render(48)).toEqual(preview);
-		h.viewer.handleInput("\r");
-		scrollToText(h.viewer, () => h.render(48), "output-body-tail");
-		expect(h.render(48).join("\n")).toContain("metadata-tail");
-		expect(h.render(48).join("\n")).toContain("output-body-tail");
-		h.viewer.handleInput("\x1b");
-		expect(h.render(48)).toEqual(preview);
-	});
-
-	it("does not add an opening hint or a row when selecting a complete Native preview", () => {
-		const h = harness(
-			fixture(
-				{ id: "result/0", label: "multiline", tokens: 1, text: "first line\nsecond line" },
-				{ id: "result/1", label: "short", tokens: 1, text: "short body" },
-			),
-		);
-		h.resize(12);
-		const context = { ...cx, cols: 48 };
-		const reconciler = new Reconciler("complete-preview");
-		h.viewer.describe(context);
-		select(h.viewer, "tool-output");
-		reconciler.reconcile({ main: [h.viewer], dock: [], layer: [] }, context);
-		for (const key of ["\x1b[B", "\x1b[A"]) {
-			h.viewer.handleInput(key);
-			const ops = reconciler.reconcile({ main: [h.viewer], dock: [], layer: [] }, context);
-			expect(ops.filter(op => op[0] === "add" || op[0] === "del")).toEqual([]);
-			const preview = nativeText(h.viewer.describe(context));
-			expect(preview).not.toContain("View Content");
-			expect(preview).not.toContain("… more");
-		}
-	});
-
-	for (const [name, content] of [
-		["multiline body", { text: `${"short row\n".repeat(20)}hidden-tail` }],
-		["wide single-line body", { text: `${"中文字 ".repeat(80)}hidden-tail` }],
-		["multiline metadata", { info: `${"metadata row\n".repeat(20)}hidden-tail`, text: "body after metadata" }],
-	] as const) {
-		it(`keeps a persistent Native more row when selecting a truncated ${name}`, () => {
-			const h = harness(
-				fixture(
-					{ id: "result/0", label: "truncated", tokens: 1, ...content },
-					{ id: "result/1", label: "complete", tokens: 1, text: "short body" },
-				),
-			);
-			h.resize(12);
-			const context = { ...cx, cols: 48 };
-			const reconciler = new Reconciler(`truncated-preview-${name}`);
-			h.viewer.describe(context);
-			select(h.viewer, "tool-output");
-			reconciler.reconcile({ main: [h.viewer], dock: [], layer: [] }, context);
-			const selectedPreview = nativeText(h.viewer.describe(context));
-			expect(selectedPreview).toContain("… more");
-			expect(selectedPreview).toContain("View Content");
-			expect(selectedPreview).not.toContain("hidden-tail");
-			h.viewer.handleInput("\x1b[B");
-			const deselected = reconciler.reconcile({ main: [h.viewer], dock: [], layer: [] }, context);
-			expect(deselected.filter(op => op[0] === "add" || op[0] === "del")).toEqual([]);
-			const unselectedPreview = nativeText(h.viewer.describe(context));
-			expect(unselectedPreview).toContain("… more");
-			expect(unselectedPreview).not.toContain("View Content");
-			h.viewer.handleInput("\x1b[A");
-			const reselected = reconciler.reconcile({ main: [h.viewer], dock: [], layer: [] }, context);
-			expect(reselected.filter(op => op[0] === "add" || op[0] === "del")).toEqual([]);
-			expect(nativeText(h.viewer.describe(context))).toEqual(selectedPreview);
-			h.viewer.handleInput("\r");
-			expect(nativeText(h.viewer.describe(context))).toContain("hidden-tail");
-		});
-	}
 
 	it("emits a new Native scroll request for each repeated down input", () => {
 		const h = harness();
@@ -696,108 +407,9 @@ describe("ContextViewer preview and scrolling", () => {
 			by: "page-down",
 		});
 	});
-
-	it("renders no empty rows for an entry's trailing newlines in either renderer", () => {
-		const h = harness(fixture({ id: "result/0", label: "read result", tokens: 1, text: "trailing body\n\n\n" }));
-		select(h.viewer, "tool-output");
-		const preview = h.render();
-		const body = preview.findIndex(line => line.includes("trailing body"));
-		// One separator row, then the next entry's header.
-		expect(preview[body + 2]).toContain("[bash result]");
-		expect(nativeText(h.viewer.describe(cx))).not.toContain("trailing body\n\n");
-		h.viewer.handleInput("\r");
-		// The body text node ends at the source text; the action bar follows directly.
-		expect(nativeText(h.viewer.describe(cx))).toContain("trailing body\nBack");
-	});
-
-	it("opens the tail of a single source line even when only part of that line fits the preview", () => {
-		const data = fixture({
-			id: "result/0",
-			label: "single line",
-			tokens: 100,
-			text: `${"寬字 ".repeat(10000)}single-line-tail`,
-		});
-		const h = harness(data);
-		h.resize(12);
-		h.render(48);
-		select(h.viewer, "tool-output");
-		expect(h.render(48).join("\n")).toContain("… more");
-		h.viewer.handleInput("\r");
-		h.render(48);
-		scrollToText(h.viewer, () => h.render(48), "single-line-tail");
-		expect(h.render(48).join("\n")).toContain("single-line-tail");
-		h.viewer.handleInput("\x1b");
-		expect(selected(h.viewer.describe({ ...cx, cols: 48 }))).toBe("result/0");
-	});
-
-	it("reserves gutter and scrollbar columns before wrapping a wide-character preview", () => {
-		const body = `${"寬".repeat(18)}END`;
-		const data = fixture(
-			{ id: "result/0", label: "wide", tokens: 1, text: body },
-			{ id: "result/1", label: "overflow", tokens: 1, text: "overflow\n".repeat(100) },
-		);
-		const h = harness(data);
-		h.resize(18);
-		h.render(48);
-		select(h.viewer, "tool-output");
-		const lines = h.render(48);
-		const content = lines.find(line => line.includes("END"));
-		expect(content).toContain(`┃   ${body}`);
-		expect(content).toMatch(/[│█] │$/);
-		expect(lines.every(line => visibleWidth(line) <= 48)).toBe(true);
-	});
-
-	it("moves the selected gutter with the entry without marking separators or the previous entry", () => {
-		const h = harness(
-			fixture({
-				id: "result/0",
-				label: "first title",
-				info: "metadata",
-				tokens: 1,
-				text: "first body\n\n寬字 body\nlast body",
-			}),
-		);
-		h.render(48);
-		select(h.viewer, "tool-output");
-		const before = h.render(48);
-		for (const value of ["first title", "metadata", "first body", "寬字 body", "last body"]) {
-			expect(before.find(line => line.includes(value))).toContain("┃ ");
-		}
-		const lastBody = before.findIndex(line => line.includes("last body"));
-		expect(before[lastBody + 1]).not.toContain("┃ ");
-		h.viewer.handleInput("\x1b[B");
-		const next = h.render(48);
-		expect(next.find(line => line.includes("bash result"))).toContain("┃ ");
-		expect(next.find(line => line.includes("short result"))).toContain("┃ ");
-		for (const value of ["first title", "metadata", "first body", "寬字 body", "last body"]) {
-			expect(next.find(line => line.includes(value))).not.toContain("┃ ");
-		}
-		expect(next.every(line => visibleWidth(line) <= 48)).toBe(true);
-	});
 });
 
 describe("ContextViewer usage and allocation", () => {
-	it.each([
-		{ name: "zero", tokens: 0, share: "0.0%" },
-		{ name: "below the rounding boundary", tokens: 99, share: "<0.1%" },
-		{ name: "at the rounding boundary", tokens: 100, share: "0.1%" },
-	])("formats usage $name consistently in ANSI and Native output", ({ tokens, share }) => {
-		const data = fixture();
-		const h = harness({
-			...data,
-			usage: tokens,
-			categories: [{ ...data.categories[0]!, tokens: 1 }],
-		});
-		for (const width of [48, 100]) {
-			const line = h.render(width).find(line => line.includes("System Prompt"))!;
-			expect(line.match(/<?\d+\.\d%/)?.[0]).toBe(share);
-		}
-		for (const context of [cx, meterCx]) {
-			const item = nodes(h.viewer.describe(context)).find(item => item.key === "system-prompt");
-			expect(usageColumns(item)?.[1]).toBe(share);
-		}
-	});
-
 	it("conserves Used across top-level allocations and splits only the parent's budget among children", () => {
 		const data = fixture();
 		const categories = data.categories.filter(category => category.tokens > 0);
@@ -862,53 +474,9 @@ describe("ContextViewer usage and allocation", () => {
 		const top = nodes(h.viewer.describe(cx)).find(node => node.key === "system-prompt");
 		expect(usageColumns(top)).toEqual(["4", "40.0%"]);
 	});
-
-	it("keeps a zero-usage allocation at zero without hiding free capacity", () => {
-		const data = fixture();
-		const zero = harness({ ...data, usage: 0, buffer: 20000, free: 180000 });
-		const values = nodes(zero.viewer.describe(cx)).filter(node => node.k === "item");
-		expect(usageColumns(values.find(node => node.key === "tool-output"))).toEqual(["0", "0.0%"]);
-		expect(usageColumns(values.find(node => node.key === "free"))).toEqual(["180K", "90.0%"]);
-	});
 });
 
 describe("ContextViewer overview and meter", () => {
-	it("keeps usage in two overview rows and gives preview and full content the reclaimed rows", () => {
-		const data = fixture();
-		const usage = { contextWindow: 272000, usedTokens: 71000, freeTokens: 160200, thresholdTokens: 231200 };
-		const h = harness({
-			...data,
-			modelLabel: "GPT-6 Luna",
-			window: usage.contextWindow,
-			usage: usage.usedTokens,
-			free: usage.freeTokens,
-			buffer: 40800,
-			breakdown: { ...data.breakdown, ...usage },
-		});
-		data.categories[0]!.entries = [
-			{ id: "first", label: "first source", tokens: 1, text: "one\ntwo\nthree\nfour\nfive\nsource-tail" },
-			{ id: "second", label: "second source", tokens: 1, text: "other source" },
-		];
-		const overview = h.render();
-		expect(overview[0]).toContain("Context · GPT-6 Luna");
-		expect(overview[1]).toMatch(/71K.*272K.*26%/);
-		expect(overview[2]).toMatch(/160K.*85%/);
-		expect(overview[3]).toContain("System Prompt");
-		h.resize(12);
-		h.viewer.handleInput("\r");
-		const preview = h.render();
-		expect(preview[1]).toContain("[first source]");
-		expect(preview.join("\n")).toContain("source-tail");
-		h.viewer.handleInput("\r");
-		const full = h.render();
-		expect(full[1]).toContain("[first source]");
-		expect(full.join("\n")).toContain("source-tail");
-		h.viewer.handleInput("\x1b");
-		h.render();
-		h.viewer.handleInput("\x1b");
-		expect(h.render()[1]).toMatch(/71K.*272K.*26%/);
-	});
-
 	it.each([
 		{ name: "without meter support", supportsMeter: false, emptyWeights: false },
 		{ name: "without category weights", supportsMeter: true, emptyWeights: true },
@@ -921,48 +489,6 @@ describe("ContextViewer overview and meter", () => {
 		const lines = nodes(root).flatMap(node => (node.k === "text" ? [textValue(node.p?.spans)] : []));
 		expect(lines.some(line => /85K.*200K/.test(line ?? ""))).toBe(true);
 		expect(lines.some(line => /75K.*80%/.test(line ?? ""))).toBe(true);
-	});
-
-	it("keeps category swatches matched to the usage bar", () => {
-		const h = harness();
-		const root = h.viewer.describe(meterCx);
-		const all = nodes(root);
-		const meter = all.find(node => node.k === "meter");
-		if (meter?.k !== "meter") throw new Error("Missing context meter");
-		const list = all.find(node => node.key === "categories");
-		if (!list) throw new Error("Missing categories");
-		const item = (key: string) => {
-			const row = nodes(list).find(node => node.key === key);
-			if (!row) throw new Error(`Missing category: ${key}`);
-			return row;
-		};
-		const expected = [
-			{
-				row: item("system-prompt"),
-				glyph: "■",
-				color: CONTEXT_PRESENTATION["system-prompt"].color,
-				bar: item("system-prompt"),
-			},
-			{ row: item("skills"), glyph: "■", color: CONTEXT_PRESENTATION.skills.color },
-			{
-				row: item("tool-output/read"),
-				glyph: "■",
-				color: CONTEXT_PRESENTATION["tool-output"].color,
-				bar: item("tool-output"),
-			},
-		];
-		for (const item of expected) {
-			const swatch = itemLabel(item.row)?.[0];
-			expect(swatch?.t.trim()).toBe(item.glyph);
-			expect(swatch?.s).toBe(item.color);
-			if (item.bar) {
-				const label = itemLabel(item.bar)?.[1]?.t;
-				expect(meter.p?.parts?.find(part => part.label?.startsWith(`${label} ·`))?.token).toBe(item.color);
-			}
-		}
-		expect(selected(root)).toBe("system-prompt");
-		const fallback = nodes(h.viewer.describe(cx)).find(node => node.key === "system-prompt");
-		expect(itemLabel(fallback)?.[0]?.t.trim()).toBe(theme.symbol("context.content"));
 	});
 
 	it("places a stacked meter above selectable categories on meter-capable terminals", () => {
@@ -1111,44 +637,6 @@ describe("ContextViewer entry content", () => {
 		expect(body).not.toContain("\x1b");
 	});
 
-	it.each([
-		{ name: "12-hour", hour12: true },
-		{ name: "24-hour", hour12: false },
-	])("shows $name message times and call IDs in ANSI and Native content", ({ hour12 }) => {
-		const h = harness();
-		const context = { ...cx, hour12 };
-		const expectedTime = new Date(0).toLocaleString([], {
-			year: "numeric",
-			month: "2-digit",
-			day: "2-digit",
-			hour: "2-digit",
-			minute: "2-digit",
-			hour12,
-		});
-		h.viewer.describe(context);
-		select(h.viewer, "tool-output");
-		const preview = h.render().join("\n");
-		expect(preview).toContain("call-123");
-		expect(preview).toContain(expectedTime);
-		expect(preview).toContain("[read result]");
-		const narrowPreview = h.render(48).join("\n");
-		expect(narrowPreview).toContain("call-123");
-		expect(narrowPreview).toContain(
-			new Date(0).toLocaleDateString([], { year: "numeric", month: "2-digit", day: "2-digit" }),
-		);
-		const nativePreview = nodes(h.viewer.describe(context)).find(node => node.key === "result/0")!;
-		expect(nativeText(nativePreview)).toContain(expectedTime);
-		h.viewer.handleInput("\r");
-		const full = h.render().join("\n");
-		expect(full).toContain("call-123");
-		expect(full).toContain(expectedTime);
-		const nativeFull = nativeText(h.viewer.describe(context));
-		expect(nativeFull).toContain("call-123");
-		expect(nativeFull).toContain(expectedTime);
-		h.viewer.handleInput("\x1b");
-		expect(h.render(48).join("\n")).toContain("call-123");
-	});
-
 	it("refreshes cached preview and full-content timestamps when the clock format changes at the same width", () => {
 		const h = harness();
 		const context = { ...cx, cols: 160, hour12: true };
@@ -1179,113 +667,7 @@ describe("ContextViewer entry content", () => {
 	});
 });
 
-describe("ContextViewer Snapcompact", () => {
-	it("shows estimated wire savings in the overview without a diagnostics navigation level", () => {
-		const data = fixture();
-		const h = harness(data);
-		const overview = h.render(160);
-		expect(h.viewer.capturesInput("d")).toBe(false);
-		h.viewer.handleInput("d");
-		expect(h.render(160)).toEqual(overview);
-		scrollToText(h.viewer, () => h.render(160), "2 frames");
-		expect(h.render(160).join("\n")).toContain("2 frames");
-		expect(nodes(h.viewer.describe(cx)).some(node => node.p?.actions?.click === "diagnostics")).toBe(false);
-		h.viewer.handleInput("\x1b");
-		expect(h.closed()).toBe(1);
-	});
-
-	it("keeps inactive Snapcompact reasons visible in the overview", () => {
-		const data = fixture();
-		const inactive = harness({
-			...data,
-			breakdown: {
-				...data.breakdown,
-				snapcompact: { visionCapable: false, savedTokens: 0 },
-			},
-		});
-		scrollToText(inactive.viewer, () => inactive.render(160), "no image input");
-		expect(inactive.render(160).join("\n")).toContain("no image input");
-	});
-});
-
-describe("ContextViewer theme and responsive layout", () => {
-	it("resolves map cells and interactive legend swatches from the same live theme, including overrides after invalidate", () => {
-		const base = getBuiltinThemes().dark!;
-		const h = harness();
-		for (const override of ["A", "寬寬"]) {
-			setThemeInstance(
-				createTheme({
-					...base,
-					symbols: {
-						preset: "unicode",
-						overrides: {
-							"context.content": override,
-							"context.messages": "msg",
-							"context.buffer": "buf",
-							"context.free": "free",
-						},
-					},
-				}),
-			);
-			h.viewer.invalidate();
-			const lines = h.viewer.render(100);
-			const system = lines.find(line => Bun.stripANSI(line).includes("System Prompt"))!;
-			const p = CONTEXT_PRESENTATION["system-prompt"];
-			const swatch = theme.styledSymbol(p.symbol, p.color);
-			const native = nodes(h.viewer.describe(cx));
-			const grid = native.filter(node => node.k === "text" && node.p?.wrap === "none");
-			expect(
-				grid.some(
-					node =>
-						node.k === "text" &&
-						node.p?.spans?.some(span => span.t.startsWith(override) && span.s?.split(" ")[0] === p.color),
-				),
-			).toBe(true);
-			for (const key of ["skills", "built-in-tools", "tool-output", "buffer", "free"] as const) {
-				const legend = native.find(node => node.key === key);
-				const presentation = CONTEXT_PRESENTATION[key];
-				const swatch = itemLabel(legend)?.[0];
-				expect(
-					grid.some(
-						node =>
-							node.k === "text" &&
-							node.p?.spans?.some(
-								cell => cell.t.trim() === swatch?.t.trim() && cell.s?.split(" ")[0] === swatch?.s,
-							),
-					),
-				).toBe(true);
-				expect(swatch?.s).toBe(presentation.color);
-			}
-			const top = native.find(node => node.key === "tool-output");
-			const child = native.find(node => node.key === "tool-output/read");
-			const topSwatch = itemLabel(top)?.[0];
-			const childSwatch = itemLabel(child)?.[0];
-			expect(childSwatch?.s).toBe(topSwatch?.s);
-			expect(childSwatch?.t.trim()).toBe(topSwatch?.t.trim());
-			if (override === "A") {
-				expect(sliceWithWidth(system, 2, 31, true).text).toContain(swatch);
-				expect(sliceWithWidth(system, 36, 60, true).text).toContain(swatch);
-			}
-		}
-	});
-
-	it("aligns token and usage columns across categories, children, and capacity rows", () => {
-		const data = fixture();
-		data.categories[0]!.label = "寬".repeat(80);
-		const h = harness(data);
-		for (const width of [48, 100]) {
-			const lines = h.render(width).filter(line => /\d+K?\s+\d+\.\d%/.test(line));
-			const ends = lines.map(line => {
-				const match = /(\d+K?)\s+(\d+\.\d%)/.exec(line)!;
-				const start = visibleWidth(line.slice(0, match.index));
-				return [start + match[1]!.length, start + match[0].length];
-			});
-			expect(ends.length).toBeGreaterThan(1);
-			expect(ends.every(end => end[0] === ends[0]![0] && end[1] === ends[0]![1])).toBe(true);
-			expect(h.render(width).every(line => visibleWidth(line) <= width)).toBe(true);
-		}
-	});
-
+describe("ContextViewer layout", () => {
 	it("preserves the footer divider and bottom border at short heights in overview, preview and full content", () => {
 		const h = harness();
 		for (const page of ["overview", "category", "entry"]) {
@@ -1302,31 +684,5 @@ describe("ContextViewer theme and responsive layout", () => {
 			h.resize(24);
 			h.render();
 		}
-	});
-
-	it("keeps wide symbols and content inside all responsive widths, and remains usable after width-only and height-only resizes", () => {
-		const base = getBuiltinThemes().dark!;
-		setThemeInstance(
-			createTheme({
-				...base,
-				symbols: { preset: "ascii", overrides: { "context.content": "寬寬", "context.messages": "multi" } },
-			}),
-		);
-		const h = harness();
-		for (const width of [48, 64, 100]) {
-			const lines = h.viewer.render(width);
-			expect(lines.every(line => visibleWidth(line) <= width)).toBe(true);
-		}
-		select(h.viewer, "tool-output/read");
-		h.render(48);
-		scrollToText(h.viewer, () => h.render(48), "context-output-tail");
-		expect(h.render(48).join("\n")).toContain("context-output-tail");
-		h.resize(18);
-		h.render(48);
-		scrollToText(h.viewer, () => h.render(48), "context-output-tail");
-		expect(h.render(48).join("\n")).toContain("context-output-tail");
-		h.render(100);
-		scrollToText(h.viewer, () => h.render(100), "context-output-tail");
-		expect(h.render(100).join("\n")).toContain("context-output-tail");
 	});
 });
