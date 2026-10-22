@@ -64,46 +64,6 @@ Argument handling:
 - `--` ends flag parsing; everything after it is literal message text, even if it
   looks like a flag.
 
-### Interactive context viewer
-
-`/context` opens a read-only snapshot of the active system prompt, tools, and
-messages. It deliberately skips extension hooks, including `context` and
-`before_provider_request`, so inspecting context cannot trigger their side
-effects. It is not the raw transcript or an exact preview of the next provider
-request: request transforms, provider encoding, and image processing are also
-not applied. Token counts and category shares are estimates.
-
-System Prompt entries include loaded instruction files and skill descriptions.
-Skills is a separate, estimate-only row; its estimate excludes hidden or
-unavailable skills and is subtracted from the System Prompt estimate to avoid
-double-counting.
-
-Thinking counts use the session tokenizer's estimates. Multiple thinking blocks
-in one message share a total shown on the message heading; grouped blocks show
-`—` rather than individual counts. A single block shows its count directly.
-Empty interrupted thinking without usage shows `N/A · Interrupted`, not a
-measured zero.
-
-Retained Anthropic web-search and tool-search calls and their results appear in
-Tool Calls and Tool Output as JSON blocks. Opaque provider data shows only its
-size: thinking signatures and encrypted thinking appear in the entry metadata
-(`signature · 1,024 chars`), server-tool `signature`, `encrypted_content`, and
-`encrypted_index` inline as `[signature · 1,024 chars]`. Their tokens still count
-toward the estimates. Long content uses the normal preview limits and remains
-available in full-content view.
-
-Use the configured `tui.select.up` / `tui.select.down` keys to select and scroll,
-`tui.select.confirm` to open an entry, and `tui.select.cancel` to go back or
-close. In full-content view, `tui.select.pageUp` / `tui.select.pageDown` scroll
-by a page. They default to Up/Down, Enter, Esc, and PageUp/PageDown; configure
-other keys in `keybindings.yml`. In native previews, click to select and
-double-click to open. Categories without entries cannot be opened.
-Closing full-content view restores the previous selection and scroll position.
-Truncated previews show `… more`; confirm to inspect the full entry.
-
-Browsing does not submit the composer draft or interrupt a background turn. The
-snapshot does not refresh while open; close and reopen it to update.
-
 ### Launch flags
 
 #### Session and workspace
