@@ -14,7 +14,8 @@ export const CONTEXT_PRESENTATION = {
 	skills: SKILLS,
 	"built-in-tools": TOOLS,
 	"custom-tools": DETAILS,
-	"user-messages": SYSTEM,
+	// Shares the System Prompt color; the message glyph tells them apart in the map.
+	"user-messages": { color: "accent", symbol: "context.messages" },
 	"assistant-messages": MESSAGES,
 	"assistant-thinking": DETAILS,
 	"tool-calls": TOOLS,
