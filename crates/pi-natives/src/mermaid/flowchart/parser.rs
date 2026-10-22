@@ -376,7 +376,10 @@ fn parse_state_transition(line: &str) -> Option<(&str, &str, Option<&str>)> {
 	// Source IDs admit `-`, so find the arrow at the first `>` and backtrack its
 	// two dashes.
 	let arrow_end = line.find('>')? + 1;
-	if arrow_end < 3 || &line[arrow_end - 3..arrow_end] != "-->" {
+	if arrow_end < 3
+		|| !line.is_char_boundary(arrow_end - 3)
+		|| &line[arrow_end - 3..arrow_end] != "-->"
+	{
 		return None;
 	}
 	let mut source_cursor = Cursor::new(&line[..arrow_end - 3]);
@@ -1141,5 +1144,14 @@ mod tests {
 		assert_eq!(graph.node("A").unwrap().label, "A");
 		assert_eq!(graph.node("A").unwrap().shape, NodeShape::Rectangle);
 		assert_eq!(graph.subgraphs[0].node_ids, ["A"]);
+	}
+
+	#[test]
+	fn state_transition_handles_multibyte_char_before_gt() {
+		let graph = parse_flowchart("stateDiagram-v2\n  🎉> --> B").unwrap();
+		assert!(graph.edges.is_empty());
+
+		let graph = parse_flowchart("stateDiagram-v2\n  state \"α>\" as A\n  A --> B").unwrap();
+		assert_eq!(graph.edges.len(), 1);
 	}
 }
