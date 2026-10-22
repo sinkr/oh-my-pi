@@ -399,13 +399,5 @@ export function buildSessionContextView(
 	appendMessageEntries(session, state);
 	finalizeToolOutputGroups(state);
 
-	return {
-		modelLabel: session.model?.name ?? session.model?.id ?? "no model",
-		window: breakdown.contextWindow,
-		usage: breakdown.usedTokens,
-		buffer: breakdown.autoCompactBufferTokens,
-		free: breakdown.freeTokens,
-		breakdown,
-		categories,
-	};
+	return { breakdown, categories };
 }

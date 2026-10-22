@@ -6,7 +6,7 @@ import { renderToolExamples } from "@oh-my-pi/pi-ai/dialect";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme";
-import type { TspText } from "@oh-my-pi/pi-wire";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { NativeNode } from "../native/node";
 import { node, span, text } from "../native/describe";
 
@@ -650,7 +650,7 @@ export function describeContextMeter(breakdown: ContextMeterData): [NativeNode, 
 }
 
 /** The `/context` title: the model once one is selected (the body leads with its window). */
-export function contextUsageHead(breakdown: ContextBreakdown): TspText {
+export function contextUsageHead(breakdown: ContextBreakdown): TspSpan[] {
 	if (breakdown.contextWindow <= 0) return [span("Context usage", "strong")];
 	const modelName = breakdown.model?.name ?? breakdown.model?.id ?? "no model";
 	return [span("Context", "strong"), span(` · ${modelName}`, "muted")];

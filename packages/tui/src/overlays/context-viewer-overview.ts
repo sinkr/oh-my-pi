@@ -127,17 +127,20 @@ export function buildOverviewRows(
 			});
 	}
 	rows.push(
-		{ key: "buffer", id: "buffer", label: "Auto-Compact Buffer", tokens: data.buffer },
-		{ key: "free", id: "free", label: "Free Space", tokens: data.free },
+		{ key: "buffer", id: "buffer", label: "Auto-Compact Buffer", tokens: data.breakdown.autoCompactBufferTokens },
+		{ key: "free", id: "free", label: "Free Space", tokens: data.breakdown.freeTokens },
 	);
 	const tokenWidth = Math.max(...rows.map(row => (row.tokens === undefined ? 1 : formatNumber(row.tokens).length)));
 	const shareWidth = Math.max(
-		...rows.map(row => (row.tokens === undefined ? 1 : formatShare(row.tokens, data.window).length)),
+		...rows.map(row => (row.tokens === undefined ? 1 : formatShare(row.tokens, data.breakdown.contextWindow).length)),
 	);
 	return rows.map(row => ({
 		...row,
 		value: row.tokens === undefined ? "—" : formatNumber(row.tokens).padStart(tokenWidth),
-		share: row.tokens === undefined ? "" : `  ${formatShare(row.tokens, data.window).padStart(shareWidth)}`,
+		share:
+			row.tokens === undefined
+				? ""
+				: `  ${formatShare(row.tokens, data.breakdown.contextWindow).padStart(shareWidth)}`,
 	}));
 }
 
@@ -200,10 +203,10 @@ export function planMapRows(
 	const cells = planContextMap<ContextPresentationId>(
 		[
 			...data.categories.map(category => ({ id: category.id, tokens: allocated.get(category) ?? 0 })),
-			{ id: "free", tokens: data.free },
-			{ id: "buffer", tokens: data.buffer },
+			{ id: "free", tokens: data.breakdown.freeTokens },
+			{ id: "buffer", tokens: data.breakdown.autoCompactBufferTokens },
 		],
-		data.window,
+		data.breakdown.contextWindow,
 		geometry.columns,
 		geometry.rows,
 	);

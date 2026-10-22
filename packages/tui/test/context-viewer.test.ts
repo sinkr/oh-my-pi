@@ -79,11 +79,6 @@ function fixture(firstOutput?: ContextViewEntry, secondOutput?: ContextViewEntry
 		{ ...output, key: "tool-output/bash", label: "bash", entries: output.entries.slice(1), tokens: 10000 },
 	];
 	return {
-		modelLabel: "Fixture",
-		window: 200000,
-		usage: 85000,
-		buffer: 20000,
-		free: 95000,
 		breakdown: {
 			model: undefined,
 			contextWindow: 200000,
@@ -416,7 +411,16 @@ describe("ContextViewer usage and allocation", () => {
 		for (const category of categories) category.tokens = 1;
 		const output = categories.at(-1)!;
 		for (const child of output.children!) child.tokens = 1;
-		const h = harness({ ...data, usage: 7, window: 100, buffer: 10, free: 83, categories });
+		const h = harness({
+			categories,
+			breakdown: {
+				...data.breakdown,
+				usedTokens: 7,
+				contextWindow: 100,
+				autoCompactBufferTokens: 10,
+				freeTokens: 83,
+			},
+		});
 		const value = (key: string) => {
 			const item = nodes(h.viewer.describe(cx)).find(node => node.key === key);
 			return usageColumns(item);
@@ -439,7 +443,7 @@ describe("ContextViewer usage and allocation", () => {
 		const data = fixture();
 		const categories = data.categories.slice(0, 3);
 		for (const [index, category] of categories.entries()) category.tokens = [1, 2, 4][index]!;
-		const h = harness({ ...data, categories, usage: 5, window: 100 });
+		const h = harness({ categories, breakdown: { ...data.breakdown, usedTokens: 5, contextWindow: 100 } });
 		const values = nodes(h.viewer.describe(cx)).filter(
 			node => node.k === "item" && categories.some(category => category.id === node.key),
 		);
@@ -460,7 +464,11 @@ describe("ContextViewer usage and allocation", () => {
 	});
 
 	it("omits percentages and the meter when capacity is zero", () => {
-		const h = harness({ ...fixture(), window: 0, usage: 0, buffer: 0, free: 0 });
+		const data = fixture();
+		const h = harness({
+			...data,
+			breakdown: { ...data.breakdown, contextWindow: 0, usedTokens: 0, autoCompactBufferTokens: 0, freeTokens: 0 },
+		});
 		expect(h.render(160).join("\n")).not.toMatch(/NaN|Infinity/);
 		const root = h.viewer.describe(meterCx);
 		expect(nodes(root).some(node => node.k === "meter")).toBe(false);
@@ -469,7 +477,11 @@ describe("ContextViewer usage and allocation", () => {
 	});
 
 	it("shows over-capacity usage without clamping its percentage or category allocation", () => {
-		const h = harness({ ...fixture(), window: 10, usage: 15, buffer: 0, free: 0 });
+		const data = fixture();
+		const h = harness({
+			...data,
+			breakdown: { ...data.breakdown, contextWindow: 10, usedTokens: 15, autoCompactBufferTokens: 0, freeTokens: 0 },
+		});
 		expect(h.render(160)[1]).toMatch(/15.*10.*150%/);
 		const top = nodes(h.viewer.describe(cx)).find(node => node.key === "system-prompt");
 		expect(usageColumns(top)).toEqual(["4", "40.0%"]);
@@ -493,13 +505,14 @@ describe("ContextViewer overview and meter", () => {
 
 	it("places a stacked meter above selectable categories on meter-capable terminals", () => {
 		const data = fixture();
+		const { breakdown } = data;
 		const h = harness(data);
 		for (const cols of [48, 100]) {
 			const root = h.viewer.describe({ ...meterCx, cols });
 			const all = nodes(root);
 			const meter = all.find(node => node.k === "meter");
 			if (meter?.k !== "meter") throw new Error("Missing context meter");
-			expect(meter.p?.value).toBe(data.usage / data.window);
+			expect(meter.p?.value).toBe(breakdown.usedTokens / breakdown.contextWindow);
 			expect(meter.p?.parts?.map(part => part.value)).toEqual([
 				21250 / 200000,
 				10625 / 200000,
@@ -510,7 +523,7 @@ describe("ContextViewer overview and meter", () => {
 				20000 / 200000,
 			]);
 			expect(meter.p?.parts?.at(-1)).toMatchObject({ token: "warning", hatch: true });
-			expect(meter.p?.marks?.[0]?.at).toBe(data.breakdown.thresholdTokens! / data.window);
+			expect(meter.p?.marks?.[0]?.at).toBe(breakdown.thresholdTokens! / breakdown.contextWindow);
 			const body = root.c?.findIndex(child => "k" in child && child.key === "overview");
 			const bar = root.c?.findIndex(child => "k" in child && child.k === "meter");
 			expect(bar).toBeLessThan(body!);

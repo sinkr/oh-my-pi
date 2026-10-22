@@ -67,12 +67,6 @@ export interface ContextViewCategory {
 }
 
 export interface ContextViewData {
-	readonly modelLabel: string;
-	readonly window: number;
-	/** Current context usage, which may be provider-anchored or locally estimated. */
-	readonly usage: number;
-	readonly buffer: number;
-	readonly free: number;
 	readonly breakdown: ContextBreakdown;
 	readonly categories: readonly ContextViewCategory[];
 }

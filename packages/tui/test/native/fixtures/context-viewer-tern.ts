@@ -6,11 +6,6 @@ import { ContextViewer } from "../../../src/overlays/context-viewer";
 const terminal = new ProcessTerminal();
 const tui = new TUI(terminal);
 const data: ContextViewData = {
-	modelLabel: "Native regression fixture",
-	window: 10000,
-	usage: 100,
-	buffer: 1000,
-	free: 8900,
 	breakdown: {
 		model: undefined,
 		contextWindow: 10000,

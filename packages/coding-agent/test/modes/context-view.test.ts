@@ -125,10 +125,11 @@ describe("context snapshot capacity and savings", () => {
 			settings: Settings.isolated({ "compaction.enabled": true, "todo.enabled": false }),
 		});
 		const data = buildSessionContextView(session);
-		expect(totalTokens(data)).toBeGreaterThan(data.window);
-		expect(data.usage).toBe(100);
-		expect(data.buffer).toBeGreaterThan(0);
-		expect(data.free + data.buffer).toBe(data.window - 100);
+		const { breakdown } = data;
+		expect(totalTokens(data)).toBeGreaterThan(breakdown.contextWindow);
+		expect(breakdown.usedTokens).toBe(100);
+		expect(breakdown.autoCompactBufferTokens).toBeGreaterThan(0);
+		expect(breakdown.freeTokens + breakdown.autoCompactBufferTokens).toBe(breakdown.contextWindow - 100);
 	});
 });
 

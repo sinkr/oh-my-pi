@@ -143,16 +143,14 @@ export class ContextViewer implements Component {
 		this.#close = options.onClose;
 		this.#requestRender = options.requestRender;
 		this.#getRows = options.getRows;
-		const allocated = allocateUsage(data.categories, data.usage);
-		this.#scaledUsage = data.window > 0 && Number.isFinite(data.window) ? allocated : undefined;
+		const { breakdown } = data;
+		const window = breakdown.contextWindow;
+		const allocated = allocateUsage(data.categories, breakdown.usedTokens);
+		this.#scaledUsage = window > 0 && Number.isFinite(window) ? allocated : undefined;
 		const scaled = this.#scaledUsage;
 		this.#meter = scaled
 			? describeContextMeter({
-					contextWindow: data.window,
-					usedTokens: data.usage,
-					freeTokens: data.free,
-					autoCompactBufferTokens: data.buffer,
-					thresholdTokens: data.breakdown.thresholdTokens,
+					...breakdown,
 					categories: data.categories.map(category => ({
 						label: safeText(overviewLabel(category)),
 						tokens: scaled.get(category)!,
@@ -334,13 +332,7 @@ export class ContextViewer implements Component {
 
 	#summary(): string[] {
 		if (this.#state !== "overview") return [];
-		const { usage, window, free, breakdown } = this.#data;
-		const labels = contextUsageSummary({
-			contextWindow: window,
-			usedTokens: usage,
-			freeTokens: free,
-			thresholdTokens: breakdown.thresholdTokens,
-		});
+		const labels = contextUsageSummary(this.#data.breakdown);
 		return [`Used ${labels.used}${labels.detail}`, labels.room];
 	}
 
@@ -376,7 +368,13 @@ export class ContextViewer implements Component {
 		const terminalRows = Math.max(1, this.#getRows());
 		const summary = this.#layout();
 		this.#panel.title =
-			this.#state === "overview" ? `Context · ${safeText(this.#data.modelLabel)}` : safeText(this.#category!.label);
+			this.#state === "overview"
+				? safeText(
+						contextUsageHead(this.#data.breakdown)
+							.map(part => part.t)
+							.join(""),
+					)
+				: safeText(this.#category!.label);
 		this.#header.setHeight(summary.length);
 		this.#header.setLines(summary.map(line => truncateToWidth(theme.fg("dim", line), this.#width)));
 		this.#body.setLines(
@@ -558,7 +556,7 @@ export class ContextViewer implements Component {
 	#describeOverview(cx: DescribeContext): NativeNode[] {
 		const meter = cx.supports("meter") ? this.#meter : undefined;
 		const items = this.#overview.items.map(item =>
-			legendItem(item, this.#overview.selectedKey === item.key, !!meter, this.#data.window),
+			legendItem(item, this.#overview.selectedKey === item.key, !!meter, this.#data.breakdown.contextWindow),
 		);
 		const list = selectList("categories", items, { selected: this.#overview.selectedKey, grow: 1 });
 		const usage = meter ? undefined : this.#scaledUsage;
