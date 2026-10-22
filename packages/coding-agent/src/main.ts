@@ -109,6 +109,7 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import { resolveCostGate } from "./session/cost-gate";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
@@ -182,6 +183,8 @@ import {
 	cfgHideThinkingBlock,
 	cfgOmitThinking,
 	cfgPrewalkEnabled,
+	cfgSessionMaxCost,
+	cfgSessionWarnCost,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
@@ -1405,6 +1408,16 @@ export async function buildSessionOptions(
 	}
 	if (parsed.maxTime !== undefined) {
 		options.deadline = Date.now() + parsed.maxTime * 1000;
+	}
+	const costGate = resolveCostGate(
+		{ warnCost: parsed.warnCost, maxCost: parsed.maxCost },
+		{
+			warnCost: cfgSessionWarnCost.get(activeSettings),
+			maxCost: cfgSessionMaxCost.get(activeSettings),
+		},
+	);
+	if (costGate !== undefined) {
+		options.costGate = costGate;
 	}
 
 	// Explicit prompt inputs win over discovered SYSTEM_TEMPLATE.md/SYSTEM.md.

@@ -1482,3 +1482,7 @@ export const cfgThinkingBudgets = combine({
 	xhigh: cfgThinkingBudgetsXhigh,
 	max: cfgThinkingBudgetsMax,
 });
+
+export const cfgSessionWarnCost = register({ id: "session.warnCost", type: "number", default: undefined });
+
+export const cfgSessionMaxCost = register({ id: "session.maxCost", type: "number", default: undefined });

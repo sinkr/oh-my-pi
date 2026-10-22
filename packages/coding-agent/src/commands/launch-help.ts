@@ -114,6 +114,12 @@ export const launchHelp = {
 		}),
 		"print-thoughts": Flags.boolean({ description: "Include thinking blocks in print mode text output" }),
 		"max-time": Flags.string({ description: "Stop the session after this duration (e.g., 600, 10m, 1h)" }),
+		"warn-cost": Flags.string({
+			description: "Emit a one-time warning once cumulative session cost reaches this USD amount",
+		}),
+		"max-cost": Flags.string({
+			description: "Refuse the next provider dispatch once cumulative session cost reaches this USD amount",
+		}),
 		"auto-approve": Flags.boolean({
 			aliases: ["yolo"],
 			description: "Auto-approve all tool calls (skip approval prompts)",

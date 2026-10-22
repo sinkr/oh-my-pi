@@ -165,6 +165,24 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--max-time": (result, value) => {
 		result.maxTime = parseMaxTimeSeconds(value);
 	},
+	"--warn-cost": (result, value) => {
+		const parsed = Number(value);
+		if (!Number.isFinite(parsed) || parsed < 0) {
+			throw new CliUsageError(
+				`Invalid --warn-cost value: ${JSON.stringify(value)}. Expected a non-negative number of USD.`,
+			);
+		}
+		result.warnCost = parsed;
+	},
+	"--max-cost": (result, value) => {
+		const parsed = Number(value);
+		if (!Number.isFinite(parsed) || parsed < 0) {
+			throw new CliUsageError(
+				`Invalid --max-cost value: ${JSON.stringify(value)}. Expected a non-negative number of USD.`,
+			);
+		}
+		result.maxCost = parsed;
+	},
 	"--service-tier": (result, value) => {
 		if (!isServiceTierOpenAISettingValue(value)) {
 			throw new CliUsageError(

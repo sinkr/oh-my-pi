@@ -192,6 +192,7 @@ import {
 	loadEffectiveAuthAccountPolicyConfig,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import { applyCostGate, type CostGateController, resolveCostGate } from "./session/cost-gate";
 import {
 	CREDENTIAL_DISABLED_NOTICE_SOURCE,
 	formatCredentialDisabledNotice,
@@ -357,6 +358,8 @@ import {
 	cfgRetryUsageReservePct,
 	cfgRetryUsageReservePolicy,
 	cfgSampling,
+	cfgSessionMaxCost,
+	cfgSessionWarnCost,
 	cfgSkillful,
 	cfgThinkingBudgets,
 	cfgTierAnthropic,
@@ -673,6 +676,8 @@ export interface CreateAgentSessionOptions {
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;
+	/** Cost gate controller shared across the session tree; checked before each provider dispatch. */
+	costGate?: CostGateController;
 
 	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
 	customTools?: (CustomTool | ToolDefinition)[];
@@ -1788,6 +1793,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		? logger.time("initializeWithSettings", initializeWithSettings, settings)
 		: undefined;
 	const unbindSessionEffects = bindsProcessState ? bindEffects(settings) : undefined;
+	// SDK-created sessions honor the configured session.*Cost settings even
+	// when the caller never passed a controller; resolveCostGate also
+	// normalizes negative/non-finite configured values (#7978 review).
+	const costGate =
+		options.costGate ??
+		resolveCostGate({}, { warnCost: cfgSessionWarnCost.get(settings), maxCost: cfgSessionMaxCost.get(settings) });
 	// Until the session is handed back (its dispose wrapper then owns the process-state holds
 	// and the credential listener), any startup failure below releases them.
 	using startupCleanup = new DisposableStack();
@@ -2361,6 +2372,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			costGate,
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,
@@ -2462,6 +2474,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
 			getTurnBudget: () => sessionManager.getTurnBudget(),
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),
+			recordSubagentCost: cost => sessionManager.recordSubagentCost(cost),
 			getClientBridge: () => session?.clientBridge,
 			emitBeforeSubagentSpawn: (event, signal) =>
 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
@@ -4510,6 +4523,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						getMode: () => cfgProvidersCacheWarming.get(settings),
 						decide: event => extensionRunner.emitCacheWarmingDecision(event),
 					});
+		// Gate every provider dispatch in this session tree through the shared
+		// controller: primary stream, side turns, and advisor calls. Each
+		// session registers its own live stats source on setup, so a running
+		// child session's completed turns count immediately instead of only
+		// after the parent rolls them up on task write-back.
+		const sessionCostSource = (): number => session.getSessionStats().cost;
+		const gateDispatch = <T>(dispatch: () => T): T => {
+			const gate = costGate;
+			if (gate === undefined) return dispatch();
+			// Before any source registers the aggregate is undefined; bind a
+			// zero fallback so applyCostGate's `??=` cannot bind a
+			// self-referential getter.
+			gate.getCost ??= () => 0;
+			return applyCostGate(
+				gate,
+				() => gate.getCost?.() ?? 0,
+				message => session.emitNotice("warning", message, "cost-gate"),
+				dispatch,
+			);
+		};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
 			const maxTimeout = cfgToolsMaxTimeout.get(settings);
@@ -4556,39 +4589,45 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			...cfgSampling.get(settings),
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
-			streamFn: (streamModel, context, streamOptions) => {
-				if (notifyFirstChatDispatch) {
-					const cb = notifyFirstChatDispatch;
-					notifyFirstChatDispatch = undefined;
-					try {
-						cb();
-					} catch (error) {
-						logger.warn("onFirstChatDispatch hook threw", {
-							error: error instanceof Error ? error.message : String(error),
-						});
+			// Shared gate wrapper for every provider dispatch in this session
+			// tree — the primary stream, side turns (branch summaries,
+			// compaction/handoff generation), and advisor calls all go through
+			// the same controller so --max-cost holds for every provider
+			// request, not just the main turn stream (#7978 review).
+			streamFn: (streamModel, context, streamOptions) =>
+				gateDispatch(() => {
+					if (notifyFirstChatDispatch) {
+						const cb = notifyFirstChatDispatch;
+						notifyFirstChatDispatch = undefined;
+						try {
+							cb();
+						} catch (error) {
+							logger.warn("onFirstChatDispatch hook threw", {
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
 					}
-				}
-				const externalThinking =
-					cfgExternalThinking.get(settings) &&
-					agent.state.tools.some(tool => tool.name === "think") &&
-					supportsExternalThinking(streamModel);
-				const fallbackCreditRedemption = session?.consumeActiveFallbackCreditRedemption(streamModel);
-				const merged: SimpleStreamOptions = {
-					...streamOptions,
-					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
-					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
-				};
-				const stream = primaryStreamFn(streamModel, context, {
-					...merged,
-					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
-				});
-				// Every request through this streamFn is this session's own main
-				// loop (side-channel, advisor, and maintenance requests use
-				// dedicated wrappers), so it owns the warmer. The replay omits the
-				// one-shot fallback-credit redemption.
-				session.startCacheWarming(streamModel, context, merged);
-				return stream;
-			},
+					const externalThinking =
+						cfgExternalThinking.get(settings) &&
+						agent.state.tools.some(tool => tool.name === "think") &&
+						supportsExternalThinking(streamModel);
+					const fallbackCreditRedemption = session?.consumeActiveFallbackCreditRedemption(streamModel);
+					const merged: SimpleStreamOptions = {
+						...streamOptions,
+						promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
+						forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
+					};
+					const stream = primaryStreamFn(streamModel, context, {
+						...merged,
+						...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
+					});
+					// Every request through this streamFn is this session's own main
+					// loop (side-channel, advisor, and maintenance requests use
+					// dedicated wrappers), so it owns the warmer. The replay omits the
+					// one-shot fallback-credit redemption.
+					session.startCacheWarming(streamModel, context, merged);
+					return stream;
+				}),
 			cursorExecHandlers,
 			getCursorTools: () => (toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
 			transformToolCallArguments,
@@ -4760,6 +4799,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// streamed and parsed on the main thread.
 		session = new AgentSession({
 			cacheWarmer,
+			costGate,
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
 			advisorMemoryPrompt,
@@ -4835,8 +4875,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformProviderContext,
 			onPayload,
 			onResponse,
-			sideStreamFn: settingsAwareStreamFn,
-			advisorStreamFn: settingsAwareStreamFn,
+			sideStreamFn: (streamModel, context, streamOptions) =>
+				gateDispatch(() => settingsAwareStreamFn(streamModel, context, streamOptions)),
+			advisorStreamFn: (streamModel, context, streamOptions) =>
+				gateDispatch(() => settingsAwareStreamFn(streamModel, context, streamOptions)),
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
@@ -5159,6 +5201,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return next;
 			});
 		}
+		// Register this session's live spend with the shared tree controller.
+		// The source is dropped on dispose: once a child's task result is
+		// written back, the parent's own stats roll it up, so keeping the
+		// source would double-count.
+		if (costGate !== undefined) {
+			costGate.addCostSource?.(sessionCostSource);
+			disposeCallbacks.add(() => costGate.removeCostSource?.(sessionCostSource));
+			// A resumed session already crossed the warn threshold in a past
+			// run; do not re-emit the one-time warning on the first dispatch.
+			if (
+				hasExistingSession &&
+				costGate.warnCost !== undefined &&
+				session.getSessionStats().cost >= costGate.warnCost
+			) {
+				costGate.warned = true;
+			}
+		}
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
 			build: buildMcpNotificationBatchMessage,
 		});
@@ -5412,7 +5471,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					hideThinkingSummary: agent.hideThinkingSummary,
 					maxRetryDelayMs: agent.maxRetryDelayMs,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
-					streamFn: primaryStreamFn,
+					streamFn: (streamModel, context, streamOptions) =>
+						gateDispatch(() => primaryStreamFn(streamModel, context, streamOptions)),
 					transformToolCallArguments,
 					// No fallback resolver. The capture agent advertises only
 					// `learn`/`manage_skill`, both of which stay top-level and never
