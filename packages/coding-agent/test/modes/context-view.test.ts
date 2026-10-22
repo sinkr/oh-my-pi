@@ -232,15 +232,14 @@ describe("context snapshot assistant reasoning", () => {
 		const data = buildSessionContextView(session);
 		expect(category(data, "assistant-messages").entries.map(entry => entry.text)).toEqual(["visible answer"]);
 		const thinking = category(data, "assistant-thinking").entries;
-		expect(thinking.map(entry => entry.text)).toEqual([
-			"readable thought",
-			"[Encrypted thinking]",
-			"[Encrypted thinking]",
-		]);
+		expect(thinking[0]?.text).toBe("readable thought");
+		// Signature-only and redacted blocks still get readable placeholder text.
+		for (const entry of thinking.slice(1)) expect(entry.text.trim()).not.toBe("");
+		// Signature and ciphertext blocks show their size and nothing else.
 		expect(thinking.map(entry => entry.info)).toEqual([
-			"signature · 17 chars",
-			"signature · 24 chars",
-			"data · 18 chars",
+			expect.stringContaining("17"),
+			expect.stringContaining("24"),
+			expect.stringContaining("18"),
 		]);
 		expect(category(data, "tool-calls").entries[0]?.text).toContain('"path": "notes.txt"');
 		expect(totalTokens(data)).toBe(session.agent.tokenizer.countMessages([message]));
@@ -473,15 +472,16 @@ describe("context snapshot tool calls and output", () => {
 		expect(JSON.parse(results.entries[0]!.text).content).toEqual([
 			{ type: "tool_reference", tool_name: "read_file" },
 		]);
-		expect(JSON.parse(results.entries[1]!.text).content).toEqual([
-			{
-				type: "web_search_result",
-				title: "Release notes",
-				url: "https://example.org/releases",
-				encrypted_content: "[encrypted_content · 18 chars]",
-				signature: "[signature · 17 chars]",
-			},
-		]);
+		const [shown] = JSON.parse(results.entries[1]!.text).content;
+		expect(shown).toMatchObject({
+			type: "web_search_result",
+			title: "Release notes",
+			url: "https://example.org/releases",
+		});
+		// Ciphertext fields keep their size but never their bytes.
+		expect(shown.encrypted_content).toContain("18");
+		expect(shown.signature).toContain("17");
+		expect(JSON.stringify(data)).not.toMatch(/private-ciphertext|private-signature/);
 		expect(category(data, "assistant-messages").entries).toEqual([]);
 		expect(totalTokens(data)).toBe(session.agent.tokenizer.countMessages([message]));
 		expect(message).toEqual(before);

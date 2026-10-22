@@ -118,7 +118,7 @@ describe("context command viewer", () => {
 			expect(abort).not.toHaveBeenCalled();
 			expect(requests).toBe(1);
 			mode.handleContextCommand();
-			await mode.handleToolsCommand();
+			mode.handleToolsCommand();
 			expect(mode.ui.overlayStack).toHaveLength(0);
 			expect(mode.reportContainer.children).toHaveLength(1);
 		} finally {

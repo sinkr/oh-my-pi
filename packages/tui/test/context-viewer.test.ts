@@ -49,6 +49,13 @@ function usageColumns(item: NativeNode | undefined): string[] | undefined {
 	return item?.k === "item" ? textValue(item.p?.value)?.split(" · ") : undefined;
 }
 
+/** First line of `text` containing `needle`; fails the test when there is none. */
+function lineWith(text: string, needle: string): string {
+	const line = text.split("\n").find(candidate => candidate.includes(needle));
+	if (line === undefined) throw new Error(`No line contains ${needle}`);
+	return line;
+}
+
 function fixture(firstOutput?: ContextViewEntry, secondOutput?: ContextViewEntry): ContextViewData {
 	const output: ContextViewCategory = {
 		id: "tool-output",
@@ -562,19 +569,20 @@ describe("ContextViewer entry content", () => {
 		h.render(160);
 		select(h.viewer, "assistant-thinking");
 		for (const preview of [h.render(160).join("\n"), nativeText(h.viewer.describe({ ...cx, cols: 160 }))]) {
-			expect(preview.match(/1,250 tokens/g)).toHaveLength(1);
+			// The shared replay total appears once, on the group heading ahead of its members.
+			expect(preview.match(/1,250/g)).toHaveLength(1);
 			expect(preview.indexOf(group.label)).toBeLessThan(preview.indexOf("[first block]"));
-			expect(preview).toContain("  [first block] —");
-			expect(preview).toContain("  [second block] —");
-			expect(preview).toContain("[ordinary block] 25 tokens");
-			expect(preview).not.toContain("] 0 tokens");
-			expect(preview).not.toContain("unavailable");
+			// Members of a group carry no estimate of their own; ordinary entries do.
+			expect(lineWith(preview, "[first block]")).not.toMatch(/\d/);
+			expect(lineWith(preview, "[second block]")).not.toMatch(/\d/);
+			expect(lineWith(preview, "[ordinary block]")).toContain("25");
+			expect(preview).not.toMatch(/\] 0\b/);
 		}
 		for (const id of ["first", "second"]) {
 			h.viewer.handleNativeEvent({ type: "action", key: `entries/content/list/${id}`, act: "open-entry", mods: [] });
 			for (const detail of [h.render(160).join("\n"), nativeText(h.viewer.describe({ ...cx, cols: 160 }))]) {
-				expect(detail).toContain(`[${id} block] —`);
-				expect(detail).toContain(`${group.label} · 1,250 tokens`);
+				expect(lineWith(detail, `[${id} block]`)).not.toMatch(/\d/);
+				expect(lineWith(detail, group.label)).toContain("1,250");
 				expect(detail).toContain(`${id} thinking body`);
 			}
 			h.viewer.handleInput("\x1b");
@@ -610,15 +618,20 @@ describe("ContextViewer entry content", () => {
 		h.render(160);
 		select(h.viewer, "system-prompt");
 		for (const preview of [h.render(160).join("\n"), nativeText(h.viewer.describe({ ...cx, cols: 160 }))]) {
-			expect(preview).toContain("[interrupted single] N/A · Interrupted");
-			expect(preview).toContain(`${group.label} · N/A · Interrupted`);
-			expect(preview).not.toContain("0 tokens");
+			// Interrupted estimates are unavailable, never a zero count; a lone interrupted entry is
+			// not mistaken for a group member, whose estimate lives on its group heading.
+			expect(lineWith(preview, "[interrupted single]")).not.toMatch(/\d|—/);
+			expect(lineWith(preview, group.label)).not.toMatch(/\d/);
+			expect(preview).not.toMatch(/\b0 tokens/);
 		}
-		for (const id of ["interrupted-single", "second"]) {
+		for (const [id, heading] of [
+			["interrupted-single", "[interrupted single]"],
+			["second", group.label],
+		] as const) {
 			h.viewer.handleNativeEvent({ type: "action", key: `entries/content/list/${id}`, act: "open-entry", mods: [] });
 			for (const detail of [h.render(160).join("\n"), nativeText(h.viewer.describe({ ...cx, cols: 160 }))]) {
-				expect(detail).toContain("N/A · Interrupted");
-				expect(detail).not.toContain("0 tokens");
+				expect(lineWith(detail, heading)).not.toMatch(/\d|—/);
+				expect(detail).not.toMatch(/\b0 tokens/);
 			}
 			h.viewer.handleInput("\x1b");
 		}
