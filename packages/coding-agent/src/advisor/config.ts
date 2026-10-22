@@ -24,8 +24,8 @@ export type { AdvisorReviewMode, AdvisorSyncBacklog } from "@oh-my-pi/pi-tui/ove
  * - `paused` — user-toggled off via per-advisor switch (runtime disposed)
  * - `quota_exhausted` — provider returned a quota/usage-limit error that host
  *   recovery could not absorb; the runtime stays paused, batch retained, until
- *   it is reset or rebuilt (history rewrite, session switch, `/advisor` rebuild,
- *   config reload, restart). No timer resumes it.
+ *   it is reset or rebuilt (compaction, image drop, shake, session switch,
+ *   `/advisor` rebuild, config reload, restart). No timer resumes it.
  * - `error` — repeated transient failures; backlog dropped to prevent stall
  * - `no_model` — no model resolved for this advisor's role/explicit model
  */
