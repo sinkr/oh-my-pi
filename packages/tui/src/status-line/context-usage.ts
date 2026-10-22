@@ -86,7 +86,7 @@ interface CategoryInfo {
 	id: CategoryId;
 	label: string;
 	tokens: number;
-	color: "accent" | "warning" | "success" | "userMessageText" | "customMessageLabel";
+	color: ThemeColor;
 	glyph: string;
 }
 
@@ -505,7 +505,7 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 
 interface CellSpec {
 	glyph: string;
-	color: "accent" | "warning" | "success" | "userMessageText" | "customMessageLabel" | "muted" | "dim";
+	color: ThemeColor;
 }
 
 function planCells(breakdown: ContextBreakdown): CellSpec[] {
@@ -707,6 +707,10 @@ function buildSnapcompactParts(breakdown: ContextBreakdown): LegendPart[][] {
 	return lines;
 }
 
+export function contextSnapcompactLines(breakdown: ContextBreakdown): string[] {
+	return buildSnapcompactParts(breakdown).map(line => line.map(part => part.t).join(""));
+}
+
 function buildLegendLines(breakdown: ContextBreakdown, theme: Theme): string[] {
 	return buildLegendParts(breakdown).map(line => {
 		let out = "";
@@ -717,9 +721,16 @@ function buildLegendLines(breakdown: ContextBreakdown, theme: Theme): string[] {
 	});
 }
 
+interface ContextMeterData extends Pick<
+	ContextBreakdown,
+	"contextWindow" | "usedTokens" | "freeTokens" | "autoCompactBufferTokens" | "thresholdTokens"
+> {
+	categories: readonly Pick<CategoryInfo, "label" | "tokens" | "color">[];
+}
+
 /** Stacked meter parts in grid order: the categories, free space as the empty track, then the hatched buffer. */
 function contextMeterParts(
-	breakdown: ContextBreakdown,
+	breakdown: ContextMeterData,
 ): { value: number; token?: string; label?: string; hatch?: boolean }[] {
 	const window = breakdown.contextWindow;
 	const parts: { value: number; token?: string; label?: string; hatch?: boolean }[] = breakdown.categories
@@ -840,36 +851,40 @@ function describeSnapcompact(breakdown: ContextBreakdown): NativeNode | undefine
 	return node("col", { role: "omp.context.snap" }, [head, ...rows], "snapcompact");
 }
 
-/**
- * The `/context` body for terminals that draw `meter`: the tokens used as
- * the figure that leads, beside the room left before auto-compaction; one
- * stacked bar of the parts (categories, free space as the empty track, the
- * hatched buffer) ticked where compaction fires; the breakdown in the bar's
- * order with free space and the buffer under it; then the snapcompact
- * estimate when one is on. {@link contextUsageHead} names the model.
- */
-function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
-	const { contextWindow: window, usedTokens, freeTokens, autoCompactBufferTokens, thresholdTokens } = breakdown;
-	const parts = contextMeterParts(breakdown);
-	const used = Math.min(1, usedTokens / window);
+/** Shared usage and compaction labels for ANSI and native context views. */
+export function contextUsageSummary(
+	breakdown: Pick<ContextBreakdown, "contextWindow" | "usedTokens" | "freeTokens" | "thresholdTokens">,
+) {
+	const { contextWindow: window, usedTokens, freeTokens, thresholdTokens } = breakdown;
 	const room =
 		thresholdTokens === undefined
 			? `${formatNumber(freeTokens)} free`
 			: usedTokens >= thresholdTokens
 				? `Past auto-compaction at ${percentString(thresholdTokens, window, 0)}`
 				: `${formatNumber(thresholdTokens - usedTokens)} left before auto-compaction at ${percentString(thresholdTokens, window, 0)}`;
+	return {
+		used: formatNumber(usedTokens),
+		detail: ` of ${formatNumber(window)} tokens · ${percentString(usedTokens, window, 0)}`,
+		room,
+	};
+}
+
+/** Shared native usage summary and stacked bar; callers provide the category list. */
+export function describeContextMeter(breakdown: ContextMeterData): [NativeNode, NativeNode] {
+	const { contextWindow: window, usedTokens, thresholdTokens } = breakdown;
+	const parts = contextMeterParts(breakdown);
+	const used = Math.min(1, usedTokens / window);
+	const labels = contextUsageSummary(breakdown);
 	const summary = node(
 		"row",
 		{ role: "omp.context.summary", align: "baseline", wrap: true },
 		[
-			text(
-				[
-					span(formatNumber(usedTokens), "strong"),
-					span(` of ${formatNumber(window)} tokens · ${percentString(usedTokens, window, 0)}`, "dim"),
-				],
-				{ role: "omp.context.used", grow: 1, wrap: "none" },
-			),
-			text(room, { role: "omp.context.room", wrap: "none" }),
+			text([span(labels.used, "strong"), span(labels.detail, "dim")], {
+				role: "omp.context.used",
+				grow: 1,
+				wrap: "none",
+			}),
+			text(labels.room, { role: "omp.context.room", wrap: "none" }),
 		],
 		"summary",
 	);
@@ -889,6 +904,19 @@ function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
 		undefined,
 		"bar",
 	);
+	return [summary, bar];
+}
+
+/**
+ * The `/context` body for terminals that draw `meter`: the tokens used as
+ * the figure that leads, beside the room left before auto-compaction; one
+ * stacked bar of the parts (categories, free space as the empty track, the
+ * hatched buffer) ticked where compaction fires; the breakdown in the bar's
+ * order with free space and the buffer under it; then the snapcompact
+ * estimate when one is on. {@link contextUsageHead} names the model.
+ */
+function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
+	const { contextWindow: window, freeTokens, autoCompactBufferTokens } = breakdown;
 	const shares = breakdown.categories.map(category =>
 		contextShareRow(
 			category.id,
@@ -912,7 +940,7 @@ function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
 			),
 		);
 	}
-	const children = [summary, bar, node("col", { role: "omp.context.cats" }, shares, "cats")];
+	const children = [...describeContextMeter(breakdown), node("col", { role: "omp.context.cats" }, shares, "cats")];
 	const snap = describeSnapcompact(breakdown);
 	if (snap) children.push(snap);
 	return col(children, { role: "omp.context" });

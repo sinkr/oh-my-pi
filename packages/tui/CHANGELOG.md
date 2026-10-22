@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an ANSI and native `/context` viewer with category navigation, content inspection, token-usage and compaction estimates, and keyboard/mouse controls that adapt across Tern and other terminals ([#16160](https://github.com/can1357/oh-my-pi/pull/16160) by [@C-W-Z](https://github.com/C-W-Z)).
+
 ## [18.12.6] - 2026-10-21
 
 ### Changed
