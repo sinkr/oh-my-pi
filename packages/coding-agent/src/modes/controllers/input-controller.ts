@@ -1430,8 +1430,9 @@ export class InputController {
 	 * Extension and custom commands keep precedence over a file command of the same name.
 	 */
 	async #runSideFileCommand(text: string, clearEditor = true): Promise<boolean> {
-		const name = parseSlashCommand(text)?.name;
-		if (!name || !this.ctx.fileSlashCommands.has(name)) return false;
+		const parsed = parseSlashCommand(text);
+		const name = parsed?.name;
+		if (!parsed || !name || !this.ctx.fileSlashCommands.has(name)) return false;
 		const session = this.ctx.session;
 		if (session.extensionRunner?.getCommand(name) !== undefined) return false;
 		if (session.customCommands.some(loaded => loaded.command.name === name)) return false;
@@ -1439,7 +1440,8 @@ export class InputController {
 		if (!resolved?.command.side) return false;
 		this.ctx.editor.addToHistory(text);
 		if (clearEditor) this.ctx.editor.setText("");
-		await this.ctx.handleBtwCommand(resolved.text);
+		const title = parsed.args ? `/${name} ${parsed.args}` : `/${name}`;
+		await this.ctx.handleBtwCommand(resolved.text, title);
 		return true;
 	}
 

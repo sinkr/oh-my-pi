@@ -26,6 +26,7 @@ const recordSchema = type({
 	...turnFields,
 	id: "string > 0",
 	leafId: "string | null",
+	"title?": "string",
 	"followUps?": turnSchema.array(),
 	"+": "reject",
 });

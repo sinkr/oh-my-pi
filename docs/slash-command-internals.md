@@ -250,7 +250,7 @@ Argument substitution is one pass over the template; dollar placeholders inside 
 
 ### Side commands (`side: true`)
 
-A file command with `side: true` frontmatter runs as a [`/btw`](#11-built-in-command-note-btw) side question in the interactive TUI. The expanded template, after the same argument substitution, is the question. It works the same with or without arguments. The question and answer stay off the transcript, the command runs while a turn streams without steering it, and the answer gets `/btw` history, follow-ups and branching. Use it for read-only questions about the session, such as status reports or explanations:
+A file command with `side: true` frontmatter runs as a [`/btw`](#11-built-in-command-note-btw) side question in the interactive TUI. The expanded template, after the same argument substitution, is the question. It works the same with or without arguments. The question and answer stay off the transcript, the command runs while a turn streams without steering it, and the answer gets `/btw` history, follow-ups and branching. The panel and history show the typed invocation (`/sitrep`, `/sitrep the migration`) as the topic's title, saved as the record's `title`, while the model receives the expanded template. Use it for read-only questions about the session, such as status reports or explanations:
 
 ```markdown
 ---

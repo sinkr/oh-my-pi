@@ -415,7 +415,7 @@ describe("InputController escape behavior", () => {
 			editor.setText("/sitrep");
 			await editor.onSubmit?.("/sitrep");
 
-			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:");
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", "/sitrep");
 			expect(spies.prompt).not.toHaveBeenCalled();
 			expect(editor.addToHistory).toHaveBeenCalledWith("/sitrep");
 			expect(editor.getText()).toBe("");
@@ -429,7 +429,10 @@ describe("InputController escape behavior", () => {
 			controller.setupEditorSubmitHandler();
 			await editor.onSubmit?.("/sitrep the migration");
 
-			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus: the migration");
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
+				"Situation report. Focus: the migration",
+				"/sitrep the migration",
+			);
 			expect(spies.onInputCallback).not.toHaveBeenCalled();
 		});
 

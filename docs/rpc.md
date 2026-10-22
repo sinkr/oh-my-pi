@@ -1080,11 +1080,12 @@ in that topic and its earlier turns are replayed as context.
 ```ts
 type BtwStatus = "running" | "complete" | "cancelled" | "error" | "interrupted";
 interface BtwHistoryTurn { question: string; answer: string; status: BtwStatus; createdAt: number; updatedAt: number; error?: string }
-interface BtwHistoryRecord extends BtwHistoryTurn { id: string; leafId: string | null; followUps?: BtwHistoryTurn[] }
+interface BtwHistoryRecord extends BtwHistoryTurn { id: string; leafId: string | null; title?: string; followUps?: BtwHistoryTurn[] }
 ```
 
 A record's latest turn is its last follow-up, else the record itself.
 `interrupted` marks a turn whose process died while it ran.
+`title`, when present, is the topic's display heading (a side file command such as `/sitrep`); `question` keeps the full text the model answered.
 
 ```json
 { "id": "req_1", "type": "btw", "question": "why does this test need a lock?" }
