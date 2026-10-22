@@ -118,7 +118,8 @@ export const launchHelp = {
 			description: "Warn once when the session's spend, subagents included, reaches this many USD",
 		}),
 		"max-cost": Flags.string({
-			description: "Stop sending model requests once the session's spend reaches this many USD (print mode exits 3)",
+			description:
+				"Stop sending model requests once the session's spend reaches this many USD; requests already in flight can finish past it (print mode exits 3)",
 		}),
 		"auto-approve": Flags.boolean({
 			aliases: ["yolo"],

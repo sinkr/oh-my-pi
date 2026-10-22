@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import * as ai from "@oh-my-pi/pi-ai";
+import { createModelJobWidgetAuthor } from "@oh-my-pi/pi-coding-agent/job-widgets/author";
 import {
 	type Api,
 	type AssistantMessage,
@@ -33,19 +35,24 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 import { rejectionOf } from "./helpers/rejection";
 
+/** The test model's catalog fields, for registering it as a provider's model. */
+const costModelSpec = {
+	id: "cost-gate-model",
+	name: "Cost Gate Model",
+	reasoning: false,
+	input: ["text" as const],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 4096,
+	maxTokens: 1024,
+};
+
 /** A keyless model on a custom API, so the stubbed provider needs no credentials. */
 function createCostModel(api: string): Model<Api> {
 	return buildModel({
-		id: "cost-gate-model",
-		name: "Cost Gate Model",
+		...costModelSpec,
 		api,
 		provider: "llama.cpp",
 		baseUrl: "http://127.0.0.1:8080/v1",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 4096,
-		maxTokens: 1024,
 	} as ModelSpec<Api>) as Model<Api>;
 }
 
@@ -160,6 +167,37 @@ describe("CostGate", () => {
 
 		expect(await queued).toBeInstanceOf(CostCapError);
 		expect(calls).toBe(1);
+	});
+});
+
+describe("job widget authoring", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("counts the spec request against the cost cap and refuses at it", async () => {
+		const model = createCostModel("test-cost-gate-widget");
+		const billed = response(1.2);
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(billed);
+		const settings = Settings.isolated({ "session.maxCost": 1 });
+		settings.setModelRole("widget", "llama.cpp/cost-gate-model");
+		const modelRegistry = {
+			getAvailable: () => [model],
+			find: () => model,
+			getApiKey: async () => "test-key",
+			resolver: () => async () => "test-key",
+		} as unknown as ModelRegistry;
+		const costGate = new CostGate(settings, 0, () => {});
+		const author = createModelJobWidgetAuthor({
+			settings,
+			modelRegistry,
+			sessionId: () => "sess",
+			costGate: () => costGate,
+		});
+		const request = { jobId: "job-1", brief: { kind: "bash" as const, command: "make" }, sources: [] };
+
+		await author(request, new AbortController().signal).catch(() => undefined);
+		expect(costGate.spent).toBe(1.2);
+		expect(await rejectionOf(author(request, new AbortController().signal))).toBeInstanceOf(CostCapError);
+		expect(spy).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -385,6 +423,28 @@ describe("cost gate in a running session", () => {
 		expect(session.costCapRefusal?.spent).toBe(1.2);
 	});
 
+	it("sends no title request once the session is at its cap", async () => {
+		const api = "test-cost-gate-title";
+		const provider = scriptedProvider(api, [response(1.2)]);
+		const session = await createSession(api, {
+			"session.maxCost": 1,
+			"modelRoles.tiny": "llama.cpp/cost-gate-model",
+		});
+		session.modelRegistry.registerProvider("llama.cpp", {
+			api,
+			baseUrl: "http://127.0.0.1:8080/v1",
+			apiKey: "test-key",
+			models: [costModelSpec],
+		});
+
+		await session.prompt("first");
+		await session.waitForIdle();
+		const title = await session.generateTitle("Implement a native cost gate for this command line tool");
+
+		expect(title).toBeNull();
+		expect(provider.calls()).toBe(1);
+	});
+
 	it("gives a new session a fresh budget", async () => {
 		const api = "test-cost-gate-new-session";
 		const provider = scriptedProvider(api, [response(1.2), response(0.1)]);
@@ -420,17 +480,7 @@ describe("cost gate in a running session", () => {
 			api,
 			baseUrl: "http://127.0.0.1:8080/v1",
 			apiKey: "test-key",
-			models: [
-				{
-					id: "cost-gate-model",
-					name: "Cost Gate Model",
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 4096,
-					maxTokens: 1024,
-				},
-			],
+			models: [costModelSpec],
 		});
 
 		expect(savedFile && (await session.switchSession(savedFile))).toBe(true);
