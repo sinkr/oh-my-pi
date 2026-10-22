@@ -1822,6 +1822,14 @@ function formatHyperlink(text: string, target: string): string {
 const CODE_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/y;
 const CODE_URL_RE = /(?<![A-Za-z0-9+.-])https?:\/\/[^\s\x00-\x1f\x7f<>"'`]+/g;
 const CODE_URL_TRAILING_RE = /[.,;:!?]+$/;
+const CODE_URL_OPENERS: Partial<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
+
+/** Whether `url` ends in a closing bracket that has no matching opener inside it. */
+function endsWithUnbalancedCloser(url: string): boolean {
+	const closer = url.at(-1) ?? "";
+	const opener = CODE_URL_OPENERS[closer];
+	return opener !== undefined && url.split(closer).length > url.split(opener).length;
+}
 
 /**
  * Wrap each http(s) URL in a highlighted code row with an OSC 8 hyperlink.
@@ -1856,7 +1864,7 @@ function linkifyCodeUrls(line: string): string {
 	for (const match of visible.matchAll(CODE_URL_RE)) {
 		let url = match[0].replace(CODE_URL_TRAILING_RE, "");
 		// A closer only belongs to the URL when it balances an opener inside it.
-		while (url.endsWith(")") && url.split(")").length > url.split("(").length) {
+		while (endsWithUnbalancedCloser(url)) {
 			url = url.slice(0, -1).replace(CODE_URL_TRAILING_RE, "");
 		}
 		if (!/:\/\/./.test(url)) continue;

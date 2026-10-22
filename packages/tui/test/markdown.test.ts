@@ -1746,6 +1746,21 @@ bar`,
 			}
 		});
 
+		it("leaves an unbalanced closing bracket after a code-block URL out of the link", () => {
+			const cases = [
+				["urls = [https://a.com/x]", "https://a.com/x"],
+				["{https://a.com/x}", "https://a.com/x"],
+				["(https://a.com/x),", "https://a.com/x"],
+				["https://a.com/w[1]", "https://a.com/w[1]"],
+			] as const;
+			for (const [code, target] of cases) {
+				clearRenderCache();
+				const lines = new Markdown(`\`\`\`\n${code}\n\`\`\``, 0, 0, defaultMarkdownTheme).render(80);
+				const targets = lines.flatMap(line => inspectHyperlinks(line).targets).filter(t => t !== null);
+				expect(new Set(targets)).toEqual(new Set([target]));
+			}
+		});
+
 		it("should isolate wrapped OSC 8 links from adjacent table cells", () => {
 			const issueUrl = "https://github.com/can1357/oh-my-pi/issues/5860";
 			const markdown = new Markdown(
