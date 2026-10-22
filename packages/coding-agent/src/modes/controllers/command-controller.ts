@@ -188,8 +188,8 @@ function hasForkApiKeyOverride(argv: string[]): boolean {
 }
 
 export class CommandController {
-	/** The open native report sheet. */
-	#reportSheet: OverlayHandle | undefined;
+	/** The open native report sheet and the component it shows. */
+	#reportSheet: { handle: OverlayHandle; component: Component } | undefined;
 	#forkTerminalDependencies: ForkTerminalDependencies;
 
 	constructor(
@@ -235,9 +235,24 @@ export class CommandController {
 		const sheet = this.#reportSheet;
 		if (!sheet) return;
 		this.#reportSheet = undefined;
-		sheet.hide();
+		sheet.handle.hide();
+		// Like the docked report, a closed sheet is never shown again.
+		sheet.component.dispose?.();
 		this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
 		this.ctx.ui.requestRender();
+	}
+
+	/** Open `component` as a focused full-screen page; callers close any previous sheet first. */
+	#showFullscreenSheet(component: Component): void {
+		const handle = this.ctx.ui.showOverlay(component, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.#reportSheet = { handle, component };
+		this.ctx.ui.setFocus(component);
 	}
 
 	/**
@@ -264,19 +279,15 @@ export class CommandController {
 		});
 		if (isNativeRendering()) {
 			report.holdFocus();
-			this.#reportSheet = this.ctx.ui.showOverlay(report, { anchor: "center", width: "90%", maxHeight: "90%" });
+			this.#reportSheet = {
+				handle: this.ctx.ui.showOverlay(report, { anchor: "center", width: "90%", maxHeight: "90%" }),
+				component: report,
+			};
 			this.ctx.ui.setFocus(report);
 		} else if (report.heightAt(terminal.columns) > inline) {
 			fullScreen = true;
 			report.holdFocus();
-			this.#reportSheet = this.ctx.ui.showOverlay(report, {
-				anchor: "bottom-center",
-				width: "100%",
-				maxHeight: "100%",
-				margin: 0,
-				fullscreen: true,
-			});
-			this.ctx.ui.setFocus(report);
+			this.#showFullscreenSheet(report);
 		} else {
 			this.ctx.reportContainer.addChild(report);
 		}
@@ -974,14 +985,7 @@ export class CommandController {
 			requestRender: () => this.ctx.ui.requestRender(),
 			getRows: () => this.ctx.ui.terminal.rows,
 		});
-		this.#reportSheet = this.ctx.ui.showOverlay(viewer, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-			fullscreen: true,
-		});
-		this.ctx.ui.setFocus(viewer);
+		this.#showFullscreenSheet(viewer);
 		this.ctx.ui.requestRender();
 	}
 
