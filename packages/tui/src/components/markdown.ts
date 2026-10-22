@@ -1764,8 +1764,13 @@ type ListToken = Token & {
 	start?: number;
 	loose: boolean;
 };
-type TableCellToken = { tokens?: Token[] };
-type TableToken = Token & { header: TableCellToken[]; rows: TableCellToken[][]; raw?: string };
+type TableCellToken = { tokens?: Token[]; align?: Tokens.TableCell["align"] };
+type TableToken = Token & {
+	header: TableCellToken[];
+	rows: TableCellToken[][];
+	raw?: string;
+	align?: Array<Tokens.TableCell["align"]>;
+};
 
 /** `item` as marked lexes it inside a loose list: tight `text` blocks become paragraphs. */
 function loosenListItem(item: Tokens.ListItem): Tokens.ListItem {
@@ -4504,6 +4509,26 @@ export class Markdown implements Component {
 	}
 
 	/**
+	 * Pad a table cell to the width of its column, following the column's GFM
+	 * alignment: a right-aligned cell ends at the column's right edge, a
+	 * centered one is surrounded by padding, and anything else stays flush left.
+	 */
+	#alignCellText(text: string, width: number, align: Tokens.TableCell["align"]): string {
+		const gap = Math.max(0, width - visibleWidth(text));
+		if (gap === 0) return text;
+		switch (align) {
+			case "right":
+				return padding(gap) + text;
+			case "center": {
+				const left = Math.floor(gap / 2);
+				return padding(left) + text + padding(gap - left);
+			}
+			default:
+				return text + padding(gap);
+		}
+	}
+
+	/**
 	 * Render a table with width-aware cell wrapping.
 	 * Cells that don't fit are wrapped to multiple lines.
 	 */
@@ -4644,6 +4669,12 @@ export class Markdown implements Component {
 		const h = t.horizontal;
 		const v = t.vertical;
 
+		// GFM alignment belongs to the column: the marker in the delimiter row
+		// applies to the header and to every body cell below it.
+		const columnAligns: Array<Tokens.TableCell["align"]> = token.header.map(
+			(cell, i) => cell.align ?? token.align?.[i] ?? null,
+		);
+
 		// Render top border
 		const topBorderCells = columnWidths.map(w => h.repeat(w));
 		lines.push(`${t.topLeft}${h}${topBorderCells.join(`${h}${t.teeDown}${h}`)}${h}${t.topRight}`);
@@ -4658,7 +4689,7 @@ export class Markdown implements Component {
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
 				const text = cellLines[lineIdx] || "";
-				const padded = text + padding(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+				const padded = this.#alignCellText(text, columnWidths[colIdx], columnAligns[colIdx] ?? null);
 				return this.#theme.bold(padded);
 			});
 			lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
@@ -4702,7 +4733,8 @@ export class Markdown implements Component {
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCellLines.map((cellLines, colIdx) => {
 					const text = cellLines[lineIdx] || "";
-					return text + padding(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+					const align = row[colIdx]?.align ?? columnAligns[colIdx] ?? null;
+					return this.#alignCellText(text, columnWidths[colIdx], align);
 				});
 				lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
 			}
