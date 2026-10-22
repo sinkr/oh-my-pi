@@ -31,7 +31,7 @@ import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
-import type { CostGateController } from "../session/cost-gate";
+import type { CostGate } from "../session/cost-gate";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
@@ -210,8 +210,8 @@ export interface DeferredDiagnosticsEntry {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
-	/** Cost gate controller shared across the session tree, forwarded to subagents. */
-	costGate?: CostGateController;
+	/** Cost gate of the session tree, forwarded to subagents. */
+	costGate?: CostGate;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
 	additionalDirectories?: string[];
 	/** Whether UI is available */
@@ -461,8 +461,6 @@ export interface ToolSession {
 	getTurnBudget?: () => { total: number | null; spent: number; hard: boolean };
 	/** Record output tokens consumed by an eval-spawned subagent toward the current turn budget. */
 	recordEvalSubagentUsage?: (output: number) => void;
-	/** Record detached subagent spend on the parent session's cost total (#7978). */
-	recordSubagentCost?: (cost: number) => void;
 	/** Bridge to the connected client (e.g. ACP editor host). Tools should route fs/terminal/permission requests through this when available. */
 	getClientBridge?: () => ClientBridge | undefined;
 	/** Get cached todo phases for this session. */

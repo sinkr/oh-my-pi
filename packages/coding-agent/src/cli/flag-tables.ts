@@ -109,6 +109,14 @@ function parseMaxTimeSeconds(value: string): number {
 	);
 }
 
+function parseCostUsd(flag: string, value: string): number {
+	const usd = Number(value.trim());
+	if (Number.isFinite(usd) && usd > 0) return usd;
+	throw new CliUsageError(
+		`Invalid ${flag} value: ${JSON.stringify(value)}. Expected a positive USD amount, e.g. 0.50.`,
+	);
+}
+
 /**
  * Setters for flags with string values. Most built-ins consume the next argv
  * token even when it starts with `-`; flags listed in
@@ -166,22 +174,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.maxTime = parseMaxTimeSeconds(value);
 	},
 	"--warn-cost": (result, value) => {
-		const parsed = Number(value);
-		if (!Number.isFinite(parsed) || parsed < 0) {
-			throw new CliUsageError(
-				`Invalid --warn-cost value: ${JSON.stringify(value)}. Expected a non-negative number of USD.`,
-			);
-		}
-		result.warnCost = parsed;
+		result.warnCost = parseCostUsd("--warn-cost", value);
 	},
 	"--max-cost": (result, value) => {
-		const parsed = Number(value);
-		if (!Number.isFinite(parsed) || parsed < 0) {
-			throw new CliUsageError(
-				`Invalid --max-cost value: ${JSON.stringify(value)}. Expected a non-negative number of USD.`,
-			);
-		}
-		result.maxCost = parsed;
+		result.maxCost = parseCostUsd("--max-cost", value);
 	},
 	"--service-tier": (result, value) => {
 		if (!isServiceTierOpenAISettingValue(value)) {

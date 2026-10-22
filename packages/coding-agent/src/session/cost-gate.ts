@@ -1,98 +1,107 @@
-export interface CostGateController {
-	warnCost?: number;
-	maxCost?: number;
-	/** One-time warn flag, shared across the whole session tree. */
-	warned: boolean;
-	/**
-	 * Live cumulative cost across the whole session tree. Every session in
-	 * the tree registers its own stats source, so a running child session's
-	 * completed turns count immediately instead of only after the parent
-	 * rolls them up on task write-back (#7978 review).
-	 */
-	getCost?: () => number;
-	/** Register a session's live stats source (idempotent per session). */
-	addCostSource?(source: () => number): void;
-	/** Drop a session's source once its spend is rolled into a parent. */
-	removeCostSource?(source: () => number): void;
+import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+import type { Settings } from "../config/settings";
+import { cfgSessionMaxCost, cfgSessionWarnCost } from "./settings";
+
+/** `notice` source of cost-gate warnings and refusals. */
+export const COST_GATE_NOTICE_SOURCE = "cost-gate";
+
+/** A model request the cost gate refused to send. */
+export interface CostCapRefusal {
+	/** Session-tree spend in USD when the request was refused. */
+	readonly spent: number;
+	/** The `session.maxCost` cap in USD. */
+	readonly cap: number;
+	readonly message: string;
 }
 
-export class CostCapExceededError extends Error {
-	constructor(public readonly cap: number) {
-		super(`Cost cap reached ($${cap.toFixed(2)}). Raise session.maxCost or remove --max-cost to continue.`);
-		this.name = "CostCapExceededError";
+/** Rejects a side-channel request (compaction, advisor, cache warming, …) the cost gate refused. */
+export class CostCapError extends Error {
+	constructor(readonly refusal: CostCapRefusal) {
+		super(refusal.message);
+		this.name = "CostCapError";
 	}
 }
 
-export function createCostGateController(options: { warnCost?: number; maxCost?: number }): CostGateController {
-	const sources = new Set<() => number>();
-	// Lazily installed: until the first source registers, getCost stays
-	// undefined so applyCostGate still binds a caller-supplied getter.
-	const aggregate = (): number => {
-		let total = 0;
-		for (const source of sources) total += source();
-		return total;
-	};
-	const controller: CostGateController = {
-		warnCost: options.warnCost,
-		maxCost: options.maxCost,
-		warned: false,
-		getCost: undefined,
-		addCostSource: source => {
-			sources.add(source);
-			controller.getCost = aggregate;
-		},
-		removeCostSource: source => {
-			sources.delete(source);
-			controller.getCost = sources.size > 0 ? aggregate : undefined;
-		},
-	};
-	return controller;
+function usd(amount: number): string {
+	return `$${amount.toFixed(amount < 0.01 ? 4 : 2)}`;
 }
 
-export type CostGateDecision = "ok" | "warn" | "cap";
+/**
+ * Running spend of one session tree: the root session, its subagents, and
+ * their side-channel requests share one gate. The total starts from the
+ * root's recorded spend (so a resumed session keeps its history) and adds
+ * every response's cost as it finishes. Thresholds are read from the root's
+ * settings on each check, so `session.warnCost` / `session.maxCost` edits
+ * apply to the next request.
+ */
+export class CostGate {
+	readonly #settings: Settings;
+	readonly #warn: (message: string) => void;
+	#spent: number;
+	#warned: boolean;
 
-export function evaluateCostGate(controller: CostGateController, cost: number): CostGateDecision {
-	if (controller.maxCost !== undefined && cost >= controller.maxCost) return "cap";
-	if (controller.warnCost !== undefined && cost >= controller.warnCost && !controller.warned) {
-		controller.warned = true;
-		return "warn";
+	constructor(settings: Settings, recordedSpend: number, warn: (message: string) => void) {
+		this.#settings = settings;
+		this.#warn = warn;
+		this.#spent = recordedSpend;
+		const warnCost = cfgSessionWarnCost.get(settings);
+		// A session resumed past its warning threshold was warned in the run that crossed it.
+		this.#warned = warnCost !== undefined && recordedSpend >= warnCost;
 	}
-	return "ok";
-}
 
-export function applyCostGate<T>(
-	gate: CostGateController,
-	getCost: () => number,
-	onWarn: (message: string) => void,
-	dispatch: () => T,
-): T {
-	gate.getCost ??= getCost;
-	const cost = gate.getCost();
-	const decision = evaluateCostGate(gate, cost);
-	if (decision === "cap") {
-		throw new CostCapExceededError(gate.maxCost!);
+	get spent(): number {
+		return this.#spent;
 	}
-	if (decision === "warn") {
-		onWarn(
-			`Cost warning: cumulative session cost $${cost.toFixed(2)} reached the warn threshold ($${gate.warnCost!.toFixed(2)}).`,
+
+	/** The refusal for the next model request, or `undefined` to send it. */
+	check(): CostCapRefusal | undefined {
+		const cap = cfgSessionMaxCost.get(this.#settings);
+		if (cap === undefined || this.#spent < cap) return undefined;
+		return {
+			spent: this.#spent,
+			cap,
+			message: `Cost cap reached: this session spent ${usd(this.#spent)} of its ${usd(cap)} cap (--max-cost / session.maxCost), so the next model request was not sent.`,
+		};
+	}
+
+	/** Adds a finished response's cost; warns once when the total first reaches `session.warnCost`. */
+	record(cost: number): void {
+		if (!(cost > 0)) return;
+		this.#spent += cost;
+		const warnCost = cfgSessionWarnCost.get(this.#settings);
+		if (this.#warned || warnCost === undefined || this.#spent < warnCost) return;
+		this.#warned = true;
+		this.#warn(
+			`Cost warning: this session has spent ${usd(this.#spent)}, past its ${usd(warnCost)} warning threshold (--warn-cost / session.warnCost).`,
 		);
 	}
-	return dispatch();
+
+	/** Wraps a stream function: refuses requests at the cap and records each response's cost. */
+	guard(streamFn: StreamFn): StreamFn {
+		const meter = (stream: AssistantMessageEventStream): AssistantMessageEventStream => {
+			stream.result().then(
+				message => this.record(message.usage.cost.total),
+				() => {},
+			);
+			return stream;
+		};
+		return (model, context, options) => {
+			const refusal = this.check();
+			if (refusal) return Promise.reject(new CostCapError(refusal));
+			const stream = streamFn(model, context, options);
+			return stream instanceof Promise ? stream.then(meter) : meter(stream);
+		};
+	}
 }
 
-// A negative or non-finite threshold can never be crossed by a cumulative
-// cost, so it most likely means a misconfigured settings value; treat it as
-// unset rather than enforcing a broken contract.
-function normalizeThreshold(value: number | undefined): number | undefined {
-	return value !== undefined && Number.isFinite(value) && value >= 0 ? value : undefined;
-}
-
-export function resolveCostGate(
-	flags: { warnCost?: number; maxCost?: number },
-	configured: { warnCost?: number; maxCost?: number },
-): CostGateController | undefined {
-	const warnCost = normalizeThreshold(flags.warnCost ?? configured.warnCost);
-	const maxCost = normalizeThreshold(flags.maxCost ?? configured.maxCost);
-	if (warnCost === undefined && maxCost === undefined) return undefined;
-	return createCostGateController({ warnCost, maxCost });
+/** A gate for a new session tree, or `undefined` when neither threshold is configured. */
+export function createCostGate(
+	settings: Settings,
+	recordedSpend: number,
+	warn: (message: string) => void,
+): CostGate | undefined {
+	if (cfgSessionWarnCost.get(settings) === undefined && cfgSessionMaxCost.get(settings) === undefined)
+		return undefined;
+	return new CostGate(settings, recordedSpend, warn);
 }

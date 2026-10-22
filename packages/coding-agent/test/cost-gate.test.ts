@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type Api, clearCustomApis, type Model, type ModelSpec, registerCustomApi } from "@oh-my-pi/pi-ai";
+import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import {
+	type Api,
+	type AssistantMessage,
+	clearCustomApis,
+	type Model,
+	type ModelSpec,
+	registerCustomApi,
+} from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { runCli } from "@oh-my-pi/pi-coding-agent/cli";
@@ -9,168 +16,157 @@ import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import { PRINT_MODE_COST_CAP_EXIT_CODE, runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import {
-	applyCostGate,
-	CostCapExceededError,
-	createCostGateController,
-	evaluateCostGate,
-	resolveCostGate,
-} from "@oh-my-pi/pi-coding-agent/session/cost-gate";
+import { COST_GATE_NOTICE_SOURCE, CostCapError, CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgSessionMaxCost, cfgSessionWarnCost } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { rejectionOf } from "./helpers/rejection";
 
-describe("evaluateCostGate", () => {
-	it("is ok when no thresholds are set", () => {
-		expect(evaluateCostGate(createCostGateController({}), 999)).toBe("ok");
+/** A keyless model on a custom API, so the stubbed provider needs no credentials. */
+function createCostModel(api: string): Model<Api> {
+	return buildModel({
+		id: "cost-gate-model",
+		name: "Cost Gate Model",
+		api,
+		provider: "llama.cpp",
+		baseUrl: "http://127.0.0.1:8080/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 4096,
+		maxTokens: 1024,
+	} as ModelSpec<Api>) as Model<Api>;
+}
+
+/** A finished response costing `cost`; with `toolCall`, the loop has to send another request. */
+function response(cost: number, toolCall = false): AssistantMessage {
+	const message = createAssistantMessage(toolCall ? "" : "Answer");
+	message.usage.cost.total = cost;
+	if (toolCall) {
+		message.content = [{ type: "toolCall", id: "call_1", name: "lookup", arguments: {} }];
+		message.stopReason = "toolUse";
+	}
+	return message;
+}
+
+function streamOf(message: AssistantMessage): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() =>
+		stream.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message }),
+	);
+	return stream;
+}
+
+describe("CostGate", () => {
+	function gateWith(values: Record<string, unknown>, recordedSpend = 0) {
+		const warnings: string[] = [];
+		const settings = Settings.isolated(values);
+		return { gate: new CostGate(settings, recordedSpend, message => warnings.push(message)), settings, warnings };
+	}
+
+	it("admits requests below session.maxCost and refuses them from the cap on", () => {
+		const { gate } = gateWith({ "session.maxCost": 1 });
+		gate.record(0.6);
+		expect(gate.check()).toBeUndefined();
+		gate.record(0.4);
+		const refusal = gate.check();
+		expect(refusal?.cap).toBe(1);
+		expect(refusal?.spent).toBeCloseTo(1, 10);
+		expect(refusal?.message).toContain("Cost cap reached");
+		expect(refusal?.message).toContain("$1.00");
 	});
 
-	it("is ok below both thresholds", () => {
-		const gate = createCostGateController({ warnCost: 8, maxCost: 10 });
-		expect(evaluateCostGate(gate, 5)).toBe("ok");
+	it("starts from the resumed session's recorded spend", () => {
+		const { gate } = gateWith({ "session.maxCost": 1 }, 1.2);
+		expect(gate.check()?.spent).toBe(1.2);
 	});
 
-	it("warns once at warnCost and stays ok afterwards", () => {
-		const gate = createCostGateController({ warnCost: 8, maxCost: 10 });
-		expect(evaluateCostGate(gate, 8)).toBe("warn");
-		expect(evaluateCostGate(gate, 9)).toBe("ok");
+	it("reads the cap on every check, so raising session.maxCost admits the next request", () => {
+		const { gate, settings } = gateWith({ "session.maxCost": 1 }, 1.5);
+		expect(gate.check()).toBeDefined();
+		cfgSessionMaxCost.override(settings, 2);
+		expect(gate.check()).toBeUndefined();
 	});
 
-	it("caps at maxCost regardless of prior warning", () => {
-		const gate = createCostGateController({ warnCost: 8, maxCost: 10 });
-		expect(evaluateCostGate(gate, 10)).toBe("cap");
-		expect(evaluateCostGate(gate, 10)).toBe("cap");
+	it("warns once, when spend first reaches session.warnCost", () => {
+		const { gate, warnings } = gateWith({ "session.warnCost": 0.5 });
+		gate.record(0.4);
+		expect(warnings).toEqual([]);
+		gate.record(0.2);
+		gate.record(1);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("$0.60");
+		expect(warnings[0]).toContain("$0.50");
+	});
+
+	it("does not warn again for a session resumed past its warning threshold", () => {
+		const { gate, warnings } = gateWith({ "session.warnCost": 0.5 }, 0.7);
+		gate.record(0.1);
+		expect(warnings).toEqual([]);
+	});
+
+	it("ignores costs that are not positive numbers", () => {
+		const { gate } = gateWith({ "session.maxCost": 1 });
+		gate.record(Number.NaN);
+		gate.record(-1);
+		gate.record(0);
+		expect(gate.spent).toBe(0);
+	});
+
+	it("guard() refuses at the cap without calling the provider and records each response", async () => {
+		const { gate } = gateWith({ "session.maxCost": 1 });
+		let calls = 0;
+		const provider: StreamFn = () => {
+			calls++;
+			return streamOf(response(1.5));
+		};
+		const guarded = gate.guard(provider);
+		const model = createCostModel("test-cost-gate-guard");
+
+		const stream = await guarded(model, { messages: [] });
+		await stream.result();
+		expect(gate.spent).toBe(1.5);
+
+		const refused = await rejectionOf(Promise.resolve(guarded(model, { messages: [] })));
+		expect(refused).toBeInstanceOf(CostCapError);
+		expect(calls).toBe(1);
 	});
 });
 
-describe("applyCostGate", () => {
-	it("dispatches below thresholds", () => {
-		const gate = createCostGateController({ maxCost: 10 });
-		const dispatch = () => "sent";
-		expect(
-			applyCostGate(
-				gate,
-				() => 1,
-				() => {},
-				dispatch,
-			),
-		).toBe("sent");
-	});
-
-	it("throws CostCapExceededError at maxCost without dispatching", () => {
-		const gate = createCostGateController({ maxCost: 10 });
-		const dispatched = { called: false };
-		expect(() =>
-			applyCostGate(
-				gate,
-				() => 10,
-				() => {},
-				() => {
-					dispatched.called = true;
-				},
-			),
-		).toThrow(CostCapExceededError);
-		expect(dispatched.called).toBe(false);
-	});
-
-	it("invokes onWarn once at warnCost", () => {
-		const gate = createCostGateController({ warnCost: 8 });
-		const warned: string[] = [];
-		applyCostGate(
-			gate,
-			() => 8,
-			m => warned.push(m),
-			() => "sent",
-		);
-		applyCostGate(
-			gate,
-			() => 9,
-			m => warned.push(m),
-			() => "sent",
-		);
-		expect(warned).toHaveLength(1);
-		expect(warned[0]).toContain("$8.00");
-	});
-
-	it("binds the cost getter on first use", () => {
-		const gate = createCostGateController({ maxCost: 10 });
-		applyCostGate(
-			gate,
-			() => 3,
-			() => {},
-			() => {},
-		);
-		expect(gate.getCost?.()).toBe(3);
-	});
-});
-
-describe("resolveCostGate", () => {
-	it("returns undefined when neither flags nor config are set", () => {
-		expect(resolveCostGate({}, {})).toBeUndefined();
-	});
-
-	it("prefers flags over configured values", () => {
-		const gate = resolveCostGate({ warnCost: 8, maxCost: 10 }, { warnCost: 1, maxCost: 2 });
-		expect(gate?.warnCost).toBe(8);
-		expect(gate?.maxCost).toBe(10);
-	});
-
-	it("falls back to configured values", () => {
-		const gate = resolveCostGate({}, { warnCost: 8, maxCost: 10 });
-		expect(gate?.warnCost).toBe(8);
-		expect(gate?.maxCost).toBe(10);
-		expect(gate?.warned).toBe(false);
-	});
-
-	it("ignores negative or non-finite configured thresholds", () => {
-		expect(resolveCostGate({}, { warnCost: -5, maxCost: Number.NaN })).toBeUndefined();
-		const gate = resolveCostGate({}, { warnCost: -5, maxCost: 10 });
-		expect(gate?.warnCost).toBeUndefined();
-		expect(gate?.maxCost).toBe(10);
-	});
-});
-
-describe("session cost settings (issue #7802)", () => {
-	it("defaults warnCost and maxCost to undefined", () => {
+describe("session.warnCost / session.maxCost settings", () => {
+	it("default to unset", () => {
 		const settings = Settings.isolated();
 		expect(cfgSessionWarnCost.get(settings)).toBeUndefined();
 		expect(cfgSessionMaxCost.get(settings)).toBeUndefined();
 	});
 
-	it("honors explicit overrides", () => {
-		const settings = Settings.isolated({ "session.warnCost": 8, "session.maxCost": 10 });
-		expect(cfgSessionWarnCost.get(settings)).toBe(8);
-		expect(cfgSessionMaxCost.get(settings)).toBe(10);
+	it("reject a configured value that is not a positive USD amount", () => {
+		for (const value of [-1, 0, Number.NaN, "5"]) {
+			expect(() => Settings.isolated({ "session.maxCost": value })).toThrow("Invalid session.maxCost");
+			expect(() => Settings.isolated({ "session.warnCost": value })).toThrow("Invalid session.warnCost");
+		}
 	});
 });
 
-describe("--warn-cost / --max-cost parsing (issue #7802)", () => {
-	it("parses valid numbers", () => {
-		const parsed = parseArgs(["--warn-cost", "8", "--max-cost", "10", "--print", "hello"]);
+describe("--warn-cost / --max-cost", () => {
+	it("parse positive USD amounts", () => {
+		const parsed = parseArgs(["--warn-cost", "8", "--max-cost", "0.0001", "--print", "hello"]);
 		expect(parsed.warnCost).toBe(8);
-		expect(parsed.maxCost).toBe(10);
-		expect(parsed.print).toBe(true);
+		expect(parsed.maxCost).toBe(0.0001);
 	});
 
-	it("throws a visible parse error for invalid values", () => {
-		for (const value of ["-1", "Infinity", "NaN", "abc"]) {
-			let thrown: unknown;
-			try {
-				parseArgs(["--max-cost", value]);
-			} catch (error) {
-				thrown = error;
-			}
-			if (!(thrown instanceof Error)) {
-				throw new Error(`--max-cost ${value} did not throw a visible parse error`);
-			}
-			expect(thrown.message).toContain("--max-cost");
+	it("reject amounts that are not positive", () => {
+		for (const value of ["-1", "0", "Infinity", "NaN", "abc", ""]) {
+			expect(() => parseArgs(["--max-cost", value])).toThrow("Invalid --max-cost value");
 		}
 	});
 
-	it("reports invalid values as CLI usage errors", async () => {
+	it("report an invalid amount as a usage error", async () => {
 		const previousExitCode = process.exitCode;
 		let observedExitCode: string | number | null | undefined;
 		const captured: string[] = [];
@@ -178,7 +174,6 @@ describe("--warn-cost / --max-cost parsing (issue #7802)", () => {
 			captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
 			return true;
 		});
-
 		try {
 			await runCli(["--warn-cost", "abc", "--print", "hello"]);
 			observedExitCode = process.exitCode;
@@ -186,202 +181,83 @@ describe("--warn-cost / --max-cost parsing (issue #7802)", () => {
 			vi.restoreAllMocks();
 			process.exitCode = previousExitCode ?? 0;
 		}
-
-		const stderr = captured.join("");
 		expect(observedExitCode).toBe(2);
-		expect(stderr).toContain("Invalid --warn-cost value");
-		expect(stderr).toContain("Run `omp --help` for available flags.");
-	});
-});
-
-describe("cost gate wiring in runRootCommand (issue #7802)", () => {
-	it("passes flag-derived costGate into createAgentSession options", async () => {
-		using tempDir = TempDir.createSync("@omp-cost-gate-");
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
-		let observedOptions: CreateAgentSessionOptions | undefined;
-		const parsed = parseArgs(["--warn-cost", "8", "--max-cost", "10", "--print", "hello"]);
-		parsed.noExtensions = true;
-		parsed.noSkills = true;
-		parsed.noRules = true;
-		parsed.noTools = true;
-		parsed.noLsp = true;
-		parsed.sessionDir = tempDir.path();
-
-		try {
-			await runRootCommand(parsed, ["--warn-cost", "8", "--max-cost", "10", "--print", "hello"], {
-				discoverAuthStorage: async () => authStorage,
-				settings,
-				createAgentSession: async options => {
-					observedOptions = options;
-					throw new Error("stop after session options");
-				},
-			});
-		} catch (error) {
-			if (!(error instanceof Error) || error.message !== "stop after session options") {
-				throw error;
-			}
-		} finally {
-			authStorage.close();
-		}
-
-		expect(observedOptions?.costGate?.warnCost).toBe(8);
-		expect(observedOptions?.costGate?.maxCost).toBe(10);
+		expect(captured.join("")).toContain("Invalid --warn-cost value");
 	});
 
-	it("falls back to session settings when flags are absent", async () => {
+	it("override the configured thresholds for the session", async () => {
 		using tempDir = TempDir.createSync("@omp-cost-gate-");
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		const settings = Settings.isolated({
 			"marketplace.autoUpdate": "off",
-			"session.warnCost": 8,
-			"session.maxCost": 10,
+			"session.warnCost": 1,
+			"session.maxCost": 2,
 		});
-		let observedOptions: CreateAgentSessionOptions | undefined;
-		const parsed = parseArgs(["--print", "hello"]);
+		const argv = ["--warn-cost", "8", "--max-cost", "10", "--print", "hello"];
+		const parsed = parseArgs(argv);
 		parsed.noExtensions = true;
 		parsed.noSkills = true;
 		parsed.noRules = true;
 		parsed.noTools = true;
 		parsed.noLsp = true;
 		parsed.sessionDir = tempDir.path();
-
+		let sessionSettings: Settings | undefined;
 		try {
-			await runRootCommand(parsed, ["--print", "hello"], {
+			await runRootCommand(parsed, argv, {
 				discoverAuthStorage: async () => authStorage,
 				settings,
 				createAgentSession: async options => {
-					observedOptions = options;
+					sessionSettings = options?.settings;
 					throw new Error("stop after session options");
 				},
 			});
 		} catch (error) {
-			if (!(error instanceof Error) || error.message !== "stop after session options") {
-				throw error;
-			}
+			if (!(error instanceof Error) || error.message !== "stop after session options") throw error;
 		} finally {
 			authStorage.close();
 		}
-
-		expect(observedOptions?.costGate?.warnCost).toBe(8);
-		expect(observedOptions?.costGate?.maxCost).toBe(10);
+		expect(sessionSettings && cfgSessionWarnCost.get(sessionSettings)).toBe(8);
+		expect(sessionSettings && cfgSessionMaxCost.get(sessionSettings)).toBe(10);
 	});
 });
 
-describe("cost gate session-tree aggregation (issue #7978)", () => {
-	it("sums live sources across sessions and drops removed ones", () => {
-		const gate = createCostGateController({ maxCost: 10 });
-		const root = { cost: 1 };
-		const child = { cost: 2 };
-		const rootSource = () => root.cost;
-		const childSource = () => child.cost;
-		gate.addCostSource?.(rootSource);
-		gate.addCostSource?.(childSource);
-		expect(gate.getCost?.()).toBe(3);
-		// A child's completed turn counts immediately, not only after the
-		// parent rolls it up on task write-back.
-		child.cost = 5;
-		expect(gate.getCost?.()).toBe(6);
-		gate.removeCostSource?.(childSource);
-		expect(gate.getCost?.()).toBe(1);
-	});
-
-	it("leaves getCost undefined until a source registers, so applyCostGate binds its own getter", () => {
-		const gate = createCostGateController({ maxCost: 10 });
-		expect(gate.getCost).toBeUndefined();
-		gate.addCostSource?.(() => 4);
-		expect(gate.getCost?.()).toBe(4);
-	});
-
-	it("is idempotent when the same source registers twice", () => {
-		const gate = createCostGateController({ maxCost: 10 });
-		const source = () => 3;
-		gate.addCostSource?.(source);
-		gate.addCostSource?.(source);
-		expect(gate.getCost?.()).toBe(3);
-	});
-});
-
-describe("cost gate observable contract (issue #7978)", () => {
-	const sessions: { dispose(): Promise<void> }[] = [];
-	let authStorage: AuthStorage | undefined;
+describe("cost gate in a running session", () => {
+	const sessions: AgentSession[] = [];
+	const tempDirs: TempDir[] = [];
+	const authStorages: AuthStorage[] = [];
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		clearCustomApis();
-		for (const session of sessions.splice(0)) {
-			await session.dispose();
-		}
-		authStorage?.close();
-		authStorage = undefined;
+		for (const session of sessions.splice(0)) await session.dispose();
+		for (const storage of authStorages.splice(0)) storage.close();
+		for (const dir of tempDirs.splice(0)) dir.removeSync();
 	});
 
-	function createCostModel(api: string): Model<Api> {
-		// "llama.cpp" is a keyless provider, so dispatch does not need auth.
-		return buildModel({
-			id: "cost-gate-model",
-			name: "Cost Gate Model",
-			api,
-			provider: "llama.cpp",
-			baseUrl: "http://127.0.0.1:8080/v1",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		} as ModelSpec<Api>) as Model<Api>;
+	/** Registers a provider that answers with `responses` in order and counts the requests it got. */
+	function scriptedProvider(api: string, responses: AssistantMessage[]): { calls: () => number } {
+		let calls = 0;
+		registerCustomApi(api, () => streamOf(responses[Math.min(calls++, responses.length - 1)]));
+		return { calls: () => calls };
 	}
 
-	function createCostStubApi(api: string, costPerTurn = 0): { count(): number } {
-		let dispatches = 0;
-		registerCustomApi(api, (_model, _context, _options) => {
-			dispatches++;
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage("Answer");
-				message.usage.cost.total = costPerTurn;
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
-		});
-		return { count: () => dispatches };
-	}
-
-	/** Append a completed assistant turn's usage to the session state. */
-	function recordSpend(session: { agent: { state: { messages: AgentMessage[] } } }, cost: number): void {
-		session.agent.state.messages.push({
-			role: "assistant",
-			content: [{ type: "text", text: "expensive turn" }],
-			api: "cost-gate-model",
-			provider: "llama.cpp",
-			model: "cost-gate-model",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		});
-	}
-
-	async function createGatedSession(api: string, costGate: object) {
-		const tempDir = TempDir.createSync("@omp-cost-gate-contract-");
-		const storage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage = storage;
-		const modelRegistry = new ModelRegistry(storage, path.join(tempDir.path(), "models.yml"));
+	async function createSession(
+		api: string,
+		values: Record<string, unknown>,
+		extra: Partial<CreateAgentSessionOptions> = {},
+	): Promise<AgentSession> {
+		const tempDir = TempDir.createSync("@omp-cost-gate-session-");
+		tempDirs.push(tempDir);
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorages.push(authStorage);
 		const { session } = await createAgentSession({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
-			authStorage: storage,
-			modelRegistry,
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			settings: Settings.isolated({ "compaction.enabled": false, ...values }),
 			model: createCostModel(api),
-			costGate: costGate as never,
 			disableExtensionDiscovery: true,
 			skills: [],
 			contextFiles: [],
@@ -390,57 +266,138 @@ describe("cost gate observable contract (issue #7978)", () => {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
+			...extra,
 		});
 		sessions.push(session);
 		return session;
 	}
 
-	it("dispatches below the threshold, warns once, and refuses at the cap without calling the provider", async () => {
-		// The stub adds $6 of usage per completed turn, so the gate reads the
-		// cumulative cost *before* each dispatch: turn 1 reads $0 (ok), turn 2
-		// reads $6 (warn), turn 3 reads $12 (cap).
-		const gate = createCostGateController({ warnCost: 5, maxCost: 12 });
-		const api = "test-cost-gate-contract";
-		const stub = createCostStubApi(api, 6);
-		const session = await createGatedSession(api, gate);
-		const warnings: string[] = [];
+	function costNotices(session: AgentSession): Extract<AgentSessionEvent, { type: "notice" }>[] {
+		const notices: Extract<AgentSessionEvent, { type: "notice" }>[] = [];
 		session.subscribe(event => {
-			if (event.type === "notice" && event.level === "warning") warnings.push(event.message);
+			if (event.type === "notice" && event.source === COST_GATE_NOTICE_SOURCE) notices.push(event);
 		});
+		return notices;
+	}
 
-		// Below threshold: dispatch proceeds.
-		await session.sendUserMessage("first");
-		expect(stub.count()).toBe(1);
-		expect(warnings).toHaveLength(0);
+	it("refuses the next request of a turn once a response reaches the cap", async () => {
+		const api = "test-cost-gate-midturn";
+		const provider = scriptedProvider(api, [response(1.5, true), response(0.1)]);
+		const session = await createSession(api, { "session.maxCost": 1 });
+		const notices = costNotices(session);
 
-		// At/above the warn threshold: still proceeds, but warns exactly once.
-		await session.sendUserMessage("second");
-		expect(stub.count()).toBe(2);
-		expect(warnings).toHaveLength(1);
-		expect(warnings[0]).toContain("$5.00");
+		await session.prompt("go");
+		await session.waitForIdle();
 
-		// At/above the cap: the turn ends without invoking the provider, and
-		// the one-time warning is not re-emitted.
-		await session.sendUserMessage("third");
-		expect(stub.count()).toBe(2);
-		expect(session.getSessionStats().cost).toBe(12);
-		expect(warnings).toHaveLength(1);
+		expect(provider.calls()).toBe(1);
+		expect(session.costCapRefusal?.spent).toBe(1.5);
+		expect(notices.map(notice => notice.level)).toEqual(["error"]);
+		expect(notices[0]?.message).toContain("Cost cap reached");
 	});
 
-	it("counts a child session's completed turns before the parent rolls them up", async () => {
-		const gate = createCostGateController({ maxCost: 10 });
-		const api = "test-cost-gate-child";
-		const stub = createCostStubApi(api);
-		const parent = await createGatedSession(api, gate);
-		const child = await createGatedSession(api, gate);
+	it("warns once at session.warnCost and keeps sending requests", async () => {
+		const api = "test-cost-gate-warn";
+		const provider = scriptedProvider(api, [response(0.6, true), response(0.6, true), response(0.6)]);
+		const session = await createSession(api, { "session.warnCost": 1 });
+		const notices = costNotices(session);
 
-		// The parent is already at the cap; the child's own stats are zero,
-		// but the shared controller reads the whole tree, so the child's first
-		// dispatch is refused without invoking the provider.
-		recordSpend(parent, 10);
-		expect(stub.count()).toBe(0);
-		await child.sendUserMessage("child turn");
-		expect(stub.count()).toBe(0);
-		expect(child.getSessionStats().cost).toBe(0);
+		await session.prompt("go");
+		await session.waitForIdle();
+
+		expect(provider.calls()).toBe(3);
+		expect(notices.map(notice => notice.level)).toEqual(["warning"]);
+		expect(session.costCapRefusal).toBeUndefined();
+	});
+
+	it("counts a subagent's spend against the shared cap", async () => {
+		const api = "test-cost-gate-child";
+		const provider = scriptedProvider(api, [response(1.2)]);
+		const parent = await createSession(api, { "session.maxCost": 1 });
+		const child = await createSession(api, {}, { costGate: parent.costGate });
+
+		await child.prompt("child work");
+		await child.waitForIdle();
+		await parent.prompt("parent work");
+		await parent.waitForIdle();
+
+		expect(provider.calls()).toBe(1);
+		expect(parent.costCapRefusal?.spent).toBe(1.2);
+	});
+
+	it("keeps a resumed session's recorded spend", async () => {
+		const api = "test-cost-gate-resume";
+		const provider = scriptedProvider(api, [response(0.1)]);
+		const tempDir = TempDir.createSync("@omp-cost-gate-resume-");
+		tempDirs.push(tempDir);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		sessionManager.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() });
+		sessionManager.appendMessage(response(2));
+		const session = await createSession(api, { "session.maxCost": 1 }, { sessionManager });
+
+		await session.prompt("continue");
+		await session.waitForIdle();
+
+		expect(provider.calls()).toBe(0);
+		expect(session.costCapRefusal?.spent).toBe(2);
+	});
+
+	describe("print mode", () => {
+		function captureOutput(): { stdout: string[]; stderr: string[] } {
+			const stdout: string[] = [];
+			const stderr: string[] = [];
+			vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+				stdout.push(String(args[0]));
+				const cb = args[args.length - 1];
+				if (typeof cb === "function") (cb as (err?: Error | null) => void)(null);
+				return true;
+			});
+			vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+				stderr.push(String(chunk));
+				return true;
+			});
+			return { stdout, stderr };
+		}
+
+		it("exits with the cost-cap status and reports the refusal on stderr", async () => {
+			const api = "test-cost-gate-print";
+			scriptedProvider(api, [response(1.5, true), response(0.1)]);
+			const session = await createSession(api, { "session.maxCost": 1 });
+			const output = captureOutput();
+
+			const exitCode = await runPrintMode(session, { mode: "text", initialMessage: "go" });
+
+			expect(exitCode).toBe(PRINT_MODE_COST_CAP_EXIT_CODE);
+			expect(output.stderr.join("")).toContain("Cost cap reached");
+			expect(output.stdout.join("")).toBe("");
+		});
+
+		it("emits the refusal as a cost-gate notice in JSON mode", async () => {
+			const api = "test-cost-gate-print-json";
+			scriptedProvider(api, [response(1.5, true), response(0.1)]);
+			const session = await createSession(api, { "session.maxCost": 1 });
+			const output = captureOutput();
+
+			const exitCode = await runPrintMode(session, { mode: "json", initialMessage: "go" });
+
+			expect(exitCode).toBe(PRINT_MODE_COST_CAP_EXIT_CODE);
+			const notices = output.stdout
+				.flatMap(line => line.split("\n"))
+				.filter(line => line.startsWith("{"))
+				.map(line => JSON.parse(line) as { type: string; source?: string; level?: string })
+				.filter(event => event.type === "notice" && event.source === COST_GATE_NOTICE_SOURCE);
+			expect(notices.map(notice => notice.level)).toEqual(["error"]);
+		});
+
+		it("exits 0 when the run stays under the cap", async () => {
+			const api = "test-cost-gate-print-ok";
+			scriptedProvider(api, [response(0.1)]);
+			const session = await createSession(api, { "session.maxCost": 1 });
+			const output = captureOutput();
+
+			const exitCode = await runPrintMode(session, { mode: "text", initialMessage: "go" });
+
+			expect(exitCode).toBe(0);
+			expect(output.stdout.join("")).toContain("Answer");
+		});
 	});
 });

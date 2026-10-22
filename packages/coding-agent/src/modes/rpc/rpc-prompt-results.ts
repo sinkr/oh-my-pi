@@ -13,6 +13,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { stripRawHttpRequestDiagnostics } from "@oh-my-pi/pi-ai/utils/http-inspector";
 import type { AgentSessionEvent } from "../../session/agent-session";
+import type { CostCapRefusal } from "../../session/cost-gate";
 import { isRpcSessionSettled, type RpcScheduledTurnProbe, type RpcSettleSession } from "./rpc-session-settle";
 import type { RpcPromptError, RpcPromptResultFrame, RpcPromptStatus } from "./rpc-types";
 
@@ -55,19 +56,24 @@ export class RpcPromptResults {
 	readonly #session: RpcSettleSession;
 	readonly #output: (frame: RpcPromptResultFrame) => void;
 	readonly #scheduledTurn: RpcScheduledTurnProbe | undefined;
+	readonly #costCapRefusal: (() => CostCapRefusal | undefined) | undefined;
+	#refusalAtRunStart: CostCapRefusal | undefined;
 
 	/**
 	 * @param session read for queue state and, at report time, the `sessionSettled` predicate.
 	 * @param scheduledTurn reports a host-scheduled turn not yet admitted (not settled).
+	 * @param costCapRefusal the session's latest cost-gate refusal; a new one during a run makes its outcome `cost_cap`.
 	 */
 	constructor(
 		session: RpcSettleSession,
 		output: (frame: RpcPromptResultFrame) => void,
 		scheduledTurn?: RpcScheduledTurnProbe,
+		costCapRefusal?: () => CostCapRefusal | undefined,
 	) {
 		this.#session = session;
 		this.#output = output;
 		this.#scheduledTurn = scheduledTurn;
+		this.#costCapRefusal = costCapRefusal;
 	}
 
 	/** Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}. */
@@ -129,12 +135,18 @@ export class RpcPromptResults {
 	observe(event: AgentSessionEvent): void {
 		if (event.type === "agent_start") {
 			this.#agentStarts++;
+			this.#refusalAtRunStart = this.#costCapRefusal?.();
 			return;
 		}
 		if (event.type !== "agent_end" || this.#open.size === 0) return;
 		// Older sessions omit `yielded`; only their terminal ends were yields.
 		if (!(event.yielded ?? event.isTerminal !== false)) return;
-		const outcome = runOutcome(event.messages);
+		const refusal = this.#costCapRefusal?.();
+		// A request the cost gate refused during this run is its outcome, whatever message ended it.
+		const outcome: RunOutcome =
+			refusal !== undefined && refusal !== this.#refusalAtRunStart
+				? { status: "error", error: { message: refusal.message, retryable: false, code: "cost_cap" } }
+				: runOutcome(event.messages);
 		// A still-queued steer/follow-up has not been read by the agent yet.
 		const queueDrained = this.#session.queuedMessageCount === 0;
 		for (const [ticket, open] of this.#open) {

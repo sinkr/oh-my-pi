@@ -109,7 +109,6 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
-import { resolveCostGate } from "./session/cost-gate";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
@@ -1409,16 +1408,6 @@ export async function buildSessionOptions(
 	if (parsed.maxTime !== undefined) {
 		options.deadline = Date.now() + parsed.maxTime * 1000;
 	}
-	const costGate = resolveCostGate(
-		{ warnCost: parsed.warnCost, maxCost: parsed.maxCost },
-		{
-			warnCost: cfgSessionWarnCost.get(activeSettings),
-			maxCost: cfgSessionMaxCost.get(activeSettings),
-		},
-	);
-	if (costGate !== undefined) {
-		options.costGate = costGate;
-	}
 
 	// Explicit prompt inputs win over discovered SYSTEM_TEMPLATE.md/SYSTEM.md.
 	if (parsed.systemPrompt !== undefined && parsed.systemPromptTemplate !== undefined) {
@@ -1951,6 +1940,9 @@ export async function runRootCommand(
 			// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
 			cfgToolsApprovalMode.override(settingsInstance, "yolo");
 		}
+		// Runtime overrides (not persisted): the session's cost gate reads its thresholds from settings.
+		if (parsedArgs.warnCost !== undefined) cfgSessionWarnCost.override(settingsInstance, parsedArgs.warnCost);
+		if (parsedArgs.maxCost !== undefined) cfgSessionMaxCost.override(settingsInstance, parsedArgs.maxCost);
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyProtocolDefaults("rpc", settingsInstance);
 		} else if (parsedArgs.mode === "acp") {

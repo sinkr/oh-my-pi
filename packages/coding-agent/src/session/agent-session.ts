@@ -354,7 +354,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import type { CostGateController } from "./cost-gate";
+import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, type CostGate } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
@@ -846,8 +846,9 @@ export class AgentSession implements SettingsScope {
 	readonly settings: Settings;
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
-	/** Cost gate controller shared across the session tree, forwarded to revived subagents. */
-	readonly costGate?: CostGateController;
+	/** Cost gate of the session tree, forwarded to revived subagents. */
+	readonly costGate?: CostGate;
+	#costCapRefusal: CostCapRefusal | undefined;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -2613,6 +2614,19 @@ export class AgentSession implements SettingsScope {
 				this.#maintenance.renderArchiveForModel(context.messages),
 			),
 		);
+		const costGate = config.costGate;
+		if (costGate) {
+			// Stops the run before the request is sent: no turn opens, nothing is billed.
+			this.addDisposer(
+				this.agent.addBeforeModelCall(() => {
+					const refusal = costGate.check();
+					if (!refusal) return;
+					this.#costCapRefusal = refusal;
+					this.emitNotice("error", refusal.message, COST_GATE_NOTICE_SOURCE);
+					return { stop: true, reason: refusal.message };
+				}),
+			);
+		}
 
 		const handoffHost: SessionHandoffHost = {
 			agent: this.agent,
@@ -3262,6 +3276,11 @@ export class AgentSession implements SettingsScope {
 	/** True while a submission has been admitted but has not yet started a turn, queued, or bailed. */
 	get hasAdmittedSubmission(): boolean {
 		return this.#admittedSubmissionCount > 0;
+	}
+
+	/** The latest model request the cost gate refused; print and RPC modes report it as the run's stop reason. */
+	get costCapRefusal(): CostCapRefusal | undefined {
+		return this.#costCapRefusal;
 	}
 
 	/** Resolves once every currently admitted submission has dispatched, queued, or bailed. */

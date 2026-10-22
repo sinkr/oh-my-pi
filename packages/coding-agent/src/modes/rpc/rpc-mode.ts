@@ -1405,7 +1405,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		() => goalController.continuationPending,
 		() => settleWatcher,
 	);
-	const promptResults = new RpcPromptResults(session, output, goalTurnScheduled);
+	const promptResults = new RpcPromptResults(session, output, goalTurnScheduled, () => session.costCapRefusal);
 	const sessionEvents = new RpcSessionEventForwarder(output);
 	const settleWatcher = new RpcSessionSettleWatcher(session, output, goalTurnScheduled);
 

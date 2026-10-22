@@ -945,8 +945,6 @@ export class SessionManager {
 	#turnBudgetHard = false;
 	#turnOutputBaseline = 0;
 	#turnEvalOutput = 0;
-	/** Detached subagent spend recorded on the parent (#7978 review). */
-	#recordedSubagentCost = 0;
 
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
@@ -3148,15 +3146,6 @@ export class SessionManager {
 
 	recordEvalSubagentOutput(output: number): void {
 		if (Number.isFinite(output) && output > 0) this.#turnEvalOutput += output;
-	}
-
-	/** Accumulate detached subagent spend that never rolls into message stats. */
-	recordSubagentCost(cost: number): void {
-		if (Number.isFinite(cost) && cost > 0) this.#recordedSubagentCost += cost;
-	}
-
-	getRecordedSubagentCost(): number {
-		return this.#recordedSubagentCost;
 	}
 
 	getTurnBudget(): { total: number | null; spent: number; hard: boolean } {

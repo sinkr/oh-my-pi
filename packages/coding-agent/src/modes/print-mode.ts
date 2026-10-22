@@ -12,6 +12,7 @@ import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
+import { COST_GATE_NOTICE_SOURCE } from "../session/cost-gate";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
@@ -52,6 +53,8 @@ export interface PrintModeOptions {
 export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 /** Error exits cannot hold automation for the full normal drain budget. */
 export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
+/** Exit status of a run the cost gate stopped (`--max-cost` / `session.maxCost` reached). */
+export const PRINT_MODE_COST_CAP_EXIT_CODE = 3;
 
 /** Sanitize untrusted text (server names, errors) into one stderr-safe line. */
 function singleLine(text: string): string {
@@ -345,10 +348,14 @@ async function runPrintModeCore(
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
-		} else if (event.type === "notice" && event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE) {
+		} else if (
+			event.type === "notice" &&
+			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE || event.source === COST_GATE_NOTICE_SOURCE)
+		) {
 			// Text mode renders no session notices, but an automatic sign-out must not stay
-			// hidden behind a sibling account that quietly answers the prompt.
-			writeStderrLine(`Warning: ${event.message}`);
+			// hidden behind a sibling account that quietly answers the prompt, and a run
+			// must say when it crossed its cost thresholds.
+			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
 		}
 	});
 
@@ -469,6 +476,10 @@ async function runPrintModeCore(
 	// can trail synthetic tool results — both would hide the terminal
 	// assistant message (and its error) from a last-element read.
 	const assistantMsg = admittedAgentTurn ? session.getLastAssistantMessage() : undefined;
+	// A refused request ends the run short of an answer; the refusal (already on
+	// stderr, or a `cost-gate` notice in the JSON stream) is the outcome, with
+	// its own exit code.
+	const costCapped = admittedAgentTurn && !strictMCPFailure && session.costCapRefusal !== undefined;
 	// The terminal stop reason decides the process exit code in every output
 	// mode: `--mode json` used to report success for the same turn-fatal error
 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
@@ -476,6 +487,7 @@ async function runPrintModeCore(
 	// postmortem owns the signal-specific exit code (130/143/129).
 	const terminalFailure =
 		!strictMCPFailure &&
+		!costCapped &&
 		assistantMsg !== undefined &&
 		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
 		!isSilentAbort(assistantMsg) &&
@@ -484,7 +496,7 @@ async function runPrintModeCore(
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
 	// stop reason through the event subscription.
-	if (mode === "text" && !terminalFailure && !strictMCPFailure) {
+	if (mode === "text" && !terminalFailure && !strictMCPFailure && !costCapped) {
 		if (assistantMsg) {
 			if (
 				assistantMsg.errorMessage &&
@@ -512,7 +524,9 @@ async function runPrintModeCore(
 		// verdict is the point of a headless advisor run, so wait through recovery,
 		// and wait on `strict` reviewers past the budget like every primary boundary.
 		await session.waitForAdvisorCatchup(
-			terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
+			terminalFailure || costCapped
+				? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS
+				: PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
 			{ waitThroughRecovery: true, strictWithoutDeadline: true },
 		);
 	}
@@ -553,5 +567,6 @@ async function runPrintModeCore(
 	}
 
 	await stderrTail;
-	return terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed ? 1 : 0;
+	if (terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed) return 1;
+	return costCapped ? PRINT_MODE_COST_CAP_EXIT_CODE : 0;
 }

@@ -115,10 +115,10 @@ export const launchHelp = {
 		"print-thoughts": Flags.boolean({ description: "Include thinking blocks in print mode text output" }),
 		"max-time": Flags.string({ description: "Stop the session after this duration (e.g., 600, 10m, 1h)" }),
 		"warn-cost": Flags.string({
-			description: "Emit a one-time warning once cumulative session cost reaches this USD amount",
+			description: "Warn once when the session's spend, subagents included, reaches this many USD",
 		}),
 		"max-cost": Flags.string({
-			description: "Refuse the next provider dispatch once cumulative session cost reaches this USD amount",
+			description: "Stop sending model requests once the session's spend reaches this many USD (print mode exits 3)",
 		}),
 		"auto-approve": Flags.boolean({
 			aliases: ["yolo"],

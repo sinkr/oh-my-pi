@@ -999,6 +999,16 @@ To spend one by hand, use `/usage reset` in a session or `omp usage reset` from 
 
 `omp usage` and the active account's status-line usage segment flag banked resets expiring within **7 days** when the account's fullest window they restore is at least 25% used. Within **24 hours**, `omp usage` opens with a banner per account: whether the sweep above spends the reset or asks first (only while an interactive omp session is open), or that it will not, and the `/usage reset` target that spends it now when the provider allows. The interactive TUI shows that warning once per conversation.
 
+### Cost limits
+
+```yaml
+session:
+  warnCost: 5   # USD: warn once when the session's spend reaches it
+  maxCost: 10   # USD: stop sending model requests from this spend on
+```
+
+Both are unset by default and accept positive USD amounts; `--warn-cost` and `--max-cost` override them for one run. Spend counts every model request of the session and its subagents (side requests such as compaction, advisor reviews and cache warming included), at the costs the model catalog prices; a resumed session starts from the spend it already recorded. The cap is checked before each request is sent, so requests already in flight can finish past it. Each check reads the current value, so raising `session.maxCost` while a session is open lets its next request through. Print mode exits with status `3` and RPC reports `error.code: "cost_cap"` when the cap stops a run.
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:
