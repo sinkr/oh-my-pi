@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed Step 5 Preview reasoning choices on OpenCode Go and Zen to offer only low, medium, and high ([#14987](https://github.com/can1357/oh-my-pi/issues/14987), [#16669](https://github.com/can1357/oh-my-pi/pull/16669) by [@SheetHappiness](https://github.com/SheetHappiness))
 - Fixed GPT-6 Sol/Luna API and MiniMax-M3 long-context usage estimates above their published input thresholds ([#16711](https://github.com/can1357/oh-my-pi/issues/16711))
 - Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
 - Fixed GPT-5.6 Sol requests over 272K input tokens (`openai` and `openai-codex`) being priced at the retired $10/$45 long-context card instead of $8/$30 ([#16742](https://github.com/can1357/oh-my-pi/issues/16742))
