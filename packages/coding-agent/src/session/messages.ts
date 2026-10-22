@@ -1188,6 +1188,31 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 	}
 }
 
+/** A converted viewer message and its position in the source and converted histories. */
+export interface ContextViewMessage {
+	message: Message;
+	sourceIndex: number;
+	convertedIndex: number;
+}
+
+/**
+ * Convert history for inspection without reading or populating production caches.
+ * Steering messages show the envelope `wrapSteeringForModel` sends; other
+ * `convertToLlm` callers keep raw text.
+ */
+export function convertMessagesForContextView(messages: AgentMessage[]): ContextViewMessage[] {
+	const result: ContextViewMessage[] = [];
+	for (let sourceIndex = 0; sourceIndex < messages.length; sourceIndex++) {
+		const source = messages[sourceIndex];
+		const interruptedNext = source.role === "assistant" && followedByInterruptedThinking(messages, sourceIndex);
+		const input = isSteeringUserMessage(source) ? wrapSteeringUserMessage(source) : source;
+		for (const message of convertOne(input, interruptedNext)) {
+			result.push({ message, sourceIndex, convertedIndex: result.length });
+		}
+	}
+	return result;
+}
+
 /** Cached per-message conversion. Reuses the stored fragment while identity and
  *  `interruptedNext` neighbor state hold; recomputes on a neighbor flip. */
 function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] {
