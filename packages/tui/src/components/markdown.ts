@@ -1819,6 +1819,55 @@ function formatHyperlink(text: string, target: string): string {
 	return `\x1b]8;;${safeTarget}\x07${text}\x1b]8;;\x07`;
 }
 
+const CODE_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/y;
+const CODE_URL_RE = /(?<![A-Za-z0-9+.-])https?:\/\/[^\s\x00-\x1f\x7f<>"'`]+/g;
+const CODE_URL_TRAILING_RE = /[.,;:!?]+$/;
+
+/**
+ * Wrap each http(s) URL in a highlighted code row with an OSC 8 hyperlink.
+ * The row is hard-wrapped later; wrapTextWithAnsi reopens the link on every
+ * fragment, so terminals open the whole URL instead of only the first visual
+ * line. URLs are located in the visible text so syntax-highlight escapes
+ * inside them stay in place and the visible width is unchanged.
+ */
+function linkifyCodeUrls(line: string): string {
+	if (!TERMINAL.hyperlinks || !line.includes("://") || line.includes("\x1b]8;")) {
+		return line;
+	}
+
+	let visible = "";
+	const offsets: number[] = [];
+	for (let i = 0; i < line.length;) {
+		if (line.charCodeAt(i) === 0x1b) {
+			CODE_ESCAPE_RE.lastIndex = i;
+			const match = CODE_ESCAPE_RE.exec(line);
+			if (match) {
+				i += match[0].length;
+				continue;
+			}
+		}
+		offsets.push(i);
+		visible += line[i];
+		i++;
+	}
+
+	let result = "";
+	let copied = 0;
+	for (const match of visible.matchAll(CODE_URL_RE)) {
+		let url = match[0].replace(CODE_URL_TRAILING_RE, "");
+		// A closer only belongs to the URL when it balances an opener inside it.
+		while (url.endsWith(")") && url.split(")").length > url.split("(").length) {
+			url = url.slice(0, -1).replace(CODE_URL_TRAILING_RE, "");
+		}
+		if (!/:\/\/./.test(url)) continue;
+		const start = offsets[match.index] ?? 0;
+		const end = (offsets[match.index + url.length - 1] ?? start) + 1;
+		result += line.slice(copied, start) + formatHyperlink(line.slice(start, end), url);
+		copied = end;
+	}
+	return copied === 0 ? line : result + line.slice(copied);
+}
+
 function isAsciiTextSizingPayload(text: string): boolean {
 	for (let i = 0; i < text.length; i++) {
 		const code = text.charCodeAt(i);
@@ -3483,7 +3532,8 @@ export class Markdown implements Component {
 		const tokenText = "text" in token && typeof token.text === "string" ? token.text : "";
 		const lang = "lang" in token && typeof token.lang === "string" ? token.lang : undefined;
 		const addBodyLine = (line: string): void => {
-			bodyLines.push(renderedLine(literalCode ? line : codeIndent + line, literalCode));
+			const linked = linkifyCodeUrls(line);
+			bodyLines.push(renderedLine(literalCode ? linked : codeIndent + linked, literalCode));
 		};
 
 		const streaming = this.transientRenderCache && !this.#renderingStablePrefix;

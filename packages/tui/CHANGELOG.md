@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed long URLs in fenced code blocks opening only their first visual line on ctrl/cmd-click; each wrapped fragment now carries the full OSC 8 hyperlink when the terminal supports it ([#12321](https://github.com/can1357/oh-my-pi/issues/12321))
+
 ## [18.12.6] - 2026-10-21
 
 ### Changed

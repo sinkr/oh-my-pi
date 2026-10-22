@@ -1704,6 +1704,48 @@ bar`,
 			}
 		});
 
+		it("links every wrapped fragment of a URL in a fenced code block, and only when hyperlinks are on (issue #12321)", () => {
+			const url =
+				"https://example.com/very/long/path/segment-one/segment-two/segment-three/segment-four?query=value&another=value";
+			const text = `\`\`\`\n${url}\n\`\`\``;
+			// Highlighters can split a URL across several SGR spans; the link must span them all.
+			const highlighted = {
+				...defaultMarkdownTheme,
+				highlightCode: (code: string): string[] =>
+					code.split("\n").map(line => `\x1b[32m${line.slice(0, 30)}\x1b[39m\x1b[33m${line.slice(30)}\x1b[39m`),
+			};
+
+			for (const theme of [defaultMarkdownTheme, highlighted]) {
+				clearRenderCache();
+				const lines = new Markdown(text, 0, 0, theme).render(40);
+				const fragments = lines.filter(line => inspectHyperlinks(line).targets.includes(url));
+				expect(fragments.length).toBeGreaterThan(2);
+				for (const line of fragments) {
+					const { visible, targets } = inspectHyperlinks(line);
+					expect(line.split(`\x1b]8;;${url}\x07`)).toHaveLength(2);
+					expect(line.match(/\x1b\]8;;\x07/g)).toHaveLength(1);
+					expect(visible.length).toBeLessThanOrEqual(40);
+					for (let i = 0; i < visible.length; i++) {
+						if (visible[i] !== " ") expect(targets[i]).toBe(url);
+					}
+				}
+				const linkedText = fragments.map(line => inspectHyperlinks(line).visible.trimEnd()).join("");
+				expect(linkedText).toBe(url);
+
+				terminalState.hyperlinks = false;
+				try {
+					clearRenderCache();
+					const plainLines = new Markdown(text, 0, 0, theme).render(40);
+					expect(plainLines.join("")).not.toContain("\x1b]8;");
+					expect(plainLines.map(line => inspectHyperlinks(line).visible)).toEqual(
+						lines.map(line => inspectHyperlinks(line).visible),
+					);
+				} finally {
+					terminalState.hyperlinks = true;
+				}
+			}
+		});
+
 		it("should isolate wrapped OSC 8 links from adjacent table cells", () => {
 			const issueUrl = "https://github.com/can1357/oh-my-pi/issues/5860";
 			const markdown = new Markdown(
