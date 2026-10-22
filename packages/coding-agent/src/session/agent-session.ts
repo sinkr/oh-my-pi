@@ -355,7 +355,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, type CostGate } from "./cost-gate";
+import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
@@ -847,8 +847,9 @@ export class AgentSession implements SettingsScope {
 	readonly settings: Settings;
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
-	/** Cost gate of the session tree, forwarded to revived subagents. */
-	readonly costGate?: CostGate;
+	#costGate: CostGate;
+	/** False for a subagent, whose gate belongs to its session tree's root. */
+	readonly #ownsCostGate: boolean;
 	#costCapRefusal: CostCapRefusal | undefined;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
@@ -1795,8 +1796,9 @@ export class AgentSession implements SettingsScope {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
-		this.costGate = config.costGate;
 		this.settings = config.settings;
+		this.#ownsCostGate = config.costGate === undefined;
+		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
@@ -2616,7 +2618,7 @@ export class AgentSession implements SettingsScope {
 			),
 		);
 		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
-		if (config.costGate) this.addDisposer(this.agent.addBeforeModelCall(() => this.#refuseOverCostCap()));
+		this.addDisposer(this.agent.addBeforeModelCall(() => this.#refuseOverCostCap()));
 
 		const handoffHost: SessionHandoffHost = {
 			agent: this.agent,
@@ -3268,18 +3270,44 @@ export class AgentSession implements SettingsScope {
 		return this.#admittedSubmissionCount > 0;
 	}
 
+	/** The session tree's cost gate; a root session's follows its session file across new/resume/fork/branch. */
+	get costGate(): CostGate {
+		return this.#costGate;
+	}
+
 	/** The latest model request the cost gate refused; print and RPC modes report it as the run's stop reason. */
 	get costCapRefusal(): CostCapRefusal | undefined {
 		return this.#costCapRefusal;
 	}
 
-	/** Records and announces a cost-cap refusal of the next model request; `undefined` lets it through. */
-	#refuseOverCostCap(): AgentPreModelCallStop | undefined {
-		const refusal = this.costGate?.check();
-		if (!refusal) return undefined;
+	/** Records and announces a refused request of this session's own agent loop. */
+	reportCostCapRefusal(refusal: CostCapRefusal): void {
 		this.#costCapRefusal = refusal;
 		this.emitNotice("error", refusal.message, COST_GATE_NOTICE_SOURCE);
+	}
+
+	/** Records and announces a cost-cap refusal of the next model request; `undefined` lets it through. */
+	#refuseOverCostCap(): AgentPreModelCallStop | undefined {
+		const refusal = this.#costGate.check();
+		if (!refusal) return undefined;
+		this.reportCostCapRefusal(refusal);
 		return { stop: true, reason: refusal.message };
+	}
+
+	/** A gate seeded with this session file's recorded spend. */
+	#createCostGate(): CostGate {
+		return new CostGate(this.settings, this.sessionManager.getUsageStatistics().cost, message =>
+			this.emitNotice("warning", message, COST_GATE_NOTICE_SOURCE),
+		);
+	}
+
+	/**
+	 * After a transition to another session file, a root session's spend starts from
+	 * that file's recorded spend. Requests still in flight finish on the gate they
+	 * started on; subagents keep the tree's gate they were given.
+	 */
+	#reseedCostGate(): void {
+		if (this.#ownsCostGate) this.#costGate = this.#createCostGate();
 	}
 
 	/** Resolves once every currently admitted submission has dispatched, queued, or bailed. */
@@ -10844,6 +10872,7 @@ export class AgentSession implements SettingsScope {
 			resetCapabilities();
 			await this.refreshBaseSystemPrompt();
 
+			this.#reseedCostGate();
 			// Emit session_switch event with reason "new" to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -10966,6 +10995,7 @@ export class AgentSession implements SettingsScope {
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
 
+			this.#reseedCostGate();
 			// Emit session_switch event with reason "fork" to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -12532,6 +12562,7 @@ export class AgentSession implements SettingsScope {
 			// so jobs they start belong to the resumed session. Deliveries are held until now.
 			if (switchingToDifferentSession) this.#cancelOwnAsyncJobs();
 
+			this.#reseedCostGate();
 			// Emit session_switch event to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -12896,6 +12927,7 @@ export class AgentSession implements SettingsScope {
 			// Reload messages from entries (works for both file and in-memory mode)
 			const sessionContext = this.buildDisplaySessionContext();
 
+			this.#reseedCostGate();
 			// Emit session_branch event to hooks (after branch completes)
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -13017,6 +13049,7 @@ export class AgentSession implements SettingsScope {
 
 			const sessionContext = this.buildDisplaySessionContext();
 
+			this.#reseedCostGate();
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
 					type: "session_branch",

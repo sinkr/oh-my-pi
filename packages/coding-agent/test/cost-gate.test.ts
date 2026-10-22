@@ -20,8 +20,14 @@ import { PRINT_MODE_COST_CAP_EXIT_CODE, runPrintMode } from "@oh-my-pi/pi-coding
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { COST_GATE_NOTICE_SOURCE, CostCapError, CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
+import {
+	COST_GATE_NOTICE_SOURCE,
+	CostCapError,
+	CostGate,
+	guardStreamFn,
+} from "@oh-my-pi/pi-coding-agent/session/cost-gate";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { wrapStreamFnWithProviderConcurrency } from "@oh-my-pi/pi-coding-agent/task/provider-concurrency";
 import { cfgSessionMaxCost, cfgSessionWarnCost } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -118,14 +124,14 @@ describe("CostGate", () => {
 		expect(gate.spent).toBe(0);
 	});
 
-	it("guard() refuses at the cap without calling the provider and records each response", async () => {
+	it("guardStreamFn refuses at the cap without calling the provider and records each response", async () => {
 		const { gate } = gateWith({ "session.maxCost": 1 });
 		let calls = 0;
 		const provider: StreamFn = () => {
 			calls++;
 			return streamOf(response(1.5));
 		};
-		const guarded = gate.guard(provider);
+		const guarded = guardStreamFn(provider, () => gate);
 		const model = createCostModel("test-cost-gate-guard");
 
 		const stream = await guarded(model, { messages: [] });
@@ -134,6 +140,25 @@ describe("CostGate", () => {
 
 		const refused = await rejectionOf(Promise.resolve(guarded(model, { messages: [] })));
 		expect(refused).toBeInstanceOf(CostCapError);
+		expect(calls).toBe(1);
+	});
+
+	it("checks a request that waited for a provider slot when it goes out", async () => {
+		const { gate, settings } = gateWith({ "session.maxCost": 1, "providers.ollama-cloud.maxConcurrency": 1 });
+		const first = new AssistantMessageEventStream();
+		let calls = 0;
+		const provider: StreamFn = () => (++calls === 1 ? first : streamOf(response(0.1)));
+		const send = wrapStreamFnWithProviderConcurrency(
+			settings,
+			guardStreamFn(provider, () => gate),
+		);
+		const model = { ...createCostModel("test-cost-gate-slot"), provider: "ollama-cloud" };
+
+		await send(model, { messages: [] });
+		const queued = rejectionOf(Promise.resolve(send(model, { messages: [] })));
+		first.push({ type: "done", reason: "stop", message: response(1.2) });
+
+		expect(await queued).toBeInstanceOf(CostCapError);
 		expect(calls).toBe(1);
 	});
 });
@@ -345,6 +370,77 @@ describe("cost gate in a running session", () => {
 		expect(sessionManager.getEntries().filter(entry => entry.type === "message")).toHaveLength(2);
 	});
 
+	it("applies a cap set while the session is open", async () => {
+		const api = "test-cost-gate-enable";
+		const provider = scriptedProvider(api, [response(1.2)]);
+		const session = await createSession(api, {});
+
+		await session.prompt("first");
+		await session.waitForIdle();
+		cfgSessionMaxCost.override(session.settings, 1);
+		await session.prompt("second");
+		await session.waitForIdle();
+
+		expect(provider.calls()).toBe(1);
+		expect(session.costCapRefusal?.spent).toBe(1.2);
+	});
+
+	it("gives a new session a fresh budget", async () => {
+		const api = "test-cost-gate-new-session";
+		const provider = scriptedProvider(api, [response(1.2), response(0.1)]);
+		const session = await createSession(api, { "session.maxCost": 1 });
+
+		await session.prompt("first");
+		await session.waitForIdle();
+		expect(await session.newSession()).toBe(true);
+		await session.prompt("new work");
+		await session.waitForIdle();
+
+		expect(provider.calls()).toBe(2);
+		expect(session.costGate.spent).toBe(0.1);
+	});
+
+	it("starts a resumed session from its recorded spend when switching to it", async () => {
+		const api = "test-cost-gate-switch";
+		const provider = scriptedProvider(api, [response(0.1)]);
+		const tempDir = TempDir.createSync("@omp-cost-gate-switch-");
+		tempDirs.push(tempDir);
+		const saved = SessionManager.create(tempDir.path(), tempDir.path());
+		saved.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() });
+		saved.appendMessage({ ...response(2), api, provider: "llama.cpp", model: "cost-gate-model" });
+		await saved.flush();
+		const savedFile = saved.getSessionFile();
+		await saved.close();
+		const session = await createSession(
+			api,
+			{ "session.maxCost": 1 },
+			{ sessionManager: SessionManager.create(tempDir.path(), tempDir.path()) },
+		);
+		session.modelRegistry.registerProvider("llama.cpp", {
+			api,
+			baseUrl: "http://127.0.0.1:8080/v1",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "cost-gate-model",
+					name: "Cost Gate Model",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 4096,
+					maxTokens: 1024,
+				},
+			],
+		});
+
+		expect(savedFile && (await session.switchSession(savedFile))).toBe(true);
+		await session.prompt("continue");
+		await session.waitForIdle();
+
+		expect(provider.calls()).toBe(0);
+		expect(session.costCapRefusal?.spent).toBe(2);
+	});
+
 	describe("print mode", () => {
 		function captureOutput(): { stdout: string[]; stderr: string[] } {
 			const stdout: string[] = [];
@@ -402,6 +498,46 @@ describe("cost gate in a running session", () => {
 
 			expect(exitCode).toBe(0);
 			expect(output.stdout.join("")).toContain("Answer");
+		});
+
+		it("exits 0 for a run after the cap was raised, though an earlier run was capped", async () => {
+			const api = "test-cost-gate-print-recover";
+			scriptedProvider(api, [response(1.2, true), response(0.1)]);
+			const session = await createSession(api, { "session.maxCost": 1 });
+			const output = captureOutput();
+
+			expect(await runPrintMode(session, { mode: "text", initialMessage: "first" })).toBe(
+				PRINT_MODE_COST_CAP_EXIT_CODE,
+			);
+			cfgSessionMaxCost.override(session.settings, 10);
+			expect(await runPrintMode(session, { mode: "text", initialMessage: "second" })).toBe(0);
+			expect(output.stdout.join("")).toContain("Answer");
+		});
+
+		it("reports a refusal that lands between the loop's check and the dispatch as the cost cap", async () => {
+			const api = "test-cost-gate-print-race";
+			const provider = scriptedProvider(api, [response(1.2)]);
+			let dispatches = 0;
+			const session = await createSession(
+				api,
+				{ "session.maxCost": 1 },
+				{ onFirstChatDispatch: () => dispatches++ },
+			);
+			// A side request finishes after the loop's own cap check passed.
+			let sideSent = false;
+			session.agent.addBeforeModelCall(async () => {
+				if (sideSent) return;
+				sideSent = true;
+				await session.runEphemeralTurn({ promptText: "side work" });
+			});
+			const output = captureOutput();
+
+			const exitCode = await runPrintMode(session, { mode: "text", initialMessage: "main work" });
+
+			expect(provider.calls()).toBe(1);
+			expect(exitCode).toBe(PRINT_MODE_COST_CAP_EXIT_CODE);
+			expect(dispatches).toBe(0);
+			expect(output.stderr.join("")).toContain("Cost cap reached");
 		});
 	});
 });

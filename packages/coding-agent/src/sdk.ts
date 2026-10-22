@@ -192,7 +192,7 @@ import {
 	loadEffectiveAuthAccountPolicyConfig,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
-import { COST_GATE_NOTICE_SOURCE, type CostGate, createCostGate } from "./session/cost-gate";
+import { CostCapError, type CostGate, guardStreamFn } from "./session/cost-gate";
 import {
 	CREDENTIAL_DISABLED_NOTICE_SOURCE,
 	formatCredentialDisabledNotice,
@@ -2274,16 +2274,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const effectiveGetApiKey =
 		options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId));
 	let session!: AgentSession;
-	// The session tree shares one cost gate: subagents inherit the parent's; a root starts
-	// from its recorded spend, so a resumed session keeps what it already spent.
-	const costGate =
-		options.costGate ??
-		createCostGate(settings, sessionManager.getUsageStatistics().cost, message =>
-			session?.emitNotice("warning", message, COST_GATE_NOTICE_SOURCE),
-		);
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
+	// The session tree shares one cost gate: a subagent is given its parent's; a root
+	// session owns one that follows its session file. Read it per request, so a request
+	// lands on the gate of the session file it was sent for.
+	const currentCostGate = (): CostGate | undefined => session?.costGate ?? options.costGate;
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
 	// Every root owns its jobs and delivery sinks, even when another root is live.
@@ -2303,6 +2300,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings,
 					modelRegistry,
 					sessionId: () => sessionManager.getSessionId(),
+					costGate: currentCostGate,
 					telemetry: () => agent?.telemetry,
 					obfuscate: () => (obfuscator?.hasSecrets() ? text => obfuscator?.obfuscate(text) ?? text : undefined),
 					onUsage: message => {
@@ -2371,7 +2369,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
-			costGate,
+			get costGate() {
+				return currentCostGate();
+			},
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,
@@ -4477,28 +4477,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the session drives. Wrapped in a per-provider concurrency limiter so
 		// each LLM HTTP request — not the whole subagent lifecycle — holds the
 		// slot, preventing the nested-spawn deadlock from issue #3749.
+		// Every attempt this session sends (primary, side-channel, advisor, cache warming,
+		// image-source retries) passes the session tree's cost gate once it holds its
+		// concurrency slot, and adds its cost to the gate before releasing the slot.
 		const settingsBoundStreamFn = wrapStreamFnWithBlobUrlFallback(
 			wrapStreamFnWithProviderConcurrency(
 				settings,
-				createSettingsAwareStreamFn(settings, undefined, {
-					canAutoAccept: streamModel =>
-						anthropicSlowModeHasNoSiblingHeadroom(modelRegistry.authStorage, streamModel, session?.sessionId),
-					notify: (level, message) => session?.emitNotice(level, message, "anthropic-slow-mode"),
-					onLane: lane => session?.noteAnthropicSlowModeLane(lane),
-				}),
+				guardStreamFn(
+					createSettingsAwareStreamFn(settings, undefined, {
+						canAutoAccept: streamModel =>
+							anthropicSlowModeHasNoSiblingHeadroom(modelRegistry.authStorage, streamModel, session?.sessionId),
+						notify: (level, message) => session?.emitNotice(level, message, "anthropic-slow-mode"),
+						onLane: lane => session?.noteAnthropicSlowModeLane(lane),
+					}),
+					currentCostGate,
+				),
 			),
 			() => blobBroker.current,
 		);
 		// Outbound credential-pattern redaction follows THIS session's `secrets.enabled` per
 		// request, not the process-wide switch (the newest effect holder's): concurrent ACP/SDK
 		// sessions in one process each keep their own policy.
-		const redactingStreamFn: StreamFn = (streamModel, context, streamOptions) =>
+		const settingsAwareStreamFn: StreamFn = (streamModel, context, streamOptions) =>
 			withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
 				settingsBoundStreamFn(streamModel, context, streamOptions),
 			);
-		// Every provider request this session sends (primary, side-channel, advisor,
-		// cache warming) passes the session tree's cost gate and adds its cost to it.
-		const settingsAwareStreamFn = costGate ? costGate.guard(redactingStreamFn) : redactingStreamFn;
 		// Primary-agent (and its auto-learn capture twin) provider options read per
 		// request, so `/settings` changes to budgets, Kimi format, or the Codex
 		// websocket policy reach the next call without a session recreate.
@@ -4571,6 +4574,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
+				// The loop checks the cap before each request, but a side request can finish
+				// in between: refuse here, as this run's refusal, before announcing a dispatch.
+				const refusal = currentCostGate()?.check();
+				if (refusal) {
+					session.reportCostCapRefusal(refusal);
+					return Promise.reject(new CostCapError(refusal));
+				}
 				if (notifyFirstChatDispatch) {
 					const cb = notifyFirstChatDispatch;
 					notifyFirstChatDispatch = undefined;
@@ -4596,6 +4606,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...merged,
 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
 				});
+				// A request that waited for a provider slot is checked again when it goes out.
+				if (stream instanceof Promise) {
+					stream.catch(error => {
+						if (error instanceof CostCapError) session.reportCostCapRefusal(error.refusal);
+					});
+				}
 				// Every request through this streamFn is this session's own main
 				// loop (side-channel, advisor, and maintenance requests use
 				// dedicated wrappers), so it owns the warmer. The replay omits the
@@ -4774,7 +4790,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// streamed and parsed on the main thread.
 		session = new AgentSession({
 			cacheWarmer,
-			costGate,
+			costGate: options.costGate,
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
 			advisorMemoryPrompt,

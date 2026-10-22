@@ -274,6 +274,8 @@ async function runPrintModeCore(
 	// persisted previous turn must not be reprinted or its old stop reason
 	// reused as this run's exit status.
 	let admittedAgentTurn = false;
+	// The session's cost-cap refusal when the last admitted turn started; a newer one stopped that turn.
+	let costCapRefusalBeforeTurn = session.costCapRefusal;
 	// The print-mode-dispatched commands. Only commands whose runtime hooks
 	// are real in the headless runtime belong here: each runs a session API
 	// (`/mcp reauth` engine, `session.compact`, `session.handoff`,
@@ -320,6 +322,7 @@ async function runPrintModeCore(
 			// reported, consumed without executing, and the run exits 1.
 			return true;
 		}
+		const refusalBeforeCommand = session.costCapRefusal;
 		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
 		// The allow-list only matches registered commands, so `false` (not a
 		// command) and a `{ prompt }` residual cannot occur; stay defensive.
@@ -327,7 +330,10 @@ async function runPrintModeCore(
 		if (result.failed) builtinFailed = true;
 		// A builtin that scheduled a real agent turn (`/retry`) admitted that
 		// turn: its answer (and stop reason) belong to this run.
-		if (result.agentInvoked) admittedAgentTurn = true;
+		if (result.agentInvoked) {
+			admittedAgentTurn = true;
+			costCapRefusalBeforeTurn = refusalBeforeCommand;
+		}
 		// A recovery command may have repaired a server the strict gate
 		// failed on, so the gate re-evaluates before the next model turn.
 		return true;
@@ -437,6 +443,7 @@ async function runPrintModeCore(
 	const promptTurn = async (text: string, images?: PrintModeOptions["initialImages"]): Promise<void> => {
 		if (!(await prepareAgentTurn())) return;
 		admittedAgentTurn = true;
+		costCapRefusalBeforeTurn = session.costCapRefusal;
 		await logger.time("print:prompt", () =>
 			images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
 		);
@@ -476,10 +483,10 @@ async function runPrintModeCore(
 	// can trail synthetic tool results — both would hide the terminal
 	// assistant message (and its error) from a last-element read.
 	const assistantMsg = admittedAgentTurn ? session.getLastAssistantMessage() : undefined;
-	// A refused request ends the run short of an answer; the refusal (already on
-	// stderr, or a `cost-gate` notice in the JSON stream) is the outcome, with
-	// its own exit code.
-	const costCapped = admittedAgentTurn && !strictMCPFailure && session.costCapRefusal !== undefined;
+	// A request refused during the last admitted turn ends the run short of an
+	// answer; the refusal (already on stderr, or a `cost-gate` notice in the JSON
+	// stream) is the outcome, with its own exit code.
+	const costCapped = admittedAgentTurn && !strictMCPFailure && session.costCapRefusal !== costCapRefusalBeforeTurn;
 	// The terminal stop reason decides the process exit code in every output
 	// mode: `--mode json` used to report success for the same turn-fatal error
 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction

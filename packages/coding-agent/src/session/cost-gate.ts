@@ -15,7 +15,7 @@ export interface CostCapRefusal {
 	readonly message: string;
 }
 
-/** Rejects a side-channel request (compaction, advisor, cache warming, …) the cost gate refused. */
+/** Rejects a model request the cost gate refused (the caller sends nothing). */
 export class CostCapError extends Error {
 	constructor(readonly refusal: CostCapRefusal) {
 		super(refusal.message);
@@ -29,11 +29,11 @@ function usd(amount: number): string {
 
 /**
  * Running spend of one session tree: the root session, its subagents, and
- * their side-channel requests share one gate. The total starts from the
- * root's recorded spend (so a resumed session keeps its history) and adds
- * every response's cost as it finishes. Thresholds are read from the root's
- * settings on each check, so `session.warnCost` / `session.maxCost` edits
- * apply to the next request.
+ * their side requests share one gate. The total starts from the root's
+ * recorded spend (so a resumed session keeps its history) and adds every
+ * response's cost as it finishes. Thresholds are read from the root's
+ * settings on each check, so setting or changing `session.warnCost` /
+ * `session.maxCost` applies to the next request.
  */
 export class CostGate {
 	readonly #settings: Settings;
@@ -65,6 +65,12 @@ export class CostGate {
 		};
 	}
 
+	/** Throws {@link CostCapError} when the next model request must not be sent. */
+	admit(): void {
+		const refusal = this.check();
+		if (refusal) throw new CostCapError(refusal);
+	}
+
 	/** Adds a finished response's cost; warns once when the total first reaches `session.warnCost`. */
 	record(cost: number): void {
 		if (!(cost > 0)) return;
@@ -77,31 +83,29 @@ export class CostGate {
 		);
 	}
 
-	/** Wraps a stream function: refuses requests at the cap and records each response's cost. */
-	guard(streamFn: StreamFn): StreamFn {
-		const meter = (stream: AssistantMessageEventStream): AssistantMessageEventStream => {
-			stream.result().then(
-				message => this.record(message.usage.cost.total),
-				() => {},
-			);
-			return stream;
-		};
-		return (model, context, options) => {
-			const refusal = this.check();
-			if (refusal) return Promise.reject(new CostCapError(refusal));
-			const stream = streamFn(model, context, options);
-			return stream instanceof Promise ? stream.then(meter) : meter(stream);
-		};
+	/** Records the response's cost once the provider finishes producing it. */
+	meter(stream: AssistantMessageEventStream): AssistantMessageEventStream {
+		stream.result().then(
+			message => this.record(message.usage.cost.total),
+			() => {},
+		);
+		return stream;
 	}
 }
 
-/** A gate for a new session tree, or `undefined` when neither threshold is configured. */
-export function createCostGate(
-	settings: Settings,
-	recordedSpend: number,
-	warn: (message: string) => void,
-): CostGate | undefined {
-	if (cfgSessionWarnCost.get(settings) === undefined && cfgSessionMaxCost.get(settings) === undefined)
-		return undefined;
-	return new CostGate(settings, recordedSpend, warn);
+/**
+ * Wraps a stream function so each request passes the gate current when it is
+ * sent, and adds its cost to that gate. Wrap the function that sends one
+ * provider attempt (inside concurrency slots and retry loops), so a request
+ * that waited for a slot or retries is checked when it actually goes out.
+ */
+export function guardStreamFn(streamFn: StreamFn, currentGate: () => CostGate | undefined): StreamFn {
+	return (model, context, options) => {
+		const gate = currentGate();
+		if (!gate) return streamFn(model, context, options);
+		const refusal = gate.check();
+		if (refusal) return Promise.reject(new CostCapError(refusal));
+		const stream = streamFn(model, context, options);
+		return stream instanceof Promise ? stream.then(sent => gate.meter(sent)) : gate.meter(stream);
+	};
 }
