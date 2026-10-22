@@ -1721,7 +1721,6 @@ export async function buildSessionOptions(
 
 	// Context files
 	if (parsed.noContextFiles) {
-		options.contextFiles = [];
 		options.noContextFiles = true;
 	}
 

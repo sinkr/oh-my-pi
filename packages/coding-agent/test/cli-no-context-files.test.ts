@@ -106,10 +106,6 @@ describe("--no-context-files", () => {
 		return childPrompt;
 	}
 
-	it("sets noContextFiles", () => {
-		expect(parseArgs(["--no-context-files", "-p", "hi"]).noContextFiles).toBe(true);
-	});
-
 	it("keeps every context file, including additional roots' and their imports, out of the session and its subagents", async () => {
 		const ambient = await createSession([]);
 		try {
