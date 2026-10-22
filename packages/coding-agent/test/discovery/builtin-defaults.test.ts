@@ -470,20 +470,23 @@ describe("builtin-defaults rule provider", () => {
 	});
 
 	it("checks ts-set-map in linear time while a long single-line table streams in", async () => {
-		const value = "x".repeat(10_000);
+		// A backtracking `Set` condition streams 10,000 characters fast but takes 5 s at 20,000.
+		const value = "x".repeat(20_000);
 		const fired = await streamRule("ts-set-map");
-		for (const source of [
-			`const SCHEMAS = new Map([["schema", "${value}"]]);`,
-			`const SCHEMAS = new Map([["schema", ${"x+".repeat(5_000)}x]]);`,
-			`const SCHEMAS = new Set(["${value}"]);`,
-			`const SCHEMAS = new Set([/* ${value} */ "a"]);`,
-		]) {
+		const cases: [source: string, names: string[]][] = [
+			// The Map condition gives up on a `new Map` line past 1000 characters: no table that long is small.
+			[`const SCHEMAS = new Map([["schema", "${value}"]]);`, []],
+			[`const SCHEMAS = new Map([["schema", ${"x+".repeat(10_000)}x]]);`, []],
+			[`const SCHEMAS = new Set(["${value}"]);`, ["ts-set-map"]],
+			[`const SCHEMAS = new Set([/* ${value} */ "a"]);`, ["ts-set-map"]],
+		];
+		for (const [source, expected] of cases) {
 			const deltas = source.match(/[\s\S]{1,20}/g) ?? [];
 			// Each delta rescans the whole unfinished line; a per-character backtrack there made this take seconds.
 			const start = performance.now();
 			const names = fired(...deltas);
 			const elapsed = performance.now() - start;
-			expect(new Set(names), source.slice(0, 40)).toEqual(new Set(["ts-set-map"]));
+			expect(new Set(names), source.slice(0, 40)).toEqual(new Set(expected));
 			expect(elapsed, source.slice(0, 40)).toBeLessThan(500);
 		}
 	});

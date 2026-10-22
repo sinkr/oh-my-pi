@@ -32,6 +32,7 @@
 - Fixed reading `proc://<id>/kill` or `proc://<id>/mode` answering only "writable only", so agents often moved on with the job still running; the error now names the `write` call that cancels the job or sets the mode, with the real id ([#16580](https://github.com/can1357/oh-my-pi/pull/16580) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the built-in `ts-set-map` rule stalling tool-call streaming on a long single-line `Set` value (5 s at 20,000 characters) and firing when the literal array only feeds a computed argument such as `new Set(["a", "b"].map(normalize))`; `ts-import-type` no longer fires on `import("x").then` written with a non-breaking space or line separator before the call ([#16556](https://github.com/can1357/oh-my-pi/pull/16556) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
@@ -71,9 +72,6 @@
 - Fixed `<path>:conflicts` on a file past the 10 MiB scan cap reporting no conflicts with no hint: it now names the line the scan stopped at and the ranged `read` that registers the blocks after it ([#16269](https://github.com/can1357/oh-my-pi/pull/16269))
 - Fixed the `ts-set-map` rule stalling tool-call streaming for seconds on a long single-line `Map` literal, and missing `Map` entries written `["key", value] as const` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
 - Fixed the `ts-import-type` rule missing inline type imports whose member name is non-ASCII, such as `import("./units").温度` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
-- Fixed the built-in `ts-set-map` rule slowing tool-call streaming to a crawl on a long single-line `Map` or `Set` value (about 5 s for a 10,000-character value), and made it fire on `Map` entries written `["key", value] as const`; `ts-import-type` now also fires on a member whose name starts with a non-ASCII letter, such as `import("./units").温度`
-- Fixed the built-in `ts-set-map` rule slowing tool-call streaming to a crawl on a long single-line `Map` or `Set` value (about 5 s for a 10,000-character value), and made it fire on `Map` entries written `["key", value] as const`; `ts-import-type` now also fires on a member whose name starts with a non-ASCII letter, such as `import("./units").温度` ([#16556](https://github.com/can1357/oh-my-pi/pull/16556) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed the built-in `ts-set-map` rule slowing tool-call streaming to a crawl on a long single-line `Map` or `Set` value (about 5 s for a 10,000-character value); it now also fires on `Map` entries written `["key", value] as const` and no longer fires when the literal array only feeds a computed argument such as `new Set(["a", "b"].map(normalize))`. `ts-import-type` now also fires on a member whose name starts with a non-ASCII letter, such as `import("./units").温度` ([#16556](https://github.com/can1357/oh-my-pi/pull/16556) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.4] - 2026-10-20
 
