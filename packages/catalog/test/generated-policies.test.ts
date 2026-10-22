@@ -214,9 +214,9 @@ describe("generated model policies", () => {
 			expect(model.compat).toMatchObject({ reasoningDisableMode: "none-effort" });
 			expect(model.cost.longContext?.inputThreshold).toBe(272_000);
 		}
-		expect(models[0]?.cost.longContext).toMatchObject({ input: 10, output: 45 });
+		expect(models[0]?.cost.longContext).toMatchObject({ input: 8, output: 30 });
 		expect(models[1]?.cost.longContext).toMatchObject({ input: 0.4, output: 1.8 });
-		expect(models[2]?.cost.longContext).toMatchObject({ input: 10, output: 45 });
+		expect(models[2]?.cost.longContext).toMatchObject({ input: 8, output: 30 });
 		expect(models[3]?.cost.longContext).toMatchObject({ input: 4, output: 18 });
 		expect(models[4]?.compat).not.toMatchObject({ reasoningDisableMode: "none-effort" });
 		expect(models[4]?.cost.longContext).toBeUndefined();
@@ -270,7 +270,14 @@ describe("generated model policies", () => {
 			createSpec({ id: "gpt-5.6-sol", api: "openai-completions", provider: "openrouter" }),
 		].map(model => buildGenerated(model));
 
-		expect(models[0]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 10, output: 45 });
+		// Sol's $4/$20 card at 2x input/cache and 1.5x output (#16742).
+		expect(models[0]?.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 30,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
 		expect(models[1]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 0.4, output: 1.8 });
 		expect(models[2]?.cost.longContext).toBeUndefined();
 	});

@@ -2053,8 +2053,8 @@ describe("ModelRegistry", () => {
 			expect(gpt56?.cost.output).toBeGreaterThan(0);
 			expect(gpt56?.cost.longContext).toMatchObject({
 				inputThreshold: 272_000,
-				input: 10,
-				output: 45,
+				input: 8,
+				output: 30,
 			});
 		});
 
