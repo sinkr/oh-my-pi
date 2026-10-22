@@ -27,6 +27,7 @@ import {
 	AgentBusyError,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentPreModelCallStop,
 	type AgentState,
 	type AgentTool,
 	type AgentToolCall,
@@ -2614,19 +2615,8 @@ export class AgentSession implements SettingsScope {
 				this.#maintenance.renderArchiveForModel(context.messages),
 			),
 		);
-		const costGate = config.costGate;
-		if (costGate) {
-			// Stops the run before the request is sent: no turn opens, nothing is billed.
-			this.addDisposer(
-				this.agent.addBeforeModelCall(() => {
-					const refusal = costGate.check();
-					if (!refusal) return;
-					this.#costCapRefusal = refusal;
-					this.emitNotice("error", refusal.message, COST_GATE_NOTICE_SOURCE);
-					return { stop: true, reason: refusal.message };
-				}),
-			);
-		}
+		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
+		if (config.costGate) this.addDisposer(this.agent.addBeforeModelCall(() => this.#refuseOverCostCap()));
 
 		const handoffHost: SessionHandoffHost = {
 			agent: this.agent,
@@ -3281,6 +3271,15 @@ export class AgentSession implements SettingsScope {
 	/** The latest model request the cost gate refused; print and RPC modes report it as the run's stop reason. */
 	get costCapRefusal(): CostCapRefusal | undefined {
 		return this.#costCapRefusal;
+	}
+
+	/** Records and announces a cost-cap refusal of the next model request; `undefined` lets it through. */
+	#refuseOverCostCap(): AgentPreModelCallStop | undefined {
+		const refusal = this.costGate?.check();
+		if (!refusal) return undefined;
+		this.#costCapRefusal = refusal;
+		this.emitNotice("error", refusal.message, COST_GATE_NOTICE_SOURCE);
+		return { stop: true, reason: refusal.message };
 	}
 
 	/** Resolves once every currently admitted submission has dispatched, queued, or bailed. */
@@ -8006,6 +8005,7 @@ export class AgentSession implements SettingsScope {
 				: undefined;
 		let turnError: unknown;
 		let dispatched = false;
+		const refusalBeforeDispatch = this.#costCapRefusal;
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
@@ -8039,11 +8039,12 @@ export class AgentSession implements SettingsScope {
 		}
 		outcome.sessionClaimed = dispatched;
 		if (!dispatched && message.role === "user") {
-			// An abort (Esc) or preflight denial raced turn setup: the prompt never
-			// reached the agent or the session file. Hand it back to the host so the
-			// user can edit/resubmit instead of losing it (tree/branch can't offer
-			// a message that was never persisted).
-			this.#promptDropped?.({ text: typedText, images: options?.images });
+			// An abort (Esc), preflight denial or the cost cap raced turn setup: the
+			// prompt never reached the agent or the session file. Hand it back to the
+			// host so the user can edit/resubmit instead of losing it (tree/branch
+			// can't offer a message that was never persisted).
+			const refusal = this.#costCapRefusal !== refusalBeforeDispatch ? this.#costCapRefusal : undefined;
+			this.#promptDropped?.({ text: typedText, images: options?.images, reason: refusal?.message });
 		}
 		if (!dispatched && options?.throwOnDrop) throw new PromptDroppedError();
 		return true;
@@ -8417,6 +8418,8 @@ export class AgentSession implements SettingsScope {
 			if (autoPrewalkTask) await this.#prewalk.beginAutoTask();
 			const autoPrewalk = autoPrewalkTask ? this.#prewalk.classifyAuto(expandedText, setupAbort.signal) : undefined;
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			// A capped session hands the prompt back rather than start a run whose first request it refuses.
+			if (this.#refuseOverCostCap()) return false;
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();

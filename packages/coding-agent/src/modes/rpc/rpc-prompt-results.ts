@@ -34,6 +34,8 @@ interface OpenPrompt {
 	ownOutcome?: RunOutcome;
 	/** Settled while another run was live: reported at the next yield that leaves nothing queued. */
 	waiting: boolean;
+	/** The cost gate's latest refusal at acceptance; a newer one refused this prompt before dispatch. */
+	refusalAtBegin: CostCapRefusal | undefined;
 }
 
 /**
@@ -57,29 +59,37 @@ export class RpcPromptResults {
 	readonly #output: (frame: RpcPromptResultFrame) => void;
 	readonly #scheduledTurn: RpcScheduledTurnProbe | undefined;
 	readonly #costCapRefusal: (() => CostCapRefusal | undefined) | undefined;
+	readonly #settledWithoutRun: (() => void) | undefined;
 	#refusalAtRunStart: CostCapRefusal | undefined;
 
 	/**
 	 * @param session read for queue state and, at report time, the `sessionSettled` predicate.
 	 * @param scheduledTurn reports a host-scheduled turn not yet admitted (not settled).
-	 * @param costCapRefusal the session's latest cost-gate refusal; a new one during a run makes its outcome `cost_cap`.
+	 * @param hooks.costCapRefusal the session's latest cost-gate refusal; a new one before a prompt's run ends makes its outcome `cost_cap`.
+	 * @param hooks.settledWithoutRun a prompt reported without starting a run (refused or aborted before
+	 *   dispatch): no `agent_end` follows, so the host re-checks session settlement here.
 	 */
 	constructor(
 		session: RpcSettleSession,
 		output: (frame: RpcPromptResultFrame) => void,
 		scheduledTurn?: RpcScheduledTurnProbe,
-		costCapRefusal?: () => CostCapRefusal | undefined,
+		hooks?: { costCapRefusal?: () => CostCapRefusal | undefined; settledWithoutRun?: () => void },
 	) {
 		this.#session = session;
 		this.#output = output;
 		this.#scheduledTurn = scheduledTurn;
-		this.#costCapRefusal = costCapRefusal;
+		this.#costCapRefusal = hooks?.costCapRefusal;
+		this.#settledWithoutRun = hooks?.settledWithoutRun;
 	}
 
 	/** Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}. */
 	begin(id: string | undefined): RpcPromptTicket {
 		const ticket: RpcPromptTicket = { id };
-		this.#open.set(ticket, { startsAtBegin: this.#agentStarts, waiting: false });
+		this.#open.set(ticket, {
+			startsAtBegin: this.#agentStarts,
+			refusalAtBegin: this.#costCapRefusal?.(),
+			waiting: false,
+		});
 		return ticket;
 	}
 
@@ -101,8 +111,10 @@ export class RpcPromptResults {
 			// Queued into a live run, or its own run paused for agent-owned follow-up work (e.g. a retry).
 			open.waiting = true;
 		} else {
-			// Idle with no run since acceptance: an abort won the race before dispatch.
-			this.#report(ticket, true, { status: "aborted" });
+			// Idle with no run since acceptance: the cost gate refused the prompt, or an
+			// abort won the race before dispatch.
+			this.#report(ticket, true, this.#costCapOutcome(open.refusalAtBegin) ?? { status: "aborted" });
+			this.#settledWithoutRun?.();
 		}
 	}
 
@@ -141,12 +153,8 @@ export class RpcPromptResults {
 		if (event.type !== "agent_end" || this.#open.size === 0) return;
 		// Older sessions omit `yielded`; only their terminal ends were yields.
 		if (!(event.yielded ?? event.isTerminal !== false)) return;
-		const refusal = this.#costCapRefusal?.();
 		// A request the cost gate refused during this run is its outcome, whatever message ended it.
-		const outcome: RunOutcome =
-			refusal !== undefined && refusal !== this.#refusalAtRunStart
-				? { status: "error", error: { message: refusal.message, retryable: false, code: "cost_cap" } }
-				: runOutcome(event.messages);
+		const outcome = this.#costCapOutcome(this.#refusalAtRunStart) ?? runOutcome(event.messages);
 		// A still-queued steer/follow-up has not been read by the agent yet.
 		const queueDrained = this.#session.queuedMessageCount === 0;
 		for (const [ticket, open] of this.#open) {
@@ -156,6 +164,13 @@ export class RpcPromptResults {
 				open.ownOutcome = outcome;
 			}
 		}
+	}
+
+	/** The `cost_cap` outcome when the cost gate refused a request after `since`. */
+	#costCapOutcome(since: CostCapRefusal | undefined): RunOutcome | undefined {
+		const refusal = this.#costCapRefusal?.();
+		if (refusal === undefined || refusal === since) return undefined;
+		return { status: "error", error: { message: refusal.message, retryable: false, code: "cost_cap" } };
 	}
 
 	#report(ticket: RpcPromptTicket, agentInvoked: boolean, outcome: RunOutcome): void {

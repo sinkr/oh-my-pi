@@ -5,6 +5,7 @@ import {
 	RpcPromptResults,
 	reportPromptResult,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
+import { RpcSessionSettleWatcher } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-settle";
 import type { ExtensionActions } from "../src/extensibility/extensions/types";
 import { initializeExtensions } from "../src/modes/runtime-init";
 import type { AgentSession, AgentSessionEvent } from "../src/session/agent-session";
@@ -257,12 +258,9 @@ describe("RpcPromptResults", () => {
 			hasPendingAsyncWork: () => false,
 		};
 		const gate: { refusal?: CostCapRefusal } = {};
-		const results = new RpcPromptResults(
-			session,
-			frame => frames.push(frame),
-			undefined,
-			() => gate.refusal,
-		);
+		const results = new RpcPromptResults(session, frame => frames.push(frame), undefined, {
+			costCapRefusal: () => gate.refusal,
+		});
 		const message = "Cost cap reached: this session spent $1.50 of its $1.00 cap";
 
 		const capped = results.begin("req_cap");
@@ -287,6 +285,43 @@ describe("RpcPromptResults", () => {
 				sessionSettled: true,
 			},
 			{ type: "prompt_result", id: "req_next", agentInvoked: true, status: "completed", sessionSettled: true },
+		]);
+	});
+
+	test("reports a prompt the cost gate refused before dispatch as cost_cap, then settles the session", async () => {
+		const { frames, session } = createHarness();
+		const watcher = new RpcSessionSettleWatcher({ ...session, settleAsyncWork: async () => {} }, frame =>
+			frames.push(frame),
+		);
+		// An earlier run's stretch is still open: its settle check saw this prompt admitted.
+		watcher.markActive();
+		const gate: { refusal?: CostCapRefusal } = {};
+		const results = new RpcPromptResults(session, frame => frames.push(frame), undefined, {
+			costCapRefusal: () => gate.refusal,
+			settledWithoutRun: () => void watcher.check(),
+		});
+		const message = "Cost cap reached: this session spent $1.50 of its $1.00 cap";
+
+		const refused = results.begin("req_refused");
+		gate.refusal = { spent: 1.5, cap: 1, message };
+		results.settle(refused);
+		// An abort that wins before dispatch, with no newer refusal, stays aborted.
+		const aborted = results.begin("req_aborted");
+		results.settle(aborted);
+		await flushFrames();
+		await flushFrames();
+
+		expect(frames).toEqual([
+			{
+				type: "prompt_result",
+				id: "req_refused",
+				agentInvoked: true,
+				status: "error",
+				error: { message, retryable: false, code: "cost_cap" },
+				sessionSettled: true,
+			},
+			{ type: "prompt_result", id: "req_aborted", agentInvoked: true, status: "aborted", sessionSettled: true },
+			{ type: "session_settled" },
 		]);
 	});
 });

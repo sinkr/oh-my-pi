@@ -324,7 +324,7 @@ describe("cost gate in a running session", () => {
 		expect(parent.costCapRefusal?.spent).toBe(1.2);
 	});
 
-	it("keeps a resumed session's recorded spend", async () => {
+	it("hands a prompt back, unsent and unrecorded, when a resumed session is already past its cap", async () => {
 		const api = "test-cost-gate-resume";
 		const provider = scriptedProvider(api, [response(0.1)]);
 		const tempDir = TempDir.createSync("@omp-cost-gate-resume-");
@@ -333,12 +333,16 @@ describe("cost gate in a running session", () => {
 		sessionManager.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() });
 		sessionManager.appendMessage(response(2));
 		const session = await createSession(api, { "session.maxCost": 1 }, { sessionManager });
+		const dropped: { text: string; reason?: string }[] = [];
+		session.setPromptDropped(prompt => dropped.push({ text: prompt.text, reason: prompt.reason }));
 
 		await session.prompt("continue");
 		await session.waitForIdle();
 
 		expect(provider.calls()).toBe(0);
 		expect(session.costCapRefusal?.spent).toBe(2);
+		expect(dropped).toEqual([{ text: "continue", reason: session.costCapRefusal?.message }]);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "message")).toHaveLength(2);
 	});
 
 	describe("print mode", () => {

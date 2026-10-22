@@ -1007,7 +1007,7 @@ session:
   maxCost: 10   # USD: stop sending model requests from this spend on
 ```
 
-Both are unset by default and accept positive USD amounts; `--warn-cost` and `--max-cost` override them for one run. Spend counts every model request of the session and its subagents (side requests such as compaction, advisor reviews and cache warming included), at the costs the model catalog prices; a resumed session starts from the spend it already recorded. The cap is checked before each request is sent, so requests already in flight can finish past it. Each check reads the current value, so raising `session.maxCost` while a session is open lets its next request through. Print mode exits with status `3` and RPC reports `error.code: "cost_cap"` when the cap stops a run.
+Both are unset by default and accept positive USD amounts; `--warn-cost` and `--max-cost` override them for one run. Spend counts every model request of the session and its subagents (side requests such as compaction, advisor reviews and cache warming included), at the costs the model catalog prices; a resumed session starts from the spend it already recorded. The cap is checked before each request is sent, so requests already in flight can finish past it. Each check reads the current value, so raising `session.maxCost` while a session is open lets its next request through. When the cap stops a run, the interactive TUI shows the reason and puts a refused prompt back in the editor, print mode exits with status `3`, and RPC reports `error.code: "cost_cap"`.
 
 ### Other groups
 

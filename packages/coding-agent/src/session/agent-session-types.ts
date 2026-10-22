@@ -469,6 +469,8 @@ export interface DroppedPrompt {
 	text: string;
 	/** Image attachments submitted with the prompt. */
 	images?: ImageContent[];
+	/** Why the session refused it (e.g. the cost cap), for hosts to show beside the restored text; absent for an abort. */
+	reason?: string;
 }
 
 /** Options for AgentSession.followUp(). */
