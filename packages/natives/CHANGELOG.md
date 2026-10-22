@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
+- Fixed the bash tool's `rg` and `fd` on macOS and Linux finding nothing under a path that is a symlink to a directory, such as `/tmp` or `/etc` on macOS or a symlinked skill folder; like ripgrep and fd, they now search the folder the link points to ([#16598](https://github.com/can1357/oh-my-pi/pull/16598) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.5] - 2026-10-21
 
