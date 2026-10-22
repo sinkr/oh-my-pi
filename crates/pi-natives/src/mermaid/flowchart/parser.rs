@@ -1174,7 +1174,11 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(
-			graph.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+			graph
+				.nodes
+				.iter()
+				.map(|node| node.id.as_str())
+				.collect::<Vec<_>>(),
 			["A", "B", "C", "D", "my-node", "other-node"]
 		);
 		assert_eq!(graph.class_assignments, [("C".into(), "cls".into())]);
