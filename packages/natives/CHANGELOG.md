@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Mermaid flowchart parsing swallowing leading dashes of spaceless arrows (`A-->B`, `B-.->C`, `C:::cls-->D`) into the preceding node ID or class name
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed

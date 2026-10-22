@@ -496,11 +496,17 @@ type ParsedNodeRef<'a> = (&'a str, Option<NodeShapeSpec<'a>>, usize);
 
 fn parse_node_ref(text: &str) -> Option<ParsedNodeRef<'_>> {
 	let mut cursor = Cursor::new(text);
-	let id = cursor.take_while(is_id_char);
+	let mut id = cursor.take_while(is_id_char);
 	if id.is_empty() {
 		return None;
 	}
-	let after_id = cursor.pos();
+	if id.ends_with('-') {
+		let trimmed = id.trim_end_matches('-');
+		if !trimmed.is_empty() && parse_arrow(&text[trimmed.len()..]).is_some() {
+			id = trimmed;
+		}
+	}
+	let after_id = id.len();
 	// Longest and most specific openers precede their prefixes.
 	for (open, close, shape) in [
 		("(((", ")))", NodeShape::DoubleCircle),
@@ -537,8 +543,14 @@ fn parse_class_shorthand(text: &str) -> Option<(&str, usize)> {
 	if !cursor.eat(":::") || !cursor.peek().is_some_and(is_word_char) {
 		return None;
 	}
-	let class_name = cursor.take_while(is_id_char);
-	Some((class_name, cursor.pos()))
+	let mut class_name = cursor.take_while(is_id_char);
+	if class_name.ends_with('-') {
+		let trimmed = class_name.trim_end_matches('-');
+		if !trimmed.is_empty() && parse_arrow(&text[3 + trimmed.len()..]).is_some() {
+			class_name = trimmed;
+		}
+	}
+	Some((class_name, 3 + class_name.len()))
 }
 
 /// Parse Mermaid flowchart or state-diagram source into its logical graph.
@@ -1141,5 +1153,31 @@ mod tests {
 		assert_eq!(graph.node("A").unwrap().label, "A");
 		assert_eq!(graph.node("A").unwrap().shape, NodeShape::Rectangle);
 		assert_eq!(graph.subgraphs[0].node_ids, ["A"]);
+	}
+
+	#[test]
+	fn parses_spaceless_arrows_without_swallowing_dashes_into_ids_or_classes() {
+		let graph = parse_flowchart(
+			"flowchart LR\n  A-->B\n  B-.->C\n  C:::cls-->D\n  my-node --> other-node",
+		)
+		.unwrap();
+		assert_eq!(
+			graph.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+			["A", "B", "C", "D", "my-node", "other-node"]
+		);
+		assert_eq!(graph.class_assignments, [("C".into(), "cls".into())]);
+		assert_eq!(
+			graph
+				.edges
+				.iter()
+				.map(|edge| (edge.source.as_str(), edge.target.as_str(), edge.style))
+				.collect::<Vec<_>>(),
+			[
+				("A", "B", EdgeStyle::Solid),
+				("B", "C", EdgeStyle::Dotted),
+				("C", "D", EdgeStyle::Solid),
+				("my-node", "other-node", EdgeStyle::Solid),
+			]
+		);
 	}
 }
