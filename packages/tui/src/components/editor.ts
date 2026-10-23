@@ -3733,6 +3733,11 @@ export class Editor implements Component, Focusable {
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
 
+		if (this.#vim?.mode === "insert") {
+			const mark = this.#undoMark();
+			this.#pinnedUndo = mark;
+			this.#startVimSession(mark, false);
+		}
 		this.#notifyChange("");
 		if (this.onSubmit) this.onSubmit(result);
 	}

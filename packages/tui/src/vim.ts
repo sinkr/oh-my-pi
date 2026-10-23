@@ -723,7 +723,20 @@ export class VimState {
 			to = { line: fromLine, col: stepGraphemes(lineAt(fromLine), buf.cursorCol, change.graphemes, true) };
 		} else {
 			from = cursor;
-			to = { line: toLine, col: Math.min(change.endCol, lineAt(toLine).length) };
+			// `endCol` was measured on the original last line, so it can land mid-grapheme on a
+			// destination line with longer clusters; snap it up to a boundary or a replayed `d`
+			// would leave half an emoji behind.
+			const text = lineAt(toLine);
+			const target = Math.min(change.endCol, text.length);
+			let endCol = text.length;
+			for (const seg of segmenter.segment(text)) {
+				if (seg.index >= target) {
+					endCol = seg.index;
+					break;
+				}
+				endCol = seg.index + seg.segment.length;
+			}
+			to = { line: toLine, col: endCol };
 		}
 		return this.#visualEdit(change.key, from, to, change.linewise);
 	}

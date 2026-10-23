@@ -1299,5 +1299,25 @@ describe("Editor vim mode", () => {
 			press(editor, "g", "g", ".");
 			expect(editor.getText()).toBe("fa\nbeta");
 		});
+
+		it("starts a fresh tracked Insert session after a submitted draft", () => {
+			const editor = vimEditor("");
+			press(editor, "i", ..."one");
+			editor.submit();
+			press(editor, ..."two", ESC);
+			expect(editor.getText()).toBe("two");
+			press(editor, ".");
+			expect(editor.getText()).toBe("twtwoo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("two");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("deletes whole graphemes at a multiline Visual repeat's end", () => {
+			const editor = vimEditor("a\nb\nc\n😀x");
+			press(editor, "v", "j", "d", "j", ".");
+			expect(editor.getText()).toBe("\nx");
+		});
 	});
 });
