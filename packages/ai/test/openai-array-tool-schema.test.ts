@@ -126,6 +126,30 @@ describe("Codex itemless array schemas", () => {
 		);
 	});
 
+	it("does not mistake property or definition names for unevaluatedItems constraints", () => {
+		const schema = {
+			type: "object",
+			$defs: { unevaluatedItems: { type: "string" } },
+			properties: { unevaluatedItems: { type: "string" }, listeners: { type: "array" } },
+		};
+		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toEqual({
+			...schema,
+			properties: { ...schema.properties, listeners: { type: "array", items: true } },
+		});
+	});
+
+	it.each(["const", "default"])("does not inspect unevaluatedItems inside a %s payload", keyword => {
+		const schema = {
+			type: "object",
+			properties: { listeners: { type: "array" } },
+			[keyword]: { unevaluatedItems: false },
+		};
+		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toEqual({
+			...schema,
+			properties: { listeners: { type: "array", items: true } },
+		});
+	});
+
 	it("does not rewrite itemless array-shaped literal values", () => {
 		const literal = { type: "array" };
 		const schema = { type: "string", enum: [literal], const: literal, default: literal, examples: [literal] };
@@ -206,6 +230,30 @@ describe("Codex itemless array schemas", () => {
 	describe("Codex converter", () => {
 		const model = createCodexModel("gpt-5.5");
 		const convert = (tool: Tool) => convertOpenAICodexResponsesTools([tool], model)[0];
+
+		it("preserves an own __proto__ property and its required entry when repairing a sibling array", () => {
+			const properties: Record<string, unknown> = JSON.parse(
+				'{"__proto__":{"type":"string"},"listeners":{"type":"array"}}',
+			);
+			const tool: Tool = {
+				name: "list",
+				description: "List results",
+				strict: true,
+				parameters: {
+					type: "object",
+					properties,
+					required: ["__proto__", "listeners"],
+					additionalProperties: false,
+				},
+			};
+			const converted = convert(tool);
+			if (converted.type !== "function") throw new Error("Expected a function tool");
+			const wireProperties = converted.parameters.properties as Record<string, unknown>;
+			expect(Object.hasOwn(wireProperties, "__proto__")).toBe(true);
+			expect(wireProperties.__proto__).toEqual({ type: "string" });
+			expect(wireProperties.listeners).toEqual({ type: "array", items: true });
+			expect(converted.parameters.required).toEqual(Object.keys(wireProperties));
+		});
 
 		it("preserves the whole tool when a referenced tuple has an enclosing unevaluatedItems constraint", () => {
 			const tool: Tool = {

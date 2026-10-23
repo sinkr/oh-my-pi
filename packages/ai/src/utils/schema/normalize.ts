@@ -1667,7 +1667,7 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
  * `prefixItems`, which makes strict adaptation fall back to non-strict.
  * The repair is off by default: other Responses routes include grammar
  * backends that cannot compile boolean subschemas. If `unevaluatedItems`
- * appears anywhere in the input, repair is disabled for the whole tool:
+ * appears in any schema position, repair is disabled for the whole tool:
  * references and composition can carry evaluated-item effects across subtrees.
  * Normalize only schema-valued positions so literal payloads under `enum`,
  * `const`, `default`, and `examples` remain unchanged.
@@ -1697,7 +1697,18 @@ function containsUnevaluatedItems(value: unknown, epoch: number = epochNext()): 
 	if (!isJsonObject(value) || !once(value, epoch)) return false;
 	if (Object.hasOwn(value, "unevaluatedItems")) return true;
 	for (const key in value) {
-		if (Object.hasOwn(value, key) && containsUnevaluatedItems(value[key], epoch)) return true;
+		if (!Object.hasOwn(value, key)) continue;
+		const child = value[key];
+		if (OPENAI_RESPONSES_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)) {
+			for (const name in child) {
+				if (Object.hasOwn(child, name) && containsUnevaluatedItems(child[name], epoch)) return true;
+			}
+		} else if (
+			(OPENAI_RESPONSES_SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(child)) ||
+			OPENAI_RESPONSES_SCHEMA_VALUE_KEYS.has(key)
+		) {
+			if (containsUnevaluatedItems(child, epoch)) return true;
+		}
 	}
 	return false;
 }
@@ -1788,7 +1799,13 @@ function normalizeOpenAIResponsesSchemaNode(
 		}
 
 		if (next !== child) changed = true;
-		output[key] = next;
+		// Match cloneJsonTree's hardened copy: JSON keys must not invoke the
+		// legacy __proto__ setter on the accumulator.
+		if (key === "__proto__") {
+			Object.defineProperty(output, key, { value: next, enumerable: true, writable: true, configurable: true });
+		} else {
+			output[key] = next;
+		}
 	}
 
 	if (Array.isArray(value.oneOf)) {
@@ -1871,7 +1888,11 @@ function normalizeOpenAIResponsesSchemaMap(
 			appendOpenAIResponsesFallbackPatternProperty(output, next);
 			continue;
 		}
-		output[key] = next;
+		if (key === "__proto__") {
+			Object.defineProperty(output, key, { value: next, enumerable: true, writable: true, configurable: true });
+		} else {
+			output[key] = next;
+		}
 	}
 	return changed ? output : schemaMap;
 }
