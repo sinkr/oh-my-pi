@@ -307,5 +307,4 @@ describe("SessionManager + indexed backend durability", () => {
 		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
 		await manager.close();
 	});
-
 });
