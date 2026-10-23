@@ -398,6 +398,11 @@ next job's microVM starts cold but with warm dependencies from the local store.
    the change, and the import/helm-upgrade/verify steps roll the new tag out.
    The next job's microVM boots warm with the updated toolchain.
 
+   A bun bump (e.g. to 1.4.4 for CVE-2026-111497 / CVE-2026-91403) reaches
+   running runners only after this reload. Until then the `bun-install` action
+   refuses a preloaded bun below its `min-bun-version` input and installs a
+   patched one per job, so CI is safe but pays the download cost.
+
 ---
 
 ## 7. Verification
