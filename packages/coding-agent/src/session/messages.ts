@@ -1191,6 +1191,22 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 	}
 }
 
+/**
+ * Converts `messages[index]` with its neighbor-sensitive state.
+ * {@link convertToLlm} and {@link convertMessagesForContextView} both go
+ * through here so the viewer cannot drift from the per-message conversion that
+ * gets sent; a filter or reorder added outside this helper must be mirrored in
+ * both.
+ */
+function convertMessageAt(
+	messages: AgentMessage[],
+	index: number,
+	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
+): Message[] {
+	const m = messages[index];
+	return convert(m, m.role === "assistant" && followedByInterruptedThinking(messages, index));
+}
+
 /** A converted viewer message and its position in the source and converted histories. */
 export interface ContextViewMessage {
 	message: Message;
@@ -1199,17 +1215,22 @@ export interface ContextViewMessage {
 }
 
 /**
- * Convert history for inspection without reading or populating production caches.
- * Steering messages show the envelope `wrapSteeringForModel` sends; other
- * `convertToLlm` callers keep raw text.
+ * Convert history for inspection without reading or populating the per-message
+ * and array conversion caches. Steering messages show the envelope
+ * {@link wrapSteeringForModel} sends (sharing its wrapper cache); it maps
+ * one-to-one, so source indices hold. Mirrors the {@link convertToLlm} loop
+ * through {@link convertMessageAt}.
+ *
+ * Kept separate from `convertToLlm` because the viewer needs source indices:
+ * reporting them from `convertToLlm` would add a per-message callback and
+ * disable its cache shortcuts, a cost every request would pay even when
+ * `/context` is never opened.
  */
 export function convertMessagesForContextView(messages: AgentMessage[]): ContextViewMessage[] {
+	const modelMessages = wrapSteeringForModel(messages);
 	const result: ContextViewMessage[] = [];
-	for (let sourceIndex = 0; sourceIndex < messages.length; sourceIndex++) {
-		const source = messages[sourceIndex];
-		const interruptedNext = source.role === "assistant" && followedByInterruptedThinking(messages, sourceIndex);
-		const input = isSteeringUserMessage(source) ? wrapSteeringUserMessage(source) : source;
-		for (const message of convertOne(input, interruptedNext)) {
+	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
+		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
 			result.push({ message, sourceIndex, convertedIndex: result.length });
 		}
 	}
@@ -1245,6 +1266,10 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * unchanged re-convert of the same array hands back the same outer `Message[]`.
  * Owner mutations (prune/shake/strip-images) invalidate the affected message
  * through the shared registry before the next pass.
+ *
+ * {@link convertMessagesForContextView} mirrors this loop through
+ * {@link convertMessageAt}; it stays separate so the index mapping `/context`
+ * needs adds no cost here.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const len = messages.length;
@@ -1288,9 +1313,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let prefixOutputLen = 0;
 	for (let i = start; i < len; i++) {
 		if (i === len - 1) prefixOutputLen = out.length;
-		const m = messages[i];
-		const interruptedNext = m.role === "assistant" && followedByInterruptedThinking(messages, i);
-		const fragment = convertOneCached(m, interruptedNext);
+		const fragment = convertMessageAt(messages, i, convertOneCached);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;
