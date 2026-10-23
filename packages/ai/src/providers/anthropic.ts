@@ -6902,14 +6902,12 @@ function normalizeAnthropicStrictSchemaNode(
 	if (!isRecord(schema)) return schema;
 
 	const cached = cache.get(schema);
-	if (cached !== undefined) {
-		if (
-			cached === null ||
-			cached.optionalCount > budget.optionalRemaining ||
-			cached.unionCount > budget.unionRemaining
-		) {
-			return undefined;
-		}
+	if (cached === null) return undefined;
+	if (
+		cached !== undefined &&
+		cached.optionalCount <= budget.optionalRemaining &&
+		cached.unionCount <= budget.unionRemaining
+	) {
 		// JSON repeats shared nodes; Anthropic charges every serialized occurrence.
 		budget.optionalRemaining -= cached.optionalCount;
 		budget.optionalCount += cached.optionalCount;
@@ -6918,6 +6916,7 @@ function normalizeAnthropicStrictSchemaNode(
 		return cached.schema;
 	}
 
+	// Re-normalize an overflowing occurrence so optionals can become nullable-required.
 	if (!hasAnthropicSchemaDefiningKeyword(schema)) return undefined;
 
 	// Strict tool use only supports closed objects. Open maps stay available on

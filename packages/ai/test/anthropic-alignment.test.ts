@@ -1904,33 +1904,48 @@ describe("Anthropic request fingerprint alignment", () => {
 				type: "object",
 				properties: { first: { type: "string" }, second: { type: "string" } },
 			};
-			const properties = Object.fromEntries(Array.from({ length: copies }, (_, index) => [`item${index}`, shared]));
-			const parameters = { type: "object", properties, required: Object.keys(properties) } as TJsonSchema;
-			expect(countSerializedSchemaParameters(parameters).optionalCount).toBe(copies * 2);
+			const schemas: string[] = [];
+			const payloads: Array<{ tools: Array<{ strict?: boolean; input_schema: unknown }> }> = [];
+			for (const reuse of [true, false]) {
+				const properties = Object.fromEntries(
+					Array.from({ length: copies }, (_, index) => [`item${index}`, reuse ? shared : structuredClone(shared)]),
+				);
+				const parameters = { type: "object", properties, required: Object.keys(properties) } as TJsonSchema;
+				schemas.push(JSON.stringify(parameters));
+				expect(countSerializedSchemaParameters(parameters).optionalCount).toBe(copies * 2);
 
-			const payload = (await captureAnthropicPayload(
-				ANTHROPIC_MODEL,
-				{
-					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
-					tools: [
+				payloads.push(
+					(await captureAnthropicPayload(
+						ANTHROPIC_MODEL,
 						{
-							name: "find",
-							description: "Find a value",
-							parameters: { type: "object", properties: { query: { type: "string" } } } as TJsonSchema,
+							messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+							tools: [
+								{
+									name: "find",
+									description: "Find a value",
+									parameters: { type: "object", properties: { query: { type: "string" } } } as TJsonSchema,
+								},
+								{ name: "edit", description: "Edit values", parameters },
+							],
 						},
-						{ name: "edit", description: "Edit values", parameters },
-					],
-				},
-				{ isOAuth: false },
-			)) as { tools: Array<{ strict?: boolean; input_schema: unknown }> };
+						{ isOAuth: false },
+					)) as { tools: Array<{ strict?: boolean; input_schema: unknown }> },
+				);
+			}
 
-			const optionalCount = payload.tools
-				.filter(tool => tool.strict)
-				.reduce((count, tool) => count + countSerializedSchemaParameters(tool.input_schema).optionalCount, 0);
-			expect(optionalCount).toBeLessThanOrEqual(24);
-			expect(payload.tools[0].strict).toBe(true);
-			expect(payload.tools[1].strict).toBe(copies === 11 ? true : undefined);
-			expect(optionalCount).toBe(copies === 11 ? 23 : 1);
+			expect(schemas[0]).toBe(schemas[1]);
+			expect(payloads[0].tools.map(tool => tool.strict)).toEqual(payloads[1].tools.map(tool => tool.strict));
+			for (const payload of payloads) {
+				const counts = countSerializedSchemaParameters(
+					payload.tools.filter(tool => tool.strict).map(tool => tool.input_schema),
+				);
+				expect(counts.optionalCount).toBeLessThanOrEqual(24);
+				expect(counts.unionCount).toBeLessThanOrEqual(16);
+				expect(payload.tools[0].strict).toBe(true);
+				expect(payload.tools[1].strict).toBe(true);
+				expect(counts.optionalCount).toBe(copies === 11 ? 23 : 24);
+			}
+			expect(JSON.stringify(payloads[0].tools)).toBe(JSON.stringify(payloads[1].tools));
 		});
 	}
 
