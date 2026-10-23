@@ -91,6 +91,29 @@ describe("Codex itemless array schemas", () => {
 		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
 	});
 
+	it("does not repair an allOf tuple beneath enclosing unevaluatedItems", () => {
+		const schema = {
+			type: "array",
+			allOf: [{ type: "array", prefixItems: [{ type: "string" }] }],
+			unevaluatedItems: false,
+		};
+		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
+	});
+
+	it.each([false, true])(
+		"keeps shared schemas separate across unevaluatedItems contexts (closed first: %j)",
+		closedFirst => {
+			const tuple = { type: "array", prefixItems: [{ type: "string" }] };
+			const closed = { type: "array", allOf: [tuple], unevaluatedItems: false };
+			const properties = closedFirst ? { closed, open: tuple } : { open: tuple, closed };
+			const sanitized = sanitizeSchemaForOpenAIResponses({ type: "object", properties }, { repairArrayItems: true });
+			const result = sanitized.properties as Record<string, unknown>;
+			expect(result.open).toEqual({ ...tuple, items: true });
+			expect(result.closed).toBe(closed);
+			expect(tuple).not.toHaveProperty("items");
+		},
+	);
+
 	it("does not rewrite itemless array-shaped literal values", () => {
 		const literal = { type: "array" };
 		const schema = { type: "string", enum: [literal], const: literal, default: literal, examples: [literal] };
@@ -172,10 +195,17 @@ describe("Codex itemless array schemas", () => {
 		const model = createCodexModel("gpt-5.5");
 		const convert = (tool: Tool) => convertOpenAICodexResponsesTools([tool], model)[0];
 
-		it("leaves a tuple closed by unevaluatedItems unchanged", () => {
+		it.each([
+			{ type: "array", prefixItems: [{ type: "string" }], unevaluatedItems: false },
+			{
+				type: "array",
+				allOf: [{ type: "array", prefixItems: [{ type: "string" }] }],
+				unevaluatedItems: false,
+			},
+		])("leaves a tuple closed by unevaluatedItems unchanged: %j", row => {
 			const parameters = {
 				type: "object",
-				properties: { row: { type: "array", prefixItems: [{ type: "string" }], unevaluatedItems: false } },
+				properties: { row },
 				required: ["row"],
 				additionalProperties: false,
 			};
@@ -307,7 +337,7 @@ describe("Codex itemless array schemas", () => {
 			expect(convert(tool)).toMatchObject({ strict: true, parameters: tool.parameters });
 		});
 
-		it("repairs a real YieldTool without changing task-level validation", () => {
+		it("repairs a real YieldTool without changing task-level validation", async () => {
 			const tool = new YieldTool({
 				cwd: "/tmp",
 				hasUI: false,
@@ -321,7 +351,6 @@ describe("Codex itemless array schemas", () => {
 					additionalProperties: false,
 				},
 			});
-			expect(tool.strict).toBe(true);
 			expect(convert(tool)).toMatchObject({
 				type: "function",
 				name: "yield",
@@ -341,6 +370,10 @@ describe("Codex itemless array schemas", () => {
 				},
 			});
 			expect(convert(tool)).not.toHaveProperty("strict");
+			const data = { listeners: [{ port: 1234 }, "untyped"] };
+			const result = await tool.execute("valid-result", { data });
+			expect(result.details).toMatchObject({ status: "success", data });
+			await expect(tool.execute("invalid-result", { data: {} })).rejects.toThrow("Output does not match schema");
 		});
 	});
 });
