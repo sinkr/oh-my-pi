@@ -1252,5 +1252,52 @@ describe("Editor vim mode", () => {
 			press(editor, "i", ..." ".repeat(130), ESC, "u");
 			expect(editor.getText()).toBe("seed");
 		});
+
+		it("splits redo and undo on native caret moves inside Insert mode", () => {
+			const editor = vimEditor("abcdef");
+			press(editor, "i", "X");
+			editor.applyHostEdit({ len: 7, from: 5, to: 5, cursor: 5, text: "" });
+			press(editor, "Y", ESC);
+			expect(editor.getText()).toBe("XabcdYef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("Xabcdef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("abcdef");
+			press(editor, ".");
+			expect(editor.getText()).toBe("Yabcdef");
+		});
+
+		it("treats the initial Insert session on a fresh editor as a whole-session change", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			press(editor, ..."hello world", ESC);
+			expect(editor.getText()).toBe("hello world");
+			press(editor, ".");
+			expect(editor.getText()).toBe("hello worlhello worldd");
+			press(editor, "u");
+			expect(editor.getText()).toBe("hello world");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("preserves newlines in Replace mode recordings", () => {
+			const editor = vimEditor("abcd\nefgh");
+			press(editor, "R", "X", "\n", "Y", ESC);
+			expect(editor.getText()).toBe("X\nYcd\nefgh");
+			press(editor, "j", "0", ".");
+			expect(editor.getText()).toBe("X\nYcd\nX\nYgh");
+			press(editor, "u");
+			expect(editor.getText()).toBe("X\nYcd\nefgh");
+		});
+
+		it("does not replace the last change when an edit command is a no-op", () => {
+			const editor = vimEditor("alfa\nbeta");
+			press(editor, "x");
+			expect(editor.getText()).toBe("lfa\nbeta");
+			press(editor, "G", "J");
+			expect(editor.getText()).toBe("lfa\nbeta");
+			press(editor, "g", "g", ".");
+			expect(editor.getText()).toBe("fa\nbeta");
+		});
 	});
 });

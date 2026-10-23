@@ -941,7 +941,12 @@ export class Editor implements Component, Focusable {
 		this.#vimSession = null;
 		this.#pinnedUndo = null;
 		this.#vim = enabled ? new VimState() : null;
-		if (this.#vim) this.#vim.mode = "insert";
+		if (this.#vim) {
+			this.#vim.mode = "insert";
+			const mark = this.#undoMark();
+			this.#pinnedUndo = mark;
+			this.#startVimSession(mark, false);
+		}
 		this.invalidate();
 	}
 
@@ -1135,6 +1140,11 @@ export class Editor implements Component, Focusable {
 		} else {
 			this.#state.cursorLine = this.#state.lines.length - 1;
 			this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
+		}
+		if (this.#vim?.mode === "insert") {
+			const mark = this.#undoMark();
+			this.#pinnedUndo = mark;
+			this.#startVimSession(mark, false);
 		}
 		this.#notifyChange();
 	}
@@ -2361,6 +2371,7 @@ export class Editor implements Component, Focusable {
 		const mark = this.#undoMark();
 		const pinHere = this.#vimSession === null;
 		if (pinHere) this.#pinnedUndo = mark;
+		const revisionBefore = this.#textRevision;
 		const commands = vim.handleKey(key, this.#state);
 		if (commands === null) {
 			if (pinHere) this.#pinnedUndo = null;
@@ -2370,6 +2381,11 @@ export class Editor implements Component, Focusable {
 		// Before applying: Escape's commands would otherwise clear the replace log this reads.
 		if (editing(before) && !editing(vim.mode)) this.#endVimSession();
 		this.#applyVimCommands(commands);
+		if (this.#textRevision !== revisionBefore) {
+			vim.commitChange();
+		} else {
+			vim.discardChange();
+		}
 		// The session baseline follows `cw`'s delete or `o`'s new line, but its undo mark precedes them,
 		// so one `u` restores the whole change. Every other key (`.` too) is a single undo step.
 		if (!editing(before) && editing(vim.mode)) this.#startVimSession(mark, vim.mode === "replace");
@@ -2520,7 +2536,7 @@ export class Editor implements Component, Focusable {
 		// makes the logged columns meaningless; start a fresh undo step and a fresh log.
 		if (this.#lastAction !== "replace") {
 			this.#recordUndoState();
-			this.#replaceLog.length = 0;
+			if (!this.#vimSession?.replace) this.#replaceLog.length = 0;
 		}
 		this.#lastAction = "replace";
 		// Editing a recalled prompt makes it a draft, so Up/Down at an edge move the cursor again
@@ -2701,7 +2717,10 @@ export class Editor implements Component, Focusable {
 			// `3.` after `ofoo`: one new line per copy, stacking downward (Vim's `3Ofoo` does too).
 			if (n > 0 && command.newline) this.#openVimLine(true);
 			if (command.overwrite) {
-				for (const seg of segmenter.segment(command.record.text)) this.#overwriteReplaceGrapheme(seg.segment);
+				for (const seg of segmenter.segment(command.record.text)) {
+					if (seg.segment === "\n" || seg.segment === "\r\n") this.#addNewLine();
+					else this.#overwriteReplaceGrapheme(seg.segment);
+				}
 			} else {
 				this.#spliceVimInsert(command.record);
 			}
@@ -3250,12 +3269,19 @@ export class Editor implements Component, Focusable {
 			this.#state.lines = resolved.text.split("\n");
 		}
 		const lines = this.#state.lines;
+		const priorLine = this.#state.cursorLine;
+		const priorCol = this.#state.cursorCol;
 		let line = 0;
 		let col = resolved.cursor;
 		while (line < lines.length - 1 && col > lines[line]!.length) col -= lines[line++]!.length + 1;
 		this.#state.cursorLine = line;
 		this.#setCursorCol(col);
-		if (!resolved.changed) return;
+		if (!resolved.changed) {
+			if (this.#vimSession !== null && (priorLine !== line || priorCol !== col)) {
+				this.#breakVimSession();
+			}
+			return;
+		}
 		this.#notifyChange(resolved.text);
 		this.#retriggerAutocompleteAtCursor();
 	}
@@ -3671,6 +3697,9 @@ export class Editor implements Component, Focusable {
 		// Move cursor to start of new line
 		this.#state.cursorLine++;
 		this.#setCursorCol(0);
+		if (this.#vimSession?.replace) {
+			this.#replaceLog.push({ line: this.#state.cursorLine - 1, col: splitCol, removed: "", text: "\n" });
+		}
 
 		this.#notifyChange();
 	}

@@ -534,6 +534,7 @@ export class VimState {
 	/** Every count digit typed in that command, in order. */
 	#cmdCount = "";
 	#lastChange: VimChange | null = null;
+	#stagedChange: VimChange | null = null;
 
 	/** True while a count, operator, `g`, text-object, find, or `r` prefix is half-typed — Escape cancels it. */
 	get pending(): boolean {
@@ -569,6 +570,7 @@ export class VimState {
 		this.#cmdKeys = [];
 		this.#cmdCount = "";
 		this.#lastChange = null;
+		this.#stagedChange = null;
 	}
 
 	/** `0` is the line-start motion unless it extends a count already being typed. */
@@ -629,12 +631,18 @@ export class VimState {
 			if (commands !== null && key !== "." && (editing || commands.some(c => EDIT_KINDS[c.kind] === true))) {
 				// Insert-family commands ignore their own count, so `.` must not multiply what they typed.
 				const insertKey = INSERT_KEYS[this.#cmdKeys[0] ?? ""] === true;
-				this.#lastChange = {
+				const change: VimChange = {
 					kind: "keys",
 					keys: this.#cmdKeys,
 					count: insertKey || this.#cmdCount === "" ? null : Number.parseInt(this.#cmdCount, 10),
 					insert: null,
 				};
+				if (editing) {
+					this.#lastChange = change;
+					this.#stagedChange = null;
+				} else {
+					this.#stagedChange = change;
+				}
 			}
 			this.#cmdKeys = [];
 			this.#cmdCount = "";
@@ -647,10 +655,27 @@ export class VimState {
 	 * split the session, Vim's redo becomes a plain insert of the text typed since.
 	 */
 	recordInsert(record: VimInsertRecord, afterArrow: boolean): void {
-		if (afterArrow) this.#lastChange = { kind: "keys", keys: ["i"], count: null, insert: record };
-		else if (this.#lastChange !== null) this.#lastChange = { ...this.#lastChange, insert: record };
+		if (afterArrow) {
+			this.#lastChange = { kind: "keys", keys: ["i"], count: null, insert: record };
+		} else if (this.#lastChange !== null) {
+			this.#lastChange = { ...this.#lastChange, insert: record };
+		} else if (record.text !== "" || record.deleteBefore > 0 || record.deleteAfter > 0) {
+			this.#lastChange = { kind: "keys", keys: ["i"], count: null, insert: record };
+		}
 	}
 
+	/** Commit a staged change when the editor confirms text changed. */
+	commitChange(): void {
+		if (this.#stagedChange !== null) {
+			this.#lastChange = this.#stagedChange;
+			this.#stagedChange = null;
+		}
+	}
+
+	/** Discard a staged change when the command was a no-op (e.g. `J` on the last line). */
+	discardChange(): void {
+		this.#stagedChange = null;
+	}
 	#repeat(buf: VimBuffer, dotCount: number | null): VimCommand[] {
 		const change = this.#lastChange;
 		if (change === null) return [];
@@ -1252,7 +1277,7 @@ export class VimState {
 				this.#clearPending();
 				this.anchor = null;
 				if (key !== "y") {
-					this.#lastChange = {
+					const change: VimChange = {
 						kind: "visual",
 						key,
 						linewise,
@@ -1262,6 +1287,12 @@ export class VimState {
 						endCol: to.col,
 						insert: null,
 					};
+					if (key === "c" || key === "s") {
+						this.#lastChange = change;
+						this.#stagedChange = null;
+					} else {
+						this.#stagedChange = change;
+					}
 				}
 				return this.#visualEdit(key, from, to, linewise);
 			}
