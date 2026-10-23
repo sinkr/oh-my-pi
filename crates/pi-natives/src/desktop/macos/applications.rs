@@ -205,6 +205,33 @@ fn bundle_string(bundle: &NSBundle, key: &NSString) -> Option<String> {
 		.map(|value| value.to_string())
 }
 
+/// Whether the bundle at `path` declares `LSUIElement` or `LSBackgroundOnly`:
+/// an agent or helper with no Dock icon or menu bar.
+pub(super) fn background_only(path: &Path) -> bool {
+	autoreleasepool(|_| {
+		let Some(bundle) = path
+			.to_str()
+			.and_then(|path| NSBundle::bundleWithPath(&NSString::from_str(path)))
+		else {
+			return false;
+		};
+		[ns_string!("LSUIElement"), ns_string!("LSBackgroundOnly")]
+			.into_iter()
+			.any(|key| {
+				// Info.plist files spell the flag as a Boolean, a number or a
+				// string such as "1".
+				bundle.objectForInfoDictionaryKey(key).is_some_and(|value| {
+					match value.downcast::<objc2_foundation::NSNumber>() {
+						Ok(number) => number.boolValue(),
+						Err(value) => value
+							.downcast::<NSString>()
+							.is_ok_and(|text| text.boolValue()),
+					}
+				})
+			})
+	})
+}
+
 fn running_application(running: &NSRunningApplication) -> Option<Application> {
 	let path = running.bundleURL()?.path()?.to_string();
 	let path = Path::new(&path)

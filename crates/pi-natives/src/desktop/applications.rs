@@ -99,6 +99,18 @@ pub(crate) fn list(options: ApplicationQuery) -> CoreResult<Vec<Application>> {
 /// Resolve identity before display name; ambiguity never launches an arbitrary
 /// app.
 fn resolve<'a>(apps: &'a [Application], input: &str) -> CoreResult<Option<&'a Application>> {
+	resolve_by(apps, input, background_only)
+}
+
+/// [`resolve`], with `background_only` naming the apps that show no Dock icon
+/// or menu bar. A display name that one regular app and only such helpers
+/// share names the regular app: macOS calls both Contacts and its
+/// `PeopleViewService` "Contacts".
+fn resolve_by<'a>(
+	apps: &'a [Application],
+	input: &str,
+	background_only: impl Fn(&Application) -> bool,
+) -> CoreResult<Option<&'a Application>> {
 	let mut exact = apps
 		.iter()
 		.filter(|app| app.id == input || app.path == input);
@@ -106,11 +118,34 @@ fn resolve<'a>(apps: &'a [Application], input: &str) -> CoreResult<Option<&'a Ap
 		return unique(first, exact.next(), input).map(Some);
 	}
 	let folded = input.to_lowercase();
-	let mut names = apps.iter().filter(|app| app.name.to_lowercase() == folded);
-	names
-		.next()
-		.map(|first| unique(first, names.next(), input))
-		.transpose()
+	let named = |app: &&Application| app.name.to_lowercase() == folded;
+	let mut names = apps.iter().filter(named);
+	let Some(first) = names.next() else {
+		return Ok(None);
+	};
+	let Some(second) = names.next() else {
+		return Ok(Some(first));
+	};
+	let mut regular = apps
+		.iter()
+		.filter(named)
+		.filter(|app| !background_only(app));
+	match (regular.next(), regular.next()) {
+		(Some(only), None) => Ok(Some(only)),
+		_ => unique(first, Some(second), input).map(Some),
+	}
+}
+
+/// Whether `app` runs without a Dock icon or menu bar: macOS `LSUIElement`
+/// or `LSBackgroundOnly`. Other platforms list no such kind.
+fn background_only(app: &Application) -> bool {
+	#[cfg(target_os = "macos")]
+	return platform::background_only(Path::new(&app.path));
+	#[cfg(not(target_os = "macos"))]
+	{
+		let _ = app;
+		false
+	}
 }
 
 fn unique<'a>(
@@ -215,6 +250,26 @@ mod tests {
 		assert!(resolve(&apps, "EDITOR").is_err());
 		assert!(resolve(&apps, "same").is_err());
 		assert_eq!(resolve(&apps, "/B.app").unwrap().unwrap().path, "/B.app");
+	}
+
+	#[test]
+	fn a_name_shared_with_background_helpers_names_the_regular_app() {
+		let apps = [
+			app(
+				"com.apple.PeopleViewService",
+				"Contacts",
+				"/System/Library/CoreServices/PeopleViewService.app",
+			),
+			app("com.apple.AddressBook", "Contacts", "/System/Applications/Contacts.app"),
+		];
+		let helper = |app: &Application| app.id == "com.apple.PeopleViewService";
+		assert_eq!(
+			resolve_by(&apps, "contacts", helper).unwrap().unwrap().id,
+			"com.apple.AddressBook"
+		);
+		// Two regular apps, or helpers alone, still need a path.
+		assert!(resolve_by(&apps, "Contacts", |_| false).is_err());
+		assert!(resolve_by(&apps, "Contacts", |_| true).is_err());
 	}
 
 	#[test]
