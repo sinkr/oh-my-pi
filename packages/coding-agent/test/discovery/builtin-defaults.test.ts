@@ -444,8 +444,19 @@ describe("builtin-defaults rule provider", () => {
 			'const KINDS = new Set(["text", "json"] as const);',
 			'const KEYS = new Set(["topP", "topK"] as const satisfies readonly (keyof StreamOptions)[]);',
 			'const KINDS = new Set([\n\t"text",\n\t"json",\n],\n);',
+			// Any type clause after the array: only the token right after `]` is read.
+			'const KINDS = new Set(["a"] as const satisfies\n\treadonly string[]);',
+			'const SIZES = new Map([["a", 1]] as const satisfies\n\tReadonlyArray<readonly [string, number]>);',
+			'const KINDS = new Set(["a", "b"] as const satisfies readonly ((typeof KIND)[number])[]);',
+			'const KINDS = new Set(["a"] as ReadonlyArray<\n\tstring\n>);',
+			'const SIZES = new Map([["a", { x: 1 }]] as [string, { x: number; y?: number }][]);',
+			'const KINDS = new Set(["a"] /* static */ as const);',
 		];
-		for (const snippet of hits) expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
+		for (const snippet of hits) {
+			expect(fired(snippet), snippet).toEqual(["ts-set-map"]);
+			// Streamed a character at a time it fires too, once the token after `]` arrives.
+			expect(new Set(fired(...snippet)), snippet).toEqual(new Set(["ts-set-map"]));
+		}
 
 		// Shapes the rule body keeps as Set/Map: runtime-built membership and lookups.
 		const misses = [
@@ -465,8 +476,16 @@ describe("builtin-defaults rule provider", () => {
 			'const known = new Map([["known", 1] as const].filter(predicate));',
 			'const known = new Map([["known", 1]].filter(predicate));',
 			'const kinds = new Set(["a", "b"].map(normalize));',
+			'const kinds = new Set(["a", "b"]\n\t.map(normalize));',
+			'const kinds = new Set(["a"] /* raw */ .map(normalize));',
+			'const kinds = new Set(["a", "b"].concat(extra));',
+			'const kinds = new Set(["a", "b"]?.map(normalize));',
 		];
-		for (const snippet of misses) expect(fired(snippet), snippet).toEqual([]);
+		for (const snippet of misses) {
+			expect(fired(snippet), snippet).toEqual([]);
+			// Streamed, it waits for the token after `]` instead of firing at the bracket.
+			expect(fired(...snippet), snippet).toEqual([]);
+		}
 	});
 
 	it("checks ts-set-map in linear time while a long single-line table streams in", async () => {
