@@ -1898,6 +1898,7 @@ export function convertTools(
 ): OpenAITool[] {
 	const allowFreeform = supportsFreeformApplyPatch(model);
 	const rejectRootObjectUnion = model.compat.rejectRootObjectUnion;
+	const schemaOptions = { repairArrayItems: model.compat.toolSchemaFlavor !== "grammar" };
 	const out: OpenAITool[] = [];
 	for (const tool of tools) {
 		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
@@ -1929,7 +1930,7 @@ export function convertTools(
 		// `{}` → `true` (issue #1179), and Moonshot's validator rejects boolean
 		// subschemas ("property schema … must be an object"), so the Moonshot
 		// pass re-coerces them last.
-		const sanitized = sanitizeSchemaForOpenAIResponses(baseParameters);
+		const sanitized = sanitizeSchemaForOpenAIResponses(baseParameters, schemaOptions);
 		const providerParameters = rejectRootObjectUnion ? flattenExclusiveRequiredRootUnion(sanitized) : sanitized;
 		const responseParameters =
 			model.compat.toolSchemaFlavor === "moonshot-mfjs"

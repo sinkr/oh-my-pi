@@ -3,6 +3,7 @@ import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/open
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
 import { adaptSchemaForStrict, sanitizeSchemaForOpenAIResponses } from "@oh-my-pi/pi-ai/utils/schema";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
@@ -45,6 +46,16 @@ describe("OpenAI itemless array schemas", () => {
 			schema: { type: "array", prefixItems: [] },
 			expected: { type: "array", prefixItems: [], items: true },
 		},
+		{
+			name: "typeless prefix-only tuple",
+			schema: { prefixItems: [{ type: "string" }] },
+			expected: { prefixItems: [{ type: "string" }], items: true },
+		},
+		{
+			name: "typeless empty prefix tuple",
+			schema: { prefixItems: [] },
+			expected: { prefixItems: [], items: true },
+		},
 	])("adds open items to $name and falls back to non-strict", ({ schema, expected }) => {
 		const original = structuredClone(schema);
 		const sanitized = sanitizeSchemaForOpenAIResponses(schema);
@@ -80,6 +91,40 @@ describe("OpenAI itemless array schemas", () => {
 		expect(sanitizeSchemaForOpenAIResponses(schema)).toBe(schema);
 	});
 
+	it.each(["llama.cpp", "ollama", "custom-local"])(
+		"keeps itemless arrays grammar-safe on the %s Responses route",
+		provider => {
+			const model = buildModel({
+				id: "local-model",
+				name: "Local model",
+				api: "openai-responses",
+				provider,
+				baseUrl: "http://127.0.0.1:8080/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 8192,
+				maxTokens: 1024,
+			});
+			const parameters = {
+				type: "object",
+				properties: {
+					listeners: { type: "array" },
+					row: { prefixItems: [{ type: "string" }] },
+				},
+				required: ["listeners", "row"],
+				additionalProperties: false,
+			};
+			const tool: Tool = { name: "list", description: "List results", parameters };
+			const converted = convertTools([tool], model.compat.supportsStrictMode, model)[0];
+			expect(converted.type).toBe("function");
+			if (converted.type !== "function") throw new Error("Expected a function tool");
+			expect(converted.parameters).toEqual(parameters);
+			expect(converted.strict).toBeUndefined();
+			expect(model.compat.toolSchemaFlavor).toBe("grammar");
+		},
+	);
+
 	const providers = [
 		{
 			name: "Responses",
@@ -92,6 +137,32 @@ describe("OpenAI itemless array schemas", () => {
 	];
 
 	for (const provider of providers) {
+		it(`${provider.name} repairs typeless prefix-only tuples before strict inference`, () => {
+			const prefixItems = [{ type: "string" }];
+			const tool: Tool = {
+				name: "tuple",
+				description: "Read a tuple",
+				strict: true,
+				parameters: {
+					type: "object",
+					properties: { row: { prefixItems } },
+					required: ["row"],
+					additionalProperties: false,
+				},
+			};
+			expect(provider.convert(tool)).toEqual({
+				type: "function",
+				name: "tuple",
+				description: "Read a tuple",
+				parameters: {
+					type: "object",
+					properties: { row: { prefixItems, items: true } },
+					required: ["row"],
+					additionalProperties: false,
+				},
+			});
+		});
+
 		it(`${provider.name} preserves a prefix-only tuple with an explicit non-strict open tail`, () => {
 			const prefixItems = [{ type: "string" }];
 			const tool: Tool = {

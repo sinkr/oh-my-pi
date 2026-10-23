@@ -1664,7 +1664,8 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
  * disabled, and rejects every schema node with `type: "object"` unless it has
  * a `properties` member. Arrays without `items` need explicit open `items: true`,
  * including the default open tail after `prefixItems`, which makes strict
- * adaptation fall back to non-strict.
+ * adaptation fall back to non-strict. Grammar backends can disable this repair
+ * because they accept itemless arrays but cannot compile boolean subschemas.
  * Normalize only schema-valued positions so literal payloads under `enum`,
  * `const`, `default`, and `examples` remain unchanged.
  *
@@ -1674,15 +1675,19 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
  * concatenated (the wire payload accepts a single union; preserving both
  * would not survive).
  */
-export function sanitizeSchemaForOpenAIResponses(schema: JsonObject): JsonObject {
-	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap()) as JsonObject;
+export function sanitizeSchemaForOpenAIResponses(
+	schema: JsonObject,
+	options?: { repairArrayItems?: boolean },
+): JsonObject {
+	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap(), options?.repairArrayItems !== false) as JsonObject;
 }
 
 /**
  * Alias for {@link sanitizeSchemaForOpenAIResponses} matching the
  * `normalizeSchemaFor*` dispatcher naming used elsewhere in this module.
  */
-export const normalizeSchemaForOpenAIResponses: (schema: JsonObject) => JsonObject = sanitizeSchemaForOpenAIResponses;
+export const normalizeSchemaForOpenAIResponses: typeof sanitizeSchemaForOpenAIResponses =
+	sanitizeSchemaForOpenAIResponses;
 const OPENAI_UNSUPPORTED_REGEX_LOOKAROUNDS = new Set(["=", "!", "<=", "<!"]);
 const OPENAI_RESPONSES_PATTERN_PROPERTIES_FALLBACK = ".*";
 
@@ -1701,7 +1706,11 @@ function hasOpenAIUnsupportedRegexLookaround(pattern: string): boolean {
 	return false;
 }
 
-function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonObject, unknown>): unknown {
+function normalizeOpenAIResponsesSchemaNode(
+	value: unknown,
+	cache: WeakMap<JsonObject, unknown>,
+	repairArrayItems: boolean,
+): unknown {
 	if (!isJsonObject(value)) return value;
 
 	// `{}` (empty JSON Schema) ≡ `true` (JSON Schema draft 2020-12 §4.3.1).
@@ -1749,13 +1758,13 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 		const child = value[key];
 		let next: unknown = child;
 		if (key === "patternProperties" && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaMap(child, cache, true);
+			next = normalizeOpenAIResponsesSchemaMap(child, cache, true, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaMap(child, cache, false);
+			next = normalizeOpenAIResponsesSchemaMap(child, cache, false, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(child)) {
-			next = normalizeOpenAIResponsesSchemaArray(child, cache);
+			next = normalizeOpenAIResponsesSchemaArray(child, cache, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_VALUE_KEYS.has(key) && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaNode(child, cache);
+			next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		}
 
 		if (next !== child) changed = true;
@@ -1763,7 +1772,7 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 	}
 
 	if (Array.isArray(value.oneOf)) {
-		const rewrittenOneOf = normalizeOpenAIResponsesSchemaArray(value.oneOf, cache);
+		const rewrittenOneOf = normalizeOpenAIResponsesSchemaArray(value.oneOf, cache, repairArrayItems);
 		const existingAnyOf = output.anyOf;
 		output.anyOf = Array.isArray(existingAnyOf)
 			? [...existingAnyOf, ...(rewrittenOneOf as unknown[])]
@@ -1780,8 +1789,12 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 
 	// An omitted `items` permits any element, including the tail after
 	// `prefixItems`; make that default explicit without changing the tuple.
+	// Strict sanitization also infers arrays from typeless `prefixItems`.
 	if (
-		(value.type === "array" || (Array.isArray(value.type) && value.type.includes("array"))) &&
+		repairArrayItems &&
+		(value.type === "array" ||
+			(Array.isArray(value.type) && value.type.includes("array")) ||
+			(value.type === undefined && Array.isArray(value.prefixItems))) &&
 		!Object.hasOwn(value, "items")
 	) {
 		output.items = true;
@@ -1806,10 +1819,14 @@ function declaresObjectType(type: unknown): boolean {
 	return false;
 }
 
-function normalizeOpenAIResponsesSchemaArray(value: unknown[], cache: WeakMap<JsonObject, unknown>): unknown[] {
+function normalizeOpenAIResponsesSchemaArray(
+	value: unknown[],
+	cache: WeakMap<JsonObject, unknown>,
+	repairArrayItems: boolean,
+): unknown[] {
 	let changed = false;
 	const output = value.map(item => {
-		const next = normalizeOpenAIResponsesSchemaNode(item, cache);
+		const next = normalizeOpenAIResponsesSchemaNode(item, cache, repairArrayItems);
 		if (next !== item) changed = true;
 		return next;
 	});
@@ -1820,13 +1837,14 @@ function normalizeOpenAIResponsesSchemaMap(
 	schemaMap: JsonObject,
 	cache: WeakMap<JsonObject, unknown>,
 	stripUnsupportedRegexKeys: boolean,
+	repairArrayItems: boolean,
 ): JsonObject {
 	let changed = false;
 	const output: JsonObject = {};
 	for (const key in schemaMap) {
 		if (!Object.hasOwn(schemaMap, key)) continue;
 		const child = schemaMap[key];
-		const next = normalizeOpenAIResponsesSchemaNode(child, cache);
+		const next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		if (next !== child) changed = true;
 		if (stripUnsupportedRegexKeys && hasOpenAIUnsupportedRegexLookaround(key)) {
 			changed = true;
