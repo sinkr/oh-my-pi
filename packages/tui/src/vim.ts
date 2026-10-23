@@ -82,7 +82,7 @@ export function lastGraphemeStart(text: string): number {
 	return prevGraphemeStart(text, text.length);
 }
 
-function countGraphemes(text: string): number {
+export function countGraphemes(text: string): number {
 	let count = 0;
 	for (const _ of segmenter.segment(text)) count++;
 	return count;
@@ -619,6 +619,7 @@ export class VimState {
 		}
 		if (this.mode === "insert") return null;
 		const recording = this.mode === "normal";
+		const dotIsTarget = this.#findPending !== null || this.#replaceChar;
 		if (recording) {
 			if (this.#isCountKey(key)) this.#cmdCount += key;
 			else this.#cmdKeys.push(key);
@@ -628,7 +629,13 @@ export class VimState {
 			// `#dispatch` may have entered Insert; widen past the narrowing from the early return above.
 			const mode = this.mode as VimMode;
 			const editing = mode === "insert" || mode === "replace";
-			if (commands !== null && key !== "." && (editing || commands.some(c => EDIT_KINDS[c.kind] === true))) {
+			// `.` is skipped only as the top-level repeat command; as an `f`/`t`/`r` target (`df.`)
+			// it completes a recordable edit.
+			if (
+				commands !== null &&
+				(key !== "." || dotIsTarget) &&
+				(editing || commands.some(c => EDIT_KINDS[c.kind] === true))
+			) {
 				// Insert-family commands ignore their own count, so `.` must not multiply what they typed.
 				const insertKey = INSERT_KEYS[this.#cmdKeys[0] ?? ""] === true;
 				const change: VimChange = {

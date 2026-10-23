@@ -1319,5 +1319,45 @@ describe("Editor vim mode", () => {
 			press(editor, "v", "j", "d", "j", ".");
 			expect(editor.getText()).toBe("\nx");
 		});
+
+		it("repeats a find that ended on `.` as its target", () => {
+			const editor = vimEditor("a.b.c");
+			press(editor, "d", "f", ".");
+			expect(editor.getText()).toBe("b.c");
+			press(editor, ".");
+			expect(editor.getText()).toBe("c");
+		});
+
+		it("replays a backspace masked by retyping the same grapheme", () => {
+			const editor = vimEditor("abX\ncdY");
+			press(editor, "l", "l", "i", BACKSPACE, "b", "b", ESC);
+			expect(editor.getText()).toBe("abbX\ncdY");
+			press(editor, "j", ".");
+			expect(editor.getText()).toBe("abbX\ncbbY");
+		});
+
+		it("does not coalesce the first session keystroke with pre-Vim typing", () => {
+			const editor = new Editor(defaultEditorTheme);
+			press(editor, ..."abc");
+			editor.setVimMode(true);
+			press(editor, ..."def", ESC);
+			expect(editor.getText()).toBe("abcdef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("abc");
+		});
+
+		it("starts a fresh tracked Replace session after a submitted draft", () => {
+			const editor = vimEditor("");
+			press(editor, "R", ..."one");
+			editor.submit();
+			press(editor, ..."two", ESC);
+			expect(editor.getText()).toBe("two");
+			press(editor, ".");
+			expect(editor.getText()).toBe("twtwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("two");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
+		});
 	});
 });

@@ -42,6 +42,7 @@ import {
 	visibleWidth,
 } from "../utils";
 import {
+	countGraphemes,
 	diffInsertSession,
 	flatten,
 	lastGraphemeStart,
@@ -473,6 +474,28 @@ interface UndoMark {
 }
 
 /**
+ * Tracked Insert/Replace session: `[0, leftEnd)` is surviving pre-session text on the left and
+ * `[rightStart, len)` on the right (flat-buffer offsets), so the gap is what the session typed.
+ * `delBefore`/`delAfter` count pre-session graphemes deleted around the anchor — tracked
+ * incrementally because a final-text diff cannot see a delete that was retyped identically.
+ */
+interface VimSessionState {
+	mark: UndoMark;
+	replace: boolean;
+	/** Flat text at segment start (diff fallback and arrowed-split baseline). */
+	text: string;
+	/** Flat cursor at segment start. */
+	cursor: number;
+	arrowed: boolean;
+	leftEnd: number;
+	rightStart: number;
+	delBefore: number;
+	delAfter: number;
+	/** False after an edit path we cannot classify (native host edits); falls back to a final diff. */
+	tracked: boolean;
+}
+
+/**
  * Typed characters that replace the provisional space a Tab word accept adds, so
  * they attach to the accepted word: closing punctuation, and `-` for compounds
  * (`cross-platform`; a spaced dash is still space, then `-`). Quotes are
@@ -689,7 +712,7 @@ export class Editor implements Component, Focusable {
 	/** Graphemes overwritten in the current `R` session, so Backspace can restore them. */
 	#replaceLog: { line: number; col: number; removed: string; text: string }[] = [];
 	/** Insert/Replace session a Vim command opened; Escape hands its text to `.` and folds its undo steps into one. */
-	#vimSession: { mark: UndoMark; replace: boolean; text: string; cursor: number; arrowed: boolean } | null = null;
+	#vimSession: VimSessionState | null = null;
 
 	// Character jump mode
 	#jumpMode: "forward" | "backward" | null = null;
@@ -1141,10 +1164,10 @@ export class Editor implements Component, Focusable {
 			this.#state.cursorLine = this.#state.lines.length - 1;
 			this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
 		}
-		if (this.#vim?.mode === "insert") {
+		if (this.#vim !== null && (this.#vim.mode === "insert" || this.#vim.mode === "replace")) {
 			const mark = this.#undoMark();
 			this.#pinnedUndo = mark;
-			this.#startVimSession(mark, false);
+			this.#startVimSession(mark, this.#vim.mode === "replace");
 		}
 		this.#notifyChange();
 	}
@@ -1816,6 +1839,7 @@ export class Editor implements Component, Focusable {
 			const revision = this.#textRevision;
 			const line = this.#state.cursorLine;
 			const col = this.#state.cursorCol;
+			const flatBefore = session !== null && session.tracked && !session.replace ? flatten(this.#state).text : "";
 			next = this.#handleInputChunk(next);
 			// A bare cursor move inside one Insert/Replace session splits it, like Vim's arrow keys.
 			if (
@@ -1825,8 +1849,50 @@ export class Editor implements Component, Focusable {
 				(line !== this.#state.cursorLine || col !== this.#state.cursorCol)
 			) {
 				this.#breakVimSession();
+			} else if (
+				session !== null &&
+				session === this.#vimSession &&
+				session.tracked &&
+				!session.replace &&
+				this.#textRevision !== revision
+			) {
+				this.#trackVimSessionEdit(session, flatBefore);
 			}
 		}
+	}
+
+	/**
+	 * Fold one chunk's buffer change into the session window. Counting original deletions here keeps
+	 * `deleteBefore`/`deleteAfter` exact even when typed text coincides with what was deleted
+	 * (Backspace then retyping the same grapheme), which a final-text diff cannot recover.
+	 */
+	#trackVimSessionEdit(session: VimSessionState, flatBefore: string): void {
+		const flatAfter = flatten(this.#state).text;
+		let p = 0;
+		const pMax = Math.min(flatBefore.length, flatAfter.length);
+		while (p < pMax && flatBefore.charCodeAt(p) === flatAfter.charCodeAt(p)) p++;
+		let q = 0;
+		const qMax = Math.min(flatBefore.length - p, flatAfter.length - p);
+		while (
+			q < qMax &&
+			flatBefore.charCodeAt(flatBefore.length - 1 - q) === flatAfter.charCodeAt(flatAfter.length - 1 - q)
+		)
+			q++;
+		const removedEnd = flatBefore.length - q;
+		const insLen = flatAfter.length - p - q;
+		const leftCut = Math.max(0, Math.min(removedEnd, session.leftEnd) - p);
+		const rightCut = Math.max(0, removedEnd - Math.max(p, session.rightStart));
+		const typedCut = removedEnd - p - leftCut - rightCut;
+		if (insLen > 0 && p < session.leftEnd - leftCut) {
+			// Insertion inside surviving original text can't be told apart from typed text; the
+			// finalize diff still produces a bounded record.
+			session.tracked = false;
+			return;
+		}
+		if (leftCut > 0) session.delBefore += countGraphemes(flatBefore.slice(p, p + leftCut));
+		if (rightCut > 0) session.delAfter += countGraphemes(flatBefore.slice(removedEnd - rightCut, removedEnd));
+		session.leftEnd -= leftCut;
+		session.rightStart = session.rightStart - leftCut - typedCut + insLen;
 	}
 
 	/** Process one input chunk. Returns the unconsumed tail of a completed paste, if any. */
@@ -2415,8 +2481,22 @@ export class Editor implements Component, Focusable {
 	}
 
 	#startVimSession(mark: UndoMark, replace: boolean): void {
+		// A stale "type-word" would coalesce the session's first keystroke into the pre-session
+		// undo step, so `u` would swallow text the session never touched.
+		this.#resetKillSequence();
 		const { text, cursor } = flatten(this.#state);
-		this.#vimSession = { mark, replace, text, cursor, arrowed: false };
+		this.#vimSession = {
+			mark,
+			replace,
+			text,
+			cursor,
+			arrowed: false,
+			leftEnd: cursor,
+			rightStart: cursor,
+			delBefore: 0,
+			delAfter: 0,
+			tracked: true,
+		};
 	}
 
 	/** Hand the current session segment's text to `.` and fold its undo steps. */
@@ -2426,7 +2506,13 @@ export class Editor implements Component, Focusable {
 		if (session === null || vim === null) return;
 		const record: VimInsertRecord = session.replace
 			? { deleteBefore: 0, deleteAfter: 0, text: this.#replaceLog.map(entry => entry.text).join("") }
-			: diffInsertSession(session.text, session.cursor, this.#state.lines.join("\n"));
+			: session.tracked
+				? {
+						deleteBefore: session.delBefore,
+						deleteAfter: session.delAfter,
+						text: this.#state.lines.join("\n").slice(session.leftEnd, session.rightStart),
+					}
+				: diffInsertSession(session.text, session.cursor, this.#state.lines.join("\n"));
 		if (!session.arrowed) vim.recordInsert(record, false);
 		// An empty segment after an arrow keeps the earlier change, as Vim does.
 		else if (record.text !== "" || record.deleteBefore > 0 || record.deleteAfter > 0) vim.recordInsert(record, true);
@@ -2437,6 +2523,8 @@ export class Editor implements Component, Focusable {
 		this.#finalizeVimSegment();
 		this.#vimSession = null;
 		this.#pinnedUndo = null;
+		// A spent log would otherwise leak into the next Replace session's record.
+		this.#replaceLog.length = 0;
 	}
 
 	/** An arrow key inside Insert/Replace: close the segment and start a fresh one at the new cursor. */
@@ -2450,7 +2538,18 @@ export class Editor implements Component, Focusable {
 		this.#replaceLog.length = 0;
 		const { text, cursor } = flatten(this.#state);
 		const mark = this.#undoMark();
-		this.#vimSession = { ...session, mark, text, cursor, arrowed: true };
+		this.#vimSession = {
+			...session,
+			mark,
+			text,
+			cursor,
+			arrowed: true,
+			leftEnd: cursor,
+			rightStart: cursor,
+			delBefore: 0,
+			delAfter: 0,
+			tracked: true,
+		};
 		this.#pinnedUndo = mark;
 	}
 
@@ -3264,6 +3363,7 @@ export class Editor implements Component, Focusable {
 		if (!resolved) return;
 		this.#resetKillSequence();
 		if (resolved.changed) {
+			if (this.#vimSession) this.#vimSession.tracked = false;
 			this.#historyIndex = -1;
 			this.#recordUndoState();
 			this.#state.lines = resolved.text.split("\n");
@@ -3733,10 +3833,10 @@ export class Editor implements Component, Focusable {
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
 
-		if (this.#vim?.mode === "insert") {
+		if (this.#vim !== null && (this.#vim.mode === "insert" || this.#vim.mode === "replace")) {
 			const mark = this.#undoMark();
 			this.#pinnedUndo = mark;
-			this.#startVimSession(mark, false);
+			this.#startVimSession(mark, this.#vim.mode === "replace");
 		}
 		this.#notifyChange("");
 		if (this.onSubmit) this.onSubmit(result);
