@@ -1358,7 +1358,8 @@ fn perform_choosing(
 /// a click, `menu` path included.
 fn unsupported_action(native: &str, actions: &[String]) -> DesktopError {
 	let instead = if native == "AXPress" {
-		"; nothing was sent, so click() it instead, with the same menu option if any"
+		"; nothing was sent: if this is the control you meant, click() it instead, passing the same \
+		 menu option if you gave one"
 	} else {
 		""
 	};
