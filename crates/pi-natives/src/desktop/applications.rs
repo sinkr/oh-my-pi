@@ -141,18 +141,18 @@ fn resolve_by<'a>(
 	}
 }
 
-/// Whether `app` is a helper rather than an application a user opens: on
-/// macOS an agent (`LSUIElement`), a background-only app (`LSBackgroundOnly`)
-/// or a running bundle that is not an `.app`, such as an app extension. Other
-/// platforms list no such kind.
+/// Whether `app` is a helper rather than an application a user opens: an
+/// agent (`LSUIElement`), a background-only app (`LSBackgroundOnly`) or a
+/// running bundle that is not an `.app`, such as an app extension.
+#[cfg(target_os = "macos")]
 fn is_helper(app: &Application) -> bool {
-	#[cfg(target_os = "macos")]
-	return platform::is_helper(Path::new(&app.path));
-	#[cfg(not(target_os = "macos"))]
-	{
-		let _ = app;
-		false
-	}
+	platform::is_helper(Path::new(&app.path))
+}
+
+/// Other platforms list no helpers apart from their applications.
+#[cfg(not(target_os = "macos"))]
+const fn is_helper(_: &Application) -> bool {
+	false
 }
 
 fn unique<'a>(
