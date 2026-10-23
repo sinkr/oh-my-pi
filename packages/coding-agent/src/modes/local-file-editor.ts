@@ -23,7 +23,7 @@ export function sessionLocalProtocolOptions(
 }
 
 /** Encode a filesystem name as `local://` path segments. `/` stays a separator; `%`, `#`, `?` are encoded once. */
-function encodeLocalPath(name: string): string {
+export function encodeLocalPath(name: string): string {
 	return name
 		.split("/")
 		.map(segment => encodeURIComponent(segment))

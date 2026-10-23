@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { InternalUrlRouter, type LocalFileEntry, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { buildLocalFileArgumentCompletions } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-completions";
 import {
 	openLocalFileInEditor,
 	resolveLocalEditorTarget,
@@ -129,5 +130,51 @@ describe("resolveLocalEditorTarget", () => {
 
 		await openLocalFileInEditor(ctx);
 		expect(showStatus).toHaveBeenCalledWith("/local is host-only during a collab session");
+	});
+});
+
+describe("buildLocalFileArgumentCompletions", () => {
+	beforeEach(() => {
+		LocalProtocolHandler.resetOverrideForTests();
+		InternalUrlRouter.resetForTests();
+	});
+
+	afterEach(() => {
+		LocalProtocolHandler.resetOverrideForTests();
+		InternalUrlRouter.resetForTests();
+	});
+
+	const completerFor = (options: { getArtifactsDir: () => string; getSessionId: () => string }) =>
+		buildLocalFileArgumentCompletions({
+			ctx: { sessionManager: options },
+		} as never);
+
+	it("inserts an encoded local:// URL so whitespace and metachar names survive trimming", async () => {
+		using tmp = TempDir.createSync("@omp-local-editor-");
+		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+		await Bun.write(path.join(tmp.path(), "local", " plan.md"), "spaced");
+		await Bun.write(path.join(tmp.path(), "local", "a#b.md"), "hash");
+
+		const items = await completerFor(options)("");
+		const byValue = new Map(items!.map(i => [i.value, i.label]));
+		expect(byValue.get("local://%20plan.md")).toBe(" plan.md");
+		expect(byValue.get("local://a%23b.md")).toBe("a#b.md");
+
+		// The inserted value resolves back to the exact file — a leading-space
+		// name does not collapse onto the "plan.md" sibling.
+		const resolved = await resolveLocalEditorTarget("local://%20plan.md", options);
+		expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", " plan.md")));
+	});
+
+	it("strips ANSI/control bytes from completion labels but keeps the exact value", async () => {
+		using tmp = TempDir.createSync("@omp-local-editor-");
+		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+		const evilName = "evil\x1b[31m.md";
+		await Bun.write(path.join(tmp.path(), "local", evilName), "x");
+
+		const items = await completerFor(options)("");
+		const item = items!.find(i => i.value === `local://${encodeURIComponent(evilName)}`);
+		expect(item).toBeDefined();
+		expect(item!.label).not.toContain("\x1b");
 	});
 });
