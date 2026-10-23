@@ -205,9 +205,16 @@ fn bundle_string(bundle: &NSBundle, key: &NSString) -> Option<String> {
 		.map(|value| value.to_string())
 }
 
-/// Whether the bundle at `path` declares `LSUIElement` or `LSBackgroundOnly`:
-/// an agent or helper with no Dock icon or menu bar.
-pub(super) fn background_only(path: &Path) -> bool {
+/// Whether the bundle at `path` is a helper: not an `.app` (a running app
+/// extension or XPC service), or an app that declares `LSUIElement` or
+/// `LSBackgroundOnly`.
+pub(super) fn is_helper(path: &Path) -> bool {
+	if !path
+		.extension()
+		.is_some_and(|extension| extension.as_encoded_bytes().eq_ignore_ascii_case(b"app"))
+	{
+		return true;
+	}
 	autoreleasepool(|_| {
 		let Some(bundle) = path
 			.to_str()
