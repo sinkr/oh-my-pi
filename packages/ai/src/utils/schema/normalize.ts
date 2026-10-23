@@ -1662,10 +1662,12 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
 /**
  * OpenAI Responses rejects `oneOf` in tool schemas even when strict mode is
  * disabled, and rejects every schema node with `type: "object"` unless it has
- * a `properties` member. Arrays without `items` need explicit open `items: true`,
- * including the default open tail after `prefixItems`, which makes strict
- * adaptation fall back to non-strict. Grammar backends can disable this repair
- * because they accept itemless arrays but cannot compile boolean subschemas.
+ * a `properties` member. Codex opts into repairing arrays without `items` with
+ * explicit open `items: true`, including the default open tail after
+ * `prefixItems`, which makes strict adaptation fall back to non-strict.
+ * The repair is off by default: other Responses routes include grammar
+ * backends that cannot compile boolean subschemas. Nodes with `unevaluatedItems`
+ * are not repaired because adding `items` can change which elements it constrains.
  * Normalize only schema-valued positions so literal payloads under `enum`,
  * `const`, `default`, and `examples` remain unchanged.
  *
@@ -1679,7 +1681,7 @@ export function sanitizeSchemaForOpenAIResponses(
 	schema: JsonObject,
 	options?: { repairArrayItems?: boolean },
 ): JsonObject {
-	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap(), options?.repairArrayItems !== false) as JsonObject;
+	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap(), options?.repairArrayItems === true) as JsonObject;
 }
 
 /**
@@ -1795,7 +1797,8 @@ function normalizeOpenAIResponsesSchemaNode(
 		(value.type === "array" ||
 			(Array.isArray(value.type) && value.type.includes("array")) ||
 			(value.type === undefined && Array.isArray(value.prefixItems))) &&
-		!Object.hasOwn(value, "items")
+		!Object.hasOwn(value, "items") &&
+		!Object.hasOwn(value, "unevaluatedItems")
 	) {
 		output.items = true;
 		changed = true;

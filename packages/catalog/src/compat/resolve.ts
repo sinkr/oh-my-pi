@@ -797,11 +797,7 @@ function resolveOpenAIResponsesPolicy(
 		isOpenRouterHost: isOpenRouter,
 		isVercelGatewayHost: isVercelGateway,
 		wireModelIdMode: isOpenRouter ? "openrouter" : "raw",
-		toolSchemaFlavor: facts.is("kimi")
-			? "moonshot-mfjs"
-			: PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true && isLocalServingBackend
-				? "grammar"
-				: undefined,
+		toolSchemaFlavor: facts.is("kimi") ? "moonshot-mfjs" : undefined,
 		alwaysSendMaxTokens: facts.is("kimi"),
 		clampOutputToModelMax:
 			PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
