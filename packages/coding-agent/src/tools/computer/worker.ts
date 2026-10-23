@@ -1792,12 +1792,11 @@ export class ComputerWorkerCore {
 					typeof selector === "string" || typeof selector === "number"
 						? windows.filter(window => window.id === String(selector))
 						: windows.filter(window => matchesFilter(window, selector));
+				const described = selector == null ? "computer.window() without an id or filter" : JSON.stringify(selector);
 				if (matches.length === 0) {
 					// Untyped scripts may pass `null`, which `matchesFilter` accepts as no filter.
 					const app = typeof selector === "object" ? selector?.app : undefined;
-					throw new ToolError(
-						`no window matches ${JSON.stringify(selector)}\n${describeWindowMiss(windows, app)}`,
-					);
+					throw new ToolError(`no window matches ${described}\n${describeWindowMiss(windows, app)}`);
 				}
 				if (matches.length > 1) {
 					const candidates = matches
@@ -1806,7 +1805,7 @@ export class ComputerWorkerCore {
 						.join("\n");
 					const omitted = matches.length - MAX_LISTED_WINDOWS;
 					const more = omitted > 0 ? `\n… ${omitted} more` : "";
-					throw new ToolError(`multiple windows match ${JSON.stringify(selector)}:\n${candidates}${more}`);
+					throw new ToolError(`multiple windows match ${described}:\n${candidates}${more}`);
 				}
 				return makeWin(matches[0]!);
 			},

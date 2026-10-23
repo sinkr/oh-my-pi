@@ -1901,9 +1901,15 @@ describe("computer worker round trips", () => {
 		it("says the app has no window and lists every app's windows, untitled ones included", async () => {
 			const lines = (await missMessage(desktopWindows, '{ app: "Calendar" }')).split("\n");
 			expect(lines).toContain('No open window belongs to an app matching "Calendar".');
+			expect(lines.find(line => line.includes("computer.apps.open"))).toContain('computer.apps.open("Calendar")');
 			expect(lines).toContain('- Code: 42 "Editor", 43 ""');
 			expect(lines).toContain('- Finder: 7 "Downloads"');
 			expect(lines).toContain('- TextEdit: 8 "notes.txt", 9 "draft.txt"');
+		});
+
+		it("names a call without a selector instead of matching undefined", async () => {
+			const message = await missMessage(desktopWindows, "");
+			expect(message.split("\n")[0]).toBe("multiple windows match computer.window() without an id or filter:");
 		});
 
 		it("lists untitled windows by id after titled ones, as when macOS hides other apps' titles", async () => {

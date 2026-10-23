@@ -34,7 +34,8 @@ export function describeWindowMiss(windows: readonly DesktopWindow[], app: strin
 	}
 	const note =
 		needle !== undefined && !apps.some(matched)
-			? `No open window belongs to an app matching ${JSON.stringify(app)}.\n`
+			? `No open window belongs to an app matching ${JSON.stringify(app)}.\n` +
+				`To open an application by that name or ID, or show a window of one running without any, call computer.apps.open(${JSON.stringify(app)}); it returns the application with its window.\n`
 			: "";
 	return `${note}Open windows by app (id "title"):\n${lines.join("\n")}`;
 }
