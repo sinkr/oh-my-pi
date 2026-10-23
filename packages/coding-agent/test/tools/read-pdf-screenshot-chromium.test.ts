@@ -131,13 +131,21 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("PDF page screenshots in Chromium", () => {
 				);
 				// An unpainted frame is only the viewer's grey background. A
 				// painted one shows the white page, and the share of it the black
-				// square covers identifies which page was rendered.
-				const painted = light + dark > (screenshot.width * screenshot.height) / 10;
+				// square covers identifies which page was rendered. The letter page
+				// covers about 76% of the square tab (43% of a 1024x576 one).
+				const area = screenshot.width * screenshot.height;
+				const painted = light + dark > area / 10;
 				const squareShare = painted ? dark / (light + dark) : 0;
-				expect({ page, painted, rightPage: Math.abs(squareShare - squareFraction(page) ** 2) < 0.015 }).toEqual({
+				expect({
+					page,
+					painted,
+					rightPage: Math.abs(squareShare - squareFraction(page) ** 2) < 0.015,
+					fillsShot: (light + dark) / area > 0.6,
+				}).toEqual({
 					page,
 					painted: true,
 					rightPage: true,
+					fillsShot: true,
 				});
 			}
 		},
