@@ -302,7 +302,6 @@ export const stateDefs = {
 			"error?": "string",
 			id: "string",
 			leafId: "string | null",
-			"title?": "string",
 			"followUps?": "BtwHistoryTurn[]",
 		},
 		"A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.",

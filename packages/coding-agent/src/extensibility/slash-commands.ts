@@ -96,7 +96,7 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 			argumentHint: cmd.argumentHint ?? argumentHint,
 			content: body,
 			source: sourceStr,
-			...(side ? { side } : {}),
+			...(side || cmd.side === true ? { side: true } : {}),
 			_source: { providerName: cmd._source.providerName, level: cmd.level },
 		};
 	});

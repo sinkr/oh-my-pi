@@ -912,7 +912,6 @@ class BtwHistoryRecord:
     id: str
     leaf_id: str | None
     error: str | None = None
-    title: str | None = None
     follow_ups: tuple[BtwHistoryTurn, ...] | None = None
 
 
@@ -2224,7 +2223,6 @@ def parse_btw_history_record(value: object, path: str = "BtwHistoryRecord") -> B
         id=required(payload, "id", decode_str, path),
         leaf_id=required(payload, "leafId", nullable(decode_str), path),
         error=optional(payload, "error", decode_str, path),
-        title=optional(payload, "title", decode_str, path),
         follow_ups=optional(payload, "followUps", array(parse_btw_history_turn), path),
     )
 

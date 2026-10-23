@@ -3448,8 +3448,6 @@ pub struct BtwHistoryRecord {
 	pub leaf_id: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub title: Option<String>,
 	#[serde(rename = "followUps", default, skip_serializing_if = "Option::is_none")]
 	pub follow_ups: Option<Vec<BtwHistoryTurn>>,
 }

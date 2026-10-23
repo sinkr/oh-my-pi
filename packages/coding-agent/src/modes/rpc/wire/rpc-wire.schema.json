@@ -3373,9 +3373,6 @@
 				"error": {
 					"type": "string"
 				},
-				"title": {
-					"type": "string"
-				},
 				"followUps": {
 					"type": "array",
 					"items": {

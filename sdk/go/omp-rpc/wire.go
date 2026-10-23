@@ -3273,7 +3273,6 @@ type BtwHistoryRecord struct {
 	ID        string           `json:"id"`
 	LeafID    *string          `json:"leafId"`
 	Error     *string          `json:"error,omitempty"`
-	Title     *string          `json:"title,omitempty"`
 	FollowUps []BtwHistoryTurn `json:"followUps,omitempty"`
 }
 
@@ -3292,7 +3291,6 @@ func (v *BtwHistoryRecord) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("id", &out.ID)
 	d.nullable("leafId", &out.LeafID)
 	d.optional("error", &out.Error)
-	d.optional("title", &out.Title)
 	d.optional("followUps", &out.FollowUps)
 	if d.err != nil {
 		return d.err

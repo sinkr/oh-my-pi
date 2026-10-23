@@ -145,7 +145,7 @@ For each command:
 5. preserve `argumentHint` from discovery, or parse `argumentHint`/`argument-hint` frontmatter for autocomplete ghost text and ACP input hints
 6. set `side` when the frontmatter has the boolean `side: true` (a quoted `"true"` does not count)
 
-Codex/OpenCode providers strip frontmatter before this stage. Their discovered argument hints survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
+Codex/OpenCode providers strip frontmatter before this stage. Their discovered argument hints and `side` flags survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
 
 Frontmatter parse severity is level-dependent:
 
@@ -250,7 +250,7 @@ Argument substitution is one pass over the template; dollar placeholders inside 
 
 ### Side commands (`side: true`)
 
-A file command with `side: true` frontmatter runs as a [`/btw`](#11-built-in-command-note-btw) side question in the interactive TUI. The expanded template, after the same argument substitution, is the question. It works the same with or without arguments. The question and answer stay off the transcript, the command runs while a turn streams without steering it, and the answer gets `/btw` history, follow-ups and branching. The panel and history show the typed invocation (`/sitrep`, `/sitrep the migration`) as the topic's title, saved as the record's `title`, while the model receives the expanded template. Use it for read-only questions about the session, such as status reports or explanations:
+A file command with `side: true` frontmatter runs as a [`/btw`](#11-built-in-command-note-btw) side question in the interactive TUI. The expanded template, after the same argument substitution, is the question. It works the same with or without arguments. The question and answer stay off the transcript, the command runs while a turn streams without steering it, and the answer gets `/btw` history, follow-ups and branching. The panel and history show the typed invocation (`/sitrep`, `/sitrep the migration`) as the topic's title while the model receives the expanded template. The title lives in an `entry-<id>.title` file beside the record's JSON, which keeps the record readable by older builds. Use it for read-only questions about the session, such as status reports or explanations:
 
 ```markdown
 ---

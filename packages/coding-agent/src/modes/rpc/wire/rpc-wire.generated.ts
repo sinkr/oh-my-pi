@@ -732,7 +732,6 @@ export interface BtwHistoryRecord {
 	id: string;
 	leafId: string | null;
 	error?: string;
-	title?: string;
 	followUps?: BtwHistoryTurn[];
 }
 
