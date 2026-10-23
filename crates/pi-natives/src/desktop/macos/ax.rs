@@ -1224,8 +1224,18 @@ fn element_props(
 
 /// The [`NODE_ATTRIBUTES`] that, with `AXRole`, tell an element apart in its
 /// window.
-const IDENTIFYING: [usize; 9] =
-	[SUBROLE, ROLE_DESCRIPTION, TITLE, DESCRIPTION, VALUE, VALUE_DESCRIPTION, HELP, IDENTIFIER, URL];
+const IDENTIFYING: [usize; 10] = [
+	SUBROLE,
+	ROLE_DESCRIPTION,
+	TITLE,
+	DESCRIPTION,
+	VALUE,
+	VALUE_DESCRIPTION,
+	HELP,
+	IDENTIFIER,
+	URL,
+	PLACEHOLDER,
+];
 
 /// The element's [`AxProps::identity`], hashed from its role and
 /// [`IDENTIFYING`] attributes, its title, value and description as
@@ -2517,16 +2527,20 @@ mod tests {
 		let due: &CFType = &due;
 		let add_date = CFString::from_static_str("Add Date");
 		let add_date: &CFType = &add_date;
+		let mut busy = AXError::CannotComplete;
+		// SAFETY: An AXError-typed AXValue copies the one AXError it points at.
+		let busy =
+			unsafe { AXValue::new(AXValueType::AXError, NonNull::from(&mut busy).cast()) }.unwrap();
 		// SAFETY: kCFNull is a process-lifetime constant.
 		let null: &CFType = unsafe { kCFNull }.unwrap();
-		// One walk read of a Reminders date field showing "Add Date", with
-		// `title` and `description` as its own labels.
-		let field = |title: &CFType, description: &CFType| {
+		// One walk read of a Reminders date field, with `title` and
+		// `description` as its own labels.
+		let field = |title: &CFType, description: &CFType, placeholder: &CFType| {
 			let mut entries = [null; 14];
 			entries[ROLE] = role;
 			entries[TITLE] = title;
 			entries[DESCRIPTION] = description;
-			entries[PLACEHOLDER] = add_date;
+			entries[PLACEHOLDER] = placeholder;
 			let values = NodeValues::from_batch(
 				Ok(CFArray::from_objects(&entries)),
 				NodeRead::Walk.attributes(),
@@ -2534,12 +2548,19 @@ mod tests {
 			);
 			element_props(&create_system_wide(), &values, 0, WalkBounds::Skip).unwrap()
 		};
-		assert_eq!(field(null, null).description.as_deref(), Some("Add Date"));
+		let unlabeled = field(null, null, add_date);
+		assert_eq!(unlabeled.description.as_deref(), Some("Add Date"));
+		assert!(!unlabeled.partial);
 		// A label of its own wins.
-		assert_eq!(field(null, due).description.as_deref(), Some("Due"));
-		let titled = field(due, null);
+		assert_eq!(field(null, due, add_date).description.as_deref(), Some("Due"));
+		let titled = field(due, null, add_date);
 		assert_eq!(titled.title.as_deref(), Some("Due"));
 		assert_eq!(titled.description, None);
+		// A placeholder the app was too busy to answer leaves the field
+		// unnamed and without an identity, so no ref is matched by its name.
+		let unanswered = field(null, null, &busy);
+		assert_eq!(unanswered.description, None);
+		assert!(unanswered.partial);
 	}
 
 	#[test]
