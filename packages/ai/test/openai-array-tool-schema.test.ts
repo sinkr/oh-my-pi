@@ -100,19 +100,31 @@ describe("Codex itemless array schemas", () => {
 		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
 	});
 
-	it.each([false, true])(
-		"keeps shared schemas separate across unevaluatedItems contexts (closed first: %j)",
-		closedFirst => {
-			const tuple = { type: "array", prefixItems: [{ type: "string" }] };
-			const closed = { type: "array", allOf: [tuple], unevaluatedItems: false };
-			const properties = closedFirst ? { closed, open: tuple } : { open: tuple, closed };
-			const sanitized = sanitizeSchemaForOpenAIResponses({ type: "object", properties }, { repairArrayItems: true });
-			const result = sanitized.properties as Record<string, unknown>;
-			expect(result.open).toEqual({ ...tuple, items: true });
-			expect(result.closed).toBe(closed);
-			expect(tuple).not.toHaveProperty("items");
+	it.each([false, true])("skips the whole schema when unevaluatedItems is present (closed first: %j)", closedFirst => {
+		const tuple = { type: "array", prefixItems: [{ type: "string" }] };
+		const closed = { type: "array", allOf: [tuple], unevaluatedItems: false };
+		const properties = closedFirst ? { closed, open: tuple } : { open: tuple, closed };
+		const schema = { type: "object", properties };
+		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
+		expect(tuple).not.toHaveProperty("items");
+	});
+
+	const referencedTupleSchema = {
+		type: "object",
+		$defs: { Tuple: { type: "array", prefixItems: [{ type: "string" }] } },
+		properties: {
+			row: { type: "array", allOf: [{ $ref: "#/$defs/Tuple" }], unevaluatedItems: false },
+			other: { type: "array" },
 		},
-	);
+		required: ["row", "other"],
+		additionalProperties: false,
+	};
+
+	it("does not repair definitions referenced from an unevaluatedItems constraint", () => {
+		expect(sanitizeSchemaForOpenAIResponses(referencedTupleSchema, { repairArrayItems: true })).toBe(
+			referencedTupleSchema,
+		);
+	});
 
 	it("does not rewrite itemless array-shaped literal values", () => {
 		const literal = { type: "array" };
@@ -194,6 +206,22 @@ describe("Codex itemless array schemas", () => {
 	describe("Codex converter", () => {
 		const model = createCodexModel("gpt-5.5");
 		const convert = (tool: Tool) => convertOpenAICodexResponsesTools([tool], model)[0];
+
+		it("preserves the whole tool when a referenced tuple has an enclosing unevaluatedItems constraint", () => {
+			const tool: Tool = {
+				name: "tuple",
+				description: "Read a tuple",
+				parameters: referencedTupleSchema,
+				strict: false,
+			};
+			expect(convert(tool)).toEqual({
+				type: "function",
+				name: "tuple",
+				description: "Read a tuple",
+				parameters: referencedTupleSchema,
+				strict: false,
+			});
+		});
 
 		it.each([
 			{ type: "array", prefixItems: [{ type: "string" }], unevaluatedItems: false },

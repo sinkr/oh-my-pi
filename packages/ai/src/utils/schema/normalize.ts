@@ -1666,9 +1666,9 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
  * explicit open `items: true`, including the default open tail after
  * `prefixItems`, which makes strict adaptation fall back to non-strict.
  * The repair is off by default: other Responses routes include grammar
- * backends that cannot compile boolean subschemas. Nodes declaring
- * `unevaluatedItems` and their descendants are not repaired because adding
- * `items` can change which elements the enclosing constraint evaluates.
+ * backends that cannot compile boolean subschemas. If `unevaluatedItems`
+ * appears anywhere in the input, repair is disabled for the whole tool:
+ * references and composition can carry evaluated-item effects across subtrees.
  * Normalize only schema-valued positions so literal payloads under `enum`,
  * `const`, `default`, and `examples` remain unchanged.
  *
@@ -1682,14 +1682,24 @@ export function sanitizeSchemaForOpenAIResponses(
 	schema: JsonObject,
 	options?: { repairArrayItems?: boolean },
 ): JsonObject {
-	const repairArrayItems = options?.repairArrayItems === true;
-	const cache = new WeakMap<JsonObject, unknown>();
-	return normalizeOpenAIResponsesSchemaNode(
-		schema,
-		cache,
-		repairArrayItems,
-		repairArrayItems ? new WeakMap() : cache,
-	) as JsonObject;
+	const repairArrayItems = options?.repairArrayItems === true && !containsUnevaluatedItems(schema);
+	return normalizeOpenAIResponsesSchemaNode(schema, new WeakMap(), repairArrayItems) as JsonObject;
+}
+
+function containsUnevaluatedItems(value: unknown, epoch: number = epochNext()): boolean {
+	if (Array.isArray(value)) {
+		if (!once(value, epoch)) return false;
+		for (const entry of value) {
+			if (containsUnevaluatedItems(entry, epoch)) return true;
+		}
+		return false;
+	}
+	if (!isJsonObject(value) || !once(value, epoch)) return false;
+	if (Object.hasOwn(value, "unevaluatedItems")) return true;
+	for (const key in value) {
+		if (Object.hasOwn(value, key) && containsUnevaluatedItems(value[key], epoch)) return true;
+	}
+	return false;
 }
 
 /**
@@ -1720,7 +1730,6 @@ function normalizeOpenAIResponsesSchemaNode(
 	value: unknown,
 	cache: WeakMap<JsonObject, unknown>,
 	repairArrayItems: boolean,
-	unrepairedCache: WeakMap<JsonObject, unknown>,
 ): unknown {
 	if (!isJsonObject(value)) return value;
 
@@ -1732,12 +1741,6 @@ function normalizeOpenAIResponsesSchemaNode(
 	// `sanitizeSchemaForOpenAIResponses` directly on a schema that bypassed
 	// the wire-schema pipeline (e.g. provider-specific fixtures, debug paths).
 	if (isJsonObjectEmpty(value)) return true;
-
-	// Descendants can contribute evaluated items to an enclosing constraint.
-	// Keep this context in the cache key too: a shared schema may occur both
-	// inside and outside an `unevaluatedItems` subtree.
-	repairArrayItems &&= !Object.hasOwn(value, "unevaluatedItems");
-	if (!repairArrayItems) cache = unrepairedCache;
 
 	const cached = cache.get(value);
 	if (cached) return cached;
@@ -1775,13 +1778,13 @@ function normalizeOpenAIResponsesSchemaNode(
 		const child = value[key];
 		let next: unknown = child;
 		if (key === "patternProperties" && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaMap(child, cache, true, repairArrayItems, unrepairedCache);
+			next = normalizeOpenAIResponsesSchemaMap(child, cache, true, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaMap(child, cache, false, repairArrayItems, unrepairedCache);
+			next = normalizeOpenAIResponsesSchemaMap(child, cache, false, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(child)) {
-			next = normalizeOpenAIResponsesSchemaArray(child, cache, repairArrayItems, unrepairedCache);
+			next = normalizeOpenAIResponsesSchemaArray(child, cache, repairArrayItems);
 		} else if (OPENAI_RESPONSES_SCHEMA_VALUE_KEYS.has(key) && isJsonObject(child)) {
-			next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems, unrepairedCache);
+			next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		}
 
 		if (next !== child) changed = true;
@@ -1789,7 +1792,7 @@ function normalizeOpenAIResponsesSchemaNode(
 	}
 
 	if (Array.isArray(value.oneOf)) {
-		const rewrittenOneOf = normalizeOpenAIResponsesSchemaArray(value.oneOf, cache, repairArrayItems, unrepairedCache);
+		const rewrittenOneOf = normalizeOpenAIResponsesSchemaArray(value.oneOf, cache, repairArrayItems);
 		const existingAnyOf = output.anyOf;
 		output.anyOf = Array.isArray(existingAnyOf)
 			? [...existingAnyOf, ...(rewrittenOneOf as unknown[])]
@@ -1840,11 +1843,10 @@ function normalizeOpenAIResponsesSchemaArray(
 	value: unknown[],
 	cache: WeakMap<JsonObject, unknown>,
 	repairArrayItems: boolean,
-	unrepairedCache: WeakMap<JsonObject, unknown>,
 ): unknown[] {
 	let changed = false;
 	const output = value.map(item => {
-		const next = normalizeOpenAIResponsesSchemaNode(item, cache, repairArrayItems, unrepairedCache);
+		const next = normalizeOpenAIResponsesSchemaNode(item, cache, repairArrayItems);
 		if (next !== item) changed = true;
 		return next;
 	});
@@ -1856,14 +1858,13 @@ function normalizeOpenAIResponsesSchemaMap(
 	cache: WeakMap<JsonObject, unknown>,
 	stripUnsupportedRegexKeys: boolean,
 	repairArrayItems: boolean,
-	unrepairedCache: WeakMap<JsonObject, unknown>,
 ): JsonObject {
 	let changed = false;
 	const output: JsonObject = {};
 	for (const key in schemaMap) {
 		if (!Object.hasOwn(schemaMap, key)) continue;
 		const child = schemaMap[key];
-		const next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems, unrepairedCache);
+		const next = normalizeOpenAIResponsesSchemaNode(child, cache, repairArrayItems);
 		if (next !== child) changed = true;
 		if (stripUnsupportedRegexKeys && hasOpenAIUnsupportedRegexLookaround(key)) {
 			changed = true;
