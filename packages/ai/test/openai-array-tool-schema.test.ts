@@ -35,6 +35,16 @@ describe("OpenAI itemless array schemas", () => {
 			schema: { type: "array", items: { type: "array" } },
 			expected: { type: "array", items: { type: "array", items: true } },
 		},
+		{
+			name: "prefix-only tuple",
+			schema: { type: "array", prefixItems: [{ type: "string" }] },
+			expected: { type: "array", prefixItems: [{ type: "string" }], items: true },
+		},
+		{
+			name: "empty prefix tuple",
+			schema: { type: "array", prefixItems: [] },
+			expected: { type: "array", prefixItems: [], items: true },
+		},
 	])("adds open items to $name and falls back to non-strict", ({ schema, expected }) => {
 		const original = structuredClone(schema);
 		const sanitized = sanitizeSchemaForOpenAIResponses(schema);
@@ -58,9 +68,9 @@ describe("OpenAI itemless array schemas", () => {
 	it.each([
 		{ type: "array", items: true },
 		{ type: "array", items: false },
-		{ type: "array", prefixItems: [{ type: "string" }] },
-		{ type: "array", prefixItems: [] },
-	])("preserves existing items or prefixItems: %j", schema => {
+		{ type: "array", prefixItems: [{ type: "string" }], items: { type: "number" } },
+		{ type: "array", prefixItems: [], items: false },
+	])("preserves existing items: %j", schema => {
 		expect(sanitizeSchemaForOpenAIResponses(schema)).toBe(schema);
 	});
 
@@ -82,6 +92,58 @@ describe("OpenAI itemless array schemas", () => {
 	];
 
 	for (const provider of providers) {
+		it(`${provider.name} preserves a prefix-only tuple with an explicit non-strict open tail`, () => {
+			const prefixItems = [{ type: "string" }];
+			const tool: Tool = {
+				name: "tuple",
+				description: "Read a tuple",
+				strict: true,
+				parameters: {
+					type: "object",
+					properties: { row: { type: "array", prefixItems } },
+					required: ["row"],
+					additionalProperties: false,
+				},
+			};
+			const sanitized = sanitizeSchemaForOpenAIResponses({ type: "array", prefixItems });
+			expect(sanitized.prefixItems).toBe(prefixItems);
+			expect(provider.convert(tool)).toEqual({
+				type: "function",
+				name: "tuple",
+				description: "Read a tuple",
+				parameters: {
+					type: "object",
+					properties: { row: { type: "array", prefixItems, items: true } },
+					required: ["row"],
+					additionalProperties: false,
+				},
+			});
+		});
+
+		it(`${provider.name} preserves tuple items and strict mode when the tail is typed`, () => {
+			const parameters = {
+				type: "object",
+				properties: {
+					row: { type: "array", prefixItems: [{ type: "string" }], items: { type: "number" } },
+				},
+				required: ["row"],
+				additionalProperties: false,
+			};
+			const tool: Tool = {
+				name: "tuple",
+				description: "Read a tuple",
+				strict: true,
+				parameters,
+			};
+			expect(provider.convert(tool)).toEqual({
+				type: "function",
+				name: "tuple",
+				description: "Read a tuple",
+				parameters,
+				strict: true,
+			});
+		});
+
 		it(`${provider.name} emits open array items without strict mode`, () => {
 			const tool: Tool = {
 				name: "list",

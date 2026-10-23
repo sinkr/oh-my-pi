@@ -1662,8 +1662,9 @@ const OPENAI_RESPONSES_SCHEMA_VALUE_KEYS = new Set([
 /**
  * OpenAI Responses rejects `oneOf` in tool schemas even when strict mode is
  * disabled, and rejects every schema node with `type: "object"` unless it has
- * a `properties` member. Arrays without `items` or `prefixItems` need explicit
- * open `items: true`, which makes strict adaptation fall back to non-strict.
+ * a `properties` member. Arrays without `items` need explicit open `items: true`,
+ * including the default open tail after `prefixItems`, which makes strict
+ * adaptation fall back to non-strict.
  * Normalize only schema-valued positions so literal payloads under `enum`,
  * `const`, `default`, and `examples` remain unchanged.
  *
@@ -1777,10 +1778,11 @@ function normalizeOpenAIResponsesSchemaNode(value: unknown, cache: WeakMap<JsonO
 		changed = true;
 	}
 
+	// An omitted `items` permits any element, including the tail after
+	// `prefixItems`; make that default explicit without changing the tuple.
 	if (
 		(value.type === "array" || (Array.isArray(value.type) && value.type.includes("array"))) &&
-		!Object.hasOwn(value, "items") &&
-		!Object.hasOwn(value, "prefixItems")
+		!Object.hasOwn(value, "items")
 	) {
 		output.items = true;
 		changed = true;
