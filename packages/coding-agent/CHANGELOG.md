@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved local OAuth discovery diagnostics and test-runtime cache isolation after the upstream module extractions in the 18.12.6 patch-stack upgrade.
+
 ## [18.12.6] - 2026-10-21
 
 ### Added
