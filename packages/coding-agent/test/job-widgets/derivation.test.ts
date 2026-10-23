@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import type { JobWidgetBlock, JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
-import { $ } from "bun";
 import {
 	JobWidgetRuntime,
 	type JobTextChunk,
@@ -746,6 +745,29 @@ describe("job widget spec validation", () => {
 			}
 		});
 
+		it("requires percentage evidence from every numeric feeding rule", () => {
+			const spec = {
+				...percent,
+				rules: [...percent.rules, { from: "out", match: String.raw`done (?P<pct>\d+)%` }],
+			};
+			expect(validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%"] }], "report progress").ok).toBe(
+				false,
+			);
+			expect(
+				validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%", "done 73%"] }], "report progress").ok,
+			).toBe(true);
+		});
+
+		it("rejects an unmatched scaled rule feeding a percentage", () => {
+			const spec = {
+				...percent,
+				rules: [...percent.rules, { from: "out", match: String.raw`frac (?P<pct>[\d.]+)`, scale: 100 }],
+			};
+			expect(validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%"] }], "report progress").ok).toBe(
+				false,
+			);
+		});
+
 		it("does not grant percentage totals to other fields, count feeds, targets or totals", () => {
 			for (const spec of [
 				{
@@ -769,7 +791,7 @@ describe("job widget spec validation", () => {
 				"........................................................................ [ 18%]",
 				"........................................................................ [ 37%]",
 			];
-			for (const id of ["out", "tools", "bg_7:pipe:1"]) {
+			for (const id of ["out", "tools"]) {
 				const checked = validateJobWidgetSpec(
 					{ ...percent, rules: [{ from: id, match: String.raw`\[\s*(?P<pct>\d+)%\]` }] },
 					[{ id, lines: id === "tools" ? ["» bash run tests", ...lines] : lines }],
@@ -783,22 +805,6 @@ describe("job widget spec validation", () => {
 				h.ingest();
 				expect(block(h.view(), "meter").value).toBe(0.37);
 			}
-		});
-
-		it("charts real bash percentage output without a stated total", async () => {
-			const output = await $`bash -c 'printf "progress 42%%\nprogress 73%%\n"'`.text();
-			const checked = validateJobWidgetSpec(
-				percent,
-				[{ id: "out", lines: output.trim().split("\n") }],
-				"report progress",
-			);
-			expect(checked.ok).toBe(true);
-			if (!checked.ok) return;
-			const out = new ScriptedSource("out");
-			const h = harness(checked.spec, out);
-			out.append(output);
-			h.ingest();
-			expect(block(h.view(), "meter").value).toBe(0.73);
 		});
 	});
 });

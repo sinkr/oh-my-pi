@@ -314,8 +314,9 @@ export function parseWidgetValue(text: string): number {
  *
  * With `brief` (the job's command, task and hints) as well, a constant meter
  * `total` or spark `target` must be a number the brief or the samples state:
- * an invented total draws a made-up fraction. A meter of observed, unscaled
- * percentages may use 100 without the output spelling out the denominator.
+ * an invented total draws a made-up fraction. A meter may use 100 without a
+ * stated denominator when every numeric feeding rule supplies an observed,
+ * unscaled percentage.
  */
 export function validateJobWidgetSpec(
 	value: unknown,
@@ -386,7 +387,7 @@ function isPercentCapture(captured: string, line: string, end: number): boolean 
 	return suffix === "%" || (suffix === "" && /^\s*%/.test(line.slice(end)));
 }
 
-/** Runs the rules over the samples, returning fields whose numeric captures are all unscaled percentages. */
+/** Runs the rules over the samples, requiring percentage evidence from every numeric feeding rule. */
 function dryRun(
 	spec: JobWidgetSpec,
 	matcher: LineMatcher,
@@ -401,6 +402,16 @@ function dryRun(
 	const marked = new Set<number>();
 	const numbers = new Set<string>();
 	const percentages = new Map<string, boolean>();
+	/** Numeric feeds still missing an unscaled percentage capture. */
+	const unprovenPercentages = new Map<string, Set<number>>();
+	spec.rules.forEach((rule, index) => {
+		for (const { field, text, count } of ruleFields(rule)) {
+			if (text || count) continue;
+			const feeds = unprovenPercentages.get(field) ?? new Set<number>();
+			feeds.add(index);
+			unprovenPercentages.set(field, feeds);
+		}
+	});
 	/** Field → its first capture that held no number. */
 	const words = new Map<string, string>();
 	for (const sample of samples) {
@@ -423,17 +434,17 @@ function dryRun(
 					const captured = line.slice(hits.spans[at], hits.spans[at + 1]);
 					if (Number.isFinite(parseWidgetValue(captured))) {
 						numbers.add(field);
-						percentages.set(
-							field,
-							percentages.get(field) !== false &&
-								(rule.scale ?? 1) === 1 &&
-								isPercentCapture(captured, line, hits.spans[at + 1]),
-						);
+						const percentage = (rule.scale ?? 1) === 1 && isPercentCapture(captured, line, hits.spans[at + 1]);
+						percentages.set(field, percentages.get(field) !== false && percentage);
+						if (percentage) unprovenPercentages.get(field)?.delete(index);
 					} else if (!words.has(field)) words.set(field, captured);
 				});
 			}
 			offset += names.length * 2;
 		}
+	}
+	for (const [field, feeds] of unprovenPercentages) {
+		if (feeds.size > 0) percentages.set(field, false);
 	}
 	if (seen && matches === 0) {
 		errors.push("no rule matches any sample line; copy the exact text of lines that carry the numbers");
