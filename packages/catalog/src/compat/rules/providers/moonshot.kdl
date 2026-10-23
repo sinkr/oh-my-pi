@@ -44,6 +44,25 @@ provider "moonshot" {
 			cache-write 3.0
 		}
 	}
+	// Official K3.1 Pro rates. The discovery mapper seeds K3 list pricing on
+	// every $0 K3-family row, so these must patch rather than fall back.
+	// https://platform.kimi.ai/docs/pricing/chat
+	models "kimi-k3.1-pro" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 2.0
+		}
+	}
+	models "kimi-k3.1-pro-highspeed" {
+		cost-patch {
+			input 4.0
+			output 20.0
+			cache-read 0.2
+			cache-write 4.0
+		}
+	}
 	// The /models roster carries no modality metadata for the named vision/vl
 	// SKUs; the bounded id token is the census signal.
 	models token="vision" {
