@@ -92,6 +92,7 @@ export function allocateUsage(
 	return allocate(categories, usage) ? allocation : undefined;
 }
 
+/** Overview row label for a category: its Overview-specific label when the weight differs from its content. */
 export function overviewLabel(category: ContextViewCategory): string {
 	return contextCategoryDescriptor(category.id).overviewLabel ?? category.label;
 }

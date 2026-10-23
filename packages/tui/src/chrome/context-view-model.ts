@@ -31,6 +31,7 @@ const DESCRIPTORS_BY_ID = new Map<ContextCategoryId, ContextCategoryDescriptor>(
 	CONTEXT_CATEGORIES.map(descriptor => [descriptor.id, descriptor]),
 );
 
+/** Descriptor of a category id: its label, optional Overview label, and whether it can be opened. */
 export function contextCategoryDescriptor(id: ContextCategoryId): ContextCategoryDescriptor {
 	return DESCRIPTORS_BY_ID.get(id)!;
 }

@@ -35,6 +35,7 @@ export function safeLine(value: string): string {
 	return safeText(value).replace(/\n/g, " ");
 }
 
+/** Token label of an entry or group: `—` for a grouped entry, `N/A · Interrupted`, else `N tokens` (unscaled estimate). */
 export function tokenEstimate(item: ContextViewEntry | ContextThinkingGroup): string {
 	// A grouped entry shares its group's estimate, which the group heading shows.
 	if ("thinkingGroup" in item && item.thinkingGroup) return "—";
@@ -58,6 +59,7 @@ export function entryHeaderSpans(entry: ContextViewEntry, category: ContextCateg
 	return [span("[", "dim"), span(safeLine(entry.label), `${color} strong`), span(`] ${tokenEstimate(entry)}`, "dim")];
 }
 
+/** Heading for a shared thinking group: label plus its token estimate. */
 export function groupHeaderLine(group: ContextThinkingGroup, category: ContextCategoryId): string {
 	const color = CONTEXT_PRESENTATION[category].color;
 	return theme.fg(color, theme.bold(safeLine(group.label))) + theme.fg("dim", ` · ${tokenEstimate(group)}`);

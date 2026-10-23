@@ -9,6 +9,11 @@ export interface ContextMapCell<T> {
 	readonly full: boolean;
 }
 
+/**
+ * Lays `segments` out in order over a `columns` × `rows` grid representing `windowTokens`; each cell takes the
+ * segment covering most of it and is `full` at 70% coverage or more. Returns `[]` when the window or grid
+ * size is unusable, and omits cells no segment touches.
+ */
 export function planContextMap<T>(
 	segments: readonly ContextMapSegment<T>[],
 	windowTokens: number,
