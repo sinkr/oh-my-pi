@@ -43,6 +43,8 @@ interface ConfigInit {
 	harnessUids?: string[];
 	/** `ClientModelConfig.maxTokens` — the context window. */
 	contextWindow?: number;
+	/** `ModelInfo.maxTokens` — where current catalogs carry the context window. */
+	modelInfoContextWindow?: number;
 	maxOutputTokens?: number;
 	features?: {
 		supportsThinking?: boolean;
@@ -150,6 +152,7 @@ function config(init: ConfigInit): ClientModelConfig {
 						modelUid: init.uid,
 						displayOption: init.displayOption ?? DisplayOption.UNSPECIFIED,
 						maxOutputTokens: init.maxOutputTokens ?? 64_000,
+						maxTokens: init.modelInfoContextWindow ?? 0,
 						isModelRouter: init.isModelRouter ?? false,
 						harnessUids: init.harnessUids ?? [],
 						...(init.features !== undefined ? { modelFeatures: create(ModelFeaturesSchema, init.features) } : {}),
@@ -331,6 +334,12 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
 		features: { supportsThinking: true, supportsToolCalls: true },
+	}),
+	config({
+		uid: "info-context",
+		label: "Info Context",
+		contextWindow: 0,
+		modelInfoContextWindow: 1_048_576,
 	}),
 	config({
 		uid: "priced-model",
@@ -672,6 +681,10 @@ describe("devin server metadata normalization", () => {
 		expect(longOutput.maxTokens).toBe(128_000);
 		expect(longOutput.contextWindow).toBe(1_000_000);
 		expect(longOutput.reasoning).toBe(true);
+	});
+
+	it("takes the context window from modelInfo.maxTokens when the config leaves its own unset", () => {
+		expect(model("info-context").contextWindow).toBe(1_048_576);
 	});
 
 	it("reads costs, parallel tool support and image support from server metadata", () => {
