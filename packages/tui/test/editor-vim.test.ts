@@ -1240,5 +1240,17 @@ describe("Editor vim mode", () => {
 			press(editor, ".");
 			expect(editor.getText()).toBe("bcdef");
 		});
+
+		it("replays an insert that replaced one emoji with another without splitting a surrogate", () => {
+			const editor = vimEditor("😀 abc\n😇 def");
+			press(editor, "l", "i", BACKSPACE, "😇", ESC, "j", "l", ".");
+			expect(editor.getText()).toBe("😇 abc\n😇 def");
+		});
+
+		it("restores the pre-insert text in one undo after the session outgrows the undo stack", () => {
+			const editor = vimEditor("seed");
+			press(editor, "i", ..." ".repeat(130), ESC, "u");
+			expect(editor.getText()).toBe("seed");
+		});
 	});
 });

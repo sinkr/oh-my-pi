@@ -764,6 +764,11 @@ export class Editor implements Component, Focusable {
 	#suspendUndo = false;
 	/** Snapshots evicted from the front of {@link #undoStack}, so {@link UndoMark}s stay aligned. */
 	#undoShifts = 0;
+	/**
+	 * Undo mark whose first snapshot `u` must still reach: the open Insert/Replace segment, or the
+	 * Normal-mode key being applied (so a counted `.` stays one undo step past the stack cap).
+	 */
+	#pinnedUndo: UndoMark | null = null;
 
 	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
@@ -934,6 +939,7 @@ export class Editor implements Component, Focusable {
 	setVimMode(enabled: boolean): void {
 		if (enabled === (this.#vim !== null)) return;
 		this.#vimSession = null;
+		this.#pinnedUndo = null;
 		this.#vim = enabled ? new VimState() : null;
 		if (this.#vim) this.#vim.mode = "insert";
 		this.invalidate();
@@ -2353,8 +2359,13 @@ export class Editor implements Component, Focusable {
 		const pendingBefore = vim.pendingText;
 		const selectedLinesBefore = this.vimSelectedLines;
 		const mark = this.#undoMark();
+		const pinHere = this.#vimSession === null;
+		if (pinHere) this.#pinnedUndo = mark;
 		const commands = vim.handleKey(key, this.#state);
-		if (commands === null) return false;
+		if (commands === null) {
+			if (pinHere) this.#pinnedUndo = null;
+			return false;
+		}
 		const editing = (mode: VimMode) => mode === "insert" || mode === "replace";
 		// Before applying: Escape's commands would otherwise clear the replace log this reads.
 		if (editing(before) && !editing(vim.mode)) this.#endVimSession();
@@ -2362,7 +2373,10 @@ export class Editor implements Component, Focusable {
 		// The session baseline follows `cw`'s delete or `o`'s new line, but its undo mark precedes them,
 		// so one `u` restores the whole change. Every other key (`.` too) is a single undo step.
 		if (!editing(before) && editing(vim.mode)) this.#startVimSession(mark, vim.mode === "replace");
-		else if (this.#vimSession === null) this.#collapseUndoSince(mark);
+		else if (this.#vimSession === null) {
+			this.#collapseUndoSince(mark);
+			this.#pinnedUndo = null;
+		}
 		// Pending and selection size are mode chrome too: hosts echo `2d` and the Visual line count
 		// beside the mode name, and extending a selection changes neither the mode nor the pending
 		// command — so all three have to be compared or the indicator goes stale mid-selection.
@@ -2406,6 +2420,7 @@ export class Editor implements Component, Focusable {
 	#endVimSession(): void {
 		this.#finalizeVimSegment();
 		this.#vimSession = null;
+		this.#pinnedUndo = null;
 	}
 
 	/** An arrow key inside Insert/Replace: close the segment and start a fresh one at the new cursor. */
@@ -2418,7 +2433,9 @@ export class Editor implements Component, Focusable {
 		// into the next segment's record.
 		this.#replaceLog.length = 0;
 		const { text, cursor } = flatten(this.#state);
-		this.#vimSession = { ...session, mark: this.#undoMark(), text, cursor, arrowed: true };
+		const mark = this.#undoMark();
+		this.#vimSession = { ...session, mark, text, cursor, arrowed: true };
+		this.#pinnedUndo = mark;
 	}
 
 	#applyVimCommands(commands: readonly VimCommand[]): void {
@@ -3978,10 +3995,17 @@ export class Editor implements Component, Focusable {
 			cursorLine: this.#state.cursorLine,
 			cursorCol: this.#state.cursorCol,
 		});
-		if (this.#undoStack.length > MAX_UNDO_STACK) {
-			this.#undoStack.shift();
-			this.#undoShifts++;
+		if (this.#undoStack.length <= MAX_UNDO_STACK) return;
+		const pin = this.#pinnedUndo;
+		const anchorIndex = pin === null ? -1 : pin.depth - (this.#undoShifts - pin.shifts);
+		if (anchorIndex === 0 && this.#undoStack.length > 1) {
+			// Front entry is the open change's restore point. Drop the snapshot after it, and don't
+			// bump #undoShifts: index 0 did not move, so the mark still points at it.
+			this.#undoStack.splice(1, 1);
+			return;
 		}
+		this.#undoStack.shift();
+		this.#undoShifts++;
 	}
 
 	#applyUndo(): void {

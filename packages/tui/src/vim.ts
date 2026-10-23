@@ -104,20 +104,53 @@ export function stepGraphemes(text: string, offset: number, count: number, forwa
 /**
  * What a session turned `before` into, anchored at its start `cursor`: the prefix match stops at the
  * cursor and the suffix match never crosses it, so typing `aa` before an existing `a` records `aa`
- * at the cursor rather than after the old one.
+ * at the cursor rather than after the old one. Comparisons are whole graphemes, so a shared high
+ * surrogate cannot split an emoji into the replayed text.
  */
 export function diffInsertSession(before: string, cursor: number, after: string): VimInsertRecord {
-	let p = 0;
-	const pMax = Math.min(cursor, after.length);
-	while (p < pMax && before[p] === after[p]) p++;
-	let q = 0;
-	const qMax = Math.min(before.length - cursor, after.length - p);
-	while (q < qMax && before[before.length - 1 - q] === after[after.length - 1 - q]) q++;
+	const beforeBounds = graphemeBoundaries(before);
+	const afterBounds = graphemeBoundaries(after);
+	let cursorBound = 0;
+	while (cursorBound + 1 < beforeBounds.length && beforeBounds[cursorBound + 1]! <= cursor) cursorBound++;
+
+	let prefix = 0;
+	while (
+		prefix < cursorBound &&
+		prefix + 1 < afterBounds.length &&
+		before.slice(beforeBounds[prefix]!, beforeBounds[prefix + 1]!) ===
+			after.slice(afterBounds[prefix]!, afterBounds[prefix + 1]!)
+	) {
+		prefix++;
+	}
+
+	const beforeEnd = beforeBounds.length - 1;
+	const afterEnd = afterBounds.length - 1;
+	let suffix = 0;
+	while (
+		beforeEnd - suffix > cursorBound &&
+		afterEnd - suffix > prefix &&
+		before.slice(beforeBounds[beforeEnd - suffix - 1]!, beforeBounds[beforeEnd - suffix]!) ===
+			after.slice(afterBounds[afterEnd - suffix - 1]!, afterBounds[afterEnd - suffix]!)
+	) {
+		suffix++;
+	}
+
 	return {
-		deleteBefore: countGraphemes(before.slice(p, cursor)),
-		deleteAfter: countGraphemes(before.slice(cursor, before.length - q)),
-		text: after.slice(p, after.length - q),
+		deleteBefore: cursorBound - prefix,
+		deleteAfter: beforeEnd - suffix - cursorBound,
+		text: after.slice(afterBounds[prefix]!, afterBounds[afterEnd - suffix]!),
 	};
+}
+
+/** Inclusive start offsets plus `text.length`, one entry per grapheme boundary. */
+function graphemeBoundaries(text: string): number[] {
+	const bounds = [0];
+	for (const seg of segmenter.segment(text)) {
+		const end = seg.index + seg.segment.length;
+		if (end !== bounds[bounds.length - 1]) bounds.push(end);
+	}
+	if (bounds[bounds.length - 1] !== text.length) bounds.push(text.length);
+	return bounds;
 }
 
 function firstNonBlank(text: string): number {
