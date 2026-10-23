@@ -135,6 +135,23 @@ function captureSimpleAnthropicPayload(
 	return promise;
 }
 
+function countSerializedSchemaParameters(schema: unknown): { optionalCount: number; unionCount: number } {
+	const counts = { optionalCount: 0, unionCount: 0 };
+	const visit = (node: unknown): void => {
+		if (node === null || typeof node !== "object") return;
+		const record = node as Record<string, unknown>;
+		if (record.properties !== null && typeof record.properties === "object") {
+			const required = new Set(Array.isArray(record.required) ? record.required : []);
+			counts.optionalCount += Object.keys(record.properties).filter(name => !required.has(name)).length;
+		}
+		if (Array.isArray(record.type) || Array.isArray(record.anyOf)) counts.unionCount++;
+		for (const value of Object.values(node)) visit(value);
+	};
+	// Match the wire representation, without deduplicating shared schema objects.
+	visit(JSON.parse(JSON.stringify(schema)));
+	return counts;
+}
+
 function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionId?: string): void {
 	expect(typeof userId).toBe("string");
 	const parsed = JSON.parse(userId ?? "{}") as {
@@ -1880,6 +1897,64 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(strictNames).toEqual(["python", "edit", "find", "yield"]);
 		expect(payload.tools?.find(tool => tool.name === "edit")?.input_schema?.required).toEqual(["requiredValue"]);
 	});
+
+	for (const copies of [11, 12]) {
+		it(`charges optional parameters for all ${copies} occurrences of a shared schema`, async () => {
+			const shared = {
+				type: "object",
+				properties: { first: { type: "string" }, second: { type: "string" } },
+			};
+			const properties = Object.fromEntries(Array.from({ length: copies }, (_, index) => [`item${index}`, shared]));
+			const parameters = { type: "object", properties, required: Object.keys(properties) } as TJsonSchema;
+			expect(countSerializedSchemaParameters(parameters).optionalCount).toBe(copies * 2);
+
+			const payload = (await captureAnthropicPayload(
+				ANTHROPIC_MODEL,
+				{
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+					tools: [
+						{
+							name: "find",
+							description: "Find a value",
+							parameters: { type: "object", properties: { query: { type: "string" } } } as TJsonSchema,
+						},
+						{ name: "edit", description: "Edit values", parameters },
+					],
+				},
+				{ isOAuth: false },
+			)) as { tools: Array<{ strict?: boolean; input_schema: unknown }> };
+
+			const optionalCount = payload.tools
+				.filter(tool => tool.strict)
+				.reduce((count, tool) => count + countSerializedSchemaParameters(tool.input_schema).optionalCount, 0);
+			expect(optionalCount).toBeLessThanOrEqual(24);
+			expect(payload.tools[0].strict).toBe(true);
+			expect(payload.tools[1].strict).toBe(copies === 11 ? true : undefined);
+			expect(optionalCount).toBe(copies === 11 ? 23 : 1);
+		});
+	}
+
+	for (const copies of [16, 17]) {
+		it(`charges union parameters for all ${copies} occurrences of a shared schema`, async () => {
+			const shared = { anyOf: [{ type: "string" }, { type: "number" }] };
+			const properties = Object.fromEntries(Array.from({ length: copies }, (_, index) => [`item${index}`, shared]));
+			const parameters = { type: "object", properties, required: Object.keys(properties) } as TJsonSchema;
+			expect(countSerializedSchemaParameters(parameters).unionCount).toBe(copies);
+
+			const payload = (await captureAnthropicPayload(
+				ANTHROPIC_MODEL,
+				{
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+					tools: [{ name: "edit", description: "Edit values", parameters }],
+				},
+				{ isOAuth: false },
+			)) as { tools: Array<{ strict?: boolean; input_schema: unknown }> };
+
+			const tool = payload.tools[0];
+			expect(tool.strict).toBe(copies === 16 ? true : undefined);
+			if (tool.strict) expect(countSerializedSchemaParameters(tool.input_schema).unionCount).toBeLessThanOrEqual(16);
+		});
+	}
 
 	it("sends yield with buffered input streaming while other tools stream eagerly", async () => {
 		const tools: Tool[] = (["yield", "read"] as const).map(name => ({
