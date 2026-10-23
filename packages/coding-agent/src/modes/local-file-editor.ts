@@ -20,6 +20,11 @@ export function sessionLocalProtocolOptions(
 	};
 }
 
+/** Encode a filesystem name as `local://` path segments. `/` stays a separator; `%`, `#`, `?` are encoded once. */
+function encodeLocalPath(name: string): string {
+	return name.split("/").map(segment => encodeURIComponent(segment)).join("/");
+}
+
 /** Resolve a user-typed local file target to its on-disk real path. Throws user-facing Errors. */
 export async function resolveLocalEditorTarget(
 	target: string,
@@ -27,14 +32,19 @@ export async function resolveLocalEditorTarget(
 ): Promise<{ url: string; path: string }> {
 	const trimmed = target.trim();
 	if (!trimmed) throw new Error("Enter a local:// file name.");
-	const url = /^local:/i.test(trimmed) ? trimmed : `local://${trimmed}`;
+	// Explicit `local://` / `local:/` is already a URL: pass it through so an encoded
+	// `local://100%25.md` is not encoded again. A bare filesystem name (what the completer
+	// inserts) must be encoded or `%` / `#` / `?` never reach `locate()`.
+	const explicitUrl = /^local:/i.test(trimmed);
+	const displayUrl = explicitUrl ? trimmed : `local://${trimmed}`;
+	const url = explicitUrl ? trimmed : `local://${encodeLocalPath(trimmed)}`;
 	// Non-creating locate: realpath + root containment, so traversal and escaping symlinks throw.
 	const located = await InternalUrlRouter.instance().locate(url, { localProtocolOptions: options });
-	if (located === null) throw new Error(`Local file not found: ${url}`);
+	if (located === null) throw new Error(`Local file not found: ${displayUrl}`);
 	const stat = await fs.stat(located);
-	if (stat.isDirectory()) throw new Error(`${url} is a directory; name a file inside it.`);
-	if (!stat.isFile()) throw new Error(`${url} is not a regular file.`);
-	return { url, path: located };
+	if (stat.isDirectory()) throw new Error(`${displayUrl} is a directory; name a file inside it.`);
+	if (!stat.isFile()) throw new Error(`${displayUrl} is not a regular file.`);
+	return { url: displayUrl, path: located };
 }
 
 async function pickLocalFile(
@@ -56,7 +66,6 @@ async function pickLocalFile(
 		PICKER_TITLE,
 		files.map(file => ({ label: file.url, description: formatByteSize(file.size) })),
 	);
-	// Use the listed path directly: re-resolving the URL would percent-decode names containing `%`.
 	return files.find(file => file.url === choice);
 }
 
@@ -78,8 +87,17 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 			return;
 		}
 	} else {
-		chosen = await pickLocalFile(ctx, options);
-		if (!chosen) return;
+		const picked = await pickLocalFile(ctx, options);
+		if (!picked) return;
+		try {
+			// The listing is stale once the picker returns. Re-resolve the filesystem name
+			// (not the display URL, which would decode `%` twice) so a symlink swapped in
+			// while the picker was open cannot escape the local root.
+			chosen = await resolveLocalEditorTarget(picked.name, options);
+		} catch (error) {
+			ctx.showError(errorMessage(error));
+			return;
+		}
 	}
 
 	let exitCode: number;

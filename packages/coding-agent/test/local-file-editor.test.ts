@@ -42,4 +42,33 @@ describe("resolveLocalEditorTarget", () => {
 		);
 		await expect(resolveLocalEditorTarget("../escape.md", options)).rejects.toThrow();
 	});
+
+	it("opens bare names containing %, #, and ? without double-decoding an encoded local:// URL", async () => {
+		using tmp = TempDir.createSync("@omp-local-editor-");
+		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+		const names = ["100%.md", "a#b.md", "a?b.md", "sub/a#b.md"];
+		for (const name of names) {
+			await Bun.write(path.join(tmp.path(), "local", name), name);
+		}
+
+		for (const name of names) {
+			const resolved = await resolveLocalEditorTarget(name, options);
+			expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", name)));
+			expect(resolved.url).toBe(`local://${name}`);
+		}
+		expect((await resolveLocalEditorTarget("local://100%25.md", options)).path).toBe(
+			await fs.realpath(path.join(tmp.path(), "local", "100%.md")),
+		);
+	});
+
+	it("rejects a name whose file is a symlink to outside the local root", async () => {
+		using tmp = TempDir.createSync("@omp-local-editor-");
+		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+		const outside = path.join(tmp.path(), "outside.md");
+		await Bun.write(outside, "secret");
+		await fs.mkdir(path.join(tmp.path(), "local"));
+		await fs.symlink(outside, path.join(tmp.path(), "local", "normal.md"));
+
+		await expect(resolveLocalEditorTarget("normal.md", options)).rejects.toThrow(/escapes/);
+	});
 });
