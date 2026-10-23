@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { resolveLocalEditorTarget } from "@oh-my-pi/pi-coding-agent/modes/local-file-editor";
+import { InternalUrlRouter, type LocalFileEntry, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import {
+	openLocalFileInEditor,
+	resolveLocalEditorTarget,
+	revalidateLocalEditorEntry,
+} from "@oh-my-pi/pi-coding-agent/modes/local-file-editor";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { vi } from "bun:test";
 
 describe("resolveLocalEditorTarget", () => {
 	beforeEach(() => {
@@ -70,5 +76,58 @@ describe("resolveLocalEditorTarget", () => {
 		await fs.symlink(outside, path.join(tmp.path(), "local", "normal.md"));
 
 		await expect(resolveLocalEditorTarget("normal.md", options)).rejects.toThrow(/escapes/);
+	});
+
+	it("revalidates an already-picked entry without trimming filenames that start or end with spaces", async () => {
+		using tmp = TempDir.createSync("@omp-local-editor-");
+		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+		const spaceName = " plan.md";
+		const normalName = "plan.md";
+		await Bun.write(path.join(tmp.path(), "local", spaceName), "spaced");
+		await Bun.write(path.join(tmp.path(), "local", normalName), "normal");
+
+		const spaceEntry: LocalFileEntry = {
+			name: spaceName,
+			url: `local://${spaceName}`,
+			path: path.join(tmp.path(), "local", spaceName),
+			size: 6,
+			mtimeMs: Date.now(),
+		};
+		const revalidated = await revalidateLocalEditorEntry(spaceEntry, options);
+		expect(revalidated.path).toBe(await fs.realpath(path.join(tmp.path(), "local", spaceName)));
+		expect(revalidated.url).toBe(`local://${spaceName}`);
+	});
+
+	it("revalidates an already-picked entry and rejects symlink escape at use time", async () => {
+		using tmp = TempDir.createSync("@omp-local-editor-");
+		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+		const outside = path.join(tmp.path(), "outside.md");
+		await Bun.write(outside, "secret");
+		await fs.mkdir(path.join(tmp.path(), "local"));
+		await Bun.write(path.join(tmp.path(), "local", "normal.md"), "original");
+
+		const entry: LocalFileEntry = {
+			name: "normal.md",
+			url: "local://normal.md",
+			path: path.join(tmp.path(), "local", "normal.md"),
+			size: 8,
+			mtimeMs: Date.now(),
+		};
+
+		await fs.unlink(path.join(tmp.path(), "local", "normal.md"));
+		await fs.symlink(outside, path.join(tmp.path(), "local", "normal.md"));
+
+		await expect(revalidateLocalEditorEntry(entry, options)).rejects.toThrow(/escapes/);
+	});
+
+	it("rejects openLocalFileInEditor when collabGuest is active", async () => {
+		const showStatus = vi.fn();
+		const ctx = {
+			collabGuest: {} as unknown as InteractiveModeContext["collabGuest"],
+			showStatus,
+		} as unknown as InteractiveModeContext;
+
+		await openLocalFileInEditor(ctx);
+		expect(showStatus).toHaveBeenCalledWith("/local is host-only during a collab session");
 	});
 });

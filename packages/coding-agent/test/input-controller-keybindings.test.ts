@@ -1136,6 +1136,17 @@ describe("InputController global editor actions", () => {
 		expect(openLocalFilePicker).toHaveBeenCalledTimes(1);
 	});
 
+	it("refuses Alt+G when collabGuest is active", async () => {
+		const context = await createContext();
+		context.ctx.collabGuest = {} as unknown as InteractiveModeContext["collabGuest"];
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, ALT_G)).toEqual({ consume: true });
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("/local is host-only during a collab session");
+	});
+
 	it("defers the tree selector's Ctrl+Shift+O filter binding", async () => {
 		const context = await createContext();
 		const controller = new context.InputController(context.ctx);

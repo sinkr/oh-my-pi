@@ -2846,6 +2846,10 @@ export class InputController {
 	}
 
 	openLocalFilePicker(): Promise<void> {
+		if (this.ctx.collabGuest) {
+			this.ctx.showStatus("/local is host-only during a collab session");
+			return Promise.resolve();
+		}
 		return openLocalFileInEditor(this.ctx);
 	}
 
