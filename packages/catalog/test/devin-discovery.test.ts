@@ -1,4 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
@@ -24,6 +27,8 @@ import {
 import { create, fromBinary, toBinary } from "../src/discovery/protobuf";
 import { Effort } from "../src/effort";
 import { providerEntry } from "../src/compat/providers";
+import { readModelCache, writeModelCache } from "../src/model-cache";
+import { resolveProviderModels } from "../src/model-manager";
 import { calculateUncachedInputCost, getTimeBasedPricingPeriod } from "../src/models";
 import { devinModelManagerOptions } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec, ThinkingConfig } from "../src/types";
@@ -859,6 +864,54 @@ describe("devin catalog seed", () => {
 			"https://cascade.internal",
 			"https://cascade.internal",
 		]);
+	});
+
+	it("refetches a catalog cached before context windows came from modelInfo", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-devin-context-cache-"));
+		const scratchDbPath = path.join(tempDir, "scratch.db");
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const payload = toBinary(
+				GetCliModelConfigsResponseSchema,
+				create(GetCliModelConfigsResponseSchema, {
+					clientModelConfigs: [
+						config({ uid: "info-context", contextWindow: 0, modelInfoContextWindow: 1_048_576 }),
+					],
+				}),
+			);
+			let fetches = 0;
+			const options = devinModelManagerOptions({
+				apiKey: "fixture-token",
+				fetch: async () => {
+					fetches++;
+					return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+				},
+			});
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("Devin cache provider id is missing");
+			// Discover once into a scratch cache for the row and its fingerprint.
+			const online = await resolveProviderModels({ ...options, cacheDbPath: scratchDbPath }, "online");
+			const current = online.models.find(model => model.id === "info-context");
+			const written = readModelCache(cacheProviderId, Number.POSITIVE_INFINITY, Date.now, scratchDbPath);
+			if (!current || !written) throw new Error("Devin discovery wrote no cache");
+			// The fresh authoritative cache a release reading only
+			// `ClientModelConfig.maxTokens` left behind: the row holds the 200K fallback.
+			writeModelCache(
+				"devin:models-v2",
+				Date.now(),
+				[{ ...current, contextWindow: 200_000 }],
+				true,
+				written.staticFingerprint,
+				cacheDbPath,
+			);
+			fetches = 0;
+
+			const upgraded = await resolveProviderModels({ ...options, cacheDbPath }, "online-if-uncached");
+			expect(fetches).toBe(1);
+			expect(upgraded.models.find(model => model.id === "info-context")?.contextWindow).toBe(1_048_576);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 
