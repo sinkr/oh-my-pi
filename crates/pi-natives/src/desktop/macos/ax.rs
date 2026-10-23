@@ -1286,10 +1286,7 @@ fn perform_choosing(
 	let native = action_name(action);
 	let actions = copy_strings_from_action_names(element)?;
 	if !actions.contains(&native) {
-		return Err(DesktopError::ax_failed(format!(
-			"AX action '{native}' is not supported by this element; available actions: {}",
-			actions.join(", "),
-		)));
+		return Err(unsupported_action(&native, &actions));
 	}
 	// AXRaise is an explicit request to change stacking, including the
 	// takeover preparation path. Other semantic actions must stay background.
@@ -1354,6 +1351,21 @@ fn perform_choosing(
 			},
 		)
 	})
+}
+
+/// The refusal of `native`, an action the element does not list among
+/// `actions`; nothing was sent. A control without a press action still takes
+/// a click, `menu` path included.
+fn unsupported_action(native: &str, actions: &[String]) -> DesktopError {
+	let instead = if native == "AXPress" {
+		"; nothing was sent, so click() it instead, with the same menu option if any"
+	} else {
+		""
+	};
+	DesktopError::ax_failed(format!(
+		"AX action '{native}' is not supported by this element; available actions: {}{instead}",
+		actions.join(", "),
+	))
 }
 
 /// Makes the window holding `element` key within its background
@@ -2364,7 +2376,7 @@ mod tests {
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
 		focused_window, may_borrow_focus, menu_window, replace_utf16_selection, replace_whole_value,
 		required_string, secure_subrole, select_attached, stringify_value, takes_inserted_text,
-		target_window, text_readback, window_records_of,
+		target_window, text_readback, unsupported_action, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -2576,6 +2588,17 @@ mod tests {
 		for (start, length) in [(-1, 0), (0, -1), (2, 0), (1, 1), (4, 9), (6, 0)] {
 			assert_eq!(replace_utf16_selection("a😀bc", start, length, "X"), None);
 		}
+	}
+
+	#[test]
+	fn an_element_without_a_press_action_is_pointed_at_click() {
+		let actions = ["AXShowMenu".to_owned(), "AXScrollToVisible".to_owned()];
+		let press = unsupported_action("AXPress", &actions);
+		assert_eq!(press.code, ErrorCode::AxFailed);
+		assert!(press.message.contains("AXShowMenu, AXScrollToVisible"), "{}", press.message);
+		assert!(press.message.contains("click()"), "{}", press.message);
+		let other = unsupported_action("AXIncrement", &actions);
+		assert!(!other.message.contains("click()"), "{}", other.message);
 	}
 
 	#[test]
