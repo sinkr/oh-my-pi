@@ -7,6 +7,8 @@ import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
 import { cfgCycleOrder } from "../config/model-settings";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
+import { InternalUrlRouter } from "../internal-urls";
+import { sessionLocalProtocolOptions } from "../modes/local-file-editor";
 import { createModelBrowserSource } from "../modes/model-browser-source";
 import {
 	createModelMentionSource,
@@ -376,6 +378,30 @@ export function buildDirectoryArgumentCompletions(): (prefix: string) => Promise
 		}
 	};
 }
+
+/** `/local` argument: session local:// file names (accepts a `local://` / `local:/` prefix). */
+export function buildLocalFileArgumentCompletions(
+	runtime: TuiSlashCommandRuntime,
+): (argumentPrefix: string) => Promise<AutocompleteItem[] | null> {
+	return async (argumentPrefix: string) => {
+		const query = argumentPrefix
+			.trim()
+			.replace(/^local:\/{0,2}/i, "")
+			.toLowerCase();
+		try {
+			const files = await InternalUrlRouter.instance().complete("local", query, {
+				localProtocolOptions: sessionLocalProtocolOptions(runtime.ctx.sessionManager),
+			});
+			const matches = (files ?? [])
+				.filter(file => file.value.toLowerCase().startsWith(query))
+				.map(file => ({ value: file.value, label: file.value }));
+			return matches.length > 0 ? matches : null;
+		} catch {
+			return null;
+		}
+	};
+}
+
 function buildDirectoryCompletionDisplayValue(
 	prefix: string,
 	isAbsolute: boolean,
