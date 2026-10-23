@@ -68,6 +68,37 @@ describe("resolveLocalEditorTarget", () => {
 		);
 	});
 
+	it("treats a literal `local:`-prefixed filename as a name, not a URL", async () => {
+		using tmp = TempDir.createSync("@omp-local-editor-");
+		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+		await Bun.write(path.join(tmp.path(), "local", "local:notes.md"), "colon");
+
+		const resolved = await resolveLocalEditorTarget("local:notes.md", options);
+		expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", "local:notes.md")));
+	});
+
+	it("strips control bytes from errors shown for missing control-byte names", async () => {
+		using tmp = TempDir.createSync("@omp-local-editor-");
+		const editorBackup = process.env.EDITOR;
+		process.env.EDITOR = "true";
+		const showError = vi.fn();
+		const ctx = {
+			sessionManager: { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" },
+			showError,
+		} as unknown as InteractiveModeContext;
+		try {
+			await openLocalFileInEditor(ctx, "no\x1bpe.md");
+		} finally {
+			if (editorBackup === undefined) delete process.env.EDITOR;
+			else process.env.EDITOR = editorBackup;
+		}
+
+		expect(showError).toHaveBeenCalledTimes(1);
+		const shown = showError.mock.calls[0]![0] as string;
+		expect(shown).not.toContain("\x1b");
+		expect(shown).toContain("noe.md");
+	});
+
 	it("rejects a name whose file is a symlink to outside the local root", async () => {
 		using tmp = TempDir.createSync("@omp-local-editor-");
 		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };

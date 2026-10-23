@@ -1,5 +1,5 @@
 import * as fs from "node:fs/promises";
-import { disambiguateDisplayLabels, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
+import { disambiguateDisplayLabels, replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, type LocalFileEntry, type LocalProtocolOptions, listLocalFiles } from "../internal-urls";
 import type { SessionManager } from "../session/session-manager";
@@ -11,6 +11,11 @@ const PICKER_TITLE = "Open local:// file in external editor";
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** Error text safe for the UI: strips ANSI/C0 bytes and tabs, shortens home paths. */
+function showErrorMessage(error: unknown): string {
+	return shortenPath(replaceTabs(sanitizeText(errorMessage(error))));
 }
 
 export function sessionLocalProtocolOptions(
@@ -51,10 +56,12 @@ export async function resolveLocalEditorTarget(
 ): Promise<{ url: string; path: string }> {
 	const trimmed = target.trim();
 	if (!trimmed) throw new Error("Enter a local:// file name.");
-	// Explicit `local://` / `local:/` is already a URL: pass it through so an encoded
-	// `local://100%25.md` is not encoded again. A bare filesystem name (what the completer
-	// inserts) must be encoded or `%` / `#` / `?` never reach `locate()`.
-	const explicitUrl = /^local:/i.test(trimmed);
+	// Only `local://` / `local:/` are explicit URLs: an opaque `local:` prefix can be a
+	// literal POSIX filename (`local:notes.md`) and must be encoded like any other name.
+	// A bare filesystem name (what the completer inserts) must be encoded or `%` / `#` / `?`
+	// never reach `locate()`; an explicit URL passes through so `local://100%25.md` is not
+	// encoded again.
+	const explicitUrl = /^local:\//i.test(trimmed);
 	const displayUrl = explicitUrl ? trimmed : `local://${trimmed}`;
 	const url = explicitUrl ? trimmed : `local://${encodeLocalPath(trimmed)}`;
 	return locateAndValidateTarget(url, displayUrl, options);
@@ -77,7 +84,7 @@ async function pickLocalFile(
 	try {
 		files = await listLocalFiles(options);
 	} catch (error) {
-		ctx.showError(`Failed to list local:// files: ${errorMessage(error)}`);
+		ctx.showError(`Failed to list local:// files: ${showErrorMessage(error)}`);
 		return undefined;
 	}
 	if (files.length === 0) {
@@ -116,7 +123,7 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 		try {
 			chosen = await resolveLocalEditorTarget(target, options);
 		} catch (error) {
-			ctx.showError(errorMessage(error));
+			ctx.showError(showErrorMessage(error));
 			return;
 		}
 	} else {
@@ -128,7 +135,7 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 			// while the picker was open cannot escape the local root.
 			chosen = await revalidateLocalEditorEntry(picked, options);
 		} catch (error) {
-			ctx.showError(errorMessage(error));
+			ctx.showError(showErrorMessage(error));
 			return;
 		}
 	}
@@ -138,7 +145,7 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 		ctx.ui.stop();
 		exitCode = await openEditorOnPath(editorCmd, chosen.path);
 	} catch (error) {
-		ctx.showWarning(`Failed to open external editor: ${errorMessage(error)}`);
+		ctx.showWarning(`Failed to open external editor: ${showErrorMessage(error)}`);
 		return;
 	} finally {
 		ctx.ui.start();
