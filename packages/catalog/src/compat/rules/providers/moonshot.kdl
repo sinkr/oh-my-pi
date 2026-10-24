@@ -14,6 +14,12 @@ provider "moonshot" {
 		thinking-format "zai"
 		family "k3" {
 			thinking-format "openai"
+			// K3 and K3.1 Pro default `max_completion_tokens` to 131072 and
+			// accept up to the whole 1M window; the shared catalog reports that
+			// ceiling as the output limit, leaving no room for input. Pin the
+			// documented default, as `model-limits` does for /models rows.
+			// https://platform.kimi.ai/docs/guide/kimi-k3-1-pro-quickstart
+			max-tokens-ceiling 131072
 		}
 		thinking-mode "effort"
 	}

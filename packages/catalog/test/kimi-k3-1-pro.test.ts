@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import {
 	kimiCodeModelManagerOptions,
+	modelsDevCatalogFallback,
 	moonshotModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -68,6 +69,34 @@ describe("Kimi K3.1 Pro catalog contract", () => {
 
 		expect(models.get("kimi-k3.1-pro")?.cost).toMatchObject(K31_PRO_COST);
 		expect(models.get("kimi-k3.1-pro-highspeed")?.cost).toMatchObject(K31_PRO_HIGHSPEED_COST);
+	});
+
+	it("caps Moonshot K3.1 rows from the shared catalog at K3's output budget, not the full window", () => {
+		const fallback = modelsDevCatalogFallback("moonshot");
+		if (!fallback) throw new Error("Moonshot did not configure a shared catalog fallback");
+		// The shared catalog lists Moonshot's settable `max_completion_tokens`
+		// ceiling (the whole 1M window) as the output limit.
+		const catalogRow = {
+			reasoning: true,
+			tool_call: true,
+			modalities: { input: ["text", "image"], output: ["text"] },
+			limit: { context: 1_048_576, output: 1_048_576 },
+		};
+		const specs = fallback.map(
+			{
+				moonshotai: {
+					models: {
+						"kimi-k3.1-pro": { ...catalogRow, name: "Kimi K3.1 Pro" },
+						"kimi-k3.1-pro-highspeed": { ...catalogRow, name: "Kimi K3.1 Pro Highspeed" },
+					},
+				},
+			},
+			"moonshot",
+		);
+		const models = new Map(specs.map(spec => [spec.id, buildModel(spec)]));
+
+		expect(models.get("kimi-k3.1-pro")?.maxTokens).toBe(131_072);
+		expect(models.get("kimi-k3.1-pro-highspeed")?.maxTokens).toBe(131_072);
 	});
 
 	it("replays reasoning between K3.1 Pro hosts but never from K3 into K3.1 Pro", () => {
