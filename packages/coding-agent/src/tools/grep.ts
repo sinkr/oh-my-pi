@@ -576,17 +576,18 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				? exclusionParts(candidate).length > 0 &&
 					probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(candidate, cwd).path, cwd) === "missing"
 				: isExclusionEntry(candidate, cwd);
-		// Execution searches cwd when every entry is an exclusion. Its list parser keeps delimiters inside
-		// braces (`!{vendor,gen}`) where the split here does not, so judge conservatively: key cwd when any
-		// part is an exclusion and no part names something searchable (a URL, or a path or glob base that
-		// exists). A part that names nothing makes execution fail, never search cwd, so over-keying is safe.
-		const searchable = (part: string) =>
-			!isExclusionEntry(part, cwd) &&
-			(/^[a-z][a-z0-9+.-]+:\/\/?/i.test(part) || probeLiteralPathExistsSync(splitBase(part), cwd) !== "missing");
-		const lists = roots.map(root => normalizePathLikeInput(root));
-		const onlyExclusions =
-			lists.some(list => approvalRootCandidates(list).some(part => isExclusionEntry(part, cwd))) &&
-			!lists.some(list => approvalRootCandidates(list).some(searchable));
+		// Execution searches cwd when every entry it splits out is an exclusion. Whether it splits a list
+		// depends on its own parser (braces, which parts resolve), so this does not re-derive the split: a
+		// list that starts with an exclusion may stay one exclusion there (`!vendor src`, `!{vendor,gen}`),
+		// so it keys cwd, as does a list whose every part here is one. Over-keying only adds a prompt.
+		const onlyExclusions = roots.some(root => {
+			const list = normalizePathLikeInput(root);
+			const parts = approvalRootCandidates(list);
+			return (
+				isExclusionEntry(list, cwd) ||
+				parts.slice(parts.length > 1 ? 1 : 0).every(part => isExclusionEntry(part, cwd))
+			);
+		});
 		return searchApprovalCacheTargets(
 			onlyExclusions ? [...roots, "."] : roots,
 			cwd,

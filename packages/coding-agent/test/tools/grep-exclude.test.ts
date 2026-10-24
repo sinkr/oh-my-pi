@@ -128,11 +128,14 @@ describe("grep `!glob` exclusions", () => {
 			const relativeOutside = path.relative(cwd, outside);
 			const targets = (pathArg?: string) =>
 				tool.approvalCacheTargets(pathArg === undefined ? {} : { path: pathArg });
-			expect(targets(`!nope,${relativeOutside}`)).toEqual(targets(relativeOutside));
+			// The outside path is keyed; a list starting with an exclusion also keys cwd.
+			expect(targets(`!nope,${relativeOutside}`)).toContain(targets(relativeOutside)?.[0]);
 			expect(targets(`"!vendor;!gen"`)).toEqual(targets(undefined));
 			// Execution keeps the comma inside braces and searches cwd, so cwd is keyed.
 			expect(targets("!{vendor,gen}")).toEqual(targets(undefined));
-			// A missing root names nothing searchable; cwd is keyed, erring toward a prompt.
+			// Execution keeps `!vendor src` whole (one exclusion, since `!vendor` resolves to nothing) and searches cwd.
+			expect(targets("!vendor src")).toContain(targets(undefined)?.[0]);
+			// A list starting with an exclusion keys cwd, erring toward a prompt.
 			expect(targets("!vendor gen-missing")).toEqual(targets(undefined));
 			// A public URL keys nothing and the search never walks cwd, so cwd is not keyed for it.
 			expect(targets("https://example.com/a.txt;!*.map")).toBeUndefined();
