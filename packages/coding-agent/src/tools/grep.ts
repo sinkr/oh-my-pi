@@ -43,6 +43,7 @@ import {
 	normalizePathLikeInput,
 	parseSearchPath,
 	probeLiteralPathExists,
+	probeLiteralPathExistsSync,
 	relativeSearchResultPath,
 	resolveReadPath,
 	resolveSearchResultPath,
@@ -464,17 +465,15 @@ function formatCappedFiles(paths: readonly string[]): string {
 
 /**
  * Whether a path entry is a `!glob` exclusion rather than a path to search: it
- * starts with `!` and names nothing on disk once a `:selector` is split off the
- * way `read` splits it, so `!notes.txt:1-2` still reads a real `!notes.txt`.
- * Approval and execution both classify entries through this.
+ * starts with `!` and is confirmed missing on disk once a `:selector` is split
+ * off the way `read` splits it, so `!notes.txt:1-2` still reads a real
+ * `!notes.txt`, and a dangling `!link` or an inconclusive probe stays a path
+ * whose error the search reports. Approval and execution both classify entries
+ * through this.
  */
 function isExclusionEntry(entry: string, cwd: string): boolean {
 	if (!entry.startsWith("!")) return false;
-	try {
-		return !fs.existsSync(resolveToCwd(splitPathAndSelPreferringLiteralSync(entry, cwd).path, cwd));
-	} catch {
-		return true;
-	}
+	return probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(entry, cwd).path, cwd) === "missing";
 }
 
 /** One exclusion with Windows separators and trailing separators normalized away. */
@@ -531,15 +530,28 @@ function exclusionsForRoot(patterns: readonly string[], cwd: string, root: strin
 }
 
 /**
- * Whether an anchored exclusion names `root` itself or a folder holding it.
- * Native grep matches exclusions against entries below the root, never the root
- * entry, so such a root is skipped here instead (`gen;!./gen` searches nothing).
+ * Whether an exclusion matches `root` itself or a folder holding it. Native grep
+ * matches exclusions against entries below a directory root and searches a file
+ * root directly, so such a root is skipped here instead (`gen;!./gen`,
+ * `vendor;!vendor` and `src/app.ts;!*.ts` search nothing). An anchored pattern
+ * compares resolved paths; any other is matched, as native matches it, against
+ * the root's path below cwd and each of its folders (only its own name when the
+ * root lies outside cwd).
  */
 function exclusionsCoverRoot(patterns: readonly string[], cwd: string, root: string): boolean {
 	if (InternalUrlRouter.instance().canHandle(root)) return false;
 	const absoluteRoot = path.resolve(cwd, root);
+	const relativeRoot = relativeInside(cwd, absoluteRoot);
+	const segments = relativeRoot?.split("/") ?? [path.basename(absoluteRoot)];
+	const prefixes = segments.map((_, index) => segments.slice(0, index + 1).join("/"));
 	return patterns.some(raw => {
-		const target = anchoredExclusionPath(normalizeExclusion(raw), cwd);
+		const pattern = normalizeExclusion(raw);
+		if (!pattern) return false;
+		const target = anchoredExclusionPath(pattern, cwd);
+		if (target === undefined) {
+			const glob = new Bun.Glob(pattern.startsWith("**") ? pattern : `**/${pattern}`);
+			return prefixes.some(prefix => glob.match(prefix));
+		}
 		return (
 			typeof target === "string" && (target === absoluteRoot || relativeInside(target, absoluteRoot) !== undefined)
 		);
@@ -584,7 +596,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		const splitBase = (entry: string) => parseSearchPath(splitPathAndSel(entry).path).basePath;
 		// `!glob` exclusions search nothing, so a list holding them keys its other parts, split on the
 		// delimiters execution fans lists out on; a real path starting with `!` is no exclusion and keys
-		// itself. When those parts key nothing, the search runs in cwd, so cwd is keyed.
+		// itself. When no part is left to search, the search runs in cwd, so cwd is keyed.
 		let hasExclusion = false;
 		const roots = toPathList(a?.path ?? a?.paths).flatMap(root => {
 			const candidates = approvalRootCandidates(normalizePathLikeInput(root));
@@ -594,8 +606,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			hasExclusion = true;
 			return kept;
 		});
-		const keys = searchApprovalCacheTargets(roots, cwd, splitBase);
-		return keys === undefined && hasExclusion ? searchApprovalCacheTargets(["."], cwd, splitBase) : keys;
+		return searchApprovalCacheTargets(hasExclusion && roots.length === 0 ? ["."] : roots, cwd, splitBase);
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";

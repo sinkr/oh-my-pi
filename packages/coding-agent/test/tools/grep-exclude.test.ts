@@ -86,8 +86,17 @@ describe("grep `!glob` exclusions", () => {
 		expect(ranged.details?.files).toEqual(["!notes.txt"]);
 	});
 
-	it("searches nothing under a root an anchored exclusion names", async () => {
+	it("reports a dangling `!` symlink as a path instead of searching cwd", async () => {
+		if (process.platform === "win32") return;
+		await fs.symlink(path.join(cwd, "missing-target"), path.join(cwd, "!link"));
+		await expect(tool.execute("dangling", { pattern: "needle", path: "!link" })).rejects.toThrow("!link");
+	});
+
+	it("searches nothing under a root an exclusion names", async () => {
 		expect(await files({ path: "gen;!./gen" })).toEqual([]);
+		expect(await files({ path: "vendor;scripts;!vendor" })).toEqual(["scripts/release.ts"]);
+		expect(await files({ path: "src/app.ts;scripts;!*.ts" })).toEqual([]);
+		expect(await files({ path: "src/app.ts;src/legacy/old.ts;!legacy" })).toEqual(["src/app.ts"]);
 		expect(await files({ path: "src/legacy;scripts;!./src" })).toEqual(["scripts/release.ts"]);
 	});
 
@@ -119,7 +128,10 @@ describe("grep `!glob` exclusions", () => {
 				tool.approvalCacheTargets(pathArg === undefined ? {} : { path: pathArg });
 			expect(targets(`!nope,${relativeOutside}`)).toEqual(targets(relativeOutside));
 			expect(targets(`"!vendor;!gen"`)).toEqual(targets(undefined));
-			expect(targets("!vendor gen-missing")).toEqual(targets(undefined));
+			// A missing root keys nothing, and its search errors out instead of walking cwd.
+			expect(targets("!vendor gen-missing")).toBeUndefined();
+			// A public URL keys nothing and the search never walks cwd, so cwd is not keyed for it.
+			expect(targets("https://example.com/a.txt;!*.map")).toBeUndefined();
 		} finally {
 			await removeWithRetries(outside);
 		}
