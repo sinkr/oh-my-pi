@@ -2347,7 +2347,9 @@ export class WorkerCore {
 	 * `location`) to replace the document and for the new one to finish parsing. Chromium reports the request before
 	 * the click that caused it returns, while the response and commit come later, so a call made right after the
 	 * click would otherwise reach the page being left. Bounded by half the op's deadline, at most
-	 * {@link REQUESTED_NAVIGATION_WAIT_MS}; `contextLost` waits even with no request seen.
+	 * {@link REQUESTED_NAVIGATION_WAIT_MS}: past that, Chromium itself holds evaluations on the old document until a
+	 * navigation that started loading commits, and a request that never started loading holds no later call.
+	 * `contextLost` waits even with no request seen.
 	 */
 	async #awaitRequestedNavigation(signal: AbortSignal, perOpMs: number, contextLost = false): Promise<void> {
 		const settled = await waitForMainFrameDocument(
@@ -2357,7 +2359,6 @@ export class WorkerCore {
 			signal,
 			contextLost,
 		);
-		// A request that neither committed nor stopped in time (one the browser dropped) holds no later call.
 		if (!settled) this.#mainFrameNavigationRequested = false;
 	}
 
@@ -2398,7 +2399,10 @@ export class WorkerCore {
 			fn: (sig: AbortSignal) => Promise<T>,
 			selectorOpts?: OpOptions,
 		): Promise<T> => markHandled(this.#runOp(active, label, signal, perOpMs, fn, selectorOpts));
-		// Reads and actions reach the page a navigation the page requested brings, not the one it leaves.
+		// Calls on the document (reads, actions, waits for its content) reach the page a navigation the page requested
+		// brings, not the one it leaves; `read` also reruns once when a navigation takes its context mid-call. Waits for
+		// events (navigation, response, download), dialogs and network setup run at once: they may be what the
+		// navigation waits on, or must catch its first request.
 		const read = <T>(label: string, perOpMs: number, fn: (sig: AbortSignal) => Promise<T>): Promise<T> =>
 			op(label, perOpMs, sig => this.#rereadAfterNavigation(sig, perOpMs, () => fn(sig)), { awaitNavigation: true });
 		const act = <T>(
@@ -2601,7 +2605,7 @@ export class WorkerCore {
 			drag: (from, to) => act("tab.drag()", actionOpMs, sig => this.#drag(from, to, sig)),
 			waitFor: (selector, opts) => {
 				const w = waitMs(opts?.timeout);
-				return op(
+				return act(
 					`tab.waitFor(${JSON.stringify(selector)})`,
 					w,
 					async sig => enrich(await this.#resolveActionHandle(selector, w, sig)),
@@ -2610,7 +2614,7 @@ export class WorkerCore {
 			},
 			waitForSelector: (selector, opts) => {
 				const w = waitMs(opts?.timeout);
-				return op(
+				return act(
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
@@ -2722,7 +2726,7 @@ export class WorkerCore {
 			},
 			waitForUrl: (pattern, opts) => {
 				const w = waitMs(opts?.timeout);
-				return op("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
+				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
 			},
 			waitForResponse: (pattern, opts) => {
 				const w = waitMs(opts?.timeout);
@@ -2730,10 +2734,10 @@ export class WorkerCore {
 			},
 			id: async id => enrich(await this.#resolveCachedHandle(id)),
 			ref: async id => enrich(await this.#resolveAriaRef(id)),
-			cookies: opts => op("tab.cookies()", quickOpMs, sig => readCookies(page, opts, sig)),
+			cookies: opts => act("tab.cookies()", quickOpMs, sig => readCookies(page, opts, sig)),
 			setCookies: (...cookies) => op("tab.setCookies()", actionOpMs, sig => setPageCookies(page, cookies, sig)),
 			clearCookies: opts => op("tab.clearCookies()", actionOpMs, sig => clearPageCookies(page, opts, sig)),
-			storage: (kind, opts) => op("tab.storage()", quickOpMs, sig => readStorage(page, kind, opts, sig)),
+			storage: (kind, opts) => act("tab.storage()", quickOpMs, sig => readStorage(page, kind, opts, sig)),
 			setStorage: (kind, keyOrEntries, value) =>
 				op("tab.setStorage()", actionOpMs, sig => setPageStorage(page, kind, keyOrEntries, value, sig)),
 			clearStorage: kind => op("tab.clearStorage()", actionOpMs, sig => clearPageStorage(page, kind, sig)),
@@ -2804,9 +2808,9 @@ export class WorkerCore {
 					this.#clearElementCache();
 					return await pushState(page, url, sig);
 				}),
-			frames: () => op("tab.frames()", quickOpMs, sig => listFrames(page, sig)),
+			frames: () => act("tab.frames()", quickOpMs, sig => listFrames(page, sig)),
 			frame: selectorOrNameOrUrl =>
-				op(`tab.frame(${JSON.stringify(selectorOrNameOrUrl)})`, quickOpMs, async sig => {
+				act(`tab.frame(${JSON.stringify(selectorOrNameOrUrl)})`, quickOpMs, async sig => {
 					const frame = await resolveFrame(page, selectorOrNameOrUrl, normalizeSelector, sig);
 					return createFrameApi(frame, {
 						quickOpMs,
@@ -2949,7 +2953,7 @@ export class WorkerCore {
 				),
 			waitForText: (text, opts) => {
 				const w = waitMs(opts?.timeout);
-				return op(`tab.waitForText(${JSON.stringify(text)})`, w, sig =>
+				return act(`tab.waitForText(${JSON.stringify(text)})`, w, sig =>
 					waitForPageText(page, text, {
 						timeout: w,
 						selector: opts?.selector ? normalizeSelector(opts.selector) : undefined,
@@ -3056,8 +3060,10 @@ export class WorkerCore {
 			mouseMove: (x, y, opts) => op("tab.mouseMove()", actionOpMs, sig => mouseMove(page, x, y, opts, sig)),
 			mouseDown: opts => op("tab.mouseDown()", actionOpMs, sig => mouseDown(page, opts, sig)),
 			mouseUp: opts => op("tab.mouseUp()", actionOpMs, sig => mouseUp(page, opts, sig)),
-			clickAt: (x, y, opts) => act("tab.clickAt()", actionOpMs, sig => clickAt(page, x, y, opts, sig)),
-			wheel: (deltaX, deltaY) => act("tab.wheel()", actionOpMs, sig => wheel(page, deltaX, deltaY, sig)),
+			// Raw pointer input runs at once, as on main: sent the moment a new document had parsed, a click did not
+			// reach it.
+			clickAt: (x, y, opts) => op("tab.clickAt()", actionOpMs, sig => clickAt(page, x, y, opts, sig)),
+			wheel: (deltaX, deltaY) => op("tab.wheel()", actionOpMs, sig => wheel(page, deltaX, deltaY, sig)),
 			highlight: (selector, opts) =>
 				act(
 					`tab.highlight(${JSON.stringify(selector)})`,

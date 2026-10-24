@@ -12,6 +12,8 @@ const PAGES: Record<string, string> = {
 	"/next": `<title>Next</title><main><h1>New page</h1></main>`,
 	"/step1": `<title>Step 1</title><h1>Step 1</h1><form action="/step2"><input name="response"><button>Continue</button></form>`,
 	"/step2": `<title>Step 2</title><h1>Step 2</h1><form action="/step3"><input name="response"><button>Continue</button></form>`,
+	"/slow-step1": `<title>Step 1</title><h1>Step 1</h1><form action="/slow-step2"><input name="response"><button>Continue</button></form>`,
+	"/slow-step2": `<title>Step 2</title><h1>Step 2</h1><form action="/step3"><input name="response"><button>Continue</button></form>`,
 	"/to-green": `<title>Form</title><form action="/green"><button>Continue</button></form>`,
 	"/green": `<title>Green</title><body style="margin:0;background:rgb(0,160,0)"></body>`,
 	"/unload": `<title>Unload</title><h1>Unload page</h1><a href="/next">Leave</a>
@@ -32,6 +34,8 @@ const server = Bun.serve({
 		// enough for a fill to finish on the step being left.
 		if (pathname === "/next" || pathname === "/green") await Bun.sleep(100);
 		if (pathname === "/step2") await Bun.sleep(500);
+		// Slower than the 4 s an action waits for a requested navigation.
+		if (pathname === "/slow-step2") await Bun.sleep(6_000);
 		return new Response(page, { headers });
 	},
 });
@@ -114,6 +118,45 @@ describe("browser calls after a click that navigates", () => {
 				return headings;
 			`);
 			expect(result).toEqual(["Step 3: 41", "Step 3: 42", "Step 3: 43"]);
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"answer the step a slow server is still sending",
+		async () => {
+			// Past the wait, Chromium holds evaluations on the step being left until the next one commits.
+			const result = await runOnPage(`
+				await tab.goto("${origin}/slow-step1");
+				await tab.click("text/Continue");
+				await tab.fill('input[name="response"]', "42");
+				await tab.click("text/Continue");
+				return await tab.text("h1");
+			`);
+			expect(result).toBe("Step 3: 42");
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"wait for content on the page the click loads when the page being left has it too",
+		async () => {
+			const result = await runOnPage(`
+				const waits = {
+					waitForText: () => tab.waitForText("Continue", { selector: "button" }),
+					waitForSelector: () => tab.waitForSelector('input[name="response"]'),
+					waitFor: () => tab.waitFor('input[name="response"]'),
+				};
+				const pages = {};
+				for (const [wait, run] of Object.entries(waits)) {
+					await tab.goto("${origin}/step1");
+					await tab.click("text/Continue");
+					await run();
+					pages[wait] = new URL(page.url()).pathname;
+				}
+				return pages;
+			`);
+			expect(result).toEqual({ waitForText: "/step2", waitForSelector: "/step2", waitFor: "/step2" });
 		},
 		45_000,
 	);
