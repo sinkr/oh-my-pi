@@ -130,8 +130,10 @@ describe("grep `!glob` exclusions", () => {
 				tool.approvalCacheTargets(pathArg === undefined ? {} : { path: pathArg });
 			expect(targets(`!nope,${relativeOutside}`)).toEqual(targets(relativeOutside));
 			expect(targets(`"!vendor;!gen"`)).toEqual(targets(undefined));
-			// A missing root keys nothing, and its search errors out instead of walking cwd.
-			expect(targets("!vendor gen-missing")).toBeUndefined();
+			// Execution keeps the comma inside braces and searches cwd, so cwd is keyed.
+			expect(targets("!{vendor,gen}")).toEqual(targets(undefined));
+			// A missing root names nothing searchable; cwd is keyed, erring toward a prompt.
+			expect(targets("!vendor gen-missing")).toEqual(targets(undefined));
 			// A public URL keys nothing and the search never walks cwd, so cwd is not keyed for it.
 			expect(targets("https://example.com/a.txt;!*.map")).toBeUndefined();
 			// A real file whose name holds `;!` is searched whole, so it keys itself.

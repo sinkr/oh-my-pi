@@ -576,14 +576,17 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				? exclusionParts(candidate).length > 0 &&
 					probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(candidate, cwd).path, cwd) === "missing"
 				: isExclusionEntry(candidate, cwd);
-		// Execution searches cwd when every entry is an exclusion, so cwd is keyed then.
+		// Execution searches cwd when every entry is an exclusion. Its list parser keeps delimiters inside
+		// braces (`!{vendor,gen}`) where the split here does not, so judge conservatively: key cwd when any
+		// part is an exclusion and no part names something searchable (a URL, or a path or glob base that
+		// exists). A part that names nothing makes execution fail, never search cwd, so over-keying is safe.
+		const searchable = (part: string) =>
+			!isExclusionEntry(part, cwd) &&
+			(/^[a-z][a-z0-9+.-]+:\/\/?/i.test(part) || probeLiteralPathExistsSync(splitBase(part), cwd) !== "missing");
+		const lists = roots.map(root => normalizePathLikeInput(root));
 		const onlyExclusions =
-			roots.length > 0 &&
-			roots.every(root => {
-				const list = normalizePathLikeInput(root);
-				const parts = approvalRootCandidates(list);
-				return parts.length > 1 ? exclusionParts(list).length === parts.length - 1 : isExclusionEntry(list, cwd);
-			});
+			lists.some(list => approvalRootCandidates(list).some(part => isExclusionEntry(part, cwd))) &&
+			!lists.some(list => approvalRootCandidates(list).some(searchable));
 		return searchApprovalCacheTargets(
 			onlyExclusions ? [...roots, "."] : roots,
 			cwd,
