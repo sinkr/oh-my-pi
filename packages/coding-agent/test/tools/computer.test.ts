@@ -1938,12 +1938,22 @@ describe("computer worker round trips", () => {
 			);
 		});
 
-		it("asks for an id or filter when called with nothing, instead of matching undefined", async () => {
+		it("names the missing selector when called with nothing, instead of matching undefined", async () => {
 			for (const windows of [desktopWindows, []]) {
 				const message = await missMessage(windows, "");
-				expect(message.split("\n")[0]).toContain("computer.window() needs a window id or an { app, title } filter");
+				expect(message.split("\n")[0]).toContain("computer.window() without an id or { app, title } filter");
 				expect(message).not.toContain("undefined");
 			}
+		});
+
+		it("returns the only open window when called with nothing", async () => {
+			const transport = new MemoryTransport();
+			const native = new FakeNativeSession();
+			native.listWindows = async () => [windowFixture];
+			new ComputerWorkerCore(transport, () => native);
+			const result = await runWorker(transport, "window-only", "(await desktop.window()).id");
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.payload.returnValue).toBe(windowFixture.id);
 		});
 
 		it("lists untitled windows by id after titled ones, as when macOS hides other apps' titles", async () => {

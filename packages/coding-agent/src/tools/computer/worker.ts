@@ -1792,13 +1792,18 @@ export class ComputerWorkerCore {
 					typeof selector === "string" || typeof selector === "number"
 						? windows.filter(window => window.id === String(selector))
 						: windows.filter(window => matchesFilter(window, selector));
-				// Untyped scripts may pass nothing or `null`, which `matchesFilter` accepts as no filter.
+				// Untyped scripts may pass nothing or `null`, which `matchesFilter` accepts as no filter: a desktop with one
+				// window returns it, and otherwise the error names the missing selector.
 				const unfiltered =
-					selector == null ? "computer.window() needs a window id or an { app, title } filter" : "";
+					selector == null
+						? "computer.window() without an id or { app, title } filter matches every open window"
+						: "";
 				if (matches.length === 0) {
 					const app = typeof selector === "object" ? selector?.app : undefined;
 					const route = session.capabilities.backend === "quartz" ? "shows-window" : "launches";
-					const lead = unfiltered || `no window matches ${JSON.stringify(selector)}`;
+					const lead = unfiltered
+						? `${unfiltered}, and none is open`
+						: `no window matches ${JSON.stringify(selector)}`;
 					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route)}`);
 				}
 				if (matches.length > 1) {
@@ -1809,7 +1814,7 @@ export class ComputerWorkerCore {
 					const omitted = matches.length - MAX_LISTED_WINDOWS;
 					const more = omitted > 0 ? `\n… ${omitted} more` : "";
 					const lead = unfiltered
-						? `${unfiltered}; open windows`
+						? `${unfiltered}; pass a window id or filter to pick one`
 						: `multiple windows match ${JSON.stringify(selector)}`;
 					throw new ToolError(`${lead}:\n${candidates}${more}`);
 				}
