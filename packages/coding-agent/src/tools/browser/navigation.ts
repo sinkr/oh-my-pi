@@ -61,20 +61,16 @@ export function readyStateInPage(): string {
 }
 
 /**
- * Whether an evaluation failed because a navigation replaced the document whose execution context it targeted: the
- * context was destroyed while the call ran, or was already gone when it arrived. Puppeteer's own waits retry on the
- * same two messages.
+ * Whether one of our own page evaluations failed because a navigation replaced the document whose execution context
+ * it targeted: the context was destroyed while the call ran, or was already gone when it arrived (Puppeteer rewrites
+ * that into the first message; the relay passes Chrome's own on). Puppeteer's own waits retry on the same two.
  */
 export function isNavigatedContextError(error: unknown): boolean {
 	return (
-		isUnreachedContextError(error) ||
-		(error instanceof Error && error.message.includes("Execution context was destroyed"))
+		error instanceof Error &&
+		(error.message.includes("Execution context was destroyed") ||
+			error.message.includes("Cannot find context with specified id"))
 	);
-}
-
-/** Whether an evaluation was refused before it ran because its execution context's document was already gone. */
-export function isUnreachedContextError(error: unknown): boolean {
-	return error instanceof Error && error.message.includes("Cannot find context with specified id");
 }
 
 /**

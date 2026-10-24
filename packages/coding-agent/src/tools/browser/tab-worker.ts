@@ -221,7 +221,6 @@ import {
 } from "./frames";
 import {
 	isNavigatedContextError,
-	isUnreachedContextError,
 	type NavigationWaitUntil,
 	navigateMainFrame,
 	pushState,
@@ -2362,17 +2361,12 @@ export class WorkerCore {
 		if (!settled) this.#mainFrameNavigationRequested = false;
 	}
 
-	/** Run `read` once more on the new document when a navigation took its execution context (`retryOn`). */
-	async #rereadAfterNavigation<T>(
-		signal: AbortSignal,
-		perOpMs: number,
-		read: () => Promise<T>,
-		retryOn: (error: unknown) => boolean = isNavigatedContextError,
-	): Promise<T> {
+	/** Run one of our own page reads once more on the new document when a navigation took its execution context. */
+	async #rereadAfterNavigation<T>(signal: AbortSignal, perOpMs: number, read: () => Promise<T>): Promise<T> {
 		try {
 			return await read();
 		} catch (error) {
-			if (signal.aborted || !retryOn(error)) throw error;
+			if (signal.aborted || !isNavigatedContextError(error)) throw error;
 			await this.#awaitRequestedNavigation(signal, perOpMs, true);
 			return await read();
 		}
@@ -2645,31 +2639,22 @@ export class WorkerCore {
 				);
 			},
 			evaluate: (fn, ...args) =>
-				op(
-					"tab.evaluate()",
-					INF,
-					sig =>
-						// User code may have side effects, so it runs again only when the browser refused it unrun.
-						this.#rereadAfterNavigation(
-							sig,
-							INF,
-							() =>
-								untilAborted(sig, async () => {
-									const realm = page.mainFrame().mainRealm();
-									// Puppeteer evaluates strings as expressions and ignores extra args; preserve
-									// that behavior without inspecting or adopting otherwise-unused handles.
-									if (typeof fn === "string") return realm.evaluate(fn);
-									const { args: adopted, dispose } = await adoptElementArgs(realm, args);
-									try {
-										throwIfAborted(sig);
-										return await realm.evaluate(fn as (...a: unknown[]) => unknown, ...adopted);
-									} finally {
-										await dispose();
-									}
-								}),
-							isUnreachedContextError,
-						),
-					{ awaitNavigation: true },
+				// User code may have side effects and may throw any message, so it waits for a requested navigation but
+				// never runs again.
+				act("tab.evaluate()", INF, sig =>
+					untilAborted(sig, async () => {
+						const realm = page.mainFrame().mainRealm();
+						// Puppeteer evaluates strings as expressions and ignores extra args; preserve
+						// that behavior without inspecting or adopting otherwise-unused handles.
+						if (typeof fn === "string") return realm.evaluate(fn);
+						const { args: adopted, dispose } = await adoptElementArgs(realm, args);
+						try {
+							throwIfAborted(sig);
+							return await realm.evaluate(fn as (...a: unknown[]) => unknown, ...adopted);
+						} finally {
+							await dispose();
+						}
+					}),
 				) as never,
 			scrollIntoView: selector =>
 				act(

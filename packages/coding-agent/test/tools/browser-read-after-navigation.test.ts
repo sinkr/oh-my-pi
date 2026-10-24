@@ -105,19 +105,22 @@ describe("browser calls after a click that navigates", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"answer the step the click loads when both steps have the same field",
 		async () => {
-			// On main the fill and the second click land on either step, so one pass proves little; three in a row do.
 			const result = await runOnPage(`
-				const headings = [];
-				for (const answer of ["41", "42", "43"]) {
+				const actions = {
+					fill: () => tab.fill('input[name="response"]', "41"),
+					type: () => tab.type('input[name="response"]', "42"),
+				};
+				const headings = {};
+				for (const [action, run] of Object.entries(actions)) {
 					await tab.goto("${origin}/step1");
 					await tab.click("text/Continue");
-					await tab.fill('input[name="response"]', answer);
+					await run();
 					await tab.click("text/Continue");
-					headings.push(await tab.text("h1"));
+					headings[action] = await tab.text("h1");
 				}
 				return headings;
 			`);
-			expect(result).toEqual(["Step 3: 41", "Step 3: 42", "Step 3: 43"]);
+			expect(result).toEqual({ fill: "Step 3: 41", type: "Step 3: 42" });
 		},
 		45_000,
 	);
@@ -179,43 +182,50 @@ describe("browser calls after a click that navigates", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"run a read again when its document was already gone, but not user code that may have run",
+		"run our own read again when its document is gone, but never user code",
 		async () => {
 			const result = await runOnPage(`
 				const client = page.mainFrame().client;
 				const send = client.send;
 				let sent = 0;
-				// The next evaluation fails with \`message\`: chrome.debugger's error JSON for a document already gone, as
-				// the relay forwards it unrewritten, or Puppeteer's error for one destroyed while the call ran.
-				const failNext = message => {
+				// Chromium refuses the next evaluation as it does once the document it targeted is gone: it is sent to an
+				// execution context that no longer exists.
+				const refuseNext = () => {
 					sent = 0;
-					client.send = function (method, ...args) {
-						if (method !== "Runtime.callFunctionOn") return send.call(this, method, ...args);
-						if (sent++ > 0) return send.call(this, method, ...args);
-						return Promise.reject(new Error("Protocol error (Runtime.callFunctionOn): " + message));
+					client.send = function (method, params, ...rest) {
+						if (method !== "Runtime.callFunctionOn" || sent++ > 0) return send.call(this, method, params, ...rest);
+						return send.call(this, method, { ...params, executionContextId: 2147483647 }, ...rest);
 					};
 				};
-				const gone = '{"code":-32000,"message":"Cannot find context with specified id"}';
 				try {
-					failNext(gone);
+					refuseNext();
 					const snapshot = await tab.ariaSnapshot();
-					failNext(gone);
-					const evaluated = await tab.evaluate(() => document.title);
-					failNext(gone);
+					refuseNext();
 					await tab.waitForText("Old page");
-					failNext("Execution context was destroyed.");
-					const destroyed = await tab.evaluate(() => document.title).then(() => "ran again", error => error.message);
-					return { heading: snapshot.includes("Old page"), evaluated, destroyed, destroyedSends: sent };
+					refuseNext();
+					const refused = await tab.evaluate(() => (globalThis.runs = (globalThis.runs ?? 0) + 1)).then(
+						() => "ran again",
+						error => error.message,
+					);
+					const refusedSends = sent;
+					client.send = send;
+					// Page code throwing the same words is the page's own error, not a lost document.
+					const thrown = await tab
+						.evaluate(() => {
+							globalThis.runs = (globalThis.runs ?? 0) + 1;
+							throw new Error("Cannot find context with specified id");
+						})
+						.then(() => "no error", error => error.message);
+					const runs = await tab.evaluate(() => globalThis.runs);
+					return { heading: snapshot.includes("Old page"), refused, refusedSends, thrown, runs };
 				} finally {
 					client.send = send;
 				}
 			`);
-			expect(result).toEqual({
-				heading: true,
-				evaluated: "Form",
-				destroyed: "Protocol error (Runtime.callFunctionOn): Execution context was destroyed.",
-				destroyedSends: 1,
-			});
+			expect(result).toMatchObject({ heading: true, refusedSends: 1, runs: 1 });
+			const { refused, thrown } = result as { refused: string; thrown: string };
+			expect(refused).toContain("Execution context was destroyed");
+			expect(thrown).toContain("Cannot find context with specified id");
 		},
 		45_000,
 	);
