@@ -1928,20 +1928,22 @@ describe("computer worker round trips", () => {
 			);
 			const hint = lines.find(line => line.startsWith('computer.apps.open("Calendar")'));
 			expect(hint).toContain("shows a window of it if it runs without one");
-			expect(hint).toContain("returns it with its window");
+			expect(hint).toContain("window: null if none appears");
 		});
 
-		it("names apps.open when no window is open at all, and not in a read-only run", async () => {
+		it("names apps.open when no window is open at all, and in a read-only run such as a direct window call", async () => {
 			expect(await missMessage([], '{ app: "Calendar" }')).toContain('computer.apps.open("Calendar")');
-			expect(await missMessage(desktopWindows, '{ app: "Calendar" }', { readOnly: true })).not.toContain(
-				"computer.apps.open",
+			expect(await missMessage(desktopWindows, '{ app: "Calendar" }', { readOnly: true })).toContain(
+				'computer.apps.open("Calendar")',
 			);
 		});
 
 		it("asks for an id or filter when called with nothing, instead of matching undefined", async () => {
-			const message = await missMessage(desktopWindows, "");
-			expect(message.split("\n")[0]).toContain("computer.window() needs a window id or an { app, title } filter");
-			expect(message).not.toContain("undefined");
+			for (const windows of [desktopWindows, []]) {
+				const message = await missMessage(windows, "");
+				expect(message.split("\n")[0]).toContain("computer.window() needs a window id or an { app, title } filter");
+				expect(message).not.toContain("undefined");
+			}
 		});
 
 		it("lists untitled windows by id after titled ones, as when macOS hides other apps' titles", async () => {

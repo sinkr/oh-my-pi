@@ -8,21 +8,10 @@ const MAX_TITLE_CHARS = 80;
 
 /**
  * What `computer.apps.open` does for an app with no listed window: on macOS it also shows a window of a running app
- * that has none and returns it, elsewhere it only launches, and a read-only run refuses it.
+ * that has none and returns it; elsewhere it only launches. A read-only run still gets the hint, since the next call
+ * can open the app.
  */
-export type AppOpenRoute = "shows-window" | "launches" | "refused";
-
-function openHint(app: string, route: AppOpenRoute): string {
-	const call = `computer.apps.open(${JSON.stringify(app)})`;
-	switch (route) {
-		case "shows-window":
-			return `${call} opens it by that exact name or ID, or shows a window of it if it runs without one, and returns it with its window.\n`;
-		case "launches":
-			return `${call} launches it by that exact name or ID.\n`;
-		case "refused":
-			return "";
-	}
-}
+export type AppOpenRoute = "shows-window" | "launches";
 
 /** Lists the open windows by app, apps matching `app` first, for a selector that matched nothing. */
 export function describeWindowMiss(
@@ -33,9 +22,14 @@ export function describeWindowMiss(
 	// An empty `app` filters nothing in `matchesFilter`, so it matches no app here either.
 	const needle = app?.toLocaleLowerCase() || undefined;
 	const matched = (name: string): boolean => needle !== undefined && name.toLocaleLowerCase().includes(needle);
+	const call = `computer.apps.open(${JSON.stringify(app)})`;
+	const hint =
+		route === "shows-window"
+			? `${call} opens it by that exact name or ID, or shows a window of it if it runs without one, and returns it with that window (window: null if none appears within 3 s).\n`
+			: `${call} launches it by that exact name or ID.\n`;
 	const note =
 		needle !== undefined && !windows.some(window => matched(window.app))
-			? `No open window belongs to an app matching ${JSON.stringify(app)}.\n${openHint(app!, route)}`
+			? `No open window belongs to an app matching ${JSON.stringify(app)}.\n${hint}`
 			: "";
 	if (windows.length === 0) return `${note}No windows are open.`;
 	const byApp = Map.groupBy(windows, window => window.app);
