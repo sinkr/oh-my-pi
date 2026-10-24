@@ -540,7 +540,12 @@ impl<'a> Flags<'a> {
 	}
 
 	fn on(&self, name: &str) -> bool {
-		self.0.iter().rev().find(|(flag, _)| *flag == name).is_some_and(|&(_, on)| on)
+		self
+			.0
+			.iter()
+			.rev()
+			.find(|(flag, _)| *flag == name)
+			.is_some_and(|&(_, on)| on)
 	}
 
 	fn any(&self, names: &[&str]) -> bool {
