@@ -160,9 +160,11 @@ fn outside_conflict(dir: &Path, sub: Sub, operand: Option<&str>) -> Option<Refus
 /// Whether `checkout <operand>`, run in `dir`, restores a path: the operand
 /// names no revision, and it is a glob or a file that exists there. Git takes
 /// any other name as a branch to create from a remote-tracking one, through
-/// whatever fetch refspec maps it, or fails on its own.
+/// whatever fetch refspec maps it, or fails on its own; and `A...B`, `A...`,
+/// or `...B` as their merge base, even beside a file of that name.
 fn names_path(repo: &GitRepo, dir: &Path, operand: &str) -> bool {
-	matches!(repo.resolve_ref(operand), Ok(None))
+	!operand.contains("...")
+		&& matches!(repo.resolve_ref(operand), Ok(None))
 		&& (operand.contains(['*', '?', '[', '\\']) || dir.join(operand).symlink_metadata().is_ok())
 }
 
@@ -529,6 +531,8 @@ impl<'a> Flags<'a> {
 						Some(("patch", true))
 					},
 					(Sub::Checkout | Sub::Switch, Arg::Short('f')) => Some(("force", true)),
+					(Sub::Checkout, Arg::Short('2')) => Some(("ours", true)),
+					(Sub::Checkout, Arg::Short('3')) => Some(("theirs", true)),
 					(Sub::Checkout | Sub::Switch, Arg::Short('d')) => Some(("detach", true)),
 					(Sub::Checkout | Sub::Switch, Arg::Short('t')) => Some(("track", true)),
 					(Sub::Restore, Arg::Short('S')) => Some(("staged", true)),
@@ -677,6 +681,8 @@ mod tests {
 			("checkout main", "CheckoutOne(\"main\")"),
 			("checkout main tracked.txt", "ConflictOnly"),
 			("checkout --theirs tracked.txt", "ConflictOnly"),
+			("checkout -2 tracked.txt", "ConflictOnly"),
+			("checkout -3 tracked.txt", "ConflictOnly"),
 			("checkout -qf main", "Destructive"),
 			// `-b` takes the rest of its bundle as the branch name.
 			("checkout -bf topic", "BranchMove"),
@@ -832,12 +838,13 @@ mod tests {
 		assert_eq!(code, Some(0), "{output}");
 		assert_eq!(std::fs::read_to_string(repo.join("tracked.txt")).expect("read"), "theirs\n");
 
-		// Git switches for a merge base, a branch any fetch refspec maps, and a
-		// patch flag taken back; a file sharing a remote branch's name is still
-		// a path.
+		// Git switches for a merge base (even beside a file of that name), a
+		// branch any fetch refspec maps, and a patch flag taken back; a file
+		// sharing a remote branch's name is still a path.
 		let fetch = "+refs/heads/*:refs/custom/origin/*";
 		git(&repo, &["config", "--add", "remote.origin.fetch", fetch]);
 		git(&repo, &["update-ref", "refs/custom/origin/custom", "HEAD"]);
+		std::fs::write(repo.join("main...side"), "a file\n").expect("write main...side");
 		for command in [
 			"git checkout -q main...side",
 			"git checkout -q main...",
