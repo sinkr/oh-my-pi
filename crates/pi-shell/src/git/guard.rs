@@ -462,7 +462,9 @@ fn classify_reset<'a>(args: &[Arg<'a>]) -> Verdict<'a> {
 	}
 	let index_only = pathspec || flags.any(&["patch", "pathspec-from-file"]);
 	match operands[..] {
-		_ if flags.on("hard") => Verdict::Destructive,
+		_ if flags.last(&["hard", "soft", "mixed", "merge", "keep"]) == Some("hard") => {
+			Verdict::Destructive
+		},
 		[rev] if !index_only && !matches!(rev, "HEAD" | "@") => Verdict::ResetTo(rev),
 		_ => Verdict::Allow,
 	}
@@ -554,6 +556,16 @@ impl<'a> Flags<'a> {
 
 	fn any(&self, names: &[&str]) -> bool {
 		names.iter().any(|name| self.on(name))
+	}
+
+	/// Which of `names`, mutually exclusive modes, was given last.
+	fn last(&self, names: &[&str]) -> Option<&'a str> {
+		self
+			.0
+			.iter()
+			.rev()
+			.find(|(flag, on)| *on && names.contains(flag))
+			.map(|&(flag, _)| flag)
 	}
 }
 
@@ -672,6 +684,9 @@ mod tests {
 			("reset -q --hard", "Destructive"),
 			// Long options are read by unique abbreviation, as git reads them.
 			("reset --ha", "Destructive"),
+			// Of the modes, the last one wins.
+			("reset --ha --mixed HEAD", "Allow"),
+			("reset --soft --hard main", "Destructive"),
 			("reset --so main", "ResetTo(\"main\")"),
 			// Of `--x` and `--no-x`, the last one wins.
 			("reset --patc --no-patc HEAD~1", "ResetTo(\"HEAD~1\")"),
