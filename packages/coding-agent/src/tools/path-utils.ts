@@ -699,6 +699,11 @@ async function tryDelimitedPathSplit(
  * string. Existing paths are kept intact, so real filenames containing spaces,
  * commas, or semicolons win over delimiter recovery.
  */
+/** A `!glob` exclusion part of a path list, which search tools take beside URLs. */
+function isExclusionPart(part: string): boolean {
+	return part.length > 1 && part.startsWith("!") && !part.includes("://");
+}
+
 export async function splitDelimitedPathEntry(
 	entry: string,
 	cwd: string,
@@ -712,16 +717,20 @@ export async function splitDelimitedPathEntry(
 	const splitter = options.splitter ?? parseSearchPath;
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts?.every(options.routedUrlPredicate) ? parts : null;
+		const routed = options.routedUrlPredicate;
+		return parts?.every(part => routed(part) || isExclusionPart(part)) ? parts : null;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
 		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
 		// several resources: the router resolves one URI per entry, so the list
 		// must split before dispatch (issue #14091). Split only when every part
-		// is itself an internal URL — a URL whose own path contains `;` stays
-		// whole, and a single URL ending in `;` (`local://report;`) names one resource.
+		// is itself an internal URL or a `!glob` exclusion (`local://notes;!*.test.ts`)
+		// — a URL whose own path contains `;` stays whole, and a single URL ending
+		// in `;` (`local://report;`) names one resource.
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts && parts.length > 1 && parts.every(part => isInternalUrlPath(part)) ? parts : null;
+		return parts && parts.length > 1 && parts.every(part => isInternalUrlPath(part) || isExclusionPart(part))
+			? parts
+			: null;
 	}
 	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
