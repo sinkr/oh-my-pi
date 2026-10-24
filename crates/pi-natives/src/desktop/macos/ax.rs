@@ -2375,9 +2375,9 @@ mod tests {
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
-		focused_window, may_borrow_focus, menu_window, replace_utf16_selection, replace_whole_value,
-		required_string, secure_subrole, select_attached, stringify_value, takes_inserted_text,
-		target_window, text_readback, unsupported_action, window_records_of,
+		focused_window, may_borrow_focus, menu_window, perform_choosing, replace_utf16_selection,
+		replace_whole_value, required_string, secure_subrole, select_attached, stringify_value,
+		takes_inserted_text, target_window, text_readback, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -2593,12 +2593,15 @@ mod tests {
 
 	#[test]
 	fn an_element_without_a_press_action_is_pointed_at_click() {
-		let actions = ["AXShowMenu".to_owned(), "AXScrollToVisible".to_owned()];
-		let press = unsupported_action("AXPress", &actions);
+		// The system-wide element lists no actions, as a Chrome page's button
+		// lists no AXPress.
+		let element = create_system_wide();
+		let press = perform_choosing(&element, "press", None).unwrap_err();
 		assert_eq!(press.code, ErrorCode::AxFailed);
-		assert!(press.message.contains("AXShowMenu, AXScrollToVisible"), "{}", press.message);
+		assert!(press.message.contains("'AXPress' is not supported"), "{}", press.message);
 		assert!(press.message.contains("click()"), "{}", press.message);
-		let other = unsupported_action("AXIncrement", &actions);
+		let other = perform_choosing(&element, "AXIncrement", None).unwrap_err();
+		assert!(other.message.contains("'AXIncrement' is not supported"), "{}", other.message);
 		assert!(!other.message.contains("click()"), "{}", other.message);
 	}
 
