@@ -115,9 +115,12 @@ describe("grep `!glob` exclusions", () => {
 	it("grants approval for searched roots only, keeping a real path whose name starts with `!`", async () => {
 		await Bun.write(path.join(cwd, "!notes.txt"), "needle\n");
 		const targets = (pathArg?: string) => tool.approvalCacheTargets(pathArg === undefined ? {} : { path: pathArg });
-		expect(targets("src;!*.test.ts")).toEqual(targets("src"));
+		// Any exclusion keys cwd too, since execution may search it; the named root is keyed as well.
+		expect(targets("src;!*.test.ts")).toEqual([...(targets("src") ?? []), ...(targets(undefined) ?? [])]);
+		expect(targets(";!vendor")).toEqual(targets(undefined));
 		expect(targets("!vendor;!gen")).toEqual(targets(undefined));
 		expect(targets("src;!notes.txt")).toEqual([...(targets("src") ?? []), ...(targets("!notes.txt") ?? [])]);
+		expect(targets("src;!notes.txt")).not.toContain(targets(undefined)?.[0]);
 		expect(targets("!notes.txt")).toHaveLength(1);
 	});
 
@@ -137,12 +140,11 @@ describe("grep `!glob` exclusions", () => {
 			expect(targets("!vendor src")).toContain(targets(undefined)?.[0]);
 			// A list starting with an exclusion keys cwd, erring toward a prompt.
 			expect(targets("!vendor gen-missing")).toEqual(targets(undefined));
-			// A public URL keys nothing and the search never walks cwd, so cwd is not keyed for it.
-			expect(targets("https://example.com/a.txt;!*.map")).toBeUndefined();
+			// Any exclusion keys cwd, beside a public URL too: erring toward a prompt.
+			expect(targets("https://example.com/a.txt;!*.map")).toEqual(targets(undefined));
 			// A real file whose name holds `;!` is searched whole, so it keys itself.
 			await Bun.write(path.join(cwd, "report;!draft"), "needle\n");
-			expect(targets("report;!draft")).toHaveLength(1);
-			expect(targets("report;!draft")?.[0]).toContain("report;!draft");
+			expect(targets("report;!draft")?.some(key => key.includes("report;!draft"))).toBe(true);
 		} finally {
 			await removeWithRetries(outside);
 		}

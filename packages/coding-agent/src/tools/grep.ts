@@ -52,7 +52,11 @@ import {
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
-import { approvalRootCandidates, searchApprovalCacheTargets } from "./search-approval-targets";
+import {
+	APPROVAL_ROOT_DELIMITERS,
+	approvalRootCandidates,
+	searchApprovalCacheTargets,
+} from "./search-approval-targets";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -576,20 +580,19 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				? exclusionParts(candidate).length > 0 &&
 					probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(candidate, cwd).path, cwd) === "missing"
 				: isExclusionEntry(candidate, cwd);
-		// Execution searches cwd when every entry it splits out is an exclusion. Whether it splits a list
-		// depends on its own parser (braces, which parts resolve), so this does not re-derive the split: a
-		// list that starts with an exclusion may stay one exclusion there (`!vendor src`, `!{vendor,gen}`),
-		// so it keys cwd, as does a list whose every part here is one. Over-keying only adds a prompt.
-		const onlyExclusions = roots.some(root => {
+		// Execution searches cwd when every entry it splits out is an exclusion, and how it splits a list
+		// depends on its own parser (braces, empty fields, which parts resolve). Rather than re-derive that,
+		// any exclusion in a list keys cwd too: over-keying only adds a prompt, under-keying auto-allows a
+		// recursive cwd read.
+		const hasExclusion = roots.some(root => {
 			const list = normalizePathLikeInput(root);
-			const parts = approvalRootCandidates(list);
 			return (
 				isExclusionEntry(list, cwd) ||
-				parts.slice(parts.length > 1 ? 1 : 0).every(part => isExclusionEntry(part, cwd))
+				list.split(APPROVAL_ROOT_DELIMITERS).some(part => part.length > 0 && isExclusionEntry(part, cwd))
 			);
 		});
 		return searchApprovalCacheTargets(
-			onlyExclusions ? [...roots, "."] : roots,
+			hasExclusion ? [...roots, "."] : roots,
 			cwd,
 			splitBase,
 			undefined,

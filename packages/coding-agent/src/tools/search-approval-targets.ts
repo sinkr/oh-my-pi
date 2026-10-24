@@ -20,7 +20,7 @@ import { approvalTargetKey, approvalTreeSearchKey, isApprovalPublicUrl } from ".
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
 
 /** List delimiters the execution-side path parser splits a root on. */
-const ROOT_DELIMITERS = /[;,\s]+/;
+export const APPROVAL_ROOT_DELIMITERS = /[;,\s]+/;
 
 /**
  * Roots to key for one raw entry: the entry itself plus its list parts. Execution fans `a;b`, `a,b`
@@ -29,7 +29,7 @@ const ROOT_DELIMITERS = /[;,\s]+/;
  * are dropped below, so naming them here can only add keys that really exist.
  */
 export function approvalRootCandidates(rawRoot: string): string[] {
-	const parts = rawRoot.split(ROOT_DELIMITERS).filter(part => part.length > 0);
+	const parts = rawRoot.split(APPROVAL_ROOT_DELIMITERS).filter(part => part.length > 0);
 	return parts.length <= 1 ? [rawRoot] : [rawRoot, ...parts];
 }
 
