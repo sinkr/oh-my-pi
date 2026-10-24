@@ -339,6 +339,19 @@ impl WalkFilter {
 		self
 	}
 
+	/// Whether `exclude` matches `relative_path` or one of its ancestor
+	/// directories. Collected walks gather every entry before filtering, so a
+	/// directory's `SkipDescend` prunes nothing there and its files must be
+	/// matched through their ancestors.
+	fn excluded(&self, relative_path: &str) -> bool {
+		self.exclude.as_ref().is_some_and(|exclude| {
+			exclude.is_match(relative_path)
+				|| relative_path
+					.match_indices('/')
+					.any(|(end, _)| exclude.is_match(&relative_path[..end]))
+		})
+	}
+
 	fn accepts_path(&self, relative_path: &str) -> bool {
 		self
 			.glob
@@ -367,11 +380,7 @@ impl WalkFilter {
 				WalkDecision::Skip
 			};
 		}
-		if self
-			.exclude
-			.as_ref()
-			.is_some_and(|exclude| exclude.is_match(relative_path))
-		{
+		if self.excluded(relative_path) {
 			return if file_type == FileType::Dir {
 				WalkDecision::SkipDescend
 			} else {

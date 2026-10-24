@@ -1,7 +1,7 @@
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
-import { existsSync } from "node:fs";
+import * as fs from "node:fs";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -40,16 +40,19 @@ import {
 	formatPathRelativeToCwd,
 	hasGlobPathChars,
 	isLineInRanges,
+	normalizePathLikeInput,
 	parseSearchPath,
 	probeLiteralPathExists,
 	relativeSearchResultPath,
 	resolveReadPath,
 	resolveSearchResultPath,
 	resolveToolSearchScope,
+	resolveToCwd,
 	searchPathTier,
 	splitPathAndSelPreferringLiteral,
+	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
-import { searchApprovalCacheTargets } from "./search-approval-targets";
+import { approvalRootCandidates, searchApprovalCacheTargets } from "./search-approval-targets";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -460,6 +463,49 @@ function formatCappedFiles(paths: readonly string[]): string {
 }
 
 /**
+ * Whether a path entry is a `!glob` exclusion rather than a path to search: it
+ * starts with `!` and names nothing on disk once a `:selector` is split off the
+ * way `read` splits it, so `!notes.txt:1-2` still reads a real `!notes.txt`.
+ * Approval and execution both classify entries through this.
+ */
+function isExclusionEntry(entry: string, cwd: string): boolean {
+	if (!entry.startsWith("!")) return false;
+	try {
+		return !fs.existsSync(resolveToCwd(splitPathAndSelPreferringLiteralSync(entry, cwd).path, cwd));
+	} catch {
+		return true;
+	}
+}
+
+/** One exclusion with Windows separators and trailing separators normalized away. */
+function normalizeExclusion(pattern: string): string {
+	return pattern.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * Where an anchored exclusion points: one with a `/` that does not start with
+ * `**`, resolved against cwd like any tool path. `undefined` for a pattern that
+ * matches at any depth, `null` for one that resolves to no filesystem path.
+ */
+function anchoredExclusionPath(pattern: string, cwd: string): string | null | undefined {
+	if (!pattern.includes("/") || pattern.startsWith("**")) return undefined;
+	try {
+		return resolveToCwd(pattern, cwd);
+	} catch {
+		return null;
+	}
+}
+
+/** `target` relative to `root` with `/` separators, or `undefined` unless it lies strictly inside `root`. */
+function relativeInside(root: string, target: string): string | undefined {
+	const relative = path.relative(root, target);
+	// Across Windows drives `path.relative` returns an absolute path.
+	if (relative === "" || path.isAbsolute(relative)) return undefined;
+	const posix = relative.split(path.sep).join("/");
+	return posix === ".." || posix.startsWith("../") ? undefined : posix;
+}
+
+/**
  * Rebase `!glob` exclusions, written relative to cwd, onto one search root for
  * native grep, which matches them against root-relative paths. A pattern with
  * no `/` (or starting with `**`) matches at any depth and passes through; any
@@ -468,20 +514,36 @@ function formatCappedFiles(paths: readonly string[]): string {
  */
 function exclusionsForRoot(patterns: readonly string[], cwd: string, root: string): string[] | undefined {
 	const rebased: string[] = [];
-	for (const pattern of patterns) {
-		const clean = pattern.trim().replace(/\/+$/, "");
-		if (!clean) continue;
-		if (!clean.includes("/") || clean.startsWith("**")) {
-			rebased.push(clean);
+	const internalRoot = InternalUrlRouter.instance().canHandle(root);
+	for (const raw of patterns) {
+		const pattern = normalizeExclusion(raw);
+		if (!pattern) continue;
+		const target = anchoredExclusionPath(pattern, cwd);
+		if (target === undefined) {
+			rebased.push(pattern);
 			continue;
 		}
-		if (InternalUrlRouter.instance().canHandle(root)) continue;
-		const absolute = clean.startsWith("~/") ? path.join(homedir(), clean.slice(2)) : path.resolve(cwd, clean);
-		const relative = path.relative(root, absolute).split(path.sep).join("/");
-		if (relative === "" || relative.startsWith("..")) continue;
-		rebased.push(`/${relative}`);
+		if (internalRoot || target === null) continue;
+		const relative = relativeInside(root, target);
+		if (relative !== undefined) rebased.push(`/${relative}`);
 	}
 	return rebased.length > 0 ? rebased : undefined;
+}
+
+/**
+ * Whether an anchored exclusion names `root` itself or a folder holding it.
+ * Native grep matches exclusions against entries below the root, never the root
+ * entry, so such a root is skipped here instead (`gen;!./gen` searches nothing).
+ */
+function exclusionsCoverRoot(patterns: readonly string[], cwd: string, root: string): boolean {
+	if (InternalUrlRouter.instance().canHandle(root)) return false;
+	const absoluteRoot = path.resolve(cwd, root);
+	return patterns.some(raw => {
+		const target = anchoredExclusionPath(normalizeExclusion(raw), cwd);
+		return (
+			typeof target === "string" && (target === absoluteRoot || relativeInside(target, absoluteRoot) !== undefined)
+		);
+	});
 }
 
 type SearchParams = typeof searchSchema.infer;
@@ -519,19 +581,21 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
 		const cwd = this.session.cwd;
-		// `!glob` entries exclude rather than search, so they grant nothing; one naming a real path is searched.
-		const roots = toPathList(a?.path ?? a?.paths)
-			.map(root =>
-				root
-					.split(";")
-					.filter(part => {
-						const entry = part.trim();
-						return !entry.startsWith("!") || existsSync(path.resolve(cwd, entry));
-					})
-					.join(";"),
-			)
-			.filter(root => root.trim().length > 0);
-		return searchApprovalCacheTargets(roots, cwd, entry => parseSearchPath(splitPathAndSel(entry).path).basePath);
+		const splitBase = (entry: string) => parseSearchPath(splitPathAndSel(entry).path).basePath;
+		// `!glob` exclusions search nothing, so a list holding them keys its other parts, split on the
+		// delimiters execution fans lists out on; a real path starting with `!` is no exclusion and keys
+		// itself. When those parts key nothing, the search runs in cwd, so cwd is keyed.
+		let hasExclusion = false;
+		const roots = toPathList(a?.path ?? a?.paths).flatMap(root => {
+			const candidates = approvalRootCandidates(normalizePathLikeInput(root));
+			const parts = candidates.length > 1 ? candidates.slice(1) : candidates;
+			const kept = parts.filter(part => !isExclusionEntry(part, cwd));
+			if (kept.length === parts.length) return [root];
+			hasExclusion = true;
+			return kept;
+		});
+		const keys = searchApprovalCacheTargets(roots, cwd, splitBase);
+		return keys === undefined && hasExclusion ? searchApprovalCacheTargets(["."], cwd, splitBase) : keys;
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
@@ -616,13 +680,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			const exclusions: string[] = [];
 			const searchEntries: string[] = [];
 			for (const entry of expandedEntries) {
-				const literal =
-					entry.startsWith("!") &&
-					(await stat(path.resolve(this.session.cwd, entry)).then(
-						() => true,
-						() => false,
-					));
-				if (entry.startsWith("!") && !literal) exclusions.push(entry.slice(1));
+				if (isExclusionEntry(entry, this.session.cwd)) exclusions.push(entry.slice(1));
 				else searchEntries.push(entry);
 			}
 			const rawEntries = searchEntries.length > 0 ? searchEntries : ["."];
@@ -779,6 +837,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								}))
 							: (multiTargets ?? []);
 						for (const target of targets) {
+							if (exclusionsCoverRoot(exclusions, this.session.cwd, target.basePath)) continue;
 							const targetResult = await grep(
 								{
 									pattern: normalizedPattern,
@@ -828,7 +887,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							filesSearched: exactFilePaths ? exactFilePaths.length : filesSearched,
 							limitReached,
 						};
-					} else {
+					} else if (!exclusionsCoverRoot(exclusions, this.session.cwd, searchPath)) {
 						result = await grep(
 							{
 								pattern: normalizedPattern,

@@ -1387,11 +1387,17 @@ fn grep_walk_filter(glob: Option<&str>, exclude: &[String]) -> Result<pi_walker:
 	}
 	let exclude: Vec<String> = exclude
 		.iter()
-		.map(|pattern| pattern.trim().trim_end_matches('/'))
+		.map(|pattern| pattern.trim().replace('\\', "/"))
+		.map(|pattern| pattern.trim_end_matches('/').to_owned())
 		.filter(|pattern| !pattern.is_empty())
 		.map(|pattern| match pattern.strip_prefix('/') {
 			Some(anchored) => anchored.to_owned(),
-			None => glob_util::build_glob_pattern(pattern, true),
+			// Slashless patterns match at any depth, exact brace unions (`{vendor,gen}`)
+			// included, which `build_glob_pattern` keeps root-relative for scope globs.
+			None if !pattern.contains('/') && !pattern.starts_with("**") => {
+				glob_util::build_glob_pattern(&format!("**/{pattern}"), true)
+			},
+			None => glob_util::build_glob_pattern(&pattern, true),
 		})
 		.collect();
 	if !exclude.is_empty() {
@@ -3550,20 +3556,27 @@ mod tests {
 				None,
 				&["gen/schema.ts", "src/app.test.ts", "src/app.ts", "src/vendor/lib.ts"][..],
 			),
+			(&["{vendor,gen}"][..], None, &["src/app.test.ts", "src/app.ts"][..]),
 		] {
-			let mut config = base_grep_config(root.path());
-			config.exclude = Some(
-				exclude
-					.iter()
-					.map(|pattern| (*pattern).to_owned())
-					.collect(),
-			);
-			config.glob = glob.map(str::to_owned);
-			let result = grep_sync(config, None, task::CancelToken::default())
-				.expect("excluding grep should succeed");
-			let mut paths: Vec<&str> = result.matches.iter().map(|m| m.path.as_str()).collect();
-			paths.sort_unstable();
-			assert_eq!(paths, expected, "exclude {exclude:?}");
+			// `max_count` runs the sequential path, whose walk collects every
+			// entry before filtering; `None` streams in parallel and
+			// prunes directories.
+			for max_count in [None, Some(10)] {
+				let mut config = base_grep_config(root.path());
+				config.exclude = Some(
+					exclude
+						.iter()
+						.map(|pattern| (*pattern).to_owned())
+						.collect(),
+				);
+				config.glob = glob.map(str::to_owned);
+				config.max_count = max_count;
+				let result = grep_sync(config, None, task::CancelToken::default())
+					.expect("excluding grep should succeed");
+				let mut paths: Vec<&str> = result.matches.iter().map(|m| m.path.as_str()).collect();
+				paths.sort_unstable();
+				assert_eq!(paths, expected, "exclude {exclude:?}, max_count {max_count:?}");
+			}
 		}
 
 		let mut config = base_grep_config(root.path());

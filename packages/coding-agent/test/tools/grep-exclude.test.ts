@@ -81,6 +81,24 @@ describe("grep `!glob` exclusions", () => {
 	it("still searches a real path whose name starts with `!`", async () => {
 		await Bun.write(path.join(cwd, "!notes.txt"), "needle\n");
 		expect(await files({ path: "!notes.txt" })).toEqual(["!notes.txt"]);
+		await Bun.write(path.join(cwd, "!notes.txt"), "other\nneedle\n");
+		const ranged = await tool.execute("ranged", { pattern: "needle", path: "!notes.txt:2-2" });
+		expect(ranged.details?.files).toEqual(["!notes.txt"]);
+	});
+
+	it("searches nothing under a root an anchored exclusion names", async () => {
+		expect(await files({ path: "gen;!./gen" })).toEqual([]);
+		expect(await files({ path: "src/legacy;scripts;!./src" })).toEqual(["scripts/release.ts"]);
+	});
+
+	it("rebases Windows separators and keeps a child folder whose name starts with `..`", async () => {
+		expect(await files({ path: "src;!src\\legacy" })).toEqual([
+			"src/app.test.ts",
+			"src/app.ts",
+			"src/deep/legacy/kept.ts",
+		]);
+		await Bun.write(path.join(cwd, "..cache/hit.ts"), "needle\n");
+		expect(await files({ path: ".;!./..cache;!vendor" })).not.toContain("..cache/hit.ts");
 	});
 
 	it("grants approval for searched roots only, keeping a real path whose name starts with `!`", async () => {
@@ -90,5 +108,20 @@ describe("grep `!glob` exclusions", () => {
 		expect(targets("!vendor;!gen")).toEqual(targets(undefined));
 		expect(targets("src;!notes.txt")).toEqual([...(targets("src") ?? []), ...(targets("!notes.txt") ?? [])]);
 		expect(targets("!notes.txt")).toHaveLength(1);
+	});
+
+	it("keys every path a list really searches, whatever its delimiters or quotes", async () => {
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "pi-grep-exclude-outside-"));
+		try {
+			await Bun.write(path.join(outside, "s.txt"), "needle\n");
+			const relativeOutside = path.relative(cwd, outside);
+			const targets = (pathArg?: string) =>
+				tool.approvalCacheTargets(pathArg === undefined ? {} : { path: pathArg });
+			expect(targets(`!nope,${relativeOutside}`)).toEqual(targets(relativeOutside));
+			expect(targets(`"!vendor;!gen"`)).toEqual(targets(undefined));
+			expect(targets("!vendor gen-missing")).toEqual(targets(undefined));
+		} finally {
+			await removeWithRetries(outside);
+		}
 	});
 });

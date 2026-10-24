@@ -28,7 +28,7 @@ const ROOT_DELIMITERS = /[;,\s]+/;
  * search really walks — and a search that reports no keys is auto-allowed. Parts that do not resolve
  * are dropped below, so naming them here can only add keys that really exist.
  */
-function approvalRootCandidates(rawRoot: string): string[] {
+export function approvalRootCandidates(rawRoot: string): string[] {
 	const parts = rawRoot.split(ROOT_DELIMITERS).filter(part => part.length > 0);
 	return parts.length <= 1 ? [rawRoot] : [rawRoot, ...parts];
 }
