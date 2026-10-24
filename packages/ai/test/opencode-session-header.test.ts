@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { completeSimple, stream } from "@oh-my-pi/pi-ai";
 import { buildAnthropicClientOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { normalizeOpenAIPromptCacheKey, resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
+
+import { withEnv } from "./helpers";
 
 const OPENCODE_SESSION_HEADER = "x-opencode-session";
 
@@ -28,6 +30,29 @@ function chatSse(): Response {
 	});
 }
 
+function anthropicSse(): Response {
+	const events = [
+		{
+			type: "message_start",
+			message: {
+				id: "msg_test",
+				usage: { input_tokens: 5, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+			},
+		},
+		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+		{ type: "content_block_stop", index: 0 },
+		{
+			type: "message_delta",
+			delta: { stop_reason: "end_turn" },
+			usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+		},
+		{ type: "message_stop" },
+	];
+	const payload = `${events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
+	return new Response(payload, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
 function makeOpenCodeGoCompletionsModel(): Model<"openai-completions"> {
 	return buildModel({
 		...OPENCODE_GO_COMPLETIONS_MODEL,
@@ -38,6 +63,66 @@ function makeOpenCodeGoCompletionsModel(): Model<"openai-completions"> {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 262_144,
 		maxTokens: 8192,
+	});
+}
+
+function makeOpenCodeGoCompletionsLaneModel(id: string, name: string): Model<"openai-completions"> {
+	return buildModel({
+		provider: "opencode-go",
+		id,
+		name,
+		api: "openai-completions",
+		baseUrl: "https://opencode.ai/zen/go/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+	});
+}
+
+function makeOpenCodeGoLunaModel(): Model<"openai-responses"> {
+	return buildModel({
+		provider: "opencode-go",
+		id: "gpt-5.6-luna",
+		name: "GPT-5.6 Luna",
+		api: "openai-responses",
+		baseUrl: "https://opencode.ai/zen/go/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 400_000,
+		maxTokens: 128_000,
+	});
+}
+
+function makeOpenCodeGoMuseModel(id = "muse-spark-1.3"): Model<"openai-responses"> {
+	return buildModel({
+		provider: "opencode-go",
+		id,
+		name: id === "muse-spark-1.3" ? "Muse Spark 1.3" : "Muse Spark 1.2",
+		api: "openai-responses",
+		baseUrl: "https://opencode.ai/zen/go/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+	});
+}
+
+function makeOpenCodeZenMuseModel(): Model<"openai-responses"> {
+	return buildModel({
+		provider: "opencode-zen",
+		id: "muse-spark-1.3",
+		name: "Muse Spark 1.3",
+		api: "openai-responses",
+		baseUrl: "https://opencode.ai/zen/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
 	});
 }
 
@@ -116,13 +201,27 @@ function makeOpenCodeGoAnthropicModel(): Model<"anthropic-messages"> {
 	});
 }
 
+function makeOpenCodeGoHaikuModel(): Model<"anthropic-messages"> {
+	return buildModel({
+		id: "claude-haiku-5-5",
+		name: "Claude Haiku 5.5",
+		api: "anthropic-messages",
+		provider: "opencode-go",
+		baseUrl: "https://opencode.ai/zen/go",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8192,
+	});
+}
+
 describe("opencode and gpt session header on OpenAI transports", () => {
 	it("sends the conversation session id to OpenCode", () => {
 		const setup = resolveOpenAIRequestSetup(OPENCODE_GO_COMPLETIONS_MODEL, {
 			apiKey: "key",
 			messages: [],
 			sessionId: "session-1",
-			promptCacheSessionId: "cache-1",
 		});
 		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("session-1");
 		expect(setup.headers["User-Agent"]).toBe(USER_AGENT);
@@ -280,6 +379,233 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 	});
 });
 
+describe("Go sibling prompt-cache wire affinity", () => {
+	it.each(["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.2-contributor"])(
+		"sends the shared task cache key as the OpenCode session header for %s",
+		id => {
+			const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel(id), {
+				apiKey: "key",
+				messages: [],
+				sessionId: "child-1",
+				promptCacheAffinityKey: "parent:task",
+			});
+			expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+		},
+	);
+
+	it("keeps the child conversation id when the shared cache key is absent", () => {
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel(), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "child-1",
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("child-1");
+	});
+
+	it("keeps the child conversation id for an empty shared cache key", () => {
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel(), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "child-1",
+			promptCacheAffinityKey: "",
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("child-1");
+	});
+
+	it("never lets a sessionId-derived cache id flip the header on an opted-in lane", () => {
+		// Real callers resolve the shared cache id through getOpenAIPromptCacheKey,
+		// which falls back to the sessionId normalized to the 64-char wire limit;
+		// that derived value must never feed the family affinity.
+		const sessionId = `child-${"0123456789".repeat(10)}`;
+		const derivedCacheId = normalizeOpenAIPromptCacheKey(sessionId);
+		expect(derivedCacheId?.startsWith("pc_")).toBe(true);
+		const setup = resolveOpenAIRequestSetup(
+			makeOpenCodeGoCompletionsLaneModel("mimo-v2.6-flash", "MiMo V2.6 Flash"),
+			{
+				apiKey: "key",
+				messages: [],
+				sessionId,
+				promptCacheSessionId: derivedCacheId,
+			},
+		);
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(sessionId);
+	});
+
+	it("keeps a long conversation id intact on the wire without an explicit cache key", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers));
+			return chatSse();
+		};
+		const sessionId = `child-${"0123456789".repeat(10)}`;
+
+		const response = await completeSimple(
+			makeOpenCodeGoCompletionsModel(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{ apiKey: "key", sessionId, fetch: fetchMock as typeof fetch },
+		);
+
+		expect(response.stopReason).toBe("stop");
+		expect(headersSeen).toHaveLength(1);
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe(sessionId);
+	});
+
+	it.each([
+		["mimo-v2.6-flash", "MiMo V2.6 Flash"],
+		["kimi-k2.7-code", "Kimi K2.7 Code"],
+		["deepseek-v4.1-flash", "DeepSeek V4.1 Flash"],
+	])("sends the explicit shared cache key on the opted-in Go Completions lane %s", (id, name) => {
+		const model = makeOpenCodeGoCompletionsLaneModel(id, name);
+		const first = resolveOpenAIRequestSetup(model, {
+			apiKey: "key",
+			messages: [],
+			sessionId: "child-1",
+			promptCacheAffinityKey: "parent:task",
+		});
+		const second = resolveOpenAIRequestSetup(model, {
+			apiKey: "key",
+			messages: [],
+			sessionId: "child-2",
+			promptCacheAffinityKey: "parent:task",
+		});
+		expect(first.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+		expect(second.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+	});
+
+	it("shares the family key across distinct child ids on the wire", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers));
+			return chatSse();
+		};
+
+		for (const sessionId of ["child-1", "child-2"]) {
+			const response = await completeSimple(
+				makeOpenCodeGoCompletionsModel(),
+				{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+				{ apiKey: "key", sessionId, promptCacheKey: "parent:task", fetch: fetchMock as typeof fetch },
+			);
+			expect(response.stopReason).toBe("stop");
+		}
+
+		expect(headersSeen).toHaveLength(2);
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
+		expect(headersSeen[1]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
+	});
+
+	it("keeps the conversation id on the wire when cache retention is disabled", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers));
+			return chatSse();
+		};
+
+		const response = await completeSimple(
+			makeOpenCodeGoCompletionsModel(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{
+				apiKey: "key",
+				sessionId: "child-1",
+				promptCacheKey: "parent:task",
+				cacheRetention: "none",
+				fetch: fetchMock as typeof fetch,
+			},
+		);
+
+		expect(response.stopReason).toBe("stop");
+		expect(headersSeen).toHaveLength(1);
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("child-1");
+	});
+
+	it("keeps the family key on the wire when an explicit retention overrides PI_CACHE_RETENTION=none", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers));
+			return chatSse();
+		};
+
+		for (const cacheRetention of ["short", "long"] as const) {
+			await withEnv({ PI_CACHE_RETENTION: "none" }, async () => {
+				const response = await completeSimple(
+					makeOpenCodeGoCompletionsModel(),
+					{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+					{
+						apiKey: "key",
+						sessionId: "child-1",
+						promptCacheKey: "parent:task",
+						cacheRetention,
+						fetch: fetchMock as typeof fetch,
+					},
+				);
+				expect(response.stopReason).toBe("stop");
+			});
+		}
+
+		expect(headersSeen).toHaveLength(2);
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
+		expect(headersSeen[1]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
+	});
+
+	it("keeps the child conversation id on the wire when PI_CACHE_RETENTION=none without an explicit retention", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers));
+			return chatSse();
+		};
+
+		await withEnv({ PI_CACHE_RETENTION: "none" }, async () => {
+			const response = await completeSimple(
+				makeOpenCodeGoCompletionsModel(),
+				{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+				{ apiKey: "key", sessionId: "child-1", promptCacheKey: "parent:task", fetch: fetchMock as typeof fetch },
+			);
+			expect(response.stopReason).toBe("stop");
+		});
+
+		expect(headersSeen).toHaveLength(1);
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("child-1");
+	});
+
+	it("keeps unsupported Go lanes on the conversation session id", () => {
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoLunaModel(), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "child-1",
+			promptCacheAffinityKey: "parent:task",
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("child-1");
+	});
+
+	it("keeps non-opted Go Muse lanes on the conversation session id", () => {
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel("muse-spark-1.2"), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "child-1",
+			promptCacheAffinityKey: "parent:task",
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("child-1");
+	});
+
+	it("does not extend the affinity to Zen", () => {
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeZenMuseModel(), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "child-1",
+			promptCacheAffinityKey: "parent:task",
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("child-1");
+	});
+
+	it("leaves non-Go providers on the conversation session id", () => {
+		const setup = resolveOpenAIRequestSetup(
+			{ provider: "openai", id: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
+			{ apiKey: "key", messages: [], sessionId: "conversation", promptCacheSessionId: "shared-cache" },
+		);
+		expect(setup.headers.session_id).toBe("conversation");
+		expect(setup.headers["x-opencode-session"]).toBeUndefined();
+	});
+});
+
 describe("opencode session header on the Google transport", () => {
 	it("maps the shared inference identity onto OpenCode headers", async () => {
 		const headersSeen: Headers[] = [];
@@ -317,6 +643,53 @@ describe("session header on the Anthropic transport", () => {
 		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("session-1");
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
 		expect(options.defaultHeaders["User-Agent"]).toBe(USER_AGENT);
+	});
+
+	it("sends the shared cache key as x-opencode-session while the Claude session header stays the child id", () => {
+		const options = buildAnthropicClientOptions({
+			model: makeOpenCodeGoHaikuModel(),
+			apiKey: "opencode_test_key",
+			sessionId: "child-1",
+			promptCacheKey: "parent:task",
+		});
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("child-1");
+	});
+
+	it("keeps the child session headers when cache retention is disabled", () => {
+		const options = buildAnthropicClientOptions({
+			model: makeOpenCodeGoHaikuModel(),
+			apiKey: "opencode_test_key",
+			sessionId: "child-1",
+			promptCacheKey: "parent:task",
+			cacheRetention: "none",
+		});
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("child-1");
+		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("child-1");
+	});
+
+	it("keeps the native Anthropic session header child-scoped on the wire", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
+			return anthropicSse();
+		};
+
+		const response = await completeSimple(
+			makeOpenCodeGoHaikuModel(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{
+				apiKey: "opencode_test_key",
+				sessionId: "child-1",
+				promptCacheKey: "parent:task",
+				fetch: fetchMock as typeof fetch,
+			},
+		);
+
+		expect(response.stopReason).toBe("stop");
+		expect(headersSeen).toHaveLength(1);
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
+		expect(headersSeen[0]?.get("X-Claude-Code-Session-Id")).toBe("child-1");
 	});
 
 	it("preserves the Claude fingerprint for OpenCode OAuth requests", () => {

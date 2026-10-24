@@ -124,7 +124,12 @@ import type {
 	ResponseStatus,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
-import { applyInferenceHeaders, applySessionHeader, setHeaderIfAbsent } from "./inference-headers";
+import {
+	applyInferenceHeaders,
+	applySessionHeader,
+	resolveOpenCodeGoCacheAffinity,
+	setHeaderIfAbsent,
+} from "./inference-headers";
 import { isValidToolCallId, transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
@@ -148,6 +153,12 @@ export interface OpenAIStrictToolsState {
 }
 
 export interface OpenAIRequestSetupModel extends OpenAIModelIdentity {
+	/**
+	 * Request adapter; feeds catalog policy resolution (the Go sibling
+	 * cache-affinity rules are all `on-api` scoped). Callers that hand a
+	 * reduced model object must preserve it or the affinity silently stays off.
+	 */
+	api?: Model["api"];
 	headers?: Record<string, string>;
 	premiumMultiplier?: number;
 	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader" | "sessionHeader">;
@@ -174,6 +185,15 @@ export interface OpenAIRequestSetupOptions {
 	};
 	sessionId?: string;
 	promptCacheSessionId?: string;
+	/**
+	 * Explicit prompt-cache identity only, never the sessionId fallback:
+	 * callers set it from the already-resolved `promptCacheSessionId` when an
+	 * explicit `promptCacheKey` was supplied, and leave it unset otherwise.
+	 * Feeds the Go sibling cache-affinity header so an ordinary conversation
+	 * id (especially one long enough to normalize to a `pc_` hash) can never
+	 * flip `x-opencode-session` on opted-in lanes.
+	 */
+	promptCacheAffinityKey?: string;
 }
 
 export interface OpenAIRequestSetup {
@@ -321,11 +341,34 @@ export function resolveOpenAIRequestSetup(
 		query = { "api-version": options.azureChatCompletions.apiVersion };
 	}
 
+	// The conversation id stays authoritative for every native session header.
+	// Verified Go sibling lanes (KDL `task-sibling-prompt-cache`) additionally
+	// share one family cache key on `x-opencode-session`: the Go gateway warms
+	// its prefix cache under that family affinity, so the header carries the
+	// same family key instead of the per-child conversation id. This is
+	// protocol-neutral — the Responses body `prompt_cache_key` applies only
+	// where supported and is not universal (Completions sends no such body
+	// field), while the family header holds the affinity on every opted-in
+	// lane. Other providers, Zen, and non-opted Go lanes keep the conversation
+	// id.
 	const sessionId = options.sessionId ?? options.promptCacheSessionId;
 	applyInferenceHeaders(headers, {
 		provider: model.provider,
 		protocol: "openai",
 		sessionId,
+		// Only an EXPLICIT prompt-cache key feeds the affinity. The shared
+		// cache id (`promptCacheSessionId`) also falls back to the sessionId
+		// normalized to the 64-char wire limit, so reusing it unconditionally
+		// would flip a long ordinary conversation id to a `pc_` hash on
+		// opted-in lanes, retention-dependently. Callers pass the resolved
+		// cache id as `promptCacheAffinityKey` only when an explicit
+		// `promptCacheKey` was supplied; that value is already retention-gated
+		// (getOpenAIPromptCacheKey resolves an explicit request retention over
+		// PI_CACHE_RETENTION). The helper only distinguishes "none", so pass an
+		// enabled retention rather than re-reading the env — a second env gate
+		// would drop the affinity for explicit short/long requests under
+		// PI_CACHE_RETENTION=none.
+		cacheAffinity: resolveOpenCodeGoCacheAffinity(model as Model, options.promptCacheAffinityKey, "short"),
 	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);

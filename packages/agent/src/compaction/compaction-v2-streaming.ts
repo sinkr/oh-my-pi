@@ -415,6 +415,9 @@ function buildCompactionV2Headers(
 						{
 							provider: model.provider,
 							id: model.id,
+							// Preserve the request adapter: the Go cache-affinity rules
+							// are on-api scoped and reject an undefined api.
+							api: model.api,
 							baseUrl: model.baseUrl,
 							headers: model.headers,
 							compat: {
@@ -422,7 +425,16 @@ function buildCompactionV2Headers(
 									model.compat && "sessionHeader" in model.compat ? model.compat.sessionHeader : undefined,
 							},
 						},
-						{ apiKey, messages: [], sessionId: request.sessionId ?? routingSessionId, promptCacheSessionId },
+						{
+							apiKey,
+							messages: [],
+							sessionId: request.sessionId ?? routingSessionId,
+							promptCacheSessionId,
+							// The family affinity key rides only an explicit
+							// prompt-cache identity; the sessionId-derived cache-id
+							// fallback never does.
+							promptCacheAffinityKey: request.promptCacheKey ? promptCacheSessionId : undefined,
+						},
 					).headers,
 				};
 	if (api === "openai-codex-responses" || model.provider === "openai-codex") {

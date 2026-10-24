@@ -1,12 +1,43 @@
 /** Shared inference request identity headers. */
 
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
+import type { CacheRetention, Model } from "../types";
+import { resolveCacheRetention } from "../utils";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
 	provider: string;
 	protocol: "anthropic" | "google" | "openai";
 	sessionId?: string;
+	/**
+	 * Shared task-sibling prompt-cache affinity (see
+	 * {@link resolveOpenCodeGoCacheAffinity}). Carried only by
+	 * `x-opencode-session` on the `opencode-go` provider; protocol-native
+	 * session headers and every other provider keep `sessionId`.
+	 */
+	cacheAffinity?: string;
+}
+
+/**
+ * Shared task-sibling prompt-cache affinity for OpenCode Go (KDL
+ * `task-sibling-prompt-cache`): sibling requests under one task warm and hit
+ * the gateway's prefix cache under one family key, so Go's session header
+ * must carry that key instead of the per-child conversation id.
+ *
+ * Only opted-in Go models sending an explicit cache key with prompt caching
+ * enabled qualify; everything else stays on the conversation id.
+ */
+export function resolveOpenCodeGoCacheAffinity(
+	model: Model,
+	promptCacheKey: string | undefined,
+	cacheRetention: CacheRetention | undefined,
+): string | undefined {
+	if (model.provider !== "opencode-go") return undefined;
+	// An empty key must never replace a known real child session header.
+	if (!promptCacheKey) return undefined;
+	if (resolveCacheRetention(cacheRetention) === "none") return undefined;
+	return resolveCatalogPolicy(model).taskSiblingPromptCache === true ? promptCacheKey : undefined;
 }
 
 /** Set a header unless the map already contains that field under any casing. */
@@ -71,7 +102,14 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 
 	if (isOpenCode) {
 		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
-		setHeader(headers, "x-opencode-session", sessionId);
+		// Go's session header doubles as the gateway's cache-affinity handle:
+		// opted-in sibling lanes (see resolveOpenCodeGoCacheAffinity) share one
+		// task cache key there; every other lane keeps the conversation id.
+		setHeader(
+			headers,
+			"x-opencode-session",
+			options.provider === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId,
+		);
 	}
 }
 

@@ -94,6 +94,63 @@ describe("task sibling prompt-cache routing", () => {
 			"explicit-parent:task",
 		],
 		["Muse nested lineage", "muse-code", "muse-spark-1.3-contributor", undefined, "root:task", "root:task:task"],
+		[
+			"Go Muse contributor sibling key",
+			"opencode-go",
+			"muse-spark-1.3-contributor",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		[
+			"Go Muse standard sibling key",
+			"opencode-go",
+			"muse-spark-1.3",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		[
+			"Go Muse 1.2 contributor sibling key",
+			"opencode-go",
+			"muse-spark-1.2-contributor",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		[
+			"Go MiMo Completions sibling key",
+			"opencode-go",
+			"mimo-v2.6-flash",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		[
+			"Go Kimi Completions sibling key",
+			"opencode-go",
+			"kimi-k2.7-code",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		[
+			"Go DeepSeek Completions sibling key",
+			"opencode-go",
+			"deepseek-v4.1-flash",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		[
+			"Go Haiku Anthropic sibling key",
+			"opencode-go",
+			"claude-haiku-5-5",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		["Go Luna keeps child keys", "opencode-go", "gpt-6-luna", "explicit-parent", "automatic-parent", undefined],
 		["Luna keeps child keys", "openai-codex", "gpt-6-luna", "explicit-parent", "automatic-parent", undefined],
 		["OpenAI keeps child keys", "openai", "gpt-5.4", undefined, undefined, undefined],
 		["Gemini omits cache keys", "google-antigravity", "gemini-3.8-flash", "explicit-parent", undefined, undefined],
@@ -113,7 +170,8 @@ describe("task sibling prompt-cache routing", () => {
 				fetch: async () =>
 					Response.json({ data: [{ id: modelId, object: "model", created: 0, owned_by: "meta" }] }),
 			});
-			if (provider === "muse-code") await modelRegistry.refreshProvider(provider, "online");
+			if (provider === "muse-code" || provider === "opencode-go")
+				await modelRegistry.refreshProvider(provider, "online");
 			const model = modelRegistry.find(provider, modelId);
 			if (!model) throw new Error(`Model missing from offline catalog fixture: ${provider}/${modelId}`);
 			const requests: Array<{
@@ -166,7 +224,7 @@ describe("task sibling prompt-cache routing", () => {
 								cacheOptions,
 								undefined,
 							).params.prompt_cache_key;
-						} else {
+						} else if (requestModel.api === "google-gemini-cli") {
 							const request = buildGeminiRequest(
 								requestModel as Model<"google-gemini-cli">,
 								context,
@@ -235,11 +293,13 @@ describe("task sibling prompt-cache routing", () => {
 				expect(requests[0]?.state).toBeInstanceOf(Map);
 				expect(requests[1]?.state).toBeInstanceOf(Map);
 				expect(requests[0]?.state).not.toBe(requests[1]?.state);
-				expect(requests.map(request => request.wireKey)).toEqual(
-					provider === "google-antigravity"
-						? [false, false]
-						: requests.map(request => expected ?? request.sessionId),
-				);
+				if (model.api !== "openai-completions" && model.api !== "anthropic-messages") {
+					expect(requests.map(request => request.wireKey)).toEqual(
+						provider === "google-antigravity"
+							? [false, false]
+							: requests.map(request => expected ?? request.sessionId),
+					);
+				}
 				if (provider === "openai" || provider === "openai-codex") {
 					const child = AgentRegistry.global()
 						.list()

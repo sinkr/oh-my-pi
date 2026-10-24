@@ -1088,6 +1088,63 @@ describe("requestCompactionV2Streaming", () => {
 
 		expect(sessionHeaders).toEqual(["session-1"]);
 	});
+	test("shares the Go sibling cache-affinity key on the compaction request", async () => {
+		const model = makeOpenAiModel({
+			provider: "opencode-go",
+			id: "muse-spark-1.2-contributor",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+		const request = buildCompactionV2Request(model, [userItem], "instructions", {
+			sessionId: "child-1",
+			promptCacheKey: "parent:task",
+		});
+		const sessionHeaders: (string | null)[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-opencode-session"));
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+
+		// The catalog policy is on-api scoped: the caller must preserve model.api
+		// or the explicit family key is silently dropped from the gateway header.
+		expect(sessionHeaders).toEqual(["parent:task"]);
+	});
+	test("keeps the child conversation id on the Go compaction request without an explicit cache key", async () => {
+		const model = makeOpenAiModel({
+			provider: "opencode-go",
+			id: "muse-spark-1.2-contributor",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+		const request = buildCompactionV2Request(model, [userItem], "instructions", { sessionId: "child-1" });
+		const sessionHeaders: (string | null)[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-opencode-session"));
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+
+		expect(sessionHeaders).toEqual(["child-1"]);
+	});
 	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
 		"retries a transient socket closure: %s",
 		async socketCloseMessage => {

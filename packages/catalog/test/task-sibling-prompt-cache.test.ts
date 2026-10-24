@@ -50,6 +50,42 @@ describe("task sibling prompt-cache opt-in", () => {
 		}
 	});
 
+	test("enables the verified Go Muse, Completions, and Anthropic lanes and no other Go or Zen route", () => {
+		const go = (id: string) => getBundledModel("opencode-go", id);
+		const enabled = [
+			"mimo-v2.6-flash",
+			"kimi-k2.7-code",
+			"deepseek-v4.1-flash",
+			"claude-haiku-5-5",
+			"muse-spark-1.3-contributor",
+			"muse-spark-1.2-contributor",
+		];
+		for (const id of enabled) {
+			expect(resolveCatalogPolicy(go(id)).taskSiblingPromptCache, id).toBe(true);
+		}
+		const unsupported: Model[] = [
+			// The excluded Luna and Argon lanes and unmeasured Go routes
+			// (including the unmeasured standard Muse 1.2 id) stay off.
+			go("gpt-6-luna"),
+			go("gemini-4-argon-contributor"),
+			go("deepseek-v4-flash"),
+			go("minimax-m2.7"),
+			go("beam-free"),
+			// Zen shares the gateway family but is not opted in.
+			getBundledModel("opencode-zen", "claude-haiku-5-5"),
+			getBundledModel("opencode-zen", "kimi-k2.7-code"),
+			getBundledModel("opencode-zen", "muse-spark-1.3-contributor-free"),
+			// Native Muse keeps only its six opted-in Spark and Wonder lanes.
+			{ ...muse, id: "muse-spark-1.2-contributor" },
+		];
+		for (const model of unsupported) {
+			expect(
+				resolveCatalogPolicy(model).taskSiblingPromptCache,
+				`${model.provider}/${model.id}/${model.api}`,
+			).not.toBe(true);
+		}
+	});
+
 	test("honors an explicitly declared backend for custom provider names", () => {
 		expect(
 			resolveCatalogPolicy({ ...muse, provider: "custom-muse", providerType: "muse-code" }).taskSiblingPromptCache,

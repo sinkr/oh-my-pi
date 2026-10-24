@@ -153,7 +153,7 @@ import {
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
-import { applyInferenceHeaders } from "./inference-headers";
+import { applyInferenceHeaders, resolveOpenCodeGoCacheAffinity } from "./inference-headers";
 import { isAnthropicMessagesModel, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
@@ -1177,6 +1177,10 @@ export type AnthropicClientOptionsArgs = {
 	fetch?: FetchImpl;
 	maxRetryDelayMs?: number;
 	sessionId?: string;
+	/** Explicit prompt-cache identity; feeds the Go sibling cache-affinity header. */
+	promptCacheKey?: string;
+	/** Requested cache retention; `"none"` suppresses the Go sibling cache affinity. */
+	cacheRetention?: CacheRetention;
 	/** Working-identity cache key for this credential+host; undefined off the Copilot path. */
 	copilotCacheKey?: string;
 	/**
@@ -2576,6 +2580,8 @@ const streamAnthropicOnce = (
 						options?.sessionId ??
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
 						options?.promptCacheKey,
+					promptCacheKey: options?.promptCacheKey,
+					cacheRetention: options?.cacheRetention,
 					disableStrictTools,
 					dropPromptCacheBetas: dropCacheControl || dropCacheControlOptions,
 				};
@@ -4214,6 +4220,8 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		isOAuth,
 		maxRetryDelayMs,
 		sessionId,
+		promptCacheKey,
+		cacheRetention,
 		disableStrictTools: disableStrictToolsOverride,
 		dropPromptCacheBetas = false,
 		copilotCacheKey,
@@ -4364,6 +4372,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		provider: model.provider,
 		protocol: "anthropic",
 		sessionId,
+		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, promptCacheKey, cacheRetention),
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {
