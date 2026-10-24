@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `exclude` to `grep()` options: glob patterns of files and folders to leave out of a directory search; a matched folder is not walked
+- Added `exclude` to `grep()` options: glob patterns of files and folders to leave out of a directory search; a matched folder is not walked ([#16920](https://github.com/can1357/oh-my-pi/pull/16920) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
