@@ -151,22 +151,19 @@ fn outside_conflict(dir: &Path, sub: Sub, operand: Option<&str>) -> Option<Refus
 	let Ok(Some(repo)) = GitRepo::discover(dir) else {
 		return Some(Refusal::OutsideConflict(sub));
 	};
-	if operand.is_some_and(|operand| !names_path(&repo, operand)) {
+	if operand.is_some_and(|operand| !names_path(&repo, dir, operand)) {
 		return Some(Refusal::BranchMove(sub));
 	}
 	(!repo.operation_in_progress().unwrap_or(false)).then_some(Refusal::OutsideConflict(sub))
 }
 
-/// Whether `checkout <operand>` restores a path: the operand is known to name
-/// no revision, and no remote-tracking branch git would create a local branch
-/// from.
-fn names_path(repo: &GitRepo, operand: &str) -> bool {
+/// Whether `checkout <operand>`, run in `dir`, restores a path: the operand
+/// names no revision, and it is a glob or a file that exists there. Git takes
+/// any other name as a branch to create from a remote-tracking one, through
+/// whatever fetch refspec maps it, or fails on its own.
+fn names_path(repo: &GitRepo, dir: &Path, operand: &str) -> bool {
 	matches!(repo.resolve_ref(operand), Ok(None))
-		&& repo.remote_list().is_ok_and(|remotes| {
-			remotes.iter().all(|remote| {
-				matches!(repo.resolve_ref(&format!("refs/remotes/{remote}/{operand}")), Ok(None))
-			})
-		})
+		&& (operand.contains(['*', '?', '[', '\\']) || dir.join(operand).symlink_metadata().is_ok())
 }
 
 /// A git subcommand the guard judges.
@@ -451,20 +448,19 @@ fn classify(sub: Sub, args: &[String]) -> Verdict<'_> {
 /// and no pathspec. With paths, a pathspec file, or `--patch` it rewrites index
 /// entries only.
 fn classify_reset<'a>(args: &[Arg<'a>]) -> Verdict<'a> {
+	let flags = Flags::of(Sub::Reset, args);
 	let mut operands = Vec::new();
-	let (mut hard, mut index_only) = (false, false);
+	let mut pathspec = false;
 	for arg in args {
 		match *arg {
-			Arg::Long("hard") => hard = true,
-			Arg::Long("patch" | "pathspec-from-file") | Arg::Short('p') | Arg::Pathspec(_) => {
-				index_only = true;
-			},
+			Arg::Pathspec(_) => pathspec = true,
 			Arg::Operand(operand) => operands.push(operand),
 			Arg::Long(_) | Arg::Negated(_) | Arg::Short(_) => {},
 		}
 	}
+	let index_only = pathspec || flags.any(&["patch", "pathspec-from-file"]);
 	match operands[..] {
-		_ if hard => Verdict::Destructive,
+		_ if flags.on("hard") => Verdict::Destructive,
 		[rev] if !index_only && !matches!(rev, "HEAD" | "@") => Verdict::ResetTo(rev),
 		_ => Verdict::Allow,
 	}
@@ -477,40 +473,32 @@ fn classify_tree_write<'a>(sub: Sub, args: &[Arg<'a>]) -> Verdict<'a> {
 	if sub == Sub::Checkout && args.is_empty() {
 		return Verdict::Allow;
 	}
+	let flags = Flags::of(sub, args);
 	let mut operands = Vec::new();
-	let (mut staged, mut worktree, mut forced, mut whole_tree) = (false, false, false, false);
-	let (mut branch, mut paths) = (sub == Sub::Switch, sub == Sub::Restore);
+	let (mut new_branch, mut pathspec, mut whole_tree) = (false, false, false);
 	for arg in args {
 		match (sub, *arg) {
-			(Sub::Checkout | Sub::Switch, Arg::Short('f') | Arg::Long("force"))
-			| (Sub::Switch, Arg::Long("discard-changes")) => forced = true,
-			(Sub::Restore, Arg::Short('S') | Arg::Long("staged")) => staged = true,
-			(Sub::Restore, Arg::Short('W') | Arg::Long("worktree")) => worktree = true,
-			(
-				Sub::Checkout,
-				Arg::Short('b' | 'B' | 't' | 'd') | Arg::Long("orphan" | "detach" | "track"),
-			) => {
-				branch = true;
-			},
-			(
-				Sub::Checkout,
-				Arg::Short('p') | Arg::Long("ours" | "theirs" | "patch" | "pathspec-from-file"),
-			) => paths = true,
+			(Sub::Checkout, Arg::Short('b' | 'B')) => new_branch = true,
 			(Sub::Checkout, Arg::Operand(spec)) => {
 				// `-` is the previous branch.
-				branch |= spec == "-";
+				new_branch |= spec == "-";
 				whole_tree |= is_whole_tree(spec);
 				operands.push(spec);
 			},
 			(Sub::Checkout | Sub::Restore, Arg::Pathspec(spec))
 			| (Sub::Restore, Arg::Operand(spec)) => {
 				whole_tree |= is_whole_tree(spec);
-				paths = true;
+				pathspec = true;
 			},
 			_ => {},
 		}
 	}
-	if staged && !worktree {
+	let forced = flags.on("force") || (sub == Sub::Switch && flags.on("discard-changes"));
+	let branch = sub == Sub::Switch || new_branch || flags.any(&["orphan", "detach", "track"]);
+	let paths = sub == Sub::Restore
+		|| pathspec
+		|| flags.any(&["ours", "theirs", "patch", "pathspec-from-file"]);
+	if flags.on("staged") && !flags.on("worktree") {
 		Verdict::Allow
 	} else if forced || whole_tree {
 		Verdict::Destructive
@@ -522,6 +510,41 @@ fn classify_tree_write<'a>(sub: Sub, args: &[Arg<'a>]) -> Verdict<'a> {
 		Verdict::CheckoutOne(operand)
 	} else {
 		Verdict::ConflictOnly
+	}
+}
+
+/// A subcommand's flags as git reads them: of `--name`, `--no-name`, and the
+/// short form, the last one given wins.
+struct Flags<'a>(Vec<(&'a str, bool)>);
+
+impl<'a> Flags<'a> {
+	fn of(sub: Sub, args: &[Arg<'a>]) -> Self {
+		Self(
+			args
+				.iter()
+				.filter_map(|arg| match (sub, *arg) {
+					(_, Arg::Long(name)) => Some((name, true)),
+					(_, Arg::Negated(name)) => Some((name, false)),
+					(Sub::Reset | Sub::Checkout | Sub::Restore, Arg::Short('p')) => {
+						Some(("patch", true))
+					},
+					(Sub::Checkout | Sub::Switch, Arg::Short('f')) => Some(("force", true)),
+					(Sub::Checkout | Sub::Switch, Arg::Short('d')) => Some(("detach", true)),
+					(Sub::Checkout | Sub::Switch, Arg::Short('t')) => Some(("track", true)),
+					(Sub::Restore, Arg::Short('S')) => Some(("staged", true)),
+					(Sub::Restore, Arg::Short('W')) => Some(("worktree", true)),
+					_ => None,
+				})
+				.collect(),
+		)
+	}
+
+	fn on(&self, name: &str) -> bool {
+		self.0.iter().rev().find(|(flag, _)| *flag == name).is_some_and(|&(_, on)| on)
+	}
+
+	fn any(&self, names: &[&str]) -> bool {
+		names.iter().any(|name| self.on(name))
 	}
 }
 
@@ -574,9 +597,9 @@ impl Refusal {
 				"git {} to another branch or commit is blocked by workspace policy — do not work \
 				 around it.\nThis is a SHARED workspace; switching branches moves HEAD and the \
 				 working tree under other concurrent agents. A merge or rebase in progress does not \
-				 make it safe: while resolving conflicts only targeted git checkout/restore \
-				 --ours|--theirs <path> run.\nInspect other revisions read-only with git show \
-				 <rev>:<path> / git diff / git log.\n",
+				 make it safe. While resolving conflicts, git checkout -- <path> and git restore \
+				 <path> still run; put -- before a path that shares its name with a branch.\nInspect \
+				 other revisions read-only with git show <rev>:<path> / git diff / git log.\n",
 				sub.name()
 			),
 			Self::OutsideConflict(sub) => format!(
@@ -641,6 +664,9 @@ mod tests {
 			// Long options are read by unique abbreviation, as git reads them.
 			("reset --ha", "Destructive"),
 			("reset --so main", "ResetTo(\"main\")"),
+			// Of `--x` and `--no-x`, the last one wins.
+			("reset --patc --no-patc HEAD~1", "ResetTo(\"HEAD~1\")"),
+			("reset -p --no-patch main", "ResetTo(\"main\")"),
 			("checkout", "Allow"),
 			// One operand is a branch or a path; the repository decides.
 			("checkout main", "CheckoutOne(\"main\")"),
@@ -664,6 +690,10 @@ mod tests {
 			("restore tracked.txt", "ConflictOnly"),
 			("restore --staged .", "Allow"),
 			("restore --stag tracked.txt", "Allow"),
+			("restore --staged --no-staged tracked.txt", "ConflictOnly"),
+			("checkout -d --no-detach tracked.txt", "CheckoutOne(\"tracked.txt\")"),
+			("checkout -p --no-patch main", "CheckoutOne(\"main\")"),
+			("switch -f --no-force main", "BranchMove"),
 			("restore -SW tracked.txt", "ConflictOnly"),
 			("restore --staged --worktree *", "Destructive"),
 			// `--source`'s value is a tree, not a pathspec.
@@ -794,6 +824,31 @@ mod tests {
 		git(&repo, &["add", "tracked.txt"]);
 		std::fs::write(repo.join("tracked.txt"), "scratch\n").expect("edit");
 		let (code, output) = guarded(&repo, "git restore tracked.txt").await;
+		assert_eq!(code, Some(0), "{output}");
+		assert_eq!(std::fs::read_to_string(repo.join("tracked.txt")).expect("read"), "theirs\n");
+
+		// Git switches for a merge base, a branch any fetch refspec maps, and a
+		// patch flag taken back; a file sharing a remote branch's name is still
+		// a path.
+		let fetch = "+refs/heads/*:refs/custom/origin/*";
+		git(&repo, &["config", "--add", "remote.origin.fetch", fetch]);
+		git(&repo, &["update-ref", "refs/custom/origin/custom", "HEAD"]);
+		for command in [
+			"git checkout -q main...side",
+			"git checkout -q main...",
+			"git checkout -q custom",
+			"git checkout -q -p --no-patch side",
+		] {
+			let (code, output) = guarded(&repo, command).await;
+			assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{command}: {output}");
+			assert!(output.contains("to another branch or commit is blocked"), "{command}: {output}");
+		}
+		assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+		assert_eq!(git(&repo, &["symbolic-ref", "HEAD"]), "refs/heads/main\n");
+		assert!(repo.join(".git/MERGE_HEAD").exists());
+		git(&repo, &["update-ref", "refs/remotes/origin/tracked.txt", "HEAD"]);
+		std::fs::write(repo.join("tracked.txt"), "scratch\n").expect("edit");
+		let (code, output) = guarded(&repo, "git checkout --no-guess tracked.txt").await;
 		assert_eq!(code, Some(0), "{output}");
 		assert_eq!(std::fs::read_to_string(repo.join("tracked.txt")).expect("read"), "theirs\n");
 	}
