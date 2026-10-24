@@ -118,26 +118,23 @@ fn resolve_by<'a>(
 		return unique(first, exact.next(), input).map(Some);
 	}
 	let folded = input.to_lowercase();
-	let names: Vec<&Application> = apps
-		.iter()
-		.filter(|app| app.name.to_lowercase() == folded)
-		.collect();
-	let Some((&first, rest)) = names.split_first() else {
+	let mut names = apps.iter().filter(|app| app.name.to_lowercase() == folded);
+	let Some(first) = names.next() else {
 		return Ok(None);
 	};
-	if rest.is_empty() {
+	let Some(second) = names.next() else {
 		return Ok(Some(first));
-	}
-	let regular: Vec<&Application> = names
-		.iter()
-		.copied()
-		.filter(|app| !is_helper(app))
-		.collect();
-	match regular[..] {
-		[only] => Ok(Some(only)),
+	};
+	// Bundle flags are read only once a name ties, and only for its matches.
+	let mut regular = [first, second]
+		.into_iter()
+		.chain(names)
+		.filter(|app| !is_helper(app));
+	match (regular.next(), regular.next()) {
+		(Some(only), None) => Ok(Some(only)),
 		// The error names two apps the caller could mean, never a helper.
-		[one, other, ..] => unique(one, Some(other), input).map(Some),
-		[] => unique(first, rest.first().copied(), input).map(Some),
+		(Some(one), Some(other)) => unique(one, Some(other), input).map(Some),
+		(None, _) => unique(first, Some(second), input).map(Some),
 	}
 }
 
