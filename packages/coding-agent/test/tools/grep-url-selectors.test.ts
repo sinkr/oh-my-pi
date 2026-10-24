@@ -76,15 +76,6 @@ describe("GrepTool external URL selectors", () => {
 		);
 	});
 
-	it("leaves out a fetched URL a `!glob` exclusion names, matching its URL rather than the fetched copy", async () => {
-		const tool = new GrepTool(createSession());
-
-		const kept = await tool.execute("url-kept", { pattern: "needle", path: `${url};!other` });
-		expect(getResultText(kept)).toContain("needle");
-		const excluded = await tool.execute("url-excluded", { pattern: "needle", path: `${url};!page` });
-		expect(getResultText(excluded)).not.toContain("needle");
-	});
-
 	it("keeps a line range that precedes :conflicts as a match filter", async () => {
 		const tool = new GrepTool(createSession());
 

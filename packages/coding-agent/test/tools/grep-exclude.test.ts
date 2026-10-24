@@ -92,12 +92,14 @@ describe("grep `!glob` exclusions", () => {
 		await expect(tool.execute("dangling", { pattern: "needle", path: "!link" })).rejects.toThrow("!link");
 	});
 
-	it("searches nothing under a root an exclusion names", async () => {
-		expect(await files({ path: "gen;!./gen" })).toEqual([]);
-		expect(await files({ path: "vendor;scripts;!vendor" })).toEqual(["scripts/release.ts"]);
-		expect(await files({ path: "src/app.ts;scripts;!*.ts" })).toEqual([]);
-		expect(await files({ path: "src/app.ts;src/legacy/old.ts;!legacy" })).toEqual(["src/app.ts"]);
-		expect(await files({ path: "src/legacy;scripts;!./src" })).toEqual(["scripts/release.ts"]);
+	it("filters what it walks below a named path, never the named path itself, as `rg -g '!…'` does", async () => {
+		expect(await files({ path: "vendor/pkg0;!vendor" })).toEqual(["vendor/pkg0/index.js"]);
+		expect(await files({ path: "src/app.test.ts;!*.test.ts" })).toEqual(["src/app.test.ts"]);
+		expect(await files({ path: "src;!src/*.test.ts" })).toEqual([
+			"src/app.ts",
+			"src/deep/legacy/kept.ts",
+			"src/legacy/old.ts",
+		]);
 	});
 
 	it("rebases Windows separators and keeps a child folder whose name starts with `..`", async () => {
@@ -132,6 +134,10 @@ describe("grep `!glob` exclusions", () => {
 			expect(targets("!vendor gen-missing")).toBeUndefined();
 			// A public URL keys nothing and the search never walks cwd, so cwd is not keyed for it.
 			expect(targets("https://example.com/a.txt;!*.map")).toBeUndefined();
+			// A real file whose name holds `;!` is searched whole, so it keys itself.
+			await Bun.write(path.join(cwd, "report;!draft"), "needle\n");
+			expect(targets("report;!draft")).toHaveLength(1);
+			expect(targets("report;!draft")?.[0]).toContain("report;!draft");
 		} finally {
 			await removeWithRetries(outside);
 		}

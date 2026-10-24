@@ -710,6 +710,8 @@ export async function splitDelimitedPathEntry(
 	options: {
 		splitter?: PathEntrySplitter;
 		routedUrlPredicate?: (entry: string) => boolean;
+		/** Let `!glob` exclusion parts sit beside URLs in a `;` list (grep's path syntax). */
+		exclusionParts?: boolean;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
@@ -718,7 +720,9 @@ export async function splitDelimitedPathEntry(
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
 		const routed = options.routedUrlPredicate;
-		return parts?.every(part => routed(part) || isExclusionPart(part)) ? parts : null;
+		return parts?.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
+			? parts
+			: null;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
 		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
@@ -728,7 +732,9 @@ export async function splitDelimitedPathEntry(
 		// — a URL whose own path contains `;` stays whole, and a single URL ending
 		// in `;` (`local://report;`) names one resource.
 		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts && parts.length > 1 && parts.every(part => isInternalUrlPath(part) || isExclusionPart(part))
+		return parts &&
+			parts.length > 1 &&
+			parts.every(part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)))
 			? parts
 			: null;
 	}
@@ -795,7 +801,7 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
-	options: { splitter?: PathEntrySplitter } = {},
+	options: { splitter?: PathEntrySplitter; exclusionParts?: boolean } = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];
 	for (const entry of entries) {

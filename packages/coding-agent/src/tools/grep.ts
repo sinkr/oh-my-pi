@@ -528,50 +528,6 @@ function exclusionsForRoot(patterns: readonly string[], cwd: string, root: strin
 	return rebased.length > 0 ? rebased : undefined;
 }
 
-/**
- * Whether an exclusion matches a search entry as the caller named it, before it
- * resolves or materializes: native grep matches exclusions against entries below
- * a directory root and searches a file root (a fetched URL, an archive member)
- * directly, so such an entry is dropped instead (`gen;!./gen`, `vendor;!vendor`,
- * `src/app.ts;!*.ts`, `https://host/a.txt;!a.txt`, `bundle.zip:src/a.ts;!a.ts`).
- * An anchored pattern compares resolved paths; any other is matched, as native
- * matches it, against each leading run of the entry's names: its path below cwd
- * (its own name outside cwd), a URL's host and path, an archive's member path.
- */
-function exclusionsCoverEntry(patterns: readonly string[], cwd: string, entry: string): boolean {
-	if (patterns.length === 0) return false;
-	const scheme = /^[a-z][a-z0-9+.-]+:\/\/?/i.exec(entry);
-	const named = scheme ? splitPathAndSel(entry).path : splitPathAndSelPreferringLiteralSync(entry, cwd).path;
-	let absolute: string | undefined;
-	let names: string;
-	if (scheme) {
-		names = named.slice(scheme[0].length);
-	} else {
-		try {
-			absolute = resolveToCwd(named, cwd);
-		} catch {
-			return false;
-		}
-		names = relativeInside(cwd, absolute) ?? path.basename(absolute);
-	}
-	const segments = names.split(/[/:]/).filter(segment => segment.length > 0);
-	const prefixes = segments.map((_, index) => segments.slice(0, index + 1).join("/"));
-	return patterns.some(raw => {
-		const pattern = normalizeExclusion(raw);
-		if (!pattern) return false;
-		const target = anchoredExclusionPath(pattern, cwd);
-		if (target === undefined) {
-			const glob = new Bun.Glob(pattern.startsWith("**") ? pattern : `**/${pattern}`);
-			return prefixes.some(prefix => glob.match(prefix));
-		}
-		return (
-			typeof target === "string" &&
-			absolute !== undefined &&
-			(target === absolute || relativeInside(target, absolute) !== undefined)
-		);
-	});
-}
-
 type SearchParams = typeof searchSchema.infer;
 
 /**
@@ -608,19 +564,33 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
 		const cwd = this.session.cwd;
 		const splitBase = (entry: string) => parseSearchPath(splitPathAndSel(entry).path).basePath;
-		// `!glob` exclusions search nothing, so a list holding them keys its other parts, split on the
-		// delimiters execution fans lists out on; a real path starting with `!` is no exclusion and keys
-		// itself. When no part is left to search, the search runs in cwd, so cwd is keyed.
-		let hasExclusion = false;
-		const roots = toPathList(a?.path ?? a?.paths).flatMap(root => {
-			const candidates = approvalRootCandidates(normalizePathLikeInput(root));
-			const parts = candidates.length > 1 ? candidates.slice(1) : candidates;
-			const kept = parts.filter(part => !isExclusionEntry(part, cwd));
-			if (kept.length === parts.length) return [root];
-			hasExclusion = true;
-			return kept;
-		});
-		return searchApprovalCacheTargets(hasExclusion && roots.length === 0 ? ["."] : roots, cwd, splitBase);
+		const roots = toPathList(a?.path ?? a?.paths);
+		const exclusionParts = (list: string) =>
+			approvalRootCandidates(list)
+				.slice(1)
+				.filter(part => isExclusionEntry(part, cwd));
+		// `!glob` exclusions search nothing and key nothing. A whole list holding one keys itself only when
+		// it is a real path (execution then searches it literally); its other parts key as usual.
+		const skipCandidate = (candidate: string, wholeList: boolean) =>
+			wholeList
+				? exclusionParts(candidate).length > 0 &&
+					probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(candidate, cwd).path, cwd) === "missing"
+				: isExclusionEntry(candidate, cwd);
+		// Execution searches cwd when every entry is an exclusion, so cwd is keyed then.
+		const onlyExclusions =
+			roots.length > 0 &&
+			roots.every(root => {
+				const list = normalizePathLikeInput(root);
+				const parts = approvalRootCandidates(list);
+				return parts.length > 1 ? exclusionParts(list).length === parts.length - 1 : isExclusionEntry(list, cwd);
+			});
+		return searchApprovalCacheTargets(
+			onlyExclusions ? [...roots, "."] : roots,
+			cwd,
+			splitBase,
+			undefined,
+			skipCandidate,
+		);
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
@@ -699,18 +669,17 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const scopedPaths = toPathList(rawPath);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
-			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd);
+			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+				exclusionParts: true,
+			});
 			// `!glob` entries exclude; the rest are what to search (all of cwd when only exclusions were given).
 			// A file or folder whose name really starts with `!` is still searched.
 			const exclusions: string[] = [];
-			const namedEntries: string[] = [];
+			const searchEntries: string[] = [];
 			for (const entry of expandedEntries) {
 				if (isExclusionEntry(entry, this.session.cwd)) exclusions.push(entry.slice(1));
-				else namedEntries.push(entry);
+				else searchEntries.push(entry);
 			}
-			const searchEntries = namedEntries.filter(entry => !exclusionsCoverEntry(exclusions, this.session.cwd, entry));
-			// Every named entry excluded: nothing is searched, not cwd.
-			const searchesNothing = namedEntries.length > 0 && searchEntries.length === 0;
 			const rawEntries = searchEntries.length > 0 ? searchEntries : ["."];
 			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			const resolveContext = sessionResolveContext(this.session, { signal });
@@ -914,7 +883,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							filesSearched: exactFilePaths ? exactFilePaths.length : filesSearched,
 							limitReached,
 						};
-					} else if (!searchesNothing) {
+					} else {
 						result = await grep(
 							{
 								pattern: normalizedPattern,
