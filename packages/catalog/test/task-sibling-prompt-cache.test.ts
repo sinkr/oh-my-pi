@@ -65,12 +65,19 @@ describe("task sibling prompt-cache opt-in", () => {
 		}
 		const unsupported: Model[] = [
 			// The excluded Luna and Argon lanes and unmeasured Go routes
-			// (including the unmeasured standard Muse 1.2 id) stay off.
+			// stay off, as do the standard Muse ids: only Contributor 1.3
+			// and Contributor 1.2 were exactly lane-verified, so standard
+			// Muse 1.3 stays off until verified and the unmeasured standard
+			// Muse 1.2 id never came on.
 			go("gpt-6-luna"),
 			go("gemini-4-argon-contributor"),
 			go("deepseek-v4-flash"),
 			go("minimax-m2.7"),
 			go("beam-free"),
+			// Gateway-only standard ids ship no bundled row; the verified
+			// Contributor sibling supplies the wire facts.
+			{ ...go("muse-spark-1.3-contributor"), id: "muse-spark-1.3" },
+			{ ...go("muse-spark-1.2-contributor"), id: "muse-spark-1.2" },
 			// Zen shares the gateway family but is not opted in.
 			getBundledModel("opencode-zen", "claude-haiku-5-5"),
 			getBundledModel("opencode-zen", "kimi-k2.7-code"),

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { completeSimple, stream } from "@oh-my-pi/pi-ai";
 import { buildAnthropicClientOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { normalizeOpenAIPromptCacheKey, resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { Model } from "@oh-my-pi/pi-ai/types";
+import {
+	normalizeOpenAIPromptCacheKey,
+	resolveOpenAIRequestSetup,
+	type OpenAIRequestSetupModel,
+} from "@oh-my-pi/pi-ai/providers/openai-shared";
+import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
@@ -13,8 +17,10 @@ const OPENCODE_SESSION_HEADER = "x-opencode-session";
 const OPENCODE_GO_COMPLETIONS_MODEL = {
 	provider: "opencode-go",
 	id: "kimi-k2.7-code",
+	api: "openai-completions",
+	reasoning: true,
 	baseUrl: "https://opencode.ai/zen/go/v1",
-};
+} as const;
 
 function chatSse(): Response {
 	const chunk = (delta: unknown, finishReason: string | null) =>
@@ -96,11 +102,11 @@ function makeOpenCodeGoLunaModel(): Model<"openai-responses"> {
 	});
 }
 
-function makeOpenCodeGoMuseModel(id = "muse-spark-1.3"): Model<"openai-responses"> {
+function makeOpenCodeGoMuseModel(id = "muse-spark-1.3-contributor"): Model<"openai-responses"> {
 	return buildModel({
 		provider: "opencode-go",
 		id,
-		name: id === "muse-spark-1.3" ? "Muse Spark 1.3" : "Muse Spark 1.2",
+		name: id.startsWith("muse-spark-1.3") ? "Muse Spark 1.3" : "Muse Spark 1.2",
 		api: "openai-responses",
 		baseUrl: "https://opencode.ai/zen/go/v1",
 		reasoning: true,
@@ -266,10 +272,11 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 	});
 
 	it("sends session_id and x-client-request-id on OpenAI requests", () => {
-		const setup = resolveOpenAIRequestSetup(
-			{ provider: "openai", id: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
-			{ apiKey: "key", messages: [], sessionId: "session-1" },
-		);
+		const setup = resolveOpenAIRequestSetup(makeOpenAICompletionsModel(), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "session-1",
+		});
 		expect(setup.headers.session_id).toBe("session-1");
 		expect(setup.headers["x-client-request-id"]).toBe("session-1");
 		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBeUndefined();
@@ -380,7 +387,30 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 });
 
 describe("Go sibling prompt-cache wire affinity", () => {
-	it.each(["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.2-contributor"])(
+	// Compile regression (PR #16988 R2): the Go sibling rules are `on-api`
+	// scoped, so a reduced request model must DECLARE its request adapter —
+	// while `api` was optional a caller could omit it, typecheck clean, and
+	// silently lose the family header for a family request. `Api`-required
+	// collapses this conditional to `never` in that state, so the assignment
+	// below is a compile error exactly until the typed boundary enforces `api`.
+	const _requiresApi: OpenAIRequestSetupModel extends { api: Api } ? true : never = true;
+	void _requiresApi;
+
+	it("routes the family key from a reduced model that carries the request adapter", () => {
+		const setup = resolveOpenAIRequestSetup(
+			{
+				provider: "opencode-go",
+				id: "muse-spark-1.3-contributor",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				api: "openai-responses",
+				reasoning: true,
+			},
+			{ apiKey: "key", messages: [], sessionId: "child-A", promptCacheAffinityKey: "parent:task" },
+		);
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+	});
+
+	it.each(["muse-spark-1.3-contributor", "muse-spark-1.2-contributor"])(
 		"sends the shared task cache key as the OpenCode session header for %s",
 		id => {
 			const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel(id), {
@@ -392,6 +422,19 @@ describe("Go sibling prompt-cache wire affinity", () => {
 			expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
 		},
 	);
+
+	it("keeps the child conversation id on the unverified standard Go Muse 1.3 lane", () => {
+		// Standard `muse-spark-1.3` was never exactly lane-verified; only the
+		// Contributor 1.3/1.2 siblings carry a measured opt-in, so an explicit
+		// family key must never flip the header on the standard lane.
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel("muse-spark-1.3"), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "child-1",
+			promptCacheAffinityKey: "parent:task",
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("child-1");
+	});
 
 	it("keeps the child conversation id when the shared cache key is absent", () => {
 		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel(), {
@@ -597,10 +640,12 @@ describe("Go sibling prompt-cache wire affinity", () => {
 	});
 
 	it("leaves non-Go providers on the conversation session id", () => {
-		const setup = resolveOpenAIRequestSetup(
-			{ provider: "openai", id: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
-			{ apiKey: "key", messages: [], sessionId: "conversation", promptCacheSessionId: "shared-cache" },
-		);
+		const setup = resolveOpenAIRequestSetup(makeOpenAICompletionsModel(), {
+			apiKey: "key",
+			messages: [],
+			sessionId: "conversation",
+			promptCacheSessionId: "shared-cache",
+		});
 		expect(setup.headers.session_id).toBe("conversation");
 		expect(setup.headers["x-opencode-session"]).toBeUndefined();
 	});

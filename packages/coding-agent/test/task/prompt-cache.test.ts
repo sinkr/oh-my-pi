@@ -103,12 +103,15 @@ describe("task sibling prompt-cache routing", () => {
 			"parent-provider-lineage:task",
 		],
 		[
-			"Go Muse standard sibling key",
+			// The standard Go Muse 1.3 id was never exactly lane-verified;
+			// the opt-in covers Contributor 1.3 only, so a standard-id child
+			// keeps its own native session identity on the wire.
+			"Go Muse standard keeps child keys",
 			"opencode-go",
 			"muse-spark-1.3",
 			undefined,
 			undefined,
-			"parent-provider-lineage:task",
+			undefined,
 		],
 		[
 			"Go Muse 1.2 contributor sibling key",

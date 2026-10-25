@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Remote compaction requests now carry the compaction model's API, so provider request policy is chosen from the model actually used ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+
 ### Fixed
 
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))

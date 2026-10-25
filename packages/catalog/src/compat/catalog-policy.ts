@@ -1,5 +1,5 @@
-import { toModelSpec } from "../provider-models/bundled-references";
-import type { Model } from "../types";
+import { withoutUnverifiedThinking } from "../model-thinking";
+import type { CatalogPolicyInputs } from "../types";
 import { resolveCatalogAxes } from "./resolve";
 
 /**
@@ -17,11 +17,11 @@ const CATALOG_POLICY_CACHE_MAX = 8192;
  * memoized per distinct model. Frozen: the bag is shared across callers, so it
  * must stay read-only — extract the value you need rather than handing it on.
  */
-export function resolveCatalogPolicy(model: Model): Readonly<Record<string, unknown>> {
+export function resolveCatalogPolicy(model: CatalogPolicyInputs): Readonly<Record<string, unknown>> {
 	const key = `${model.provider}\u0000${model.providerType ?? ""}\u0000${model.api}\u0000${model.id}\u0000${model.reasoning ? 1 : 0}`;
 	const cached = catalogPolicyCache.get(key);
 	if (cached !== undefined) return cached;
-	const policy = Object.freeze({ ...resolveCatalogAxes(toModelSpec(model)) });
+	const policy = Object.freeze({ ...resolveCatalogAxes(withoutUnverifiedThinking(model)) });
 	if (catalogPolicyCache.size >= CATALOG_POLICY_CACHE_MAX) catalogPolicyCache.clear();
 	catalogPolicyCache.set(key, policy);
 	return policy;

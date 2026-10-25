@@ -13,10 +13,12 @@ provider "opencode-go" {
 		// distinct child session ids (2026-10-22, Spark 1.3 Contributor and
 		// Spark 1.2 Contributor both measured the same 2/2-vs-0/2 pattern).
 		// Same shared-prefix prompt_cache_key routing as native muse-code;
-		// the opt-in lists exact ids only — the standard Spark 1.3 variant
-		// shares this scope following maintainer guidance, and the unmeasured
-		// standard Spark 1.2 id stays off.
-		models "muse-spark-1.3" "muse-spark-1.3-contributor" "muse-spark-1.2-contributor" {
+		// the opt-in lists exact verified ids only. The standard Spark 1.3
+		// variant was never exactly lane-verified — only Contributor 1.3
+		// and Contributor 1.2 measured the 2/2-vs-0/2 pattern — so it stays
+		// off until verified, and the unmeasured standard Spark 1.2 id
+		// likewise stays off.
+		models "muse-spark-1.3-contributor" "muse-spark-1.2-contributor" {
 			task-sibling-prompt-cache #true
 		}
 	}

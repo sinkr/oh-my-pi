@@ -415,9 +415,15 @@ function buildCompactionV2Headers(
 						{
 							provider: model.provider,
 							id: model.id,
-							// Preserve the request adapter: the Go cache-affinity rules
-							// are on-api scoped and reject an undefined api.
+							// The request adapter plus every fact the catalog policy
+							// cascade reads: the Go cache-affinity rules are `on-api`
+							// scoped, so a reduced projection that drops them silently
+							// disables the family header.
 							api: model.api,
+							providerType: model.providerType,
+							reasoning: model.reasoning,
+							requestModelId: model.requestModelId,
+							thinking: model.thinking,
 							baseUrl: model.baseUrl,
 							headers: model.headers,
 							compat: {

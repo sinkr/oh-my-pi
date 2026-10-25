@@ -1,8 +1,9 @@
 /** Shared inference request identity headers. */
 
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
-import type { CacheRetention, Model } from "../types";
+import type { CacheRetention } from "../types";
 import { resolveCacheRetention } from "../utils";
 
 /** Options controlling provider and protocol inference headers. */
@@ -29,7 +30,7 @@ export interface InferenceHeaderOptions {
  * enabled qualify; everything else stays on the conversation id.
  */
 export function resolveOpenCodeGoCacheAffinity(
-	model: Model,
+	model: CatalogPolicyInputs,
 	promptCacheKey: string | undefined,
 	cacheRetention: CacheRetention | undefined,
 ): string | undefined {

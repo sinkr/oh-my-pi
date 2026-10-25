@@ -1830,3 +1830,15 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }
+
+/**
+ * The model facts the catalog policy cascade reads: the resolve-target inputs
+ * (`providerType ?? provider`, the request adapter, the wire model id, the
+ * reasoning flag) plus the unverified-thinking correction applied before the
+ * cascade. Callers holding a reduced model view — request adapters that only
+ * need policy — supply exactly these instead of asserting a full `Model`.
+ */
+export type CatalogPolicyInputs = Pick<
+	ModelSpec<Api>,
+	"provider" | "providerType" | "api" | "id" | "reasoning" | "requestModelId" | "thinking"
+>;
