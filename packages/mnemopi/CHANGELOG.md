@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed local embeddings using one spinning CPU thread per core, so a single recall query cost several CPU-seconds on a many-core machine.
+
 ## [18.11.2] - 2026-10-16
 
 ### Fixed
