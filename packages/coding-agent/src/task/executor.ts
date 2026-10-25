@@ -4724,16 +4724,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				);
 				({ session } = await awaitAbortable(sessionPromise));
 				if (preparedSession) untrackedSession = session;
-				// Seed the sibling family candidate only now that the child's actual
-				// model is known (deferred pattern/auth-fallback resolution finished
-				// inside createAgentSession). An ineligible initial model keeps its
-				// default wire routing and leaves any stored header candidate intact;
-				// request-time policy checks still gate every use of the header.
-				// An explicitly empty parent lineage derives no candidate: the string
-				// build would yield ":<agent>" and coalesce every empty-lineage parent
-				// onto one family, so the child keeps its own wire session identity.
-				// Nonempty opaque keys pass through untouched (no trimming).
+				// Stash the sibling family candidate as soon as the child session
+				// exists, independent of the initial model: deferred pattern/auth
+				// fallback resolution has finished inside createAgentSession, and a
+				// later runtime model change (the retry-fallback walk) must find the
+				// candidate at its first opted-in consumer request. Consumption stays
+				// gated per request by the policy check in getPromptCacheKeyForModel,
+				// so an ineligible initial model keeps its default wire routing; the
+				// stash is session-scoped and never persisted, so forks, moves, and
+				// resets start with a fresh identity. The persisted header copy is
+				// only seeded once the child's actual model opts in, preserving
+				// fork/provider lineage for ineligible children. An explicitly empty
+				// parent lineage derives no candidate: the string build would yield
+				// ":<agent>" and coalesce every empty-lineage parent onto one family,
+				// so the child keeps its own wire session identity. Nonempty opaque
+				// keys pass through untouched (no trimming).
 				if (options.parentPromptCacheKey) {
+					sessionManager.setTaskSiblingCandidate(`${options.parentPromptCacheKey}:${agent.name}`);
 					const childModel = session.agent.state.model;
 					if (childModel && resolveCatalogPolicy(childModel).taskSiblingPromptCache === true) {
 						await sessionManager.setTaskPromptCacheKey(`${options.parentPromptCacheKey}:${agent.name}`);

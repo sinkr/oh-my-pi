@@ -566,6 +566,197 @@ describe("task sibling prompt-cache routing", () => {
 		}
 	});
 
+	// The executor seeds the sibling family candidate from the nonempty parent
+	// lineage once the child session exists; the per-request policy gate then
+	// decides whether a given request uses it. A child that starts on an
+	// unopted lane and later switches to an opted Go lane (the runtime retry
+	// fallback's model change after creation) must find the candidate at the
+	// first opted-in consumer request, while: ineligible initial requests stay
+	// child-scoped, siblings keep isolated conversation and response state, an
+	// explicit session key keeps priority, and an explicitly empty parent
+	// lineage still derives no candidate across the switch.
+	it("shares the family key across siblings after an initially unopted child switches to an opted lane", async () => {
+		using directory = TempDir.createSync("@omp-task-cache-transition-");
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network is disabled in this test"));
+		const authStorage = await AuthStorage.create(directory.join("auth.db"));
+		authStorage.keys.setRuntime("openai", "test-key");
+		authStorage.keys.setRuntime("opencode-go", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, directory.join("models.yml"), {
+			fetch: async () =>
+				Response.json({ data: [{ id: "gpt-6-luna", object: "model", created: 0, owned_by: "meta" }] }),
+		});
+		await modelRegistry.refreshProvider("opencode-go", "online");
+		const initialModel = modelRegistry.find("openai", "gpt-5.4");
+		const optedModel = modelRegistry.find("opencode-go", "gpt-6-luna");
+		if (!initialModel) throw new Error("Model missing from offline catalog fixture: openai/gpt-5.4");
+		if (!optedModel) throw new Error("Model missing from offline catalog fixture: opencode-go/gpt-6-luna");
+		const requests: Array<{
+			sessionId: string | undefined;
+			cacheKey: string | undefined;
+			wireKey: unknown;
+			state: Map<string, ProviderSessionState> | undefined;
+		}> = [];
+		const realCreateSession = sdk.createAgentSession;
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "task",
+					description: "Review",
+					systemPrompt: "Review the assignment.",
+					source: "bundled",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+			const result = await realCreateSession(options);
+			sessions.push(result.session);
+			return result;
+		});
+		const taskMock = createMockModel({
+			handler: { content: [{ type: "toolCall", name: "yield", arguments: { data: { findings: [] } } }] },
+		});
+		const chatMock = createMockModel({ handler: { content: [{ type: "text", text: "Review complete." }] } });
+		let inTaskExecute = false;
+		const realSettingsStream = settingsStream.createSettingsAwareStreamFn;
+		vi.spyOn(settingsStream, "createSettingsAwareStreamFn").mockImplementation((settings, _base, slowMode) =>
+			realSettingsStream(
+				settings,
+				async (model, context, options) => {
+					const cacheOptions = {
+						sessionId: options?.sessionId,
+						promptCacheKey: options?.promptCacheKey,
+						providerSessionState: options?.providerSessionState,
+					};
+					requests.push({
+						sessionId: options?.sessionId,
+						cacheKey: options?.promptCacheKey,
+						wireKey: buildResponsesParams(model as Model<"openai-responses">, context, cacheOptions, undefined)
+							.params.prompt_cache_key,
+						state: options?.providerSessionState,
+					});
+					return (inTaskExecute ? taskMock : chatMock).stream(model, context, options);
+				},
+				slowMode,
+			),
+		);
+		async function createParent(lineage: string, model: Model, explicitKey?: string) {
+			const { session } = await sdk.createAgentSession({
+				cwd: directory.path(),
+				agentDir: directory.path(),
+				authStorage,
+				modelRegistry,
+				model,
+				providerSessionId: lineage,
+				providerPromptCacheKey: explicitKey,
+				sessionManager: SessionManager.create(directory.path(), directory.join(lineage)),
+				settings: Settings.isolated({
+					"async.enabled": false,
+					"task.structured": true,
+					"marketplace.autoUpdate": "off",
+					"compaction.enabled": false,
+				}),
+				toolNames: ["task"],
+				spawns: "*",
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				rules: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			return session;
+		}
+		async function runTask(tool: TaskTool, name: string) {
+			inTaskExecute = true;
+			try {
+				const result = await tool.execute(name, { name, task: `Review ${name}.` });
+				expect(result.isError, JSON.stringify(result)).not.toBe(true);
+				expect(result.details?.results[0]?.exitCode, JSON.stringify(result)).toBe(0);
+			} finally {
+				inTaskExecute = false;
+			}
+		}
+		function childFor(sessionId: string | undefined) {
+			const child = sessions.find(session => session.agent.sessionId === sessionId);
+			if (!child) throw new Error(`Expected a live Task child for ${sessionId}`);
+			return child;
+		}
+		try {
+			const parent = await createParent("parent-lineage", initialModel);
+			const tool = parent.getToolByName("task") as TaskTool;
+			await runTask(tool, "SiblingA");
+			await runTask(tool, "SiblingB");
+			// Initial requests stay child-scoped: the child's own unopted model
+			// fails the per-request gate, so each child keeps its own wire
+			// session identity and response state.
+			expect(requests).toHaveLength(2);
+			expect(requests.map(request => request.cacheKey)).toEqual([undefined, undefined]);
+			expect(requests[0]?.sessionId).not.toBe("parent-lineage");
+			expect(requests[1]?.sessionId).not.toBe("parent-lineage");
+			expect(requests[0]?.sessionId).not.toBe(requests[1]?.sessionId);
+			expect(requests.map(request => request.wireKey)).toEqual([requests[0]?.sessionId, requests[1]?.sessionId]);
+			expect(requests[0]?.state).toBeInstanceOf(Map);
+			expect(requests[1]?.state).toBeInstanceOf(Map);
+			expect(requests[0]?.state).not.toBe(requests[1]?.state);
+
+			// Runtime model change after creation: the retry-fallback walk would
+			// re-request on the opted Go lane here. The consumer request must find
+			// the parent-derived candidate even though the initial model was
+			// unopted, and both siblings must land on the same family key.
+			const childA = childFor(requests[0]?.sessionId);
+			const childB = childFor(requests[1]?.sessionId);
+			childA.agent.setModel(optedModel);
+			childB.agent.setModel(optedModel);
+			await childA.agent.prompt("Continue on the fallback lane.");
+			await childB.agent.prompt("Continue on the fallback lane.");
+			expect(requests).toHaveLength(4);
+			expect(requests.slice(2).map(request => request.cacheKey)).toEqual([
+				"parent-lineage:task",
+				"parent-lineage:task",
+			]);
+			expect(requests.slice(2).map(request => request.wireKey)).toEqual([
+				"parent-lineage:task",
+				"parent-lineage:task",
+			]);
+			// Conversation and response state stay per-child across the switch.
+			expect(requests[2]?.sessionId).toBe(requests[0]?.sessionId);
+			expect(requests[3]?.sessionId).toBe(requests[1]?.sessionId);
+			expect(requests[2]?.sessionId).not.toBe(requests[3]?.sessionId);
+			expect(requests[2]?.state).toBeInstanceOf(Map);
+			expect(requests[3]?.state).toBeInstanceOf(Map);
+			expect(requests[2]?.state).not.toBe(requests[3]?.state);
+
+			// An explicit session key keeps priority over the family candidate.
+			childA.agent.promptCacheKey = "explicit-child";
+			await childA.agent.prompt("Explicit key still wins after the switch.");
+			expect(requests).toHaveLength(5);
+			expect(requests[4]?.cacheKey).toBe("explicit-child");
+			expect(requests[4]?.wireKey).toBe("explicit-child");
+
+			// An explicitly empty parent lineage still derives no candidate, both
+			// before and across the model switch.
+			const emptyParent = await createParent("parent-lineage-empty", initialModel, "");
+			expect(emptyParent.getPromptCacheKeyForModel(emptyParent.agent.state.model)).toBe("");
+			await runTask(emptyParent.getToolByName("task") as TaskTool, "SiblingC");
+			expect(requests).toHaveLength(6);
+			expect(requests[5]?.cacheKey).toBeUndefined();
+			expect(requests[5]?.wireKey).toBe(requests[5]?.sessionId);
+			expect(requests[5]?.sessionId).not.toBe("parent-lineage-empty");
+			const childC = childFor(requests[5]?.sessionId);
+			childC.agent.setModel(optedModel);
+			await childC.agent.prompt("Continue on the fallback lane.");
+			expect(requests).toHaveLength(7);
+			expect(requests[6]?.cacheKey).toBeUndefined();
+			expect(requests[6]?.wireKey).toBe(requests[6]?.sessionId);
+			expect(requests[6]?.sessionId).toBe(requests[5]?.sessionId);
+		} finally {
+			await Promise.all(sessions.splice(0).map(session => session.dispose()));
+			authStorage.close();
+		}
+	});
+
 	it.each([
 		["muse-code/muse-spark-1.3-contributor", "openai-codex", "gpt-6-luna", undefined],
 		["openai-codex/gpt-6-luna", "muse-code", "muse-spark-1.3-contributor", "parent:task"],

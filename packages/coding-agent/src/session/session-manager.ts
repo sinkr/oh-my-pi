@@ -899,6 +899,12 @@ export class SessionManager {
 	readonly #blobs: BlobStore;
 
 	#sessionId = "";
+	/**
+	 * Parent-derived sibling family candidate stashed by the Task executor once
+	 * the child session exists. Session-scoped and non-persisted: the header
+	 * never sees it, and forks, moves, and new-session resets start without it.
+	 */
+	#taskSiblingCandidate: string | undefined;
 	#sessionName: string | undefined;
 	#titleSource: SessionTitleSource | undefined;
 	#titleRevision = 0;
@@ -1265,6 +1271,7 @@ export class SessionManager {
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		const to = path.join(path.dirname(from), `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#header = {
 			...this.#header,
@@ -2000,6 +2007,7 @@ export class SessionManager {
 			this.#storage.ensureDirSync(this.#sessionDir);
 		}
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -2453,6 +2461,7 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#expectedDiskSize = null;
 		this.#header = {
@@ -3825,6 +3834,22 @@ export class SessionManager {
 		await this.#rewriteAtomically();
 	}
 
+	/**
+	 * Stash the parent-derived sibling family candidate without touching the
+	 * header. Unlike {@link setTaskPromptCacheKey} this is neither persisted nor
+	 * carried into forks, moves, or new-session resets, so a fresh identity
+	 * starts without it while the per-request policy gate still decides whether
+	 * this session's requests consume it.
+	 */
+	setTaskSiblingCandidate(key: string): void {
+		this.#taskSiblingCandidate = key;
+	}
+
+	/** Stashed sibling family candidate; consumed only when the request model opts in. */
+	getTaskSiblingCandidate(): string | undefined {
+		return this.#taskSiblingCandidate;
+	}
+
 	/** All session entries (excludes header). Returns a shallow copy. */
 	getEntries(): SessionEntry[] {
 		return [...this.#entries];
@@ -3964,6 +3989,7 @@ export class SessionManager {
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
+		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = timestamp;

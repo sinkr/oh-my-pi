@@ -7122,7 +7122,8 @@ export class AgentSession implements SettingsScope {
 
 	/** Cache identity for the main loop and side requests that reuse its context. */
 	getPromptCacheKeyForModel(model: Model | undefined): string | undefined {
-		const candidate = this.sessionManager.getHeader()?.taskPromptCacheKey;
+		const candidate =
+			this.sessionManager.getHeader()?.taskPromptCacheKey ?? this.sessionManager.getTaskSiblingCandidate();
 		return (
 			this.agent.promptCacheKey ??
 			(candidate !== undefined && model !== undefined && resolveCatalogPolicy(model).taskSiblingPromptCache === true
