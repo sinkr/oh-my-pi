@@ -93,7 +93,7 @@ Notes:
 - `additionalDirectories` records normalized, deduplicated workspace roots beyond `cwd`.
 - `previousSessionFiles` records prior absolute locations after successful moves.
 - `providerPromptCacheKey` carries an inherited provider prompt-cache identity for eligible full forks.
-- `taskPromptCacheKey` is a local-only Task sibling family key: it is stored when a subagent's own resolved model is verified for sibling cache sharing, consulted per request behind that same gate, and omitted from shares and HTML exports.
+- `taskPromptCacheKey` is a local-only Task sibling family key: it is stored when a subagent's own resolved model is verified for sibling cache sharing, consulted per request behind that same gate, and omitted from shares and HTML exports. It derives only from a nonempty parent cache lineage — an explicitly empty one derives no key, so those children keep their own wire session identity instead of coalescing onto one shared family key.
 - `parentSession` is an opaque lineage string. Current code writes either a session id or a session path depending on flow (`fork`, `forkFrom`, `createBranchedSession`, or explicit `newSession({ parentSession })`). Treat it as metadata, not a typed foreign key.
 
 - `titleSource` is `auto` or `user`; automatic renames cannot overwrite a user title.

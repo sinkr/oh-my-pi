@@ -443,6 +443,129 @@ describe("task sibling prompt-cache routing", () => {
 		},
 	);
 
+	// Two independent parents both pin the explicit empty provider cache key:
+	// the SDK must hand that empty lineage to the Task boundary verbatim, and
+	// the executor must not derive a shared ":task" family candidate from it —
+	// each child keeps its own wire identity instead of coalescing every
+	// empty-lineage parent onto one cache family.
+	it("explicit empty parent lineage keeps independent parents' children on their own wire identity", async () => {
+		using directory = TempDir.createSync("@omp-task-cache-empty-");
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network is disabled in this test"));
+		const authStorage = await AuthStorage.create(directory.join("auth.db"));
+		authStorage.keys.setRuntime("opencode-go", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, directory.join("models.yml"), {
+			fetch: async () =>
+				Response.json({ data: [{ id: "gpt-6-luna", object: "model", created: 0, owned_by: "meta" }] }),
+		});
+		await modelRegistry.refreshProvider("opencode-go", "online");
+		const model = modelRegistry.find("opencode-go", "gpt-6-luna");
+		if (!model) throw new Error("Model missing from offline catalog fixture: opencode-go/gpt-6-luna");
+		const requests: Array<{
+			sessionId: string | undefined;
+			cacheKey: string | undefined;
+			wireKey: unknown;
+		}> = [];
+		const realCreateSession = sdk.createAgentSession;
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "task",
+					description: "Review",
+					systemPrompt: "Review the assignment.",
+					source: "bundled",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+			const result = await realCreateSession(options);
+			sessions.push(result.session);
+			return result;
+		});
+		const mock = createMockModel({
+			handler: { content: [{ type: "toolCall", name: "yield", arguments: { data: { findings: [] } } }] },
+		});
+		const realSettingsStream = settingsStream.createSettingsAwareStreamFn;
+		vi.spyOn(settingsStream, "createSettingsAwareStreamFn").mockImplementation((settings, _base, slowMode) =>
+			realSettingsStream(
+				settings,
+				async (requestModel, context, streamOptions) => {
+					const cacheOptions = {
+						sessionId: streamOptions?.sessionId,
+						promptCacheKey: streamOptions?.promptCacheKey,
+						providerSessionState: streamOptions?.providerSessionState,
+					};
+					const wireKey = buildResponsesParams(
+						requestModel as Model<"openai-responses">,
+						context,
+						cacheOptions,
+						undefined,
+					).params.prompt_cache_key;
+					requests.push({
+						sessionId: streamOptions?.sessionId,
+						cacheKey: streamOptions?.promptCacheKey,
+						wireKey,
+					});
+					return mock.stream(requestModel, context, streamOptions);
+				},
+				slowMode,
+			),
+		);
+		try {
+			for (const suffix of ["a", "b"]) {
+				// Registry ownership is keyed by the invocation id, so each
+				// independent parent's spawn needs its own id; the agent type
+				// stays "task", keeping the derived family key ":task".
+				const lineage = `parent-lineage-${suffix}`;
+				const childName = `sibling-${suffix}`;
+				const { session: parent } = await sdk.createAgentSession({
+					cwd: directory.path(),
+					agentDir: directory.path(),
+					authStorage,
+					modelRegistry,
+					model,
+					providerSessionId: lineage,
+					providerPromptCacheKey: "",
+					sessionManager: SessionManager.create(directory.path(), directory.join(lineage)),
+					settings: Settings.isolated({
+						"async.enabled": false,
+						"task.structured": true,
+						"marketplace.autoUpdate": "off",
+						"compaction.enabled": false,
+					}),
+					toolNames: ["task"],
+					spawns: "*",
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					rules: [],
+					enableMCP: false,
+					enableLsp: false,
+				});
+				// The explicit empty key survives the nullish fallbacks into the Task
+				// boundary verbatim; only the derivation step may decline to use it.
+				expect(parent.getPromptCacheKeyForModel(parent.agent.state.model)).toBe("");
+				const tool = parent.getToolByName("task") as TaskTool;
+				const result = await tool.execute(childName, { name: childName, task: "Review the sibling." });
+				expect(result.isError, JSON.stringify(result)).not.toBe(true);
+				expect(result.details?.results[0]?.exitCode, JSON.stringify(result)).toBe(0);
+			}
+			expect(requests).toHaveLength(2);
+			// Break caught: deriving `${empty}:${agent.name}` yields ":task" for
+			// every empty-lineage parent, coalescing unrelated families. Eligible
+			// children instead keep their own wire identity (no family key).
+			expect(requests.map(request => request.cacheKey)).toEqual([undefined, undefined]);
+			expect(requests[0]?.sessionId).not.toBe(requests[1]?.sessionId);
+			expect(requests.map(request => request.sessionId)).not.toContain("parent-lineage-a");
+			expect(requests.map(request => request.sessionId)).not.toContain("parent-lineage-b");
+			expect(requests.map(request => request.wireKey)).toEqual(requests.map(request => request.sessionId));
+		} finally {
+			await Promise.all(sessions.splice(0).map(session => session.dispose()));
+			authStorage.close();
+		}
+	});
+
 	it.each([
 		["muse-code/muse-spark-1.3-contributor", "openai-codex", "gpt-6-luna", undefined],
 		["openai-codex/gpt-6-luna", "muse-code", "muse-spark-1.3-contributor", "parent:task"],

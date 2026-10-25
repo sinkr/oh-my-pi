@@ -4729,7 +4729,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// inside createAgentSession). An ineligible initial model keeps its
 				// default wire routing and leaves any stored header candidate intact;
 				// request-time policy checks still gate every use of the header.
-				if (options.parentPromptCacheKey !== undefined) {
+				// An explicitly empty parent lineage derives no candidate: the string
+				// build would yield ":<agent>" and coalesce every empty-lineage parent
+				// onto one family, so the child keeps its own wire session identity.
+				// Nonempty opaque keys pass through untouched (no trimming).
+				if (options.parentPromptCacheKey) {
 					const childModel = session.agent.state.model;
 					if (childModel && resolveCatalogPolicy(childModel).taskSiblingPromptCache === true) {
 						await sessionManager.setTaskPromptCacheKey(`${options.parentPromptCacheKey}:${agent.name}`);
