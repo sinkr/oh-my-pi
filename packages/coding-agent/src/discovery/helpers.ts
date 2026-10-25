@@ -1243,14 +1243,17 @@ async function resolvePluginRegistryFiles(home: string, cwd: string | undefined)
 	return { claudeConfigDir, ompRegistryPath, resolvedProjectPath, files };
 }
 
-/** Identity, size and modification time of a registry file, or `missing`; any write changes it. */
+/**
+ * Identity, size and modification time of a registry file; `missing`, or the error code of a path
+ * that cannot be checked (the registry read treats both as absent). Any write changes it.
+ */
 async function registrySignature(filePath: string): Promise<string> {
 	try {
 		const stats = await fs.promises.stat(filePath);
 		return `${stats.ino}:${stats.size}:${stats.mtimeMs}`;
 	} catch (error) {
 		if (isEnoent(error)) return "missing";
-		throw error;
+		return `unreadable:${(error as NodeJS.ErrnoException).code ?? "unknown"}`;
 	}
 }
 

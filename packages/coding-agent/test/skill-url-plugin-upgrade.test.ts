@@ -280,6 +280,14 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
 	});
 
+	it("a registry path that cannot be checked counts as absent and leaves the other registries' plugins loaded", async () => {
+		// Every stat below a regular file fails with ENOTDIR, so the Claude registry cannot be checked.
+		fs.writeFileSync(path.join(tempHomeDir, ".claude"), "");
+		const session = await startSession();
+
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+	});
+
 	it("a /skill: invocation after an upgrade that keeps the old version's directory sends the new version", async () => {
 		const session = await startSession();
 		const skill = session.skills.find(entry => entry.name === SKILL)!;
