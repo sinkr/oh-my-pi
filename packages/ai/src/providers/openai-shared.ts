@@ -357,6 +357,7 @@ export function resolveOpenAIRequestSetup(
 	const sessionId = options.sessionId ?? options.promptCacheSessionId;
 	applyInferenceHeaders(headers, {
 		provider: model.provider,
+		providerType: model.providerType,
 		protocol: "openai",
 		sessionId,
 		// Only an EXPLICIT prompt-cache key feeds the affinity. The shared

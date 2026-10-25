@@ -8,33 +8,49 @@ import { resolveCacheRetention } from "../utils";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
+	/**
+	 * Credential-bearing provider id. Wire decisions (protocol session
+	 * headers, OpenCode attribution) resolve against the declared backend
+	 * instead — see {@link providerType}.
+	 */
 	provider: string;
+	/**
+	 * Declared backend identity for a custom provider (`providerType ?? provider`,
+	 * the same target the catalog policy cascade resolves). Carried through so
+	 * a credential-bearing custom provider declared as an OpenCode backend
+	 * gets that backend's wire headers while auth and registry keep using
+	 * {@link provider}.
+	 */
+	providerType?: string;
 	protocol: "anthropic" | "google" | "openai";
 	sessionId?: string;
 	/**
 	 * Shared task-sibling prompt-cache affinity (see
 	 * {@link resolveOpenCodeGoCacheAffinity}). Carried only by
-	 * `x-opencode-session` on the `opencode-go` provider; protocol-native
-	 * session headers and every other provider keep `sessionId`.
+	 * `x-opencode-session` on the `opencode-go` backend; protocol-native
+	 * session headers and every other backend keep `sessionId`.
 	 */
 	cacheAffinity?: string;
 }
 
 /**
- * Shared task-sibling prompt-cache affinity for OpenCode Go (KDL
+ * Shared task-sibling prompt-cache affinity for the OpenCode Go backend (KDL
  * `task-sibling-prompt-cache`): sibling requests under one task warm and hit
  * the gateway's prefix cache under one family key, so Go's session header
  * must carry that key instead of the per-child conversation id.
  *
- * Only opted-in Go models sending an explicit cache key with prompt caching
- * enabled qualify; everything else stays on the conversation id.
+ * The backend identity is `providerType ?? provider`, so a custom provider
+ * declared as the Go backend follows the same rules as `opencode-go` itself;
+ * catalog policy remains the only opt-in authority. Only opted-in Go models
+ * sending an explicit cache key with prompt caching enabled qualify;
+ * everything else stays on the conversation id.
  */
 export function resolveOpenCodeGoCacheAffinity(
 	model: CatalogPolicyInputs,
 	promptCacheKey: string | undefined,
 	cacheRetention: CacheRetention | undefined,
 ): string | undefined {
-	if (model.provider !== "opencode-go") return undefined;
+	if ((model.providerType ?? model.provider) !== "opencode-go") return undefined;
 	// An empty key must never replace a known real child session header.
 	if (!promptCacheKey) return undefined;
 	if (resolveCacheRetention(cacheRetention) === "none") return undefined;
@@ -84,19 +100,23 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
  * understood by the active inference protocol and host.
  */
 export function applyInferenceHeaders(headers: Record<string, string>, options: InferenceHeaderOptions): void {
-	if (options.provider === "vercel-ai-gateway") {
+	// Wire identity: what the endpoint is, not which credential reaches it.
+	// A custom provider declaring `providerType` is that backend on the wire
+	// while its provider id stays authoritative for auth and the registry.
+	const backend = options.providerType ?? options.provider;
+	if (backend === "vercel-ai-gateway") {
 		// Vercel AI Gateway app attribution; caller/config headers take precedence.
 		setHeaderIfAbsent(headers, "http-referer", APP_URL);
 		setHeaderIfAbsent(headers, "x-title", APP_NAME);
 	}
 
-	const isOpenCode = options.provider === "opencode-go" || options.provider === "opencode-zen";
+	const isOpenCode = backend === "opencode-go" || backend === "opencode-zen";
 	const sessionId = options.sessionId;
 	if (!sessionId) return;
 
 	if (options.protocol === "anthropic") {
 		setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
-	} else if (options.protocol === "openai" && options.provider === "openai") {
+	} else if (options.protocol === "openai" && backend === "openai") {
 		setHeader(headers, "session_id", sessionId);
 		setHeader(headers, "x-client-request-id", sessionId);
 	}
@@ -109,7 +129,7 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 		setHeader(
 			headers,
 			"x-opencode-session",
-			options.provider === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId,
+			backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId,
 		);
 	}
 }

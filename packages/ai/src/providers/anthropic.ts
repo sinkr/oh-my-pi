@@ -4299,6 +4299,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			: mergedCopilotHeaders;
 		applyInferenceHeaders(defaultHeaders, {
 			provider: model.provider,
+			providerType: model.providerType,
 			protocol: "anthropic",
 			sessionId,
 		});
@@ -4370,6 +4371,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	});
 	applyInferenceHeaders(defaultHeaders, {
 		provider: model.provider,
+		providerType: model.providerType,
 		protocol: "anthropic",
 		sessionId,
 		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, promptCacheKey, cacheRetention),
