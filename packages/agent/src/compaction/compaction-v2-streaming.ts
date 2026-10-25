@@ -131,7 +131,8 @@ export function shouldUseCompactionV2Streaming(
 	return getCompactionV2Endpoint(model) !== undefined;
 }
 
-function compactionV2Api(model: Model): Api | undefined {
+/** Effective compaction request adapter: the `remoteCompaction.api` override, else the model's own API. Always defined — `Model.api` is required. */
+function compactionV2Api(model: Model): Api {
 	return model.remoteCompaction?.api ?? model.api;
 }
 
@@ -418,8 +419,10 @@ function buildCompactionV2Headers(
 							// The request adapter plus every fact the catalog policy
 							// cascade reads: the Go cache-affinity rules are `on-api`
 							// scoped, so a reduced projection that drops them silently
-							// disables the family header.
-							api: model.api,
+							// disables the family header. The adapter is the EFFECTIVE
+							// compaction API (`remoteCompaction.api` override included),
+							// never the native lane the model would otherwise use.
+							api,
 							providerType: model.providerType,
 							reasoning: model.reasoning,
 							requestModelId: model.requestModelId,
