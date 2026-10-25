@@ -2861,7 +2861,7 @@ impl<H> WalkContext<'_, H> {
 		let stopped =
 			if root_entry.file_type == FileType::Dir && self.options.max_depth > 0 && decision.descend
 			{
-				self.walk_dir(0, root_ignore, false, visitor)?
+				self.walk_tree(root_ignore, visitor)?
 			} else {
 				false
 			};
@@ -2920,74 +2920,57 @@ impl<H> WalkContext<'_, H> {
 		leave_child_path(&mut self.absolute_path, parent);
 	}
 
-	fn walk_dir<V>(
+	/// Walks the directory at `absolute_path`, the walk root, and everything
+	/// below it. Returns whether traversal stopped.
+	///
+	/// Walks with an explicit stack of listed directories: recursing once per
+	/// level overflows the thread's stack on a deep enough tree, and that
+	/// kills the whole process rather than failing the walk.
+	fn walk_tree<V>(
 		&mut self,
-		depth: usize,
-		ignore_state: &Arc<IgnoreState>,
-		derive_ignore_from_entries: bool,
+		root_ignore: &Arc<IgnoreState>,
 		visitor: &mut V,
 	) -> std::result::Result<bool, WalkError<V::Error>>
 	where
 		V: EntryVisitor,
 		H: FnMut() -> std::result::Result<(), V::Error>,
 	{
-		if self.options.follow_links == FollowLinks::Always {
-			self.symlink_ancestors.push(self.absolute_path.clone());
-			let result = self.walk_dir_inner(depth, ignore_state, derive_ignore_from_entries, visitor);
-			self.symlink_ancestors.pop();
-			return result;
-		}
-
-		self.walk_dir_inner(depth, ignore_state, derive_ignore_from_entries, visitor)
-	}
-
-	fn walk_dir_inner<V>(
-		&mut self,
-		depth: usize,
-		ignore_state: &Arc<IgnoreState>,
-		derive_ignore_from_entries: bool,
-		visitor: &mut V,
-	) -> std::result::Result<bool, WalkError<V::Error>>
-	where
-		V: EntryVisitor,
-		H: FnMut() -> std::result::Result<(), V::Error>,
-	{
-		let mut scratch = self.take_scratch();
-		let ignore_entries = match collect_directory_entries(
-			self.fs,
-			&self.absolute_path,
-			self.options.listing_detail(depth),
-			&mut scratch,
-			&self.matcher,
-			derive_ignore_from_entries,
-		) {
-			Ok(ignore_entries) => ignore_entries,
-			Err(err) => {
-				let dir = self.absolute_path.clone();
-				self.recycle_scratch(scratch);
-				return handle_read_dir_error(&dir, err, self.options, visitor);
+		let mut stack = match self.open_dir(0, root_ignore, false, visitor)? {
+			Opened::Stopped => return Ok(true),
+			Opened::Unreadable => return Ok(false),
+			Opened::Listed(scratch, dir_ignore) => {
+				vec![DirFrame { scratch, dir_ignore, depth: 0, next: 0, via: None }]
 			},
 		};
-		if self.options.order == WalkOrder::Path {
-			scratch.sort_by_name();
-		}
-		let dir_ignore = self.matcher.state_from_entries(
-			self.fs,
-			ignore_state,
-			&self.absolute_path,
-			ignore_entries,
-			derive_ignore_from_entries,
-		);
 
-		for index in 0..scratch.entries.len() {
+		while let Some(frame) = stack.last_mut() {
+			if frame.next == frame.scratch.entries.len() {
+				let frame = stack.pop().expect("the loop holds a frame");
+				self.close_dir(frame.scratch);
+				let Some(via) = frame.via else {
+					continue;
+				};
+				let parent = stack
+					.last()
+					.expect("a directory entered through an entry has a parent");
+				let name = parent.scratch.name(&parent.scratch.entries[via.index]);
+				if self.finish_entry(name, via.facts, visitor)? {
+					return Ok(true);
+				}
+				self.pop_entry_path(via.path);
+				continue;
+			}
+			let index = frame.next;
+			frame.next += 1;
+
 			if self.visited == 0 || self.visited >= HEARTBEAT_INTERVAL {
 				self.visited = 0;
 				(self.heartbeat)().map_err(WalkError::Interrupted)?;
 			}
 			self.visited += 1;
 
-			let entry = &scratch.entries[index];
-			let name = scratch.name(entry);
+			let entry = &frame.scratch.entries[index];
+			let name = frame.scratch.name(entry);
 			if is_dot_entry(name) {
 				continue;
 			}
@@ -3004,33 +2987,108 @@ impl<H> WalkContext<'_, H> {
 			if name_str.is_empty() {
 				continue;
 			}
-			let next_depth = depth + 1;
+			let next_depth = frame.depth + 1;
 			if next_depth > self.options.max_depth {
 				continue;
 			}
 
-			let parent_lengths = self.push_entry_path(name, &name_str);
-			let entry_result = self.walk_current_entry(
+			let path = self.push_entry_path(name, &name_str);
+			let facts = match self.enter_entry(
 				name,
 				entry.file_type,
 				entry.mtime,
 				entry.size,
 				next_depth,
-				&dir_ignore,
+				&frame.dir_ignore,
 				visitor,
-			);
-			self.pop_entry_path(parent_lengths);
-			if entry_result? {
-				self.recycle_scratch(scratch);
-				return Ok(true);
+			)? {
+				Step::Stop => return Ok(true),
+				Step::Done => {
+					self.pop_entry_path(path);
+					continue;
+				},
+				Step::Descend(facts) => facts,
+			};
+			match self.open_dir(next_depth, &frame.dir_ignore, true, visitor)? {
+				Opened::Stopped => return Ok(true),
+				Opened::Unreadable => {
+					if self.finish_entry(name, facts, visitor)? {
+						return Ok(true);
+					}
+					self.pop_entry_path(path);
+				},
+				Opened::Listed(scratch, dir_ignore) => stack.push(DirFrame {
+					scratch,
+					dir_ignore,
+					depth: next_depth,
+					next: 0,
+					via: Some(PendingEntry { index, facts, path }),
+				}),
 			}
 		}
-
-		self.recycle_scratch(scratch);
 		Ok(false)
 	}
 
-	fn walk_current_entry<V>(
+	/// Lists the directory at `absolute_path` and puts it on the symlink
+	/// ancestors when links are followed.
+	fn open_dir<V>(
+		&mut self,
+		depth: usize,
+		ignore_state: &Arc<IgnoreState>,
+		derive_ignore_from_entries: bool,
+		visitor: &mut V,
+	) -> std::result::Result<Opened, WalkError<V::Error>>
+	where
+		V: EntryVisitor,
+	{
+		let mut scratch = self.take_scratch();
+		let ignore_entries = match collect_directory_entries(
+			self.fs,
+			&self.absolute_path,
+			self.options.listing_detail(depth),
+			&mut scratch,
+			&self.matcher,
+			derive_ignore_from_entries,
+		) {
+			Ok(ignore_entries) => ignore_entries,
+			Err(err) => {
+				self.recycle_scratch(scratch);
+				let dir = self.absolute_path.clone();
+				let stopped = handle_read_dir_error(&dir, err, self.options, visitor)?;
+				return Ok(if stopped {
+					Opened::Stopped
+				} else {
+					Opened::Unreadable
+				});
+			},
+		};
+		if self.options.order == WalkOrder::Path {
+			scratch.sort_by_name();
+		}
+		let dir_ignore = self.matcher.state_from_entries(
+			self.fs,
+			ignore_state,
+			&self.absolute_path,
+			ignore_entries,
+			derive_ignore_from_entries,
+		);
+		if self.options.follow_links == FollowLinks::Always {
+			self.symlink_ancestors.push(self.absolute_path.clone());
+		}
+		Ok(Opened::Listed(scratch, dir_ignore))
+	}
+
+	/// Undoes [`Self::open_dir`] once a directory's entries are all walked.
+	fn close_dir(&mut self, scratch: DirScratch) {
+		if self.options.follow_links == FollowLinks::Always {
+			self.symlink_ancestors.pop();
+		}
+		self.recycle_scratch(scratch);
+	}
+
+	/// Everything done for an entry before walking its contents.
+	#[allow(clippy::too_many_arguments, reason = "one entry's listing facts")]
+	fn enter_entry<V>(
 		&mut self,
 		name: &OsStr,
 		entry_file_type: FileType,
@@ -3039,10 +3097,9 @@ impl<H> WalkContext<'_, H> {
 		next_depth: usize,
 		dir_ignore: &Arc<IgnoreState>,
 		visitor: &mut V,
-	) -> std::result::Result<bool, WalkError<V::Error>>
+	) -> std::result::Result<Step, WalkError<V::Error>>
 	where
 		V: EntryVisitor,
-		H: FnMut() -> std::result::Result<(), V::Error>,
 	{
 		let mut file_type = entry_file_type;
 		let mut mtime = entry_mtime;
@@ -3056,7 +3113,8 @@ impl<H> WalkContext<'_, H> {
 			match self.fs.metadata(&self.absolute_path) {
 				Ok(metadata) => Some(metadata),
 				Err(err) => {
-					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor);
+					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor)
+						.map(Step::from_stopped);
 				},
 			}
 		} else {
@@ -3065,7 +3123,7 @@ impl<H> WalkContext<'_, H> {
 
 		if let Some(target_metadata) = followed_metadata.as_ref() {
 			let Some(target_file_type) = file_type_from_metadata(target_metadata) else {
-				return Ok(false);
+				return Ok(Step::Done);
 			};
 			file_type = target_file_type;
 			if target_file_type == FileType::Dir {
@@ -3091,7 +3149,7 @@ impl<H> WalkContext<'_, H> {
 				.matcher
 				.is_ignored(dir_ignore, &self.absolute_path, is_dir)
 		{
-			return Ok(false);
+			return Ok(Step::Done);
 		}
 
 		if !is_effective_path_on_root_file_system(
@@ -3102,7 +3160,7 @@ impl<H> WalkContext<'_, H> {
 			self.root_device,
 			followed_metadata.as_ref(),
 		) {
-			return Ok(false);
+			return Ok(Step::Done);
 		}
 
 		if followed_symlink_dir && descend {
@@ -3118,13 +3176,13 @@ impl<H> WalkContext<'_, H> {
 								})
 								.map_err(WalkError::Interrupted)?
 							{
-								WalkControl::Quit => return Ok(true),
+								WalkControl::Quit => return Ok(Step::Stop),
 								WalkControl::SkipDescend | WalkControl::Continue => {
-									return Ok(false);
+									return Ok(Step::Done);
 								},
 							}
 						} else if self.options.directory_errors == DirectoryErrorMode::SkipSkippable {
-							return Ok(false);
+							return Ok(Step::Done);
 						}
 						return Err(WalkError::InvalidData {
 							path:    self.absolute_path.clone(),
@@ -3133,7 +3191,8 @@ impl<H> WalkContext<'_, H> {
 					}
 				},
 				Err(err) => {
-					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor);
+					return handle_directory_io_error(&self.absolute_path, &err, self.options, visitor)
+						.map(Step::from_stopped);
 				},
 			}
 		}
@@ -3153,7 +3212,7 @@ impl<H> WalkContext<'_, H> {
 				.map_err(WalkError::Interrupted)?
 		};
 		if decision.stop {
-			return Ok(true);
+			return Ok(Step::Stop);
 		}
 
 		if !self.options.contents_first && decision.emit && next_depth >= self.options.min_depth {
@@ -3169,32 +3228,42 @@ impl<H> WalkContext<'_, H> {
 				})
 				.map_err(WalkError::Interrupted)?
 			{
-				WalkControl::Quit => return Ok(true),
-				WalkControl::SkipDescend => return Ok(false),
+				WalkControl::Quit => return Ok(Step::Stop),
+				WalkControl::SkipDescend => return Ok(Step::Done),
 				WalkControl::Continue => {},
 			}
 		}
 
-		let child_stopped = if descend && next_depth < self.options.max_depth && decision.descend {
-			self.walk_dir(next_depth, dir_ignore, true, visitor)?
-		} else {
-			false
-		};
-
-		if child_stopped {
-			return Ok(true);
+		let facts = EntryFacts { file_type, mtime, size, depth: next_depth, emit: decision.emit };
+		if descend && next_depth < self.options.max_depth && decision.descend {
+			return Ok(Step::Descend(facts));
 		}
+		self
+			.finish_entry(name, facts, visitor)
+			.map(Step::from_stopped)
+	}
 
-		if self.options.contents_first && decision.emit && next_depth >= self.options.min_depth {
+	/// Everything done for an entry after walking its contents. Returns
+	/// whether traversal stopped.
+	fn finish_entry<V>(
+		&self,
+		name: &OsStr,
+		facts: EntryFacts,
+		visitor: &mut V,
+	) -> std::result::Result<bool, WalkError<V::Error>>
+	where
+		V: EntryVisitor,
+	{
+		if self.options.contents_first && facts.emit && facts.depth >= self.options.min_depth {
 			match visitor
 				.visit_pre_decided(Entry {
 					path: self.absolute_path.as_path(),
 					relative: &self.relative_path,
 					name,
-					file_type,
-					mtime,
-					size,
-					depth: next_depth,
+					file_type: facts.file_type,
+					mtime: facts.mtime,
+					size: facts.size,
+					depth: facts.depth,
 				})
 				.map_err(WalkError::Interrupted)?
 			{
@@ -3202,9 +3271,61 @@ impl<H> WalkContext<'_, H> {
 				WalkControl::SkipDescend | WalkControl::Continue => {},
 			}
 		}
-
 		Ok(false)
 	}
+}
+
+/// A directory being listed by [`WalkContext::walk_tree`].
+struct DirFrame {
+	scratch:    DirScratch,
+	dir_ignore: Arc<IgnoreState>,
+	depth:      usize,
+	/// Index of the next listing entry to walk.
+	next:       usize,
+	/// The entry this directory was reached through; the walk root has none.
+	via:        Option<PendingEntry>,
+}
+
+/// An entry whose directory contents are walked before it is finished.
+struct PendingEntry {
+	/// Its index in the parent directory's listing.
+	index: usize,
+	facts: EntryFacts,
+	path:  (SavedParent, usize),
+}
+
+/// What finishing an entry needs to know about it.
+#[derive(Clone, Copy)]
+struct EntryFacts {
+	file_type: FileType,
+	mtime:     Option<f64>,
+	size:      Option<f64>,
+	depth:     usize,
+	emit:      bool,
+}
+
+/// How [`WalkContext::enter_entry`] left an entry.
+enum Step {
+	/// Traversal stops.
+	Stop,
+	/// The entry is finished.
+	Done,
+	/// The entry is a directory whose contents are walked next.
+	Descend(EntryFacts),
+}
+
+impl Step {
+	const fn from_stopped(stopped: bool) -> Self {
+		if stopped { Self::Stop } else { Self::Done }
+	}
+}
+
+/// How [`WalkContext::open_dir`] left a directory.
+enum Opened {
+	Stopped,
+	/// Reading it failed and the error was handled without stopping.
+	Unreadable,
+	Listed(DirScratch, Arc<IgnoreState>),
 }
 
 fn collect_directory_entries<E>(

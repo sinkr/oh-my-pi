@@ -5067,6 +5067,45 @@ mod tests {
 		run_util::<Find>(&args, "", root)
 	}
 
+	/// A chain as deep as path syscalls reach must be walked, in both visit
+	/// orders, not overflow the stack of the thread the shell runs on.
+	#[test]
+	fn walks_a_directory_chain_deeper_than_the_stack() {
+		let (_dir, root) = fixture();
+		// Stay under PATH_MAX: every level adds "/d".
+		let depth = (4000 - root.join("deep/f").as_os_str().len()) / 2;
+		let mut chain = PathBuf::from("deep");
+		for _ in 0..depth {
+			chain.push("d");
+		}
+		fs::create_dir_all(root.join(&chain)).unwrap();
+		let leaf = chain.join("f");
+		fs::write(root.join(&leaf), b"x").unwrap();
+
+		let find = move |args: &'static [&'static str]| {
+			let root = root.clone();
+			std::thread::Builder::new()
+				.stack_size(256 * 1024)
+				.spawn(move || {
+					let (code, capture) = run_util::<Find>(args, "", &root);
+					(code, capture.out(), capture.err())
+				})
+				.unwrap()
+				.join()
+				.unwrap()
+		};
+		let leaf = leaf.display().to_string();
+
+		let (code, out, err) = find(&["deep", "-name", "f"]);
+		assert_eq!((code, out, err.as_str()), (0, format!("{leaf}\n"), ""));
+
+		let (code, out, err) = find(&["deep", "-depth"]);
+		assert_eq!((code, err.as_str()), (0, ""));
+		let lines: Vec<&str> = out.lines().collect();
+		assert_eq!(lines.len(), depth + 2);
+		assert_eq!((lines[0], lines[depth + 1]), (leaf.as_str(), "deep"));
+	}
+
 	#[test]
 	fn bsd_dash_e_selects_posix_extended_regexes() {
 		let (_dir, root) = fixture();
