@@ -14,7 +14,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
-import { getActiveSkills, rediscoverSkills, type Skill, type SkillRediscoveryHost } from "../extensibility/skills";
+import {
+	getActiveSkills,
+	isSkillSuperseded,
+	rediscoverSkills,
+	type Skill,
+	type SkillRediscoveryHost,
+} from "../extensibility/skills";
 import { MCPManager } from "../mcp/manager";
 import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
 import {
@@ -160,10 +166,23 @@ interface LocatedSkillTarget {
 }
 
 /**
- * {@link skillTargetPath}, resolved once more when the target is missing because the skill that
- * owns it is gone from disk: first against the holder's current list, when it moved on since
- * `context.skills` was taken (a copied tool session, a read that began before a rediscovery),
- * and only if that also misses against rediscovered skills ({@link rediscoverSkills}).
+ * Whether `target` must be resolved again: it is missing and so is its skill's own file, or the
+ * holder follows the plugin registries and they now install the skill's plugin elsewhere.
+ */
+async function isStaleTarget(
+	target: SkillTarget,
+	stats: fsTypes.Stats | null,
+	host: SkillRediscoveryHost,
+): Promise<boolean> {
+	if (!stats && !(await statIfExists(target.skill.filePath))) return true;
+	return isSkillSuperseded(target.skill, host);
+}
+
+/**
+ * {@link skillTargetPath}, resolved once more when the skill that owns the target is stale: first
+ * against the holder's current list, when it moved on since `context.skills` was taken (a copied
+ * tool session, a read that began before a rediscovery), and only if that is stale too against
+ * rediscovered skills ({@link rediscoverSkills}).
  */
 async function locateSkillTarget(
 	url: InternalUrl,
@@ -174,12 +193,12 @@ async function locateSkillTarget(
 	const skills = context?.skills ?? getActiveSkills();
 	let target = await skillTargetPath(url, skills, directory, create);
 	let stats = await statIfExists(target.path);
-	if (!stats && !(await statIfExists(target.skill.filePath))) {
-		const host = contextRediscoveryHost(skills, context);
+	const host = contextRediscoveryHost(skills, context);
+	if (await isStaleTarget(target, stats, host)) {
 		if (host.skills !== skills) {
 			const held = await skillTargetPath(url, host.skills, directory, create);
 			const heldStats = await statIfExists(held.path);
-			if (heldStats || (await statIfExists(held.skill.filePath))) return { path: held.path, stats: heldStats };
+			if (!(await isStaleTarget(held, heldStats, host))) return { path: held.path, stats: heldStats };
 		}
 		target = await skillTargetPath(url, await rediscoverSkills(host), directory, create);
 		stats = await statIfExists(target.path);

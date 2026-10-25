@@ -17,7 +17,12 @@ import {
 	loadCapability,
 	type SkillFrontmatter,
 } from "../discovery";
-import { clearPluginRootsAndCaches, compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
+import {
+	clearPluginRootsAndCaches,
+	compareSkillOrder,
+	isSupersededPluginPath,
+	scanSkillsFromDir,
+} from "../discovery/helpers";
 import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
@@ -619,24 +624,37 @@ export interface SkillRediscoveryHost {
 	extensionRoots?: EffectiveExtensionRoots;
 }
 
-/** A session that can describe itself as a {@link SkillRediscoveryHost}, built only on a miss. */
+/**
+ * A session that can describe itself as a {@link SkillRediscoveryHost}, asked when one of its skills
+ * is read. A caller that cannot describe one (an embedder's partial session) reads the path it holds.
+ */
 export interface SkillRediscoverySource {
-	skillRediscoveryHost(): SkillRediscoveryHost;
+	skillRediscoveryHost?(): SkillRediscoveryHost;
 }
 
 /**
- * Skills to use again after one of them lost its instruction file. `omp plugin upgrade`
- * installs the new version in a new cache directory and deletes the old one, so every path a
- * long-running session discovered from that plugin is gone. The plugin-root cache and the
- * discovery file cache still name the deleted directory, so both are dropped first. A holder
+ * Skills to use again after one of them went stale: its instruction file is gone (`omp plugin
+ * upgrade` installed the new version in a new cache directory and deleted the old one), or the
+ * registries now install its plugin elsewhere ({@link isSkillSuperseded}). The plugin-root cache
+ * and the discovery file cache still name the old directory, so both are dropped first. A holder
  * that rediscovers its own skills refreshes in place, so its list, its prompt and the process
- * snapshot follow. A fixed list (a subagent given its parent's) keeps its names: each is
- * re-pointed at a fresh discovery's same-named skill, a name the discovery lacks and whose file
- * is gone is dropped, and the holder stores the result, so the next lookup needs no new pass.
+ * snapshot follow. A fixed list (a subagent given its parent's) keeps every entry whose file still
+ * exists; an entry whose file is gone is re-pointed at a fresh discovery's same-named skill, or
+ * dropped when there is none. The holder stores the result, so the next lookup needs no new pass.
  */
 export function rediscoverSkills(host: SkillRediscoveryHost): Promise<readonly Skill[]> {
 	const rediscover = () => rediscoverHostSkills(host);
 	return host.shareRediscovery ? host.shareRediscovery(rediscover) : rediscover();
+}
+
+/** Whether `filePath` is gone. Only ENOENT says so: a file that cannot be checked (EACCES, EIO) may still be there. */
+async function isMissingFile(filePath: string): Promise<boolean> {
+	try {
+		await fs.stat(filePath);
+		return false;
+	} catch (error) {
+		return isEnoent(error);
+	}
 }
 
 async function rediscoverHostSkills(host: SkillRediscoveryHost): Promise<readonly Skill[]> {
@@ -653,25 +671,51 @@ async function rediscoverHostSkills(host: SkillRediscoveryHost): Promise<readonl
 	const byName = new Map(discovered.skills.map(skill => [skill.name, skill]));
 	const repointed: Skill[] = [];
 	for (const skill of host.skills) {
+		if (!(await isMissingFile(skill.filePath))) {
+			repointed.push(skill);
+			continue;
+		}
 		const fresh = byName.get(skill.name);
 		if (fresh) repointed.push(fresh);
-		else if (await fs.stat(skill.filePath).catch(() => null)) repointed.push(skill);
 	}
 	await host.replaceSkills?.(repointed);
 	return repointed;
 }
 
 /**
- * The same-named skill to read instead of `skill`, whose file is gone: the holder's own entry when
- * an earlier rediscovery already moved it and its file is there, otherwise one from a new
- * {@link rediscoverSkills} pass (the holder's entry can be gone too, after a second upgrade).
+ * Whether `holder` must rediscover before it reads `skill` although the skill's file is still there:
+ * the plugin registries now install the skill's plugin elsewhere (an upgrade that kept the old
+ * version's directory, a project-scope install shadowing a user-scope one). Only a holder that
+ * rediscovers its own skills asks: its list follows the registries for its cwd, while a fixed list
+ * keeps what its creator gave it for as long as those files exist.
+ */
+export async function isSkillSuperseded(
+	skill: Pick<Skill, "filePath">,
+	holder: SkillRediscoveryHost,
+): Promise<boolean> {
+	return (
+		holder.refreshSkills !== undefined && (await isSupersededPluginPath(skill.filePath, os.homedir(), holder.cwd))
+	);
+}
+
+/**
+ * The same-named skill to read instead of `skill`, which went stale: the holder's own entry when an
+ * earlier rediscovery already moved it and that entry is current, otherwise one from a new
+ * {@link rediscoverSkills} pass (the holder's entry can be stale too, after a second upgrade).
  */
 async function findRediscoveredSkill(
 	skill: Pick<Skill, "name" | "filePath">,
 	host: SkillRediscoveryHost,
 ): Promise<Skill | undefined> {
 	const held = host.skills.find(entry => entry.name === skill.name);
-	if (held && held.filePath !== skill.filePath && (await fs.stat(held.filePath).catch(() => null))) return held;
+	if (
+		held &&
+		held.filePath !== skill.filePath &&
+		!(await isMissingFile(held.filePath)) &&
+		!(await isSkillSuperseded(held, host))
+	) {
+		return held;
+	}
 	const fresh = (await rediscoverSkills(host)).find(entry => entry.name === skill.name);
 	return fresh && fresh.filePath !== skill.filePath ? fresh : undefined;
 }
@@ -744,9 +788,10 @@ export type SkillInvocationKind = "user" | "autoload";
 export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
 
 /**
- * Builds the prompt message for a skill invocation. With `source`, a skill whose instruction file is
- * gone (its plugin was upgraded under a running session) is replaced by the same-named skill from
- * {@link rediscoverSkills}; `details.path` names the file actually read.
+ * Builds the prompt message for a skill invocation. With `source`, a stale skill (its instruction
+ * file is gone, or for a session that rediscovers its own skills, its plugin install was replaced;
+ * see {@link rediscoverSkills}) is replaced by the same-named skill from a rediscovery;
+ * `details.path` names the file actually read.
  */
 export async function buildSkillPromptMessage(
 	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
@@ -754,12 +799,16 @@ export async function buildSkillPromptMessage(
 	invocation: SkillInvocationKind = "user",
 	source?: SkillRediscoverySource,
 ): Promise<BuiltSkillPromptMessage> {
+	const host = source?.skillRediscoveryHost?.();
+	if (host && (await isSkillSuperseded(skill, host))) {
+		skill = (await findRediscoveredSkill(skill, host)) ?? skill;
+	}
 	let content: string;
 	try {
 		content = await Bun.file(skill.filePath).text();
 	} catch (error) {
-		if (!source || !isEnoent(error)) throw error;
-		const fresh = await findRediscoveredSkill(skill, source.skillRediscoveryHost());
+		if (!host || !isEnoent(error)) throw error;
+		const fresh = await findRediscoveredSkill(skill, host);
 		if (!fresh) throw error;
 		skill = fresh;
 		content = await Bun.file(skill.filePath).text();

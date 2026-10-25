@@ -400,13 +400,29 @@ export class MarketplaceManager {
 			}
 		}
 
-		// Only now clean up old entries — new cache succeeded, so it is safe to remove old ones.
-		if (existing && existing.length > 0) {
-			// Remove from scope-appropriate registry first, then cross-check refs before disk deletion.
-			const prunedReg = removeInstalledPlugin(await readInstalledPluginsRegistry(registryPath), pluginId);
-			await writeInstalledPluginsRegistry(registryPath, prunedReg);
+		// 6. Build and register the entry, preserving enabled state from previous install
+		const now = new Date().toISOString();
+		// Carry over enabled flag from existing entry — a disabled plugin must stay disabled after upgrade
+		const wasDisabled = existing?.some(e => e.enabled === false);
+		const installedEntry: InstalledPluginEntry = {
+			scope,
+			installPath: cachePath,
+			version,
+			installedAt: now,
+			lastUpdated: now,
+			...(wasDisabled ? { enabled: false } : {}),
+		};
 
-			// Read both registries AFTER removal — only delete paths no longer referenced by either.
+		// One write replaces the old entries with the new one, so a running session that reads the
+		// registry during the upgrade never finds the plugin missing.
+		const currentInstReg = await readInstalledPluginsRegistry(registryPath);
+		const baseInstReg =
+			existing && existing.length > 0 ? removeInstalledPlugin(currentInstReg, pluginId) : currentInstReg;
+		await writeInstalledPluginsRegistry(registryPath, addInstalledPlugin(baseInstReg, pluginId, installedEntry));
+
+		// Only now clean up old installs — the new one is cached and registered.
+		if (existing && existing.length > 0) {
+			// Read both registries AFTER the replacement — only delete paths no longer referenced by either.
 			const [userReg, projectReg] = await Promise.all([
 				readInstalledPluginsRegistry(this.#opts.installedRegistryPath),
 				this.#opts.projectInstalledRegistryPath
@@ -421,23 +437,6 @@ export class MarketplaceManager {
 				}
 			}
 		}
-
-		// 6. Build and register the entry, preserving enabled state from previous install
-		const now = new Date().toISOString();
-		// Carry over enabled flag from existing entry — a disabled plugin must stay disabled after upgrade
-		const wasDisabled = existing?.some(e => e.enabled === false);
-		const installedEntry: InstalledPluginEntry = {
-			scope,
-			installPath: cachePath,
-			version,
-			installedAt: now,
-			lastUpdated: now,
-			...(wasDisabled ? { enabled: false } : {}),
-		};
-
-		const freshInstReg = await readInstalledPluginsRegistry(registryPath);
-		const newInstReg = addInstalledPlugin(freshInstReg, pluginId, installedEntry);
-		await writeInstalledPluginsRegistry(registryPath, newInstReg);
 
 		// Carry the renamed-from key's runtime state (feature selection + settings)
 		// so a case-only rename preserves the user's configuration.

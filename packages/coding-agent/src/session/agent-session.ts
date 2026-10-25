@@ -6795,9 +6795,10 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * This session as the holder `skill://`, `/skill:` and autoload rediscover through when a skill's
-	 * file is gone: a reloadable session refreshes its skills, a fixed list (a subagent's) is
-	 * re-pointed and stored, and concurrent misses share one pass.
+	 * This session as the holder `skill://`, `/skill:` and autoload rediscover through when a skill
+	 * goes stale: a reloadable session refreshes its skills (also when the plugin registries replaced
+	 * a skill's install), a fixed list (a subagent's) re-points the entries whose files are gone and
+	 * stores the result, and concurrent misses share one pass.
 	 */
 	skillRediscoveryHost(): SkillRediscoveryHost {
 		const reloadable = this.#tools.skillsReloadable;

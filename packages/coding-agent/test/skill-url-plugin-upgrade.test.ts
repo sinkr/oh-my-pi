@@ -37,6 +37,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
 	const sessions: AgentSession[] = [];
+	const extraDirs: string[] = [];
 
 	beforeAll(async () => {
 		sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skill-upgrade-shared-"));
@@ -71,6 +72,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
 		cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
+		for (const dir of extraDirs.splice(0)) removeSyncWithRetries(dir);
 		__resetDirsFromEnvForTests();
 	});
 
@@ -78,8 +80,16 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		return path.join(tempHomeDir, ".omp", "plugins", "cache", "plugins", `market___upgrade-plugin___${version}`);
 	}
 
-	/** What `omp plugin upgrade` leaves on disk: the new version installed and registered, the old one deleted. */
-	function installPluginVersion(version: string, previous?: string): void {
+	function userRegistryPath(): string {
+		return path.join(tempHomeDir, ".omp", "plugins", "installed_plugins.json");
+	}
+
+	/** The project-scope registry of a session whose cwd is `tempDir`. */
+	function projectRegistryPath(): string {
+		return path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+	}
+
+	function writePluginVersion(version: string): void {
 		const skillDir = path.join(pluginDir(version), "skills", SKILL);
 		fs.mkdirSync(skillDir, { recursive: true });
 		fs.writeFileSync(
@@ -87,22 +97,50 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 			`---\nname: ${SKILL}\ndescription: Plugin skill.\n---\n\nBody of version ${version}.\n`,
 		);
 		fs.writeFileSync(path.join(skillDir, "notes.md"), `Notes of version ${version}.\n`);
+	}
+
+	function writeRegistry(registryPath: string, version: string, scope: "user" | "project"): void {
+		fs.mkdirSync(path.dirname(registryPath), { recursive: true });
 		fs.writeFileSync(
-			path.join(tempHomeDir, ".omp", "plugins", "installed_plugins.json"),
+			registryPath,
 			JSON.stringify({
 				version: 2,
-				plugins: { "upgrade-plugin@market": [{ scope: "user", installPath: pluginDir(version), version }] },
+				plugins: { "upgrade-plugin@market": [{ scope, installPath: pluginDir(version), version }] },
 			}),
 		);
+	}
+
+	/**
+	 * What `omp plugin upgrade` leaves on disk: the new version installed and registered, and the old
+	 * one deleted when `previous` is given. Without it the old directory stays, as when another scope
+	 * still uses it or the installer keeps superseded versions for running sessions.
+	 */
+	function installPluginVersion(version: string, previous?: string): void {
+		writePluginVersion(version);
+		writeRegistry(userRegistryPath(), version, "user");
 		if (previous) removeSyncWithRetries(pluginDir(previous));
+	}
+
+	/** A project skill at `<cwd>/.omp/skills/<name>/SKILL.md`. */
+	function writeProjectSkill(cwd: string, name: string, body: string): void {
+		const skillDir = path.join(cwd, ".omp", "skills", name);
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(skillDir, "SKILL.md"),
+			`---\nname: ${name}\ndescription: Project skill.\n---\n\n${body}\n`,
+		);
+	}
+
+	/** Another directory to run a session in, removed after the test. */
+	function makeExtraDir(prefix: string): string {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+		extraDirs.push(dir);
+		return dir;
 	}
 
 	/** What `omp plugin uninstall` leaves on disk: the plugin unregistered and its directory deleted. */
 	function uninstallPlugin(version: string): void {
-		fs.writeFileSync(
-			path.join(tempHomeDir, ".omp", "plugins", "installed_plugins.json"),
-			JSON.stringify({ version: 2, plugins: {} }),
-		);
+		fs.writeFileSync(userRegistryPath(), JSON.stringify({ version: 2, plugins: {} }));
 		removeSyncWithRetries(pluginDir(version));
 	}
 
@@ -115,11 +153,12 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		});
 	}
 
-	async function startSession(options: { skills?: AgentSession["skills"] } = {}): Promise<AgentSession> {
+	async function startSession(options: { skills?: AgentSession["skills"]; cwd?: string } = {}): Promise<AgentSession> {
+		const cwd = options.cwd ?? tempDir;
 		const { session } = await sdkModule.createAgentSession({
-			cwd: tempDir,
+			cwd,
 			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(tempDir),
+			sessionManager: SessionManager.inMemory(cwd),
 			modelRegistry: sharedModelRegistry,
 			settings: skillsSettings(),
 			...(options.skills ? { skills: [...options.skills] } : {}),
@@ -181,6 +220,82 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 			expect(await readText(child, `skill://${SKILL}`)).toContain(`Unknown skill: ${SKILL}`);
 		}
 		expect(child.skills.some(entry => entry.name === SKILL)).toBe(false);
+		expect(rediscoveries).toHaveBeenCalledTimes(1);
+	});
+
+	it("a fixed list re-points only the skill whose file is gone and keeps the inherited skills that still exist", async () => {
+		writeProjectSkill(tempDir, "kept-skill", "Parent's copy.");
+		// A worktree subagent runs in another cwd; its own discovery finds a same-named project skill.
+		const worktreeDir = makeExtraDir("pi-skill-upgrade-worktree-");
+		writeProjectSkill(worktreeDir, "kept-skill", "Worktree's copy.");
+		const parent = await startSession();
+		const inherited = parent.skills.find(entry => entry.name === "kept-skill")!;
+		const child = await startSession({ skills: parent.skills, cwd: worktreeDir });
+
+		installPluginVersion("2.0.0", "1.0.0");
+
+		expect(await readText(child, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		expect(child.skills.find(entry => entry.name === "kept-skill")?.filePath).toBe(inherited.filePath);
+		expect(await readText(child, "skill://kept-skill")).toContain("Parent's copy.");
+	});
+
+	it("a fixed list keeps a skill whose file cannot be checked: only a missing file counts as gone", async () => {
+		// Every stat of a path below a regular file fails with ENOTDIR, not ENOENT.
+		const notADirectory = path.join(tempDir, "not-a-directory");
+		fs.writeFileSync(notADirectory, "");
+		const unchecked = {
+			name: "unchecked-skill",
+			description: "A skill whose file cannot be checked.",
+			filePath: path.join(notADirectory, "SKILL.md"),
+			baseDir: notADirectory,
+			source: "custom:user",
+		};
+		const parent = await startSession();
+		const child = await startSession({ skills: [...parent.skills, unchecked] });
+
+		installPluginVersion("2.0.0", "1.0.0");
+
+		expect(await readText(child, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		expect(child.skills.some(entry => entry.name === "unchecked-skill")).toBe(true);
+	});
+
+	it("an upgrade that keeps the old version's directory moves a running session to the new version", async () => {
+		const session = await startSession();
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+
+		installPluginVersion("2.0.0");
+
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		expect(session.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(pluginDir("2.0.0"))).toBe(true);
+	});
+
+	it("a /skill: invocation after an upgrade that keeps the old version's directory sends the new version", async () => {
+		const session = await startSession();
+		const skill = session.skills.find(entry => entry.name === SKILL)!;
+
+		installPluginVersion("2.0.0");
+
+		const built = await buildSkillPromptMessage(skill, { args: "" }, "user", session);
+		expect(built.message).toContain("Body of version 2.0.0.");
+		expect(built.details.path.startsWith(pluginDir("2.0.0"))).toBe(true);
+	});
+
+	it("a project-scope upgrade moves the project's session and leaves a session outside the project alone", async () => {
+		// Both scopes share the 1.0.0 cache directory; the project upgrade keeps it for the user scope.
+		writeRegistry(projectRegistryPath(), "1.0.0", "project");
+		const projectSession = await startSession();
+		const userSession = await startSession({ cwd: makeExtraDir("pi-skill-upgrade-outside-") });
+		expect(await readText(projectSession, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+		expect(await readText(userSession, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+
+		writePluginVersion("2.0.0");
+		writeRegistry(projectRegistryPath(), "2.0.0", "project");
+		const rediscoveries = countRediscoveries();
+
+		expect(await readText(projectSession, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		for (let attempt = 0; attempt < 2; attempt++) {
+			expect(await readText(userSession, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+		}
 		expect(rediscoveries).toHaveBeenCalledTimes(1);
 	});
 
