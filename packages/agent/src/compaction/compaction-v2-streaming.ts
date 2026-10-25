@@ -400,6 +400,12 @@ function buildCompactionV2Headers(
 	codexMetadata?: OpenAICodexCompatibilityMetadata,
 ): Record<string, string> {
 	const api = compactionV2Api(model);
+	// An explicit `remoteCompaction.model` sends a different id than the
+	// active lane (the same nullish presence the body resolves through
+	// `resolveCompactionV2Model`). Once it redirects the request, the active
+	// `requestModelId` and thinking classification describe a model that is
+	// NOT on the wire, so they must not reach the policy cascade.
+	const hasModelOverride = model.remoteCompaction?.model != null;
 	const cacheOptions = { sessionId: request.sessionId, promptCacheKey: request.promptCacheKey };
 	const routingSessionId = getOpenAIResponsesRoutingSessionId(cacheOptions);
 	const promptCacheSessionId = getOpenAIPromptCacheKey(cacheOptions);
@@ -415,18 +421,26 @@ function buildCompactionV2Headers(
 					...resolveOpenAIRequestSetup(
 						{
 							provider: model.provider,
-							id: model.id,
 							// The request adapter plus every fact the catalog policy
 							// cascade reads: the Go cache-affinity rules are `on-api`
 							// scoped, so a reduced projection that drops them silently
 							// disables the family header. The adapter is the EFFECTIVE
 							// compaction API (`remoteCompaction.api` override included),
-							// never the native lane the model would otherwise use.
+							// never the native lane the model would otherwise use, and
+							// the identity is the EFFECTIVE compaction wire id — the id
+							// this request actually sends, resolved by the same
+							// `resolveCompactionV2Model` the body uses. Under an
+							// override the active lane's `requestModelId` and thinking
+							// classification belong to a model that never reaches the
+							// wire, so they are dropped instead of overriding the id
+							// actually sent; without one the active pair keeps its
+							// usual `policyModelId` preference.
+							id: hasModelOverride ? resolveCompactionV2Model(model) : model.id,
 							api,
 							providerType: model.providerType,
 							reasoning: model.reasoning,
-							requestModelId: model.requestModelId,
-							thinking: model.thinking,
+							requestModelId: hasModelOverride ? undefined : model.requestModelId,
+							thinking: hasModelOverride ? undefined : model.thinking,
 							baseUrl: model.baseUrl,
 							headers: model.headers,
 							compat: {

@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Remote compaction requests now carry the effective compaction request API (the configured `remoteCompaction.api` override, else the model's API), so provider request policy is chosen from the endpoint the request actually uses ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Remote compaction requests now carry the effective compaction request API (the configured `remoteCompaction.api` override, else the model's API), and request policy resolves from that API plus the effective compaction model (the configured `remoteCompaction.model` override, else the model's wire id), so request headers are chosen from the endpoint and model the request actually sends ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 
 ### Fixed
 
