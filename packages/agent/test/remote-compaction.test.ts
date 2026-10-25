@@ -42,6 +42,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
@@ -1457,6 +1458,42 @@ describe("requestCompactionV2Streaming", () => {
 
 		expect(sentModels).toEqual(["muse-spark-1.3-contributor"]);
 		expect(sessionHeaders).toEqual(["parent:task"]);
+	});
+	test("keeps the child session header when a Go alias compacts under its own unverified id", async () => {
+		// The primary session's policy lookup resolves this alias through its
+		// requestModelId (gpt-6-luna is a verified Go Responses lane member),
+		// priming the catalog memo. Compaction redirects the body to the alias
+		// itself and drops requestModelId, so the id actually sent is the
+		// unverified alias and its header must keep the child conversation id.
+		const model = makeOpenAiModel({
+			provider: "opencode-go",
+			id: "review-memo-compact-alias",
+			requestModelId: "gpt-6-luna",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true, model: "review-memo-compact-alias" },
+		});
+		expect(resolveCatalogPolicy(model).taskSiblingPromptCache).toBe(true);
+		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+		const request = buildCompactionV2Request(model, [userItem], "instructions", {
+			sessionId: "child-1",
+			promptCacheKey: "parent:task",
+		});
+		const sessionHeaders: (string | null)[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-opencode-session"));
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+
+		expect(sessionHeaders).toEqual(["child-1"]);
 	});
 	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
 		"retries a transient socket closure: %s",

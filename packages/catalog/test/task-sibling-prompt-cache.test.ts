@@ -170,3 +170,50 @@ describe("task sibling prompt-cache opt-in", () => {
 		).toThrow(/task-sibling-prompt-cache.*rejects value/);
 	});
 });
+
+describe("catalog policy memo key", () => {
+	const go = (id: string) => getBundledModel("opencode-go", id);
+	/** Custom Go Task alias shape: unknown logical id resolved under its wire id. */
+	const alias = (id: string, requestModelId: string | undefined): Model => ({
+		...go("gpt-6-luna"),
+		id,
+		requestModelId,
+	});
+
+	test("re-resolves the alias when a projection drops or changes requestModelId after a wire-id prime", () => {
+		const id = "review-memo-alias-wire-first";
+		// Primary session: the alias opts in through gpt-6-luna, a verified Go
+		// Responses lane member, so the memo primes `true`.
+		expect(resolveCatalogPolicy(alias(id, "gpt-6-luna")).taskSiblingPromptCache).toBe(true);
+		// A compaction-style projection keeps the same logical alias but drops
+		// the wire id; the alias itself classifies as unknown, so no lane rule
+		// may match it — the axis stays off (absent, feature-off).
+		expect(resolveCatalogPolicy(alias(id, undefined)).taskSiblingPromptCache).not.toBe(true);
+		// A different wire id must re-resolve too: grok-4.5 was never verified
+		// on the Responses lane (grok-4.6/4.7 were).
+		expect(resolveCatalogPolicy(alias(id, "grok-4.5")).taskSiblingPromptCache).not.toBe(true);
+	});
+
+	test("re-resolves the alias when a projection supplies requestModelId after a bare prime", () => {
+		const id = "review-memo-alias-bare-first";
+		// The projection arriving bare must not pin the answer for the later
+		// wire-id resolution (the reverse prime order of the compaction chain).
+		expect(resolveCatalogPolicy(alias(id, undefined)).taskSiblingPromptCache).not.toBe(true);
+		expect(resolveCatalogPolicy(alias(id, "gpt-6-luna")).taskSiblingPromptCache).toBe(true);
+	});
+
+	test("keeps native lane policy independent of requestModelId in either prime order", () => {
+		// Opted native lane member: identical verdict with and without a wire
+		// id naming itself, in either prime order.
+		expect(resolveCatalogPolicy({ ...go("gpt-6-luna"), requestModelId: "gpt-6-luna" }).taskSiblingPromptCache).toBe(
+			true,
+		);
+		expect(resolveCatalogPolicy(go("gpt-6-luna")).taskSiblingPromptCache).toBe(true);
+		// Non-opted native lane member: its own known id wins over a wire id
+		// pointing at an opted sibling, in either prime order.
+		expect(resolveCatalogPolicy(go("minimax-m2.7")).taskSiblingPromptCache).not.toBe(true);
+		expect(
+			resolveCatalogPolicy({ ...go("minimax-m2.7"), requestModelId: "gpt-6-luna" }).taskSiblingPromptCache,
+		).not.toBe(true);
+	});
+});
