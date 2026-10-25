@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Reduced native Myers diff and structured patch allocation overhead on large edits by storing frontier path components in a contiguous arena instead of reference-counted heap nodes ([#17015](https://github.com/can1357/oh-my-pi/pull/17015) by [@GTanger](https://github.com/GTanger))
+- Faster native line, word, and structured patch diffs on large edits ([#17015](https://github.com/can1357/oh-my-pi/pull/17015) by [@GTanger](https://github.com/GTanger))
 
 ### Fixed
 

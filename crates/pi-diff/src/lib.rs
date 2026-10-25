@@ -27,8 +27,66 @@ const NO_COMPONENT: u32 = u32::MAX;
 struct ComponentNode {
 	count:   u32,
 	prev:    u32,
+	refs:    u32,
 	added:   bool,
 	removed: bool,
+}
+
+/// Arena-allocated component pool with intrusive free-list recycling.
+/// Superseded frontier nodes are returned to `free_head` as soon as their last
+/// active `PathState` drops them, keeping peak memory proportional to live
+/// frontier paths rather than total explored `(edit_length, diagonal)` states.
+struct ComponentArena {
+	nodes:     Vec<ComponentNode>,
+	free_head: u32,
+}
+
+impl ComponentArena {
+	fn with_capacity(capacity: usize) -> Self {
+		Self {
+			nodes:     Vec::with_capacity(capacity),
+			free_head: NO_COMPONENT,
+		}
+	}
+
+	#[inline]
+	fn alloc(&mut self, count: u32, prev: u32, added: bool, removed: bool) -> u32 {
+		if self.free_head != NO_COMPONENT {
+			let idx = self.free_head;
+			let slot = &mut self.nodes[idx as usize];
+			self.free_head = slot.prev;
+			*slot = ComponentNode { count, prev, refs: 1, added, removed };
+			idx
+		} else {
+			let idx = self.nodes.len() as u32;
+			self.nodes
+				.push(ComponentNode { count, prev, refs: 1, added, removed });
+			idx
+		}
+	}
+
+	#[inline]
+	fn clone_ref(&mut self, idx: u32) -> u32 {
+		if idx != NO_COMPONENT {
+			self.nodes[idx as usize].refs += 1;
+		}
+		idx
+	}
+
+	#[inline]
+	fn release(&mut self, mut idx: u32) {
+		while idx != NO_COMPONENT {
+			let node = &mut self.nodes[idx as usize];
+			node.refs -= 1;
+			if node.refs > 0 {
+				break;
+			}
+			let prev = node.prev;
+			node.prev = self.free_head;
+			self.free_head = idx;
+			idx = prev;
+		}
+	}
 }
 
 /// Frontier state for one diagonal: furthest old-position reached plus the
@@ -42,7 +100,7 @@ struct PathState {
 /// Extend `path` along its diagonal while tokens match, recording the common
 /// run. Returns the new-token position (mirrors jsdiff `extractCommon`).
 fn extract_common(
-	arena: &mut Vec<ComponentNode>,
+	arena: &mut ComponentArena,
 	path: &mut PathState,
 	new: &[u32],
 	old: &[u32],
@@ -62,14 +120,7 @@ fn extract_common(
 		common += 1;
 	}
 	if common > 0 {
-		let idx = arena.len() as u32;
-		arena.push(ComponentNode {
-			count:   common,
-			prev:    path.last,
-			added:   false,
-			removed: false,
-		});
-		path.last = idx;
+		path.last = arena.alloc(common, path.last, false, false);
 	}
 	path.old_pos = old_pos;
 	new_pos
@@ -77,35 +128,41 @@ fn extract_common(
 
 /// Branch from `path` with one added or removed token (mirrors jsdiff
 /// `addToPath`, which merges into the previous component when the edit kind
-/// repeats).
+/// repeats). Consumes ownership of `path`'s component reference.
 fn add_to_path(
-	arena: &mut Vec<ComponentNode>,
+	arena: &mut ComponentArena,
 	path: PathState,
 	added: bool,
 	removed: bool,
 	old_pos_inc: isize,
 ) -> PathState {
-	let node = if path.last != NO_COMPONENT {
-		let last = arena[path.last as usize];
+	let last_idx = path.last;
+	let new_last = if last_idx != NO_COMPONENT {
+		let last = arena.nodes[last_idx as usize];
 		if last.added == added && last.removed == removed {
-			ComponentNode { count: last.count + 1, prev: last.prev, added, removed }
+			if last.refs == 1 {
+				arena.nodes[last_idx as usize].count = last.count + 1;
+				last_idx
+			} else {
+				arena.nodes[last_idx as usize].refs -= 1;
+				let prev = arena.clone_ref(last.prev);
+				arena.alloc(last.count + 1, prev, added, removed)
+			}
 		} else {
-			ComponentNode { count: 1, prev: path.last, added, removed }
+			arena.alloc(1, last_idx, added, removed)
 		}
 	} else {
-		ComponentNode { count: 1, prev: NO_COMPONENT, added, removed }
+		arena.alloc(1, NO_COMPONENT, added, removed)
 	};
-	let idx = arena.len() as u32;
-	arena.push(node);
-	PathState { old_pos: path.old_pos + old_pos_inc, last: idx }
+	PathState { old_pos: path.old_pos + old_pos_inc, last: new_last }
 }
 
 /// Convert the winning component chain into forward-ordered runs.
-fn build_runs(arena: &[ComponentNode], last: u32) -> Vec<Run> {
+fn build_runs(arena: &ComponentArena, last: u32) -> Vec<Run> {
 	let mut runs = Vec::new();
 	let mut cursor = last;
 	while cursor != NO_COMPONENT {
-		let component = arena[cursor as usize];
+		let component = arena.nodes[cursor as usize];
 		runs.push(Run {
 			count:   component.count,
 			added:   component.added,
@@ -126,7 +183,7 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 	let max_edit = old_len + new_len;
 	let offset = max_edit + 1;
 	let mut best: Vec<Option<PathState>> = vec![None; (2 * max_edit + 3) as usize];
-	let mut arena: Vec<ComponentNode> = Vec::with_capacity((old.len() + new.len()).max(16));
+	let mut arena = ComponentArena::with_capacity((old.len() + new.len()).clamp(16, 4096));
 
 	// Seed edit length 0: the content may start with common tokens.
 	let mut seed = PathState { old_pos: -1, last: NO_COMPONENT };
@@ -151,7 +208,12 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 			});
 			let can_remove = remove_path.is_some_and(|path| path.old_pos + 1 < old_len);
 			if !can_add && !can_remove {
-				best[idx] = None;
+				if let Some(rem) = remove_path {
+					arena.release(rem.last);
+				}
+				if let Some(prev) = best[idx].take() {
+					arena.release(prev.last);
+				}
 				diagonal += 2;
 				continue;
 			}
@@ -163,13 +225,15 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 					&& remove_path.is_some_and(|path| {
 						add_path_old_pos.is_some_and(|add_old| path.old_pos < add_old)
 					})) {
-				add_to_path(
-					&mut arena,
-					best[idx + 1].expect("canAdd implies a live addPath"),
-					true,
-					false,
-					0,
-				)
+				if let Some(rem) = remove_path {
+					arena.release(rem.last);
+				}
+				let add_path = best[idx + 1].expect("canAdd implies a live addPath");
+				let cloned = PathState {
+					old_pos: add_path.old_pos,
+					last:    arena.clone_ref(add_path.last),
+				};
+				add_to_path(&mut arena, cloned, true, false, 0)
 			} else {
 				add_to_path(
 					&mut arena,
@@ -189,7 +253,9 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 			if new_pos + 1 >= new_len {
 				min_diagonal = min_diagonal.max(diagonal + 1);
 			}
-			best[idx] = Some(base_path);
+			if let Some(prev) = best[idx].replace(base_path) {
+				arena.release(prev.last);
+			}
 			diagonal += 2;
 		}
 		edit_length += 1;
