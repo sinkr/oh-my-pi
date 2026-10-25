@@ -269,6 +269,17 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(session.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(pluginDir("2.0.0"))).toBe(true);
 	});
 
+	it("an upgrade that keeps the old version's directory still moves a session after a session in another directory read the registry", async () => {
+		const session = await startSession();
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+
+		installPluginVersion("2.0.0");
+		// Its discovery reads the upgraded registry before the first session's next lookup.
+		await startSession({ cwd: makeExtraDir("pi-skill-upgrade-other-") });
+
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+	});
+
 	it("a /skill: invocation after an upgrade that keeps the old version's directory sends the new version", async () => {
 		const session = await startSession();
 		const skill = session.skills.find(entry => entry.name === SKILL)!;

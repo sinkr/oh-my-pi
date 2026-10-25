@@ -1206,16 +1206,21 @@ async function readClaudeEnabledPlugins(
 
 type PluginRootsResult = { roots: ClaudePluginRoot[]; warnings: string[] };
 
-const pluginRootsCache = new Map<string, Promise<PluginRootsResult>>();
+/** A cached {@link listClaudePluginRoots} result and the registry files it was read from. */
+interface PluginRootsCacheEntry {
+	files: readonly string[];
+	/** Each file's {@link registrySignature}, taken just before the files were read. */
+	signatures: Promise<readonly string[]>;
+	result: Promise<PluginRootsResult>;
+}
+
+const pluginRootsCache = new Map<string, PluginRootsCacheEntry>();
 
 /**
  * Plugin id of every plugin root a registry has named in this process, keyed by the root's path and
  * by its real path (Agent Plugin skills record real paths). See {@link isSupersededPluginPath}.
  */
 const registeredPluginRootIds = new Map<string, string>();
-
-/** Stat signature of each registry file when plugin roots were last read from it. */
-const registrySignatures = new Map<string, string>();
 
 const pluginCacheInvalidators = new Set<() => void>();
 
@@ -1249,19 +1254,10 @@ async function registrySignature(filePath: string): Promise<string> {
 	}
 }
 
-/**
- * Records each registry file's signature before roots are read from it. A file that changed since
- * the last record is dropped from the content cache first, so the read sees what is on disk.
- */
-async function recordRegistrySignatures(files: readonly string[]): Promise<void> {
-	await Promise.all(
-		files.map(async file => {
-			const signature = await registrySignature(file);
-			if (registrySignatures.get(file) === signature) return;
-			invalidateFsCache(file);
-			registrySignatures.set(file, signature);
-		}),
-	);
+/** Whether a registry file changed on disk since `entry` was read from it. */
+async function isStaleRootsEntry(entry: PluginRootsCacheEntry): Promise<boolean> {
+	const [recorded, current] = await Promise.all([entry.signatures, Promise.all(entry.files.map(registrySignature))]);
+	return recorded.some((signature, index) => signature !== current[index]);
 }
 
 async function recordRegisteredPluginRoots(roots: readonly ClaudePluginRoot[]): Promise<void> {
@@ -1277,9 +1273,9 @@ async function recordRegisteredPluginRoots(roots: readonly ClaudePluginRoot[]): 
 /**
  * Whether `filePath` lies in a plugin install that the registries, as read for `cwd`, have replaced
  * with another install of the same plugin: an upgrade that kept the old version's directory, or a
- * project-scope install that now shadows a user-scope one. A registry that changed on disk since
- * roots were last read from it is read again first. A path in no registered plugin root, or in a
- * plugin the registries no longer install at all, is not superseded.
+ * project-scope install that now shadows a user-scope one. The cached roots for `cwd` are read again
+ * first when a registry file changed on disk since they were read. A path in no registered plugin
+ * root, or in a plugin the registries no longer install at all, is not superseded.
  */
 export async function isSupersededPluginPath(filePath: string, home: string, cwd?: string): Promise<boolean> {
 	let pluginId: string | undefined;
@@ -1287,15 +1283,7 @@ export async function isSupersededPluginPath(filePath: string, home: string, cwd
 		if (pathIsWithin(root, filePath)) pluginId = id;
 	}
 	if (pluginId === undefined) return false;
-	const { files } = await resolvePluginRegistryFiles(home, cwd);
-	for (const file of files) {
-		const recorded = registrySignatures.get(file);
-		if (recorded !== undefined && recorded !== (await registrySignature(file))) {
-			clearClaudePluginRootsCache();
-			break;
-		}
-	}
-	const installs = (await listClaudePluginRoots(home, cwd)).roots.filter(root => root.id === pluginId);
+	const installs = (await readPluginRoots(home, cwd, true)).roots.filter(root => root.id === pluginId);
 	if (installs.length === 0) return false;
 	for (const install of installs) {
 		if (pathIsWithin(install.path, filePath)) return false;
@@ -1311,10 +1299,15 @@ export async function isSupersededPluginPath(filePath: string, home: string, cwd
  *
  * Results are cached per Claude and OMP config directories, project registry, and canonical active project.
  */
-export async function listClaudePluginRoots(
+export function listClaudePluginRoots(
 	home: string,
 	cwd?: string,
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+	return readPluginRoots(home, cwd, false);
+}
+
+/** {@link listClaudePluginRoots}; with `revalidate`, a cached result whose registry files changed is read again. */
+async function readPluginRoots(home: string, cwd: string | undefined, revalidate: boolean): Promise<PluginRootsResult> {
 	const { claudeConfigDir, ompRegistryPath, resolvedProjectPath, files } = await resolvePluginRegistryFiles(home, cwd);
 	const projectRoot = resolvedProjectPath ? path.dirname(path.dirname(path.dirname(resolvedProjectPath))) : cwd;
 	const activeClaudeProjectPath = projectRoot ? await canonicalClaudeProjectPath(projectRoot) : null;
@@ -1323,26 +1316,36 @@ export async function listClaudePluginRoots(
 	const enabledOverrides = await readClaudeEnabledPlugins(claudeConfigDir, settingsDirs);
 	const cacheKey = `${claudeConfigDir}:${ompRegistryPath}:${resolvedProjectPath ?? ""}:${activeClaudeProjectPath ?? ""}:${canonicalCwd ?? ""}:${enabledOverrides.sources.join("|")}`;
 	const cached = pluginRootsCache.get(cacheKey);
-	if (cached) return cached;
+	if (cached) {
+		if (!revalidate || !(await isStaleRootsEntry(cached))) return cached.result;
+		if (pluginRootsCache.get(cacheKey) === cached) pluginRootsCache.delete(cacheKey);
+		// A concurrent caller that found the same stale entry may already have replaced it.
+		const current = pluginRootsCache.get(cacheKey);
+		if (current) return current.result;
+	}
 
+	// A fresh read takes the registries from disk, not from a content cache an earlier read filled.
+	for (const file of files) invalidateFsCache(file);
+	const signatures = Promise.all(files.map(registrySignature));
 	// Cache the in-flight promise so concurrent callers share one computation.
-	const pending = (async () => {
-		await recordRegistrySignatures(files);
-		const result = await loadClaudePluginRoots({
+	const result = (async () => {
+		await signatures;
+		const loaded = await loadClaudePluginRoots({
 			claudeConfigDir,
 			ompRegistryPath,
 			resolvedProjectPath,
 			activeClaudeProjectPath,
 			enabledOverrides,
 		});
-		await recordRegisteredPluginRoots(result.roots);
-		return result;
+		await recordRegisteredPluginRoots(loaded.roots);
+		return loaded;
 	})();
-	pluginRootsCache.set(cacheKey, pending);
+	const entry: PluginRootsCacheEntry = { files, signatures, result };
+	pluginRootsCache.set(cacheKey, entry);
 	try {
-		return await pending;
+		return await result;
 	} catch (error) {
-		if (pluginRootsCache.get(cacheKey) === pending) pluginRootsCache.delete(cacheKey);
+		if (pluginRootsCache.get(cacheKey) === entry) pluginRootsCache.delete(cacheKey);
 		throw error;
 	}
 }
