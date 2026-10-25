@@ -121,6 +121,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "resume now", started: true, synthetic: true });
 
@@ -138,6 +139,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput();
 
@@ -155,6 +157,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "continue goal", customType: "goal-continuation" });
 
@@ -182,6 +185,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "loop prompt" });
 
@@ -197,6 +201,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: true,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "interrupt now", streamingBehavior: "steer" });
 
@@ -219,6 +224,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => false),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "/void-cmd" });
 
@@ -239,6 +245,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "repeat me" });
 
@@ -258,6 +265,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => false),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "/other-cmd" });
 
@@ -279,6 +287,7 @@ describe("submitInteractiveInput", () => {
 			}),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "failing body" });
 
@@ -300,6 +309,7 @@ describe("submitInteractiveInput", () => {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
+			skillRediscoveryHost: () => ({ skills: [] }),
 		};
 		const input = createInput({ text: "/skill:recap what changed" });
 

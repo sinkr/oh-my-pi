@@ -1,21 +1,23 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import { getProjectDir, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isEnoent, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
 	MANAGED_SKILLS_PROVIDER_ID,
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
+import { reset as resetCapabilities } from "../capability";
 import { skillCapability } from "../capability/skill";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
-import type { SkillsSettings } from "./settings";
+import type { Settings } from "../config/settings";
+import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "./settings";
 import {
 	type Skill as CapabilitySkill,
 	isUserSourceEnabled,
 	loadCapability,
 	type SkillFrontmatter,
 } from "../discovery";
-import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
+import { clearPluginRootsAndCaches, compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
 import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
@@ -601,6 +603,79 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	};
 }
 
+/** What {@link rediscoverSkills} needs from whoever holds a skill list. */
+export interface SkillRediscoveryHost {
+	/** The holder's current skills. */
+	skills: readonly Skill[];
+	/** Rediscovers the holder's own skills in place and returns them; absent when the list is fixed. */
+	refreshSkills?: () => Promise<readonly Skill[]>;
+	/** Stores a re-pointed fixed list, so later reads and subagents spawned from the holder use it. */
+	replaceSkills?: (skills: readonly Skill[]) => Promise<void>;
+	/** Runs `rediscover`, or joins the holder's pass already in flight, so concurrent misses share one. */
+	shareRediscovery?: (rediscover: () => Promise<readonly Skill[]>) => Promise<readonly Skill[]>;
+	/** Settings for a one-off discovery; without them a fixed list cannot be re-pointed. */
+	settings?: Settings;
+	cwd?: string;
+	extensionRoots?: EffectiveExtensionRoots;
+}
+
+/** A session that can describe itself as a {@link SkillRediscoveryHost}, built only on a miss. */
+export interface SkillRediscoverySource {
+	skillRediscoveryHost(): SkillRediscoveryHost;
+}
+
+/**
+ * Skills to use again after one of them lost its instruction file. `omp plugin upgrade`
+ * installs the new version in a new cache directory and deletes the old one, so every path a
+ * long-running session discovered from that plugin is gone. The plugin-root cache and the
+ * discovery file cache still name the deleted directory, so both are dropped first. A holder
+ * that rediscovers its own skills refreshes in place, so its list, its prompt and the process
+ * snapshot follow. A fixed list (a subagent given its parent's) keeps its names: each is
+ * re-pointed at a fresh discovery's same-named skill, a name the discovery lacks and whose file
+ * is gone is dropped, and the holder stores the result, so the next lookup needs no new pass.
+ */
+export function rediscoverSkills(host: SkillRediscoveryHost): Promise<readonly Skill[]> {
+	const rediscover = () => rediscoverHostSkills(host);
+	return host.shareRediscovery ? host.shareRediscovery(rediscover) : rediscover();
+}
+
+async function rediscoverHostSkills(host: SkillRediscoveryHost): Promise<readonly Skill[]> {
+	clearPluginRootsAndCaches();
+	resetCapabilities();
+	if (host.refreshSkills) return host.refreshSkills();
+	if (!host.settings) return host.skills;
+	const discovered = await loadSkills({
+		...cfgSkills.get(host.settings),
+		cwd: host.cwd,
+		disabledExtensions: cfgDisabledExtensions.get(host.settings),
+		extensionRoots: host.extensionRoots,
+	});
+	const byName = new Map(discovered.skills.map(skill => [skill.name, skill]));
+	const repointed: Skill[] = [];
+	for (const skill of host.skills) {
+		const fresh = byName.get(skill.name);
+		if (fresh) repointed.push(fresh);
+		else if (await fs.stat(skill.filePath).catch(() => null)) repointed.push(skill);
+	}
+	await host.replaceSkills?.(repointed);
+	return repointed;
+}
+
+/**
+ * The same-named skill to read instead of `skill`, whose file is gone: the holder's own entry when
+ * an earlier rediscovery already moved it and its file is there, otherwise one from a new
+ * {@link rediscoverSkills} pass (the holder's entry can be gone too, after a second upgrade).
+ */
+async function findRediscoveredSkill(
+	skill: Pick<Skill, "name" | "filePath">,
+	host: SkillRediscoveryHost,
+): Promise<Skill | undefined> {
+	const held = host.skills.find(entry => entry.name === skill.name);
+	if (held && held.filePath !== skill.filePath && (await fs.stat(held.filePath).catch(() => null))) return held;
+	const fresh = (await rediscoverSkills(host)).find(entry => entry.name === skill.name);
+	return fresh && fresh.filePath !== skill.filePath ? fresh : undefined;
+}
+
 export interface BuiltSkillPromptMessage {
 	message: string;
 	details: SkillPromptDetails;
@@ -668,12 +743,27 @@ export type SkillInvocationKind = "user" | "autoload";
 /** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
 export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
 
+/**
+ * Builds the prompt message for a skill invocation. With `source`, a skill whose instruction file is
+ * gone (its plugin was upgraded under a running session) is replaced by the same-named skill from
+ * {@link rediscoverSkills}; `details.path` names the file actually read.
+ */
 export async function buildSkillPromptMessage(
 	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
 	input: SkillPromptInput,
 	invocation: SkillInvocationKind = "user",
+	source?: SkillRediscoverySource,
 ): Promise<BuiltSkillPromptMessage> {
-	const content = await Bun.file(skill.filePath).text();
+	let content: string;
+	try {
+		content = await Bun.file(skill.filePath).text();
+	} catch (error) {
+		if (!source || !isEnoent(error)) throw error;
+		const fresh = await findRediscoveredSkill(skill, source.skillRediscoveryHost());
+		if (!fresh) throw error;
+		skill = fresh;
+		content = await Bun.file(skill.filePath).text();
+	}
 	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
 	// diagnostics to the loader, which already parsed this frontmatter.
 	const body = parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();

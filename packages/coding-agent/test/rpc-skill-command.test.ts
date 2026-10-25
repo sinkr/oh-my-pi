@@ -25,6 +25,7 @@ describe("tryRunRpcSkillCommand", () => {
 		const handled = await tryRunRpcSkillCommand(
 			{
 				skillsSettings: { enableSkillCommands: true },
+				skillRediscoveryHost: () => ({ skills: [] }),
 				skills: [
 					{ name: "reviewer", description: "Review code", filePath: skillPath, baseDir: dir, source: "project" },
 				],
@@ -62,6 +63,7 @@ describe("tryRunRpcSkillCommand", () => {
 			const handled = await tryRunRpcSkillCommand(
 				{
 					skillsSettings: { enableSkillCommands: true },
+					skillRediscoveryHost: () => ({ skills: [] }),
 					skills: [
 						{
 							name: "reviewer",
@@ -103,6 +105,7 @@ describe("tryRunRpcSkillCommand", () => {
 			const handled = await tryRunRpcSkillCommand(
 				{
 					skillsSettings: { enableSkillCommands: true },
+					skillRediscoveryHost: () => ({ skills: [] }),
 					skills: [
 						{
 							name: "reviewer",
@@ -138,6 +141,7 @@ describe("tryRunRpcSkillCommand", () => {
 		const handled = await tryRunRpcSkillCommand(
 			{
 				skillsSettings: { enableSkillCommands: true },
+				skillRediscoveryHost: () => ({ skills: [] }),
 				skills: [],
 				async promptCustomMessage() {
 					throw new Error("should not dispatch unknown skills");
@@ -162,6 +166,7 @@ describe("tryRunRpcSkillCommand", () => {
 			const handled = await tryRunRpcSkillCommand(
 				{
 					skillsSettings: { enableSkillCommands: true },
+					skillRediscoveryHost: () => ({ skills: [] }),
 					skills: [
 						{
 							name: "reviewer",
@@ -220,6 +225,7 @@ describe("dispatchRpcSkillPrompt", () => {
 			...promptResultsFor("cmd-1"),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
+				skillRediscoveryHost: () => ({ skills: [] }),
 				skills: [
 					{ name: "reviewer", description: "Review code", filePath: skillPath, baseDir: dir, source: "project" },
 				],
@@ -261,6 +267,7 @@ describe("dispatchRpcSkillPrompt", () => {
 			...promptResultsFor("cmd-1b"),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
+				skillRediscoveryHost: () => ({ skills: [] }),
 				skills: [
 					{ name: "reviewer", description: "Review code", filePath: skillPath, baseDir: dir, source: "project" },
 				],
@@ -299,6 +306,7 @@ describe("dispatchRpcSkillPrompt", () => {
 			...promptResultsFor("cmd-2"),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
+				skillRediscoveryHost: () => ({ skills: [] }),
 				skills: [],
 				async promptCustomMessage() {
 					return true;
@@ -322,6 +330,7 @@ describe("dispatchRpcSkillPrompt", () => {
 			...promptResultsFor("cmd-3"),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
+				skillRediscoveryHost: () => ({ skills: [] }),
 				skills: [
 					{ name: "reviewer", description: "Review code", filePath: skillPath, baseDir: dir, source: "project" },
 				],
@@ -351,6 +360,7 @@ describe("dispatchRpcSkillPrompt", () => {
 				...promptResultsFor("cmd-4"),
 				session: {
 					skillsSettings: { enableSkillCommands: true },
+					skillRediscoveryHost: () => ({ skills: [] }),
 					skills: [
 						{
 							name: "reviewer",
@@ -386,6 +396,7 @@ describe("dispatchRpcSkillPrompt", () => {
 			...promptResultsFor("cmd-5", frames),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
+				skillRediscoveryHost: () => ({ skills: [] }),
 				skills: [
 					{ name: "reviewer", description: "Review code", filePath: skillPath, baseDir: dir, source: "project" },
 				],
@@ -423,6 +434,7 @@ describe("dispatchRpcSkillPrompt", () => {
 				...promptResultsFor("cmd-img"),
 				session: {
 					skillsSettings: { enableSkillCommands: true },
+					skillRediscoveryHost: () => ({ skills: [] }),
 					skills: [
 						{
 							name: "reviewer",

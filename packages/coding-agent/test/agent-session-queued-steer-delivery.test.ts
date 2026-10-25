@@ -547,6 +547,7 @@ describe("AgentSession queued steer delivery", () => {
 			await tryRunRpcSkillCommand(
 				{
 					skillsSettings: { enableSkillCommands: true },
+					skillRediscoveryHost: () => ({ skills: [] }),
 					skills: [
 						{
 							name: "reviewer",
@@ -812,6 +813,7 @@ describe("AgentSession queued steer delivery", () => {
 				await tryRunRpcSkillCommand(
 					{
 						skillsSettings: { enableSkillCommands: true },
+						skillRediscoveryHost: () => ({ skills: [] }),
 						skills: [
 							{
 								name: "reviewer",
@@ -865,6 +867,7 @@ describe("AgentSession queued steer delivery", () => {
 				void tryRunRpcSkillCommand(
 					{
 						skillsSettings: { enableSkillCommands: true },
+						skillRediscoveryHost: () => ({ skills: [] }),
 						skills: [
 							{
 								name: "reviewer",

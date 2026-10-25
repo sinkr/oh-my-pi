@@ -164,7 +164,7 @@ import { createExtensionModelQuery } from "../extensibility/extensions/model-api
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
-import type { Skill, SkillWarning } from "../extensibility/skills";
+import type { Skill, SkillRediscoveryHost, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
@@ -6669,6 +6669,29 @@ export class AgentSession implements SettingsScope {
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
 	refreshSkills(): Promise<void> {
 		return this.#tools.refreshSkills();
+	}
+
+	/**
+	 * This session as the holder `skill://`, `/skill:` and autoload rediscover through when a skill's
+	 * file is gone: a reloadable session refreshes its skills, a fixed list (a subagent's) is
+	 * re-pointed and stored, and concurrent misses share one pass.
+	 */
+	skillRediscoveryHost(): SkillRediscoveryHost {
+		const reloadable = this.#tools.skillsReloadable;
+		return {
+			skills: this.skills,
+			refreshSkills: reloadable
+				? async () => {
+						await this.refreshSkills();
+						return this.skills;
+					}
+				: undefined,
+			replaceSkills: reloadable ? undefined : skills => this.#tools.replaceSkills(skills),
+			shareRediscovery: rediscover => this.#tools.shareSkillRediscovery(rediscover),
+			settings: this.settings,
+			cwd: this.sessionManager.getCwd(),
+			extensionRoots: this.effectiveExtensionRoots,
+		};
 	}
 
 	/**

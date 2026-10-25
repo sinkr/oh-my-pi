@@ -1,0 +1,304 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as discoveryHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { __resetDirsFromEnvForTests, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { cleanupTempHome } from "./helpers/temp-home-cleanup";
+
+const SKILL = "upgrade-skill";
+
+/**
+ * `omp plugin upgrade` installs a marketplace plugin's new version in a new
+ * cache directory (`<marketplace>___<plugin>___<version>`), points the
+ * registry at it and deletes the old version's directory. A session that
+ * discovered its skills before the upgrade must keep reading them.
+ */
+describe("a plugin upgrade that replaces the plugin's version directory under a running session", () => {
+	let tempDir = "";
+	let tempHomeDir = "";
+	let originalHome: string | undefined;
+	let originalAgentDirEnv: string | undefined;
+	let sharedDir: string;
+	let sharedAuthStorage: AuthStorage;
+	let sharedModelRegistry: ModelRegistry;
+	const sessions: AgentSession[] = [];
+
+	beforeAll(async () => {
+		sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skill-upgrade-shared-"));
+		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
+		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir, "models.yml"));
+	});
+
+	afterAll(() => {
+		sharedAuthStorage.close();
+		removeSyncWithRetries(sharedDir);
+	});
+
+	beforeEach(() => {
+		discoveryHelpers.clearClaudePluginRootsCache();
+		clearFsCache();
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skill-upgrade-project-"));
+		originalHome = process.env.HOME;
+		originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skill-upgrade-home-"));
+		process.env.HOME = tempHomeDir;
+		// Discovery reads `os.homedir()` and the agent dir; left alone they scan the real user's plugins and skills.
+		vi.spyOn(os, "homedir").mockReturnValue(tempHomeDir);
+		setAgentDir(path.join(tempHomeDir, ".omp", "agent"));
+		installPluginVersion("1.0.0");
+	});
+
+	afterEach(async () => {
+		for (const session of sessions.splice(0)) await session.dispose();
+		discoveryHelpers.clearClaudePluginRootsCache();
+		clearFsCache();
+		vi.restoreAllMocks();
+		if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+		cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
+		__resetDirsFromEnvForTests();
+	});
+
+	function pluginDir(version: string): string {
+		return path.join(tempHomeDir, ".omp", "plugins", "cache", "plugins", `market___upgrade-plugin___${version}`);
+	}
+
+	/** What `omp plugin upgrade` leaves on disk: the new version installed and registered, the old one deleted. */
+	function installPluginVersion(version: string, previous?: string): void {
+		const skillDir = path.join(pluginDir(version), "skills", SKILL);
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(skillDir, "SKILL.md"),
+			`---\nname: ${SKILL}\ndescription: Plugin skill.\n---\n\nBody of version ${version}.\n`,
+		);
+		fs.writeFileSync(path.join(skillDir, "notes.md"), `Notes of version ${version}.\n`);
+		fs.writeFileSync(
+			path.join(tempHomeDir, ".omp", "plugins", "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: { "upgrade-plugin@market": [{ scope: "user", installPath: pluginDir(version), version }] },
+			}),
+		);
+		if (previous) removeSyncWithRetries(pluginDir(previous));
+	}
+
+	/** What `omp plugin uninstall` leaves on disk: the plugin unregistered and its directory deleted. */
+	function uninstallPlugin(version: string): void {
+		fs.writeFileSync(
+			path.join(tempHomeDir, ".omp", "plugins", "installed_plugins.json"),
+			JSON.stringify({ version: 2, plugins: {} }),
+		);
+		removeSyncWithRetries(pluginDir(version));
+	}
+
+	function skillsSettings(): Settings {
+		return Settings.isolated({
+			"skills.enabled": true,
+			"skills.enableCodexUser": false,
+			"skills.enableClaudeUser": false,
+			"skills.enableClaudeProject": false,
+		});
+	}
+
+	async function startSession(options: { skills?: AgentSession["skills"] } = {}): Promise<AgentSession> {
+		const { session } = await sdkModule.createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings: skillsSettings(),
+			...(options.skills ? { skills: [...options.skills] } : {}),
+		});
+		sessions.push(session);
+		return session;
+	}
+
+	/** The `read` tool's text for `url`, or its error message when the read fails. */
+	async function readText(session: AgentSession, url: string): Promise<string> {
+		try {
+			const result = await session.getToolByName("read")!.execute(`read-${url}`, { path: url });
+			return result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	/** Counts process-wide cache clears, one per rediscovery pass. */
+	function countRediscoveries() {
+		return vi.spyOn(discoveryHelpers, "clearPluginRootsAndCaches");
+	}
+
+	it("a session that discovered the skill reads the new version and its skill list follows", async () => {
+		const session = await startSession();
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+
+		installPluginVersion("2.0.0", "1.0.0");
+
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		expect(await readText(session, `skill://${SKILL}/notes.md`)).toContain("Notes of version 2.0.0.");
+		// The session's own list is healed, so subagents it spawns from now on inherit the new path.
+		const skill = session.skills.find(entry => entry.name === SKILL);
+		expect(skill?.filePath.startsWith(pluginDir("2.0.0"))).toBe(true);
+	});
+
+	it("a session handed a fixed skill list (a subagent's inherited skills) reads the new version and keeps it", async () => {
+		const parent = await startSession();
+		const child = await startSession({ skills: parent.skills });
+
+		installPluginVersion("2.0.0", "1.0.0");
+		const rediscoveries = countRediscoveries();
+
+		expect(await readText(child, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		// The re-pointed list is stored, so later reads (and subagents this child spawns) use the new path.
+		expect(child.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(pluginDir("2.0.0"))).toBe(true);
+		expect(await readText(child, `skill://${SKILL}/notes.md`)).toContain("Notes of version 2.0.0.");
+		expect(rediscoveries).toHaveBeenCalledTimes(1);
+	});
+
+	it("a fixed list whose plugin was uninstalled rediscovers once, then reports the skill as unknown", async () => {
+		const parent = await startSession();
+		const child = await startSession({ skills: parent.skills });
+
+		uninstallPlugin("1.0.0");
+		const rediscoveries = countRediscoveries();
+
+		for (let attempt = 0; attempt < 3; attempt++) {
+			expect(await readText(child, `skill://${SKILL}`)).toContain(`Unknown skill: ${SKILL}`);
+		}
+		expect(child.skills.some(entry => entry.name === SKILL)).toBe(false);
+		expect(rediscoveries).toHaveBeenCalledTimes(1);
+	});
+
+	it("concurrent reads after the upgrade share one rediscovery", async () => {
+		const session = await startSession();
+
+		installPluginVersion("2.0.0", "1.0.0");
+		const rediscoveries = countRediscoveries();
+
+		const texts = await Promise.all(Array.from({ length: 5 }, () => readText(session, `skill://${SKILL}`)));
+		for (const text of texts) expect(text).toContain("Body of version 2.0.0.");
+		expect(rediscoveries).toHaveBeenCalledTimes(1);
+	});
+
+	it("a missing file inside a skill that still exists is not found without a rediscovery", async () => {
+		const session = await startSession();
+		const rediscoveries = countRediscoveries();
+
+		expect(await readText(session, `skill://${SKILL}/missing.md`)).toContain("File not found");
+		expect(rediscoveries).not.toHaveBeenCalled();
+	});
+
+	it("lookups through a copy of the skill list taken before the upgrade rediscover once", async () => {
+		const session = await startSession();
+		// A tool session copied before the upgrade (as a spread copy of the primary's) keeps the old
+		// list in `context.skills` while its rediscovery host is the live session.
+		const toolSession = { skills: session.skills, skillRediscoveryHost: () => session.skillRediscoveryHost() };
+		const context = { skills: session.skills, session: toolSession as unknown as ToolSession };
+		const handler = new SkillProtocolHandler();
+
+		installPluginVersion("2.0.0", "1.0.0");
+		const rediscoveries = countRediscoveries();
+
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const resource = await handler.resolve(parseInternalUrl(`skill://${SKILL}`), context);
+			expect(resource.content).toContain("Body of version 2.0.0.");
+		}
+		expect(rediscoveries).toHaveBeenCalledTimes(1);
+	});
+
+	it("a skill entry held from before two upgrades is rediscovered, not read from the first upgrade's deleted dir", async () => {
+		const session = await startSession();
+		const original = session.skills.find(entry => entry.name === SKILL)!;
+
+		installPluginVersion("2.0.0", "1.0.0");
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		installPluginVersion("3.0.0", "2.0.0");
+
+		const built = await buildSkillPromptMessage(original, { args: "" }, "user", session);
+		expect(built.message).toContain("Body of version 3.0.0.");
+		expect(built.details.path.startsWith(pluginDir("3.0.0"))).toBe(true);
+	});
+
+	it("a /skill: invocation from a running session (TUI, ACP, RPC) sends the new version", async () => {
+		const session = await startSession();
+		const skill = session.skills.find(entry => entry.name === SKILL)!;
+
+		installPluginVersion("2.0.0", "1.0.0");
+
+		const built = await buildSkillPromptMessage(skill, { args: "" }, "user", session);
+		expect(built.message).toContain("Body of version 2.0.0.");
+		expect(built.details.path.startsWith(pluginDir("2.0.0"))).toBe(true);
+	});
+
+	it("a subagent spawned with an autoload skill after the upgrade receives the new version", async () => {
+		const parent = await startSession();
+		const skill = parent.skills.find(entry => entry.name === SKILL)!;
+
+		installPluginVersion("2.0.0", "1.0.0");
+
+		// The child is a real session with the parent's list, fixed, as the executor creates it; only its
+		// turn is stubbed (there is no model to run), ending at once with a successful yield.
+		const child = await startSession({ skills: parent.skills });
+		const listeners: Array<(event: AgentSessionEvent) => void> = [];
+		vi.spyOn(child, "subscribe").mockImplementation(listener => {
+			listeners.push(listener);
+			return () => listeners.splice(listeners.indexOf(listener), 1);
+		});
+		vi.spyOn(child, "prompt").mockImplementation(async () => {
+			for (const listener of listeners) {
+				listener({
+					type: "tool_execution_end",
+					toolCallId: "tool-1",
+					toolName: "yield",
+					result: { content: [{ type: "text", text: "done" }], details: { status: "success", data: {} } },
+					isError: false,
+				});
+			}
+			return true;
+		});
+		const sendCustomMessage = vi.spyOn(child, "sendCustomMessage").mockResolvedValue(true);
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: child,
+			extensionsResult: {} as sdkModule.CreateAgentSessionResult["extensionsResult"],
+			setToolUIContext: () => {},
+			eventBus: new EventBus(),
+		});
+
+		await runSubprocess({
+			cwd: tempDir,
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "do work",
+			index: 0,
+			id: "upgrade-subagent",
+			settings: skillsSettings(),
+			modelRegistry: sharedModelRegistry,
+			enableLsp: false,
+			skills: [...parent.skills],
+			autoloadSkills: [skill],
+		});
+
+		expect(sendCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: expect.stringContaining("Body of version 2.0.0."),
+				details: expect.objectContaining({ path: expect.stringContaining(pluginDir("2.0.0")) }),
+			}),
+			{ triggerTurn: false },
+		);
+	});
+});
