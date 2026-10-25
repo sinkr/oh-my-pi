@@ -5072,8 +5072,12 @@ mod tests {
 	#[test]
 	fn walks_a_directory_chain_deeper_than_the_stack() {
 		let (_dir, root) = fixture();
-		// Stay under PATH_MAX: every level adds "/d".
-		let depth = (4000 - root.join("deep/f").as_os_str().len()) / 2;
+		// Stay under the host's PATH_MAX: every level adds "/d".
+		#[cfg(unix)]
+		let path_max = usize::try_from(libc::PATH_MAX).expect("PATH_MAX is positive");
+		#[cfg(not(unix))]
+		let path_max = 4096;
+		let depth = (path_max - 96 - root.join("deep/f").as_os_str().len()) / 2;
 		let mut chain = PathBuf::from("deep");
 		for _ in 0..depth {
 			chain.push("d");
