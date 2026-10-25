@@ -55,19 +55,28 @@ export function createApiKeyResolver(
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId } = options;
-	const resolveKey = (
+	// The access token behind the last bearer this resolver served: a 401 names
+	// it so the refresh can tell a peer's rotation from a dead token.
+	let lastOAuthAccess: string | undefined;
+	const resolveKey = async (
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
 		refreshReason?: AuthApiKeyOptions["refreshReason"],
-	): Promise<ApiKeyResolution> =>
-		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
+		rejectedAccessToken?: string,
+	): Promise<ApiKeyResolution> => {
+		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
 			forceRefresh,
 			signal,
 			refreshReason,
+			rejectedAccessToken,
 		});
+		lastOAuthAccess = typeof resolved === "object" ? resolved?.oauthAccess : undefined;
+		return resolved;
+	};
 	return async ({ lastChance, error, signal, previousKey }) => {
+		const rejectedAccessToken = lastOAuthAccess;
 		if (error === undefined) {
 			return resolveKey(undefined);
 		}
@@ -95,6 +104,6 @@ export function createApiKeyResolver(
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined);
+		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined, rejectedAccessToken);
 	};
 }

@@ -229,10 +229,15 @@ export function buildGatewayApiKeyResolver(
 ): ApiKeyResolver {
 	const { storage } = opts;
 	let lastKey = initialKey.apiKey;
+	// The access token behind the last bearer this resolver served: a 401 names
+	// it so the refresh can tell a peer's rotation from a dead token.
+	let lastOAuthAccess = initialKey.oauthAccess;
 	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
+		const rejectedAccessToken = lastOAuthAccess;
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
+			lastOAuthAccess = initialKey.oauthAccess;
 			return initialKey;
 		}
 		if (!lastChance) {
@@ -243,8 +248,10 @@ export function buildGatewayApiKeyResolver(
 					...modelKeyOptions(model, sig),
 					forceRefresh: true,
 					refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+					rejectedAccessToken,
 				},
 			);
+			lastOAuthAccess = refreshed?.oauthAccess;
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) onResolvedKey?.(refreshed);
 			return refreshed;

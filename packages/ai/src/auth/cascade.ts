@@ -332,11 +332,19 @@ export class KeyCascade implements KeysApi {
 	): Promise<ResolvedApiKey | undefined> {
 		let credentialId: number | undefined;
 		let oauthIdentity: OAuthRequestIdentity | undefined;
-		const apiKey = await this.#resolve(provider, sessionId, options, (id, identity) => {
+		let oauthAccess: string | undefined;
+		const apiKey = await this.#resolve(provider, sessionId, options, (id, identity, access) => {
 			credentialId = id;
 			oauthIdentity = identity;
+			oauthAccess = access;
 		});
-		return apiKey === undefined ? undefined : { apiKey, credentialId, ...(oauthIdentity ? { oauthIdentity } : {}) };
+		if (apiKey === undefined) return undefined;
+		return {
+			apiKey,
+			credentialId,
+			...(oauthAccess ? { oauthAccess } : {}),
+			...(oauthIdentity ? { oauthIdentity } : {}),
+		};
 	}
 
 	/**
@@ -365,7 +373,7 @@ export class KeyCascade implements KeysApi {
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
-		onCredentialId?: (id: number, identity?: OAuthRequestIdentity) => void,
+		onCredentialId?: (id: number, identity?: OAuthRequestIdentity, oauthAccess?: string) => void,
 	): Promise<string | undefined> {
 		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
 		// Runtime override takes highest priority
@@ -405,7 +413,8 @@ export class KeyCascade implements KeysApi {
 		if (oauthResolved) {
 			if (onCredentialId && oauthResolved.credentialId !== undefined) {
 				const { orgId, region, inferenceRegion } = oauthResolved.credential;
-				onCredentialId(oauthResolved.credentialId, { orgId, region, inferenceRegion });
+				const identity = { orgId, region, inferenceRegion };
+				onCredentialId(oauthResolved.credentialId, identity, oauthResolved.credential.access);
 			}
 			return oauthResolved.apiKey;
 		}
@@ -476,13 +485,18 @@ export class KeyCascade implements KeysApi {
 	 */
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {
 		const { sessionId, baseUrl, modelId } = options ?? {};
+		// The access token behind the last bearer this resolver served: a 401 names
+		// it so the refresh can tell a peer's rotation from a dead token.
+		let lastOAuthAccess: string | undefined;
+		const resolve = async (extra: AuthApiKeyOptions): Promise<ResolvedApiKey | undefined> => {
+			const resolved = await this.getWithCredential(provider, sessionId, { baseUrl, modelId, ...extra });
+			lastOAuthAccess = resolved?.oauthAccess;
+			return resolved;
+		};
 		return async ({ lastChance, error, signal, previousKey }) => {
+			const rejectedAccessToken = lastOAuthAccess;
 			if (error === undefined) {
-				return this.getWithCredential(provider, sessionId, {
-					baseUrl,
-					modelId,
-					signal,
-				});
+				return resolve({ signal });
 			}
 			if (lastChance) {
 				const rotation = await this.#deps.rotate(provider, sessionId, {
@@ -499,18 +513,13 @@ export class KeyCascade implements KeysApi {
 					// because a peer may have refreshed the failed bearer.
 					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 				}
-				const resolved = await this.getWithCredential(provider, sessionId, {
-					baseUrl,
-					modelId,
-					signal,
-				});
+				const resolved = await resolve({ signal });
 				return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 			}
-			return this.getWithCredential(provider, sessionId, {
-				baseUrl,
-				modelId,
+			return resolve({
 				forceRefresh: true,
 				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+				rejectedAccessToken,
 				signal,
 			});
 		};

@@ -772,6 +772,7 @@ export class CredentialSelector {
 						credentialId,
 						options?.signal,
 						force ? options?.refreshReason : undefined,
+						force ? options?.rejectedAccessToken : undefined,
 					);
 					const beforeRefresh = candidate.selection.credential;
 					const updated = mergeRefreshedCredential(beforeRefresh, refreshedCredentials);

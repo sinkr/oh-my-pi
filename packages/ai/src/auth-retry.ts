@@ -43,6 +43,13 @@ export interface ResolvedApiKey {
 	/** Durable row id of the credential that supplied this bearer, when known. */
 	credentialId?: number;
 	/**
+	 * The OAuth access token behind this bearer, when the bearer came from a
+	 * stored OAuth credential. A provider whose API key wraps the token in a
+	 * structured document makes the two differ, so a 401 recovery names this
+	 * one as the token the provider rejected.
+	 */
+	oauthAccess?: string;
+	/**
 	 * Resolved after `LimitsApi.rotate` slept out a sibling's short block
 	 * (`afterSiblingWait`): the driver accepts this bearer even if the request
 	 * already sent it before that block.
@@ -403,7 +410,11 @@ export async function withOAuthAccess<T>(
 			tokenRefreshReplayUsed = true;
 			refreshedCurrent = true;
 			try {
-				next = await storage.oauth.access(provider, sessionId, { forceRefresh: true, signal });
+				next = await storage.oauth.access(provider, sessionId, {
+					forceRefresh: true,
+					rejectedAccessToken: lastAccess.accessToken,
+					signal,
+				});
 			} catch {
 				next = undefined;
 			}
@@ -428,6 +439,7 @@ export async function withOAuthAccess<T>(
 					next = await storage.oauth.access(provider, sessionId, {
 						forceRefresh: true,
 						refreshReason: AIError.status(lastError) === 401 ? "auth-recovery" : undefined,
+						rejectedAccessToken: lastAccess.accessToken,
 						signal,
 					});
 				} catch {

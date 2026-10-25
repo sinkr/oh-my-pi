@@ -1034,6 +1034,148 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 	});
 
+	/** Provider whose refresh tokens are single-use, like Anthropic's; counts exchanges. */
+	function registerSingleUseProvider(id: string): { exchanges: () => number } {
+		let generation = 0;
+		let liveRefresh = "refresh-0";
+		oauthUtils.registerOAuthProvider({
+			id,
+			name: id,
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: 0 };
+			},
+			async refreshToken(current) {
+				if (current.refresh !== liveRefresh) {
+					throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+				}
+				generation += 1;
+				liveRefresh = `refresh-${generation}`;
+				return {
+					...current,
+					access: `access-${generation}`,
+					refresh: liveRefresh,
+					expires: Date.now() + 3_600_000,
+				};
+			},
+			getApiKey(current) {
+				return current.access;
+			},
+		});
+		return { exchanges: () => generation };
+	}
+
+	/** Store a login with a fresh access token, and return its row id. */
+	async function seedLogin(provider: string): Promise<number> {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: Date.now() + 3_600_000 },
+		]);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		return credentialId;
+	}
+
+	test("a provider-401 refresh adopts the token another process rotated to, instead of exchanging again", async () => {
+		if (!authStorage || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-401-peer-rotated";
+		const peerRotation = registerSingleUseProvider(provider);
+		await seedLogin(provider);
+
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		try {
+			await peer.credentials.reload();
+			// The peer's own 401 rotates the row, which revokes access-0 everywhere.
+			expect(
+				await peer.oauth.access(provider, "peer-session", {
+					forceRefresh: true,
+					refreshReason: "auth-recovery",
+					rejectedAccessToken: "access-0",
+				}),
+			).toMatchObject({ accessToken: "access-1" });
+			// This process reloaded the rotated row before its own in-flight request
+			// failed with a 401 on access-0: adopt access-1 rather than exchange.
+			await authStorage.credentials.reload();
+			expect(
+				await authStorage.oauth.access(provider, "own-session", {
+					forceRefresh: true,
+					refreshReason: "auth-recovery",
+					rejectedAccessToken: "access-0",
+				}),
+			).toMatchObject({ accessToken: "access-1" });
+			expect(peerRotation.exchanges()).toBe(1);
+			expect(events).toHaveLength(0);
+		} finally {
+			peer.close();
+		}
+	});
+
+	test("a provider-401 refresh still exchanges when the stored token is the rejected one", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "unit-oauth-401-no-peer";
+		const noPeer = registerSingleUseProvider(provider);
+		await seedLogin(provider);
+
+		expect(
+			await authStorage.oauth.access(provider, "own-session", {
+				forceRefresh: true,
+				refreshReason: "auth-recovery",
+				rejectedAccessToken: "access-0",
+			}),
+		).toMatchObject({ accessToken: "access-1" });
+		expect(noPeer.exchanges()).toBe(1);
+	});
+
+	test("a forced refresh adopts the row a peer rotated after this process loaded it", async () => {
+		if (!authStorage || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-forced-peer-rotated";
+		const forced = registerSingleUseProvider(provider);
+		const credentialId = await seedLogin(provider);
+
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		try {
+			await peer.credentials.reload();
+			await peer.oauth.refresh(credentialId);
+			// This process still holds access-0 / refresh-0 in memory.
+			const refreshed = await authStorage.oauth.refresh(credentialId);
+			expect(refreshed.credential).toMatchObject({ type: "oauth", access: "access-1" });
+			expect(forced.exchanges()).toBe(1);
+			expect(events).toHaveLength(0);
+		} finally {
+			peer.close();
+		}
+	});
+
+	test("keeps an exchanged token when the store is busy at save time", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-busy-save";
+		const busy = registerSingleUseProvider(provider);
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: Date.now() - 60_000 },
+		]);
+		const original = store.tryUpdateAuthCredentialIfMatches?.bind(store);
+		if (!original) throw new Error("test store does not support compare-and-set updates");
+		let busyWrites = 0;
+		vi.spyOn(store, "tryUpdateAuthCredentialIfMatches").mockImplementation((...args) => {
+			if (busyWrites < 2) {
+				busyWrites += 1;
+				throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+			}
+			return original(...args);
+		});
+
+		expect(await authStorage.keys.get(provider, "session")).toBe("access-1");
+		expect(busyWrites).toBe(2);
+		expect(busy.exchanges()).toBe(1);
+		expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({
+			type: "oauth",
+			access: "access-1",
+			refresh: "refresh-1",
+		});
+	});
+
 	test.skipIf(process.platform === "win32")("SIGTERM waits for a rotated token to reach SQLite", async () => {
 		if (!store || !tempDir) throw new Error("test setup failed");
 		const release = path.join(tempDir, "release-response");
