@@ -73,7 +73,7 @@ function makeOpenCodeGoCompletionsModel(): Model<"openai-completions"> {
 	});
 }
 
-function makeOpenCodeGoCompletionsLaneModel(id: string, name: string): Model<"openai-completions"> {
+function makeOpenCodeGoCompletionsLaneModel(id: string, name = id): Model<"openai-completions"> {
 	return buildModel({
 		provider: "opencode-go",
 		id,
@@ -88,11 +88,11 @@ function makeOpenCodeGoCompletionsLaneModel(id: string, name: string): Model<"op
 	});
 }
 
-function makeOpenCodeGoLunaModel(): Model<"openai-responses"> {
+function makeOpenCodeGoResponsesModel(id: string, name = id): Model<"openai-responses"> {
 	return buildModel({
 		provider: "opencode-go",
-		id: "gpt-5.6-luna",
-		name: "GPT-5.6 Luna",
+		id,
+		name,
 		api: "openai-responses",
 		baseUrl: "https://opencode.ai/zen/go/v1",
 		reasoning: true,
@@ -544,6 +544,26 @@ describe("Go sibling prompt-cache wire affinity", () => {
 		},
 	);
 
+	it.each(["gpt-5.6-luna", "gpt-6-luna", "grok-4.6", "grok-4.7"])(
+		"shares the family key across sibling children on the verified Go Responses lane %s",
+		id => {
+			const first = resolveOpenAIRequestSetup(makeOpenCodeGoResponsesModel(id), {
+				apiKey: "key",
+				messages: [],
+				sessionId: "child-1",
+				promptCacheAffinityKey: "parent:task",
+			});
+			const second = resolveOpenAIRequestSetup(makeOpenCodeGoResponsesModel(id), {
+				apiKey: "key",
+				messages: [],
+				sessionId: "child-2",
+				promptCacheAffinityKey: "parent:task",
+			});
+			expect(first.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+			expect(second.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+		},
+	);
+
 	it("keeps the child conversation id on the unverified standard Go Muse 1.3 lane", () => {
 		// Standard `muse-spark-1.3` was never exactly lane-verified; only the
 		// Contributor 1.3/1.2 siblings carry a measured opt-in, so an explicit
@@ -615,11 +635,15 @@ describe("Go sibling prompt-cache wire affinity", () => {
 	});
 
 	it.each([
-		["mimo-v2.6-flash", "MiMo V2.6 Flash"],
-		["kimi-k2.7-code", "Kimi K2.7 Code"],
-		["deepseek-v4.1-flash", "DeepSeek V4.1 Flash"],
-	])("sends the explicit shared cache key on the opted-in Go Completions lane %s", (id, name) => {
-		const model = makeOpenCodeGoCompletionsLaneModel(id, name);
+		"mimo-v2.6-flash",
+		"kimi-k2.7-code",
+		"deepseek-v4.1-flash",
+		"deepseek-v4-pro",
+		"glm-5.1",
+		"glm-5.3-flash",
+		"omen-alpha",
+	])("sends the explicit shared cache key on the opted-in Go Completions lane %s", id => {
+		const model = makeOpenCodeGoCompletionsLaneModel(id);
 		const first = resolveOpenAIRequestSetup(model, {
 			apiKey: "key",
 			messages: [],
@@ -730,13 +754,25 @@ describe("Go sibling prompt-cache wire affinity", () => {
 		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("child-1");
 	});
 
-	it("keeps unsupported Go lanes on the conversation session id", () => {
-		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoLunaModel(), {
+	it("keeps an unmeasured Go Responses lane on the conversation session id", () => {
+		// `deepseek-v4-flash` never ran the sibling probe, so an explicit
+		// family key must not flip the header on it.
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoResponsesModel("deepseek-v4-flash"), {
 			apiKey: "key",
 			messages: [],
 			sessionId: "child-1",
 			promptCacheAffinityKey: "parent:task",
 		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("child-1");
+	});
+
+	it("keeps a Go model declared on the wrong lane on the conversation session id", () => {
+		// The opt-in is `on-api` scoped: the same id on another wire never
+		// borrows the family key, whichever lane it was verified on.
+		const setup = resolveOpenAIRequestSetup(
+			{ ...makeOpenCodeGoCompletionsLaneModel("deepseek-v4-pro"), api: "openai-responses" },
+			{ apiKey: "key", messages: [], sessionId: "child-1", promptCacheAffinityKey: "parent:task" },
+		);
 		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("child-1");
 	});
 
@@ -1023,7 +1059,9 @@ describe("custom provider backend identity on the OpenCode affinity lanes", () =
 	});
 
 	it("keeps an unopted model on a custom Go backend on the child id", () => {
-		const setup = resolveOpenAIRequestSetup(makeCustomGoResponsesModel("gpt-5.6-luna"), {
+		// `grok-4.5` was never probed, so the inherited Go opt-in must not
+		// extend to it even on a backend that resolves every Go rule.
+		const setup = resolveOpenAIRequestSetup(makeCustomGoResponsesModel("grok-4.5"), {
 			apiKey: "team-key",
 			messages: [],
 			sessionId: "child-1",

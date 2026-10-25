@@ -5,7 +5,7 @@
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
-- Added opt-in verified Go Contributor lane ids and enabled MiMo, Kimi, DeepSeek, and Haiku model routes to the sibling prompt-cache sharing policy; standard Muse 1.3 lanes are excluded until they are verified ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Added opt-in verified Go lane ids and enabled the Muse Contributor, MiMo, Kimi, DeepSeek, Haiku, GPT, Grok, GLM and Omen model routes to the sibling prompt-cache sharing policy; standard Muse 1.3 lanes are excluded until they are verified, Argon and Qwen 3.6 Plus stay off while their warm-read measurements remain unproven, and MiMo V2.5 Pro stays off because the gateway rejects it ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 - Added `CatalogPolicyInputs` for catalog-policy lookups from reduced model views while preserving their API, provider, wire-model, and thinking facts ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 
 ### Changed

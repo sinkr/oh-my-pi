@@ -3,7 +3,7 @@ import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
 import { buildModel } from "../src/build";
 import { resolveCatalogPolicy } from "../src/compat/catalog-policy";
 import { resolveCascadeRules } from "../src/compat/cascade";
-import { getBundledModel } from "../src/models";
+import { getBundledModel, getBundledModels } from "../src/models";
 import { museCodeModelManagerOptions } from "../src/provider-models/openai-compat";
 import type { Model } from "../src/types";
 
@@ -50,32 +50,66 @@ describe("task sibling prompt-cache opt-in", () => {
 		}
 	});
 
-	test("enables the verified Go Muse, Completions, and Anthropic lanes and no other Go or Zen route", () => {
+	test("enables the verified Go Responses, Completions, and Anthropic lanes and no other Go or Zen route", () => {
 		const go = (id: string) => getBundledModel("opencode-go", id);
-		const enabled = [
-			"mimo-v2.6-flash",
-			"kimi-k2.7-code",
-			"deepseek-v4.1-flash",
-			"claude-haiku-5-5",
+		const responses = [
+			"gpt-5.6-luna",
+			"gpt-6-luna",
+			"grok-4.6",
+			"grok-4.7",
 			"muse-spark-1.3-contributor",
 			"muse-spark-1.2-contributor",
 		];
-		for (const id of enabled) {
-			expect(resolveCatalogPolicy(go(id)).taskSiblingPromptCache, id).toBe(true);
+		const completions = [
+			"mimo-v2.6-flash",
+			"kimi-k2.7-code",
+			"deepseek-v4.1-flash",
+			"deepseek-v4-pro",
+			"glm-5.1",
+			"glm-5.3-flash",
+			"omen-alpha",
+		];
+		const anthropic = ["claude-haiku-5-5"];
+		// Live Go discovery serves `omen-alpha` but the bundle ships no row;
+		// the verified sibling on the same Completions lane supplies the wire
+		// facts, like the gateway-only standard Muse ids below.
+		const laneModel = (id: string): Model => (id === "omen-alpha" ? { ...go("deepseek-v4-pro"), id } : go(id));
+		const optedIn = [...responses, ...completions, ...anthropic].map(laneModel);
+		for (const model of optedIn) {
+			expect(resolveCatalogPolicy(model).taskSiblingPromptCache, `${model.provider}/${model.id}/${model.api}`).toBe(
+				true,
+			);
+		}
+		// The opt-in matches the lane each id was measured on, so the same id
+		// declared on any other wire never inherits the family key.
+		const wrongApi: Model[] = [
+			...responses.map(id => ({ ...laneModel(id), api: "openai-completions" })),
+			...completions.map(id => ({ ...laneModel(id), api: "openai-responses" })),
+			...anthropic.map(id => ({ ...laneModel(id), api: "openai-responses" })),
+		];
+		for (const model of wrongApi) {
+			expect(
+				resolveCatalogPolicy(model).taskSiblingPromptCache,
+				`${model.provider}/${model.id}/${model.api}`,
+			).not.toBe(true);
 		}
 		const unsupported: Model[] = [
-			// The excluded Luna and Argon lanes and unmeasured Go routes
-			// stay off, as do the standard Muse ids: only Contributor 1.3
-			// and Contributor 1.2 were exactly lane-verified, so standard
-			// Muse 1.3 stays off until verified and the unmeasured standard
-			// Muse 1.2 id never came on.
-			go("gpt-6-luna"),
+			// Argon showed no material warm hit (unproven) and DeepSeek V4
+			// Flash was not measured; Minimax and Beam warmed under any key,
+			// so a shared family key buys nothing there.
 			go("gemini-4-argon-contributor"),
 			go("deepseek-v4-flash"),
 			go("minimax-m2.7"),
 			go("beam-free"),
+			// Qwen 3.6 Plus likewise showed no material warm hit (unproven,
+			// not shown broken), and the upstream rejects the MiMo 2.5 Pro
+			// lane outright (HTTP 400 "Unsupported model").
+			go("qwen3.6-plus"),
+			go("mimo-v2.5-pro"),
 			// Gateway-only standard ids ship no bundled row; the verified
-			// Contributor sibling supplies the wire facts.
+			// Contributor sibling supplies the wire facts. Only Contributor
+			// 1.3 and 1.2 were exactly lane-verified, so the standard ids
+			// stay off.
 			{ ...go("muse-spark-1.3-contributor"), id: "muse-spark-1.3" },
 			{ ...go("muse-spark-1.2-contributor"), id: "muse-spark-1.2" },
 			// Zen shares the gateway family but is not opted in.
@@ -90,6 +124,16 @@ describe("task sibling prompt-cache opt-in", () => {
 				resolveCatalogPolicy(model).taskSiblingPromptCache,
 				`${model.provider}/${model.id}/${model.api}`,
 			).not.toBe(true);
+		}
+		// Complement sweep: the cache-compatible-but-non-isolating lanes, the
+		// unproven routes and every other bundled Go route keep per-child
+		// routing — nothing outside the opted-in set may resolve the flag.
+		const optedIds = new Set(optedIn.map(model => model.id));
+		for (const model of getBundledModels("opencode-go")) {
+			expect(
+				resolveCatalogPolicy(model).taskSiblingPromptCache === true,
+				`${model.provider}/${model.id}/${model.api}`,
+			).toBe(optedIds.has(model.id));
 		}
 	});
 

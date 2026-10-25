@@ -153,7 +153,24 @@ describe("task sibling prompt-cache routing", () => {
 			undefined,
 			"parent-provider-lineage:task",
 		],
-		["Go Luna keeps child keys", "opencode-go", "gpt-6-luna", "explicit-parent", "automatic-parent", undefined],
+		[
+			"Go DeepSeek Pro Completions sibling key",
+			"opencode-go",
+			"deepseek-v4-pro",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		[
+			// Verified on the Go Responses lane, so the child now shares the
+			// family key while its own conversation id stays per-child.
+			"Go Luna sibling key",
+			"opencode-go",
+			"gpt-6-luna",
+			"explicit-parent",
+			"automatic-parent",
+			"explicit-parent:task",
+		],
 		["Luna keeps child keys", "openai-codex", "gpt-6-luna", "explicit-parent", "automatic-parent", undefined],
 		["OpenAI keeps child keys", "openai", "gpt-5.4", undefined, undefined, undefined],
 		["Gemini omits cache keys", "google-antigravity", "gemini-3.8-flash", "explicit-parent", undefined, undefined],
