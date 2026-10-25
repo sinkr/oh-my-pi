@@ -3580,7 +3580,11 @@ export class SessionMaintenance {
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
 						sessionId: this.#host.sessionId(),
-						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
+						// Only an EXPLICIT cache key may ride here: V2 treats any
+						// truthy value as provenance and flips x-opencode-session
+						// to the normalized cache id. The session id itself stays
+						// the header identity via `sessionId` above.
+						promptCacheKey: this.#host.agent.promptCacheKey,
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
 						// Route every summarization HTTP request through the
@@ -5401,7 +5405,9 @@ export class SessionMaintenance {
 									thinkingLevel: this.#host.thinkingLevel(),
 									tools: this.#host.agent.state.tools,
 									sessionId: this.#host.sessionId(),
-									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
+									// Explicit cache key only — see the manual
+									// callsite in #compactWithFallbackModel.
+									promptCacheKey: this.#host.agent.promptCacheKey,
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets(),
 									codexCompaction,
