@@ -28,6 +28,15 @@ describe("task sibling prompt-cache routing", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
+	// Rows whose parent runs on a different lane than its children: the parent
+	// stays on the bundled, non-caching openai/gpt-5.4 lane while the mocked
+	// agent definition overrides the siblings onto the row's child lane.
+	const unoptedParentLanes: Record<string, readonly [provider: string, modelId: string]> = {
+		"unopted parent seeds the Go Luna family key for eligible siblings": ["openai", "gpt-5.4"],
+		"unopted parent passes explicit cache lineage to eligible Go Luna siblings": ["openai", "gpt-5.4"],
+		"unopted parent keeps an ineligible child on its own wire identity": ["openai", "gpt-5.4"],
+	};
+
 	it.each([
 		[
 			"Muse standard provider-session fallback",
@@ -174,18 +183,49 @@ describe("task sibling prompt-cache routing", () => {
 		["Luna keeps child keys", "openai-codex", "gpt-6-luna", "explicit-parent", "automatic-parent", undefined],
 		["OpenAI keeps child keys", "openai", "gpt-5.4", undefined, undefined, undefined],
 		["Gemini omits cache keys", "google-antigravity", "gemini-3.8-flash", "explicit-parent", undefined, undefined],
+		[
+			// Unopted-parent rows: the parent never opts into task caching, yet an
+			// agent override onto an eligible lane must still mint one family key
+			// both siblings stream on (never on the parent's lane), while an
+			// ineligible overridden child keeps its own wire identity.
+			"unopted parent seeds the Go Luna family key for eligible siblings",
+			"opencode-go",
+			"gpt-6-luna",
+			undefined,
+			undefined,
+			"parent-provider-lineage:task",
+		],
+		[
+			"unopted parent passes explicit cache lineage to eligible Go Luna siblings",
+			"opencode-go",
+			"gpt-6-luna",
+			"explicit-parent",
+			undefined,
+			"explicit-parent:task",
+		],
+		[
+			"unopted parent keeps an ineligible child on its own wire identity",
+			"openai-codex",
+			"gpt-6-luna",
+			"explicit-parent",
+			undefined,
+			undefined,
+		],
 	] as const)(
 		"%s without sharing child conversation or response state",
 		async (_name, provider, modelId, parentCacheKey, parentTaskKey, expected) => {
 			using directory = TempDir.createSync("@omp-task-cache-");
 			vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network is disabled in this test"));
 			const authStorage = await AuthStorage.create(directory.join("auth.db"));
+			const parentOverride = unoptedParentLanes[_name];
+			const [parentProvider, parentModelId] = parentOverride ?? [provider, modelId];
 			authStorage.keys.setRuntime(
 				provider,
 				provider === "muse-code"
 					? JSON.stringify({ oauthAccessToken: "test-oauth", apiKey: "test-key" })
 					: "test-key",
 			);
+			if (parentOverride && parentProvider !== provider) authStorage.keys.setRuntime(parentProvider, "test-key");
 			const modelRegistry = new ModelRegistry(authStorage, directory.join("models.yml"), {
 				fetch: async () =>
 					Response.json({ data: [{ id: modelId, object: "model", created: 0, owned_by: "meta" }] }),
@@ -194,6 +234,9 @@ describe("task sibling prompt-cache routing", () => {
 				await modelRegistry.refreshProvider(provider, "online");
 			const model = modelRegistry.find(provider, modelId);
 			if (!model) throw new Error(`Model missing from offline catalog fixture: ${provider}/${modelId}`);
+			const parentModel = parentOverride ? modelRegistry.find(parentProvider, parentModelId) : model;
+			if (!parentModel)
+				throw new Error(`Model missing from offline catalog fixture: ${parentProvider}/${parentModelId}`);
 			const requests: Array<{
 				modelId: string;
 				sessionId: string | undefined;
@@ -205,7 +248,13 @@ describe("task sibling prompt-cache routing", () => {
 			const realCreateSession = sdk.createAgentSession;
 			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
 				agents: [
-					{ name: "task", description: "Review", systemPrompt: "Review the assignment.", source: "bundled" },
+					{
+						name: "task",
+						description: "Review",
+						systemPrompt: "Review the assignment.",
+						source: "bundled",
+						...(parentOverride ? { model: [`${provider}/${modelId}`] } : {}),
+					},
 				],
 				projectAgentsDir: null,
 			});
@@ -274,7 +323,7 @@ describe("task sibling prompt-cache routing", () => {
 					agentDir: directory.path(),
 					authStorage,
 					modelRegistry,
-					model,
+					model: parentModel,
 					providerSessionId: "parent-provider-lineage",
 					providerPromptCacheKey: parentCacheKey,
 					taskPromptCacheKey: parentTaskKey,
