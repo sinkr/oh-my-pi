@@ -524,6 +524,13 @@ pub(crate) fn apply_with_recovery(
 		edits:        &resolved,
 		clipboard:    Some(clipboard),
 	})? {
+		// A stale tag still names what its read displayed: an anchor outside
+		// that version's seen lines gets the reveal a live tag would get. The
+		// check waits for recovery to succeed, so a tag that cannot be
+		// recovered keeps its mismatch reply instead of a reveal of old content.
+		if let (Some(max_columns), Some(snapshot)) = (seen_line_guard, &stored) {
+			assert_seen_lines(section, expected, canonical, store, &snapshot.text, max_columns)?;
+		}
 		resolve_warnings.extend(recovered.warnings);
 		return Ok(ApplyResult {
 			text:               recovered.text,
@@ -1227,5 +1234,53 @@ mod lifecycle {
 			.await
 			.unwrap();
 		assert_eq!(ctx.text("short.txt"), format!("head\nfirst\n{wide}\nLAST\n"));
+	}
+
+	/// A stale tag still names what its read displayed. After another edit
+	/// changes the file, an anchor on a line that read never showed gets the
+	/// reveal and the file is untouched; the identical retry then recovers.
+	/// An anchor the read showed recovers at once.
+	#[tokio::test]
+	async fn stale_tag_anchor_outside_its_read_gets_the_reveal() {
+		let ctx = Lifecycle::new("stale.ts", 30);
+		let tag0 = ctx.read("stale.ts", &(18..=22).collect::<Vec<_>>());
+		ctx.edit(&format!("[stale.ts#{tag0}]\nPUT 20.=20:\n+let v0020 = 200;\n"))
+			.await
+			.unwrap();
+		let before = ctx.text("stale.ts");
+		let unseen = format!("[stale.ts#{tag0}]\nPUT 3.=3:\n+let v0003 = 300;\n");
+		let err = ctx.edit(&unseen).await.unwrap_err();
+		assert!(err.contains("never displayed"), "unexpected error: {err}");
+		assert!(err.contains("3:let v0003 = 3;"), "unexpected reveal: {err}");
+		assert_eq!(ctx.text("stale.ts"), before);
+		ctx.edit(&unseen).await.unwrap();
+		assert_eq!(ctx.text("stale.ts").lines().nth(2), Some("let v0003 = 300;"));
+		ctx.edit(&format!("[stale.ts#{tag0}]\nPUT 21.=21:\n+let v0021 = 210;\n"))
+			.await
+			.unwrap();
+		let text = ctx.text("stale.ts");
+		assert_eq!(text.lines().nth(19), Some("let v0020 = 200;"));
+		assert_eq!(text.lines().nth(20), Some("let v0021 = 210;"));
+	}
+
+	/// The column-cut form: the read cut line 1, so it is not seen, and an edit
+	/// built from the cut text under a stale tag asks for a `:raw` read instead
+	/// of replacing the line and dropping its tail.
+	#[tokio::test]
+	async fn stale_tag_edit_of_a_cut_line_requires_full_read() {
+		let ctx = Lifecycle::new("cut.txt", 1);
+		let wide = format!("note: {} END-OF-LINE-TAIL", "abcdefghij".repeat(80));
+		ctx.write_text("cut.txt", &format!("{wide}\ntwo\nthree\nfour\nfive\nsix\n"));
+		let tag0 = ctx.read("cut.txt", &[0, 2, 3, 4, 5, 6]);
+		ctx.edit(&format!("[cut.txt#{tag0}]\nPUT 6.=6:\n+SIX\n"))
+			.await
+			.unwrap();
+		let before = ctx.text("cut.txt");
+		let err = ctx
+			.edit(&format!("[cut.txt#{tag0}]\nPUT 1.=1:\n+NOTE: {}\n", &wide[6..768]))
+			.await
+			.unwrap_err();
+		assert!(err.contains("cut.txt:1:raw"), "unexpected error: {err}");
+		assert_eq!(ctx.text("cut.txt"), before);
 	}
 }
