@@ -4730,11 +4730,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// later runtime model change (the retry-fallback walk) must find the
 				// candidate at its first opted-in consumer request. Consumption stays
 				// gated per request by the policy check in getPromptCacheKeyForModel,
-				// so an ineligible initial model keeps its default wire routing; the
-				// stash is session-scoped and never persisted, so forks, moves, and
-				// resets start with a fresh identity. The persisted header copy is
-				// only seeded once the child's actual model opts in, preserving
-				// fork/provider lineage for ineligible children. An explicitly empty
+				// so an ineligible initial model keeps its default wire routing. The
+				// stash itself is session-scoped and never persisted: the persisted
+				// header copy is seeded when the child's model opts in — at creation,
+				// or promoted from the stash by getPromptCacheKeyForModel at the first
+				// later eligible request — so forks, moves, and resets reconstitute
+				// from the persisted identity while ineligible children keep their
+				// wire routing and fork/provider lineage. An explicitly empty
 				// parent lineage derives no candidate: the string build would yield
 				// ":<agent>" and coalesce every empty-lineage parent onto one family,
 				// so the child keeps its own wire session identity. Nonempty opaque

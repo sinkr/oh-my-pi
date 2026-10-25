@@ -7122,14 +7122,19 @@ export class AgentSession implements SettingsScope {
 
 	/** Cache identity for the main loop and side requests that reuse its context. */
 	getPromptCacheKeyForModel(model: Model | undefined): string | undefined {
-		const candidate =
-			this.sessionManager.getHeader()?.taskPromptCacheKey ?? this.sessionManager.getTaskSiblingCandidate();
-		return (
-			this.agent.promptCacheKey ??
-			(candidate !== undefined && model !== undefined && resolveCatalogPolicy(model).taskSiblingPromptCache === true
-				? candidate
-				: undefined)
-		);
+		const headerKey = this.sessionManager.getHeader()?.taskPromptCacheKey;
+		const eligible = model !== undefined && resolveCatalogPolicy(model).taskSiblingPromptCache === true;
+		const candidate = headerKey ?? (eligible ? this.sessionManager.getTaskSiblingCandidate() : undefined);
+		// The executor stashes the family candidate for every child but seeds the
+		// persisted header copy only when the INITIAL model opts in; the first
+		// eligible request therefore promotes the stash, so fork() and reopen —
+		// which reconstitute from the persisted header alone — keep the key.
+		if (headerKey === undefined && candidate !== undefined && eligible) {
+			void this.sessionManager
+				.setTaskPromptCacheKey(candidate)
+				.catch(error => logger.warn("Failed to persist task prompt cache key", { error: String(error) }));
+		}
+		return this.agent.promptCacheKey ?? (candidate !== undefined && eligible ? candidate : undefined);
 	}
 
 	/** Current steering mode */
@@ -12401,6 +12406,7 @@ export class AgentSession implements SettingsScope {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		const previousTaskSiblingCandidate = this.sessionManager.getTaskSiblingCandidate();
 
 		// Snapshot the full checkpoint runtime state: the success path calls
 		// #rehydrateCheckpointRewindState(), which clears and rebuilds all four
@@ -12464,6 +12470,9 @@ export class AgentSession implements SettingsScope {
 				this.#freshProviderSessionId = undefined;
 				this.#clearInheritedProviderPromptCacheKey();
 				this.#adoptInheritedProviderPromptCacheKey();
+				// The outgoing session's parent-derived family candidate is scoped
+				// to it; the resumed session's own header decides affinity from here.
+				this.sessionManager.clearTaskSiblingCandidate();
 			}
 			this.#syncAgentSessionId(undefined, false);
 			this.#memory.rekeyForCurrentSessionId();
@@ -12665,6 +12674,9 @@ export class AgentSession implements SettingsScope {
 			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
 			this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
 			this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
+			if (previousTaskSiblingCandidate !== undefined) {
+				this.sessionManager.setTaskSiblingCandidate(previousTaskSiblingCandidate);
+			}
 			this.#checkpointState = previousCheckpointState;
 			this.#pendingRewindReport = previousPendingRewindReport;
 			this.#lastCompletedRewind = previousLastCompletedRewind;

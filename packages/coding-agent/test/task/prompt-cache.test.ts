@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { mkdirSync } from "node:fs";
 import type { Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { buildRequest as buildGeminiRequest } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -566,17 +567,13 @@ describe("task sibling prompt-cache routing", () => {
 		}
 	});
 
-	// The executor seeds the sibling family candidate from the nonempty parent
-	// lineage once the child session exists; the per-request policy gate then
-	// decides whether a given request uses it. A child that starts on an
-	// unopted lane and later switches to an opted Go lane (the runtime retry
-	// fallback's model change after creation) must find the candidate at the
-	// first opted-in consumer request, while: ineligible initial requests stay
-	// child-scoped, siblings keep isolated conversation and response state, an
-	// explicit session key keeps priority, and an explicitly empty parent
-	// lineage still derives no candidate across the switch.
-	it("shares the family key across siblings after an initially unopted child switches to an opted lane", async () => {
-		using directory = TempDir.createSync("@omp-task-cache-transition-");
+	// Shared fixture for the stash-lifecycle regressions: a real Task child
+	// spawns on the parent's unopted openai lane (the executor stashes the
+	// parent-derived family candidate without seeding the persisted header copy
+	// for an ineligible initial model), the opted opencode-go Luna lane is
+	// available for runtime switches, and the stream wrapper records the real
+	// Responses wire `prompt_cache_key` of every request.
+	async function createUnoptedTaskFixture(directory: TempDir) {
 		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network is disabled in this test"));
 		const authStorage = await AuthStorage.create(directory.join("auth.db"));
 		authStorage.keys.setRuntime("openai", "test-key");
@@ -590,6 +587,12 @@ describe("task sibling prompt-cache routing", () => {
 		const optedModel = modelRegistry.find("opencode-go", "gpt-6-luna");
 		if (!initialModel) throw new Error("Model missing from offline catalog fixture: openai/gpt-5.4");
 		if (!optedModel) throw new Error("Model missing from offline catalog fixture: opencode-go/gpt-6-luna");
+		const sessionSettings = Settings.isolated({
+			"async.enabled": false,
+			"task.structured": true,
+			"marketplace.autoUpdate": "off",
+			"compaction.enabled": false,
+		});
 		const requests: Array<{
 			sessionId: string | undefined;
 			cacheKey: string | undefined;
@@ -650,12 +653,7 @@ describe("task sibling prompt-cache routing", () => {
 				providerSessionId: lineage,
 				providerPromptCacheKey: explicitKey,
 				sessionManager: SessionManager.create(directory.path(), directory.join(lineage)),
-				settings: Settings.isolated({
-					"async.enabled": false,
-					"task.structured": true,
-					"marketplace.autoUpdate": "off",
-					"compaction.enabled": false,
-				}),
+				settings: sessionSettings,
 				toolNames: ["task"],
 				spawns: "*",
 				disableExtensionDiscovery: true,
@@ -683,6 +681,32 @@ describe("task sibling prompt-cache routing", () => {
 			if (!child) throw new Error(`Expected a live Task child for ${sessionId}`);
 			return child;
 		}
+		return {
+			authStorage,
+			modelRegistry,
+			settings: sessionSettings,
+			initialModel,
+			optedModel,
+			requests,
+			createParent,
+			runTask,
+			childFor,
+		};
+	}
+
+	// The executor seeds the sibling family candidate from the nonempty parent
+	// lineage once the child session exists; the per-request policy gate then
+	// decides whether a given request uses it. A child that starts on an
+	// unopted lane and later switches to an opted Go lane (the runtime retry
+	// fallback's model change after creation) must find the candidate at the
+	// first opted-in consumer request, while: ineligible initial requests stay
+	// child-scoped, siblings keep isolated conversation and response state, an
+	// explicit session key keeps priority, and an explicitly empty parent
+	// lineage still derives no candidate across the switch.
+	it("shares the family key across siblings after an initially unopted child switches to an opted lane", async () => {
+		using directory = TempDir.createSync("@omp-task-cache-transition-");
+		const h = await createUnoptedTaskFixture(directory);
+		const { authStorage, initialModel, optedModel, requests, createParent, runTask, childFor } = h;
 		try {
 			const parent = await createParent("parent-lineage", initialModel);
 			const tool = parent.getToolByName("task") as TaskTool;
@@ -943,6 +967,172 @@ describe("task sibling prompt-cache routing", () => {
 				"child-conversation",
 				"request-conversation",
 			]);
+		} finally {
+			await Promise.all(sessions.splice(0).map(session => session.dispose()));
+			authStorage.close();
+		}
+	});
+
+	// Thread C: the executor only seeds the persisted header copy when the
+	// child's INITIAL model opts in; for an unopted start it stashes the family
+	// candidate session-scoped. Switching to the opted lane at runtime must
+	// promote the stash into the persisted header at the first eligible
+	// request, because fork() drops the stash and reopen can only reconstruct
+	// from disk — otherwise the next still-opted request reverts to the
+	// conversation id.
+	it("keeps the family key across fork and reopen after an unopted child switches to the opted lane", async () => {
+		using directory = TempDir.createSync("@omp-task-cache-stash-fork-");
+		const h = await createUnoptedTaskFixture(directory);
+		const {
+			authStorage,
+			modelRegistry,
+			settings,
+			initialModel,
+			optedModel,
+			requests,
+			createParent,
+			runTask,
+			childFor,
+		} = h;
+		try {
+			const parent = await createParent("parent-lineage", initialModel);
+			await runTask(parent.getToolByName("task") as TaskTool, "SiblingA");
+			const child = childFor(requests[0]?.sessionId);
+
+			// The runtime switch onto the opted lane: the first eligible request
+			// still reads the stash (the header copy was never seeded for the
+			// unopted initial model), so this guard passes before and after the
+			// fix and proves the family key reaches the wire at all.
+			child.agent.setModel(optedModel);
+			await child.prompt("Continue on the fallback lane.");
+			expect(requests).toHaveLength(2);
+			expect(requests[1]?.cacheKey).toBe("parent-lineage:task");
+			expect(requests[1]?.wireKey).toBe("parent-lineage:task");
+
+			const originalFile = child.sessionManager.getSessionFile();
+			if (!originalFile) throw new Error("Expected a persisted Task child");
+			expect(await child.fork(undefined, { requireIdle: true })).toBe(true);
+			await child.prompt("Continue after forking.");
+			expect(requests).toHaveLength(3);
+			expect(requests[2]?.cacheKey).toBe("parent-lineage:task");
+			expect(requests[2]?.wireKey).toBe("parent-lineage:task");
+			expect(child.sessionManager.getHeader()?.taskPromptCacheKey).toBe("parent-lineage:task");
+			await child.sessionManager.flush();
+			const forkFile = child.sessionManager.getSessionFile();
+			if (!forkFile) throw new Error("Expected a persisted fork");
+			await child.dispose();
+
+			// Reopening either side reconstitutes the session from disk only: the
+			// stashed candidate is gone, so the persisted header copy must carry
+			// the family key onto these still-opted requests.
+			const forked = await SessionManager.forkFrom(originalFile, directory.path(), directory.join("fork"));
+			const reopened = await SessionManager.open(forkFile, directory.path());
+			for (const sessionManager of [forked, reopened]) {
+				const { session } = await sdk.createAgentSession({
+					cwd: directory.path(),
+					agentDir: directory.path(),
+					authStorage,
+					modelRegistry,
+					model: optedModel,
+					sessionManager,
+					settings,
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					rules: [],
+					enableMCP: false,
+					enableLsp: false,
+				});
+				await session.prompt("Continue the copied review.");
+				expect(requests.at(-1)?.cacheKey).toBe("parent-lineage:task");
+				expect(requests.at(-1)?.wireKey).toBe("parent-lineage:task");
+				expect(sessionManager.getHeader()?.taskPromptCacheKey).toBe("parent-lineage:task");
+			}
+		} finally {
+			await Promise.all(sessions.splice(0).map(session => session.dispose()));
+			authStorage.close();
+		}
+	});
+
+	// Thread D: the stash is scoped to the conversation that minted it. A
+	// committed switch to a different session file must drop it — the resumed
+	// file has its own identity and no task key — while a rolled-back switch
+	// and a same-file reload keep it working (their headers are unseeded, so
+	// those guards read the stash itself).
+	it("does not leak the stashed family key across a switch to a different session", async () => {
+		using directory = TempDir.createSync("@omp-task-cache-switch-");
+		const h = await createUnoptedTaskFixture(directory);
+		const {
+			authStorage,
+			modelRegistry,
+			settings,
+			initialModel,
+			optedModel,
+			requests,
+			createParent,
+			runTask,
+			childFor,
+		} = h;
+		try {
+			const parent = await createParent("parent-lineage", initialModel);
+			await runTask(parent.getToolByName("task") as TaskTool, "SiblingA");
+			const child = childFor(requests[0]?.sessionId);
+			const childFile = child.sessionManager.getSessionFile();
+			if (!childFile) throw new Error("Expected a persisted Task child");
+
+			// Target: a different session at a different cwd with no task key of
+			// its own, so the onCwdChange hook can drive both the rejected and
+			// the committed switch below.
+			const altCwd = directory.join("alt");
+			mkdirSync(altCwd, { recursive: true });
+			const { session: alt } = await sdk.createAgentSession({
+				cwd: altCwd,
+				agentDir: directory.path(),
+				authStorage,
+				modelRegistry,
+				model: optedModel,
+				sessionManager: SessionManager.create(altCwd, altCwd),
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				rules: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			await alt.prompt("Warm the alternate session.");
+			const altFile = alt.sessionManager.getSessionFile();
+			if (!altFile) throw new Error("Expected a persisted alternate session");
+			// The file must not stay owned by a live manager: the switched child
+			// becomes its next claimant.
+			await alt.dispose();
+
+			// A rejected switch rolls back after the target header was already
+			// loaded: the stash must survive it.
+			expect(await child.switchSession(altFile, { onCwdChange: async () => false })).toBe(false);
+			expect(child.sessionManager.getSessionFile()).toBe(childFile);
+
+			// A same-file reload keeps the stash, and the first eligible request
+			// still finds it — the child's header copy was never seeded, so this
+			// guard reads the stash itself.
+			expect(await child.switchSession(childFile)).toBe(true);
+			child.agent.setModel(optedModel);
+			await child.prompt("Continue after the reload.");
+			expect(requests.at(-1)?.cacheKey).toBe("parent-lineage:task");
+			expect(requests.at(-1)?.wireKey).toBe("parent-lineage:task");
+
+			// The committed switch adopts the target's identity: its header has
+			// no task key, so the outgoing session's family candidate must not
+			// reach the wire on this still-opted request.
+			expect(await child.switchSession(altFile, { onCwdChange: async () => true })).toBe(true);
+			expect(child.sessionManager.getSessionFile()).toBe(altFile);
+			child.agent.setModel(optedModel);
+			expect(child.agent.state.model?.id).toBe("gpt-6-luna");
+			await child.prompt("Review the alternate session.");
+			expect(requests.at(-1)?.cacheKey).toBeUndefined();
+			expect(requests.at(-1)?.wireKey).toBe(requests.at(-1)?.sessionId);
 		} finally {
 			await Promise.all(sessions.splice(0).map(session => session.dispose()));
 			authStorage.close();
