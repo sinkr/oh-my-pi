@@ -348,7 +348,7 @@ interface ActiveAdvisor {
 	pendingCoveredTurn: number;
 	retryFallback?: AdvisorRetryFallbackState;
 	retryFallbackPendingSuccess: boolean;
-	/** Count of consecutive usage-limit block waits, bounded by retry.maxRetries; reset on turn success. */
+	/** Count of consecutive usage-limit / timed rate-limit waits, bounded by retry.maxRetries; reset on turn success. */
 	usageLimitRetries: number;
 	signature: string;
 }
@@ -2112,17 +2112,22 @@ export class SessionAdvisors {
 			usagePriorBlockedUntilMs = outcome.priorBlockedUntilMs;
 			usagePriorBlockedUntilTimed = outcome.priorBlockedUntilTimed;
 		}
-		if (!assistantFailure && !accountPolicyDenial && !usageLimit) return false;
+		// A provider-timed transient rejection (Codex `turn_rate_limit_exceeded`
+		// "Codex is at capacity" with Retry-After) clears on its own: wait out the
+		// stated window like the primary retry loop instead of burning the
+		// runtime's three 1s retries and dropping the batch.
+		const timedRateLimit = !usageLimit && retryAfterMs !== undefined && AIError.is(errorId, AIError.Flag.Transient);
+		if (!assistantFailure && !accountPolicyDenial && !usageLimit && !timedRateLimit) return false;
 
 		const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
 
 		const retrySettings = cfgRetry.get(this.#host.settings);
-		// A usage-limit error with no sibling credential and no usable model
-		// fallback is not automatically fatal: wait out a transient credential
-		// block and retry, mirroring the primary turn-recovery. Only a wait past
-		// retry.maxDelayMs / an exhausted budget falls through to the latch.
+		// A usage-limit or timed rate-limit error with no sibling credential and no
+		// usable model fallback is not automatically fatal: wait out the block and
+		// retry, mirroring the primary turn-recovery. Only a wait past
+		// retry.maxDelayMs / an exhausted budget falls through to the runtime.
 		const declineUsageLimit = (): Promise<boolean> =>
-			usageLimit
+			usageLimit || timedRateLimit
 				? this.#waitOutAdvisorUsageLimit(
 						advisor,
 						retrySettings,

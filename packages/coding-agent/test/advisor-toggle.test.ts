@@ -1110,6 +1110,73 @@ describe("AgentSession advisor toggle", () => {
 			vi.restoreAllMocks();
 		}
 	});
+	it("waits out a provider-timed rate limit instead of dropping the advisor batch", async () => {
+		const mock = createMockModel({ responses: [{ content: ["primary complete"] }] });
+		const primaryAgent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.baseDelayMs": 0,
+			"retry.maxDelayMs": 1_000,
+			"retry.maxRetries": 5,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const rateLimitSession = new AgentSession({
+			agent: primaryAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+		});
+
+		try {
+			expect(rateLimitSession.setAdvisorEnabled(true)).toBe(true);
+			const advisorAgent = rateLimitSession.getAdvisorAgent();
+			if (!advisorAgent) throw new Error("Expected advisor agent to exist");
+			// Codex `turn_rate_limit_exceeded` ("Codex is at capacity") with a
+			// Retry-After: transient, not an account quota. Three in a row used to
+			// exhaust the runtime's 1s retry budget and drop the batch.
+			const capacityError = () =>
+				new AIError.ProviderHttpError("ChatGPT rate limit exceeded. retry-after-ms=10", 429, {
+					code: "turn_rate_limit_exceeded",
+				});
+			const prompt = vi
+				.spyOn(advisorAgent, "prompt")
+				.mockRejectedValueOnce(capacityError())
+				.mockRejectedValueOnce(capacityError())
+				.mockRejectedValueOnce(capacityError())
+				.mockResolvedValue(undefined);
+			const markUsageLimitReached = vi.spyOn(authStorage.limits, "markReached");
+			const advisorYielded = Promise.withResolvers<void>();
+			const unsubscribe = rateLimitSession.subscribe(event => {
+				if (event.type === "advisor_yielded") advisorYielded.resolve();
+			});
+
+			await rateLimitSession.prompt("Trigger advisor");
+			await rateLimitSession.waitForIdle();
+			await advisorYielded.promise;
+			unsubscribe();
+
+			expect(markUsageLimitReached).not.toHaveBeenCalled();
+			expect(prompt).toHaveBeenCalledTimes(4);
+			expect(rateLimitSession.getAdvisorStatusOverview().advisors[0]).toMatchObject({
+				status: "running",
+				yielded: true,
+			});
+		} finally {
+			await rateLimitSession.dispose();
+			vi.restoreAllMocks();
+		}
+	});
 	it("marks structurally classified advisor usage limits", async () => {
 		const mock = createMockModel({
 			responses: [
