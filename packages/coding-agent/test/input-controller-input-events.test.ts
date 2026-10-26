@@ -67,6 +67,7 @@ async function createHarness(factory: ExtensionFactory) {
 		session,
 		viewSession: session,
 		sessionManager,
+		eventController: { isAwaitingAsyncWork: () => false },
 		settings: Settings.isolated({}),
 		keybindings: KeybindingsManager.inMemory(),
 		dictationSpaceHold: vi.fn(),

@@ -84,7 +84,9 @@ function createContext(): {
 		shutdown: Spy;
 		showStatus: Spy;
 		startPendingSubmission: StartPendingSubmissionSpy;
+		stopAwaitingAsyncWork: Spy;
 		updatePendingMessagesDisplay: Spy;
+		isAwaitingAsyncWork: Mock<() => boolean>;
 	};
 	inputListeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined>;
 	sessionListeners: Array<(event: { type: string }) => void>;
@@ -113,6 +115,8 @@ function createContext(): {
 	const hasActiveCleanse = vi.fn(() => false);
 	const updatePendingMessagesDisplay = vi.fn();
 	const prompt = vi.fn();
+	const isAwaitingAsyncWork = vi.fn(() => false);
+	const stopAwaitingAsyncWork = vi.fn(async () => {});
 	const startPendingSubmission = vi.fn(
 		(input: { text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] }) => {
 			ensureLoadingAnimation();
@@ -200,6 +204,10 @@ function createContext(): {
 			abortHandoff,
 			abortRetry: vi.fn(),
 		} as unknown as InteractiveModeContext["viewSession"],
+		eventController: {
+			isAwaitingAsyncWork,
+			stopAwaitingAsyncWork,
+		} as unknown as InteractiveModeContext["eventController"],
 		sessionManager: {
 			getSessionName: () => "existing session",
 			flushSync: vi.fn(),
@@ -275,7 +283,9 @@ function createContext(): {
 			showStatus,
 			shutdown: ctx.shutdown as Spy,
 			startPendingSubmission,
+			stopAwaitingAsyncWork,
 			updatePendingMessagesDisplay,
+			isAwaitingAsyncWork,
 		},
 		inputListeners,
 		sessionListeners,
@@ -974,6 +984,56 @@ describe("InputController escape behavior", () => {
 		// scrollback replay).
 		expect(spies.requestRender).toHaveBeenCalledWith(true);
 		expect(spies.resetDisplay).not.toHaveBeenCalled();
+	});
+
+	it("ends a wait on background jobs on the first Esc instead of arming the rewind selector", () => {
+		const { ctx, editor, spies } = createContext();
+		spies.isAwaitingAsyncWork.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.stopAwaitingAsyncWork).toHaveBeenCalledTimes(1);
+		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
+
+		// The wait is over: Esc goes back to its idle meaning, a fresh double-Esc.
+		spies.isAwaitingAsyncWork.mockReturnValue(false);
+		editor.onEscape?.();
+		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
+		editor.onEscape?.();
+		expect(ctx.showUserMessageSelector).toHaveBeenCalledTimes(1);
+		expect(spies.stopAwaitingAsyncWork).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels a prompt submitted during a background-job wait before ending the wait", () => {
+		const { ctx, editor, spies } = createContext();
+		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
+		spies.isAwaitingAsyncWork.mockReturnValue(true);
+		spies.cancelPendingSubmission.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.cancelPendingSubmission).toHaveBeenCalledTimes(1);
+		expect(spies.stopAwaitingAsyncWork).not.toHaveBeenCalled();
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("aborts a running `!` command before ending a background-job wait", () => {
+		const { ctx, editor, spies } = createContext();
+		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
+		Object.defineProperty(ctx.session, "isBashRunning", { value: true, configurable: true });
+		spies.isAwaitingAsyncWork.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.abortBash).toHaveBeenCalledTimes(1);
+		expect(spies.stopAwaitingAsyncWork).not.toHaveBeenCalled();
+		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
 	it("ignores double-Esc when the action is disabled", () => {

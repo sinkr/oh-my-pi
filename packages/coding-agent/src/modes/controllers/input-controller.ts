@@ -586,10 +586,13 @@ export class InputController {
 				}
 				return;
 			}
-			if (this.ctx.loadingAnimation) {
-				if (this.ctx.cancelPendingSubmission()) {
-					return;
-				}
+			if (this.ctx.loadingAnimation && this.ctx.cancelPendingSubmission()) {
+				return;
+			}
+			// The turn is over and only background jobs can resume it; its row
+			// stays mounted, so this is checked before the loader's abort.
+			const awaitingAsyncWork = this.ctx.eventController.isAwaitingAsyncWork();
+			if (this.ctx.loadingAnimation && !awaitingAsyncWork) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			} else if (this.ctx.session.isBashRunning) {
 				this.ctx.session.abortBash();
@@ -603,6 +606,10 @@ export class InputController {
 				this.ctx.editor.setText("");
 				this.ctx.isPythonMode = false;
 				this.ctx.updateEditorBorderColor();
+			} else if (awaitingAsyncWork) {
+				// End the wait. The jobs keep running; their results land in context
+				// for the next prompt instead of starting a turn.
+				void this.ctx.eventController.stopAwaitingAsyncWork();
 			} else if (this.ctx.session.isStreaming) {
 				this.#abortStreamingTurn();
 			} else if (this.ctx.editor.getText().trim()) {
