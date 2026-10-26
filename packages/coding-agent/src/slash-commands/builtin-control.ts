@@ -87,9 +87,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					unsettledTurns:
 						Number(root.isStreaming) +
 						ctx.statusLine.subagentCount +
-						root
-							.getAdvisorStatusOverview()
-							.advisors.filter(advisor => advisor.status === "running" && !advisor.yielded).length,
+						root.getAdvisorStatusOverview().advisors.filter(advisor => advisor.backlog > 0).length,
 					unfinishedJobs: ctx.statusLine.runningBackgroundJobCount(root),
 				}),
 			});

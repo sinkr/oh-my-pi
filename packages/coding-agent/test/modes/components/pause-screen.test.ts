@@ -5,6 +5,8 @@ import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { Reconciler } from "@oh-my-pi/pi-tui/native/reconcile";
 import type { TspNode } from "@oh-my-pi/pi-wire";
+import { BUILTIN_CONTROL_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-control";
+import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { Settings } from "../../../src/config/settings";
 import {
 	PauseScreenComponent,
@@ -122,6 +124,57 @@ describe("pause screen", () => {
 			expect(text).toContain("to resume");
 			expect(text).toContain("▌▌ P A U S E D");
 		});
+	});
+	it("counts advisor reviews only while queued or in flight", async () => {
+		vi.useFakeTimers();
+		setNativeRendering(false);
+		const { host, shown } = makeHost();
+		let backlog = 0;
+		const ctx = {
+			...host,
+			session: {
+				isStreaming: false,
+				getAdvisorStatusOverview: () => ({
+					configured: true,
+					advisors: [{ name: "Review", status: "running", yielded: false, backlog }],
+				}),
+			},
+			statusLine: {
+				subagentCount: 0,
+				runningBackgroundJobCount: () => 0,
+			},
+		};
+		const runtime = { draftDetached: true, ctx } as unknown as TuiSlashCommandRuntime;
+		const pause = BUILTIN_CONTROL_SLASH_COMMANDS.find(command => command.name === "pause");
+		if (!pause?.handleTui) throw new Error("expected /pause TUI handler");
+		const running = pause.handleTui({ name: "pause", args: "", text: "/pause" }, runtime);
+		const component = shown[0];
+		if (!(component instanceof PauseScreenComponent)) throw new Error("expected /pause screen");
+
+		const screen = () => component.render(80).map(stripAnsi).join("\n");
+		try {
+			const idle = screen();
+			expect(idle).toContain("No outstanding turns or jobs");
+			expect(idle).not.toContain("Outstanding turns:");
+			expect(idle).not.toContain("Outstanding jobs:");
+
+			backlog = 1;
+			vi.advanceTimersByTime(1_000);
+			const reviewing = screen();
+			expect(reviewing).toContain("Paused — outstanding work remains");
+			expect(reviewing).toContain("Outstanding turns: 1");
+			expect(reviewing).toContain("Outstanding jobs: 0");
+
+			backlog = 0;
+			vi.advanceTimersByTime(1_000);
+			const idleAgain = screen();
+			expect(idleAgain).toContain("No outstanding turns or jobs");
+			expect(idleAgain).not.toContain("Outstanding turns:");
+			expect(idleAgain).not.toContain("Outstanding jobs:");
+		} finally {
+			component.handleInput("\r");
+			await running;
+		}
 	});
 
 	describe("native sheet", () => {
