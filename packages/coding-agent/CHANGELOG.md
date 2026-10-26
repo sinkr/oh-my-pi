@@ -158,6 +158,7 @@
 - The `power.sleepPrevention` setting now says it keeps the machine awake only while the agent is running a turn, not for as long as a session is open ([#16762](https://github.com/can1357/oh-my-pi/pull/16762) by [@will-bogusz](https://github.com/will-bogusz))
 - The advisor docs now say a quota-paused advisor resumes only when its runtime is reset or rebuilt (compaction, a session switch, `/advisor`, a config reload or a restart), not after a cooldown ([#16766](https://github.com/can1357/oh-my-pi/pull/16766) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `read proc://<agent>` and `write proc://<agent>/kill` answering "not found" for a subagent that a message woke while its new turn runs as job `<agent>-2`; they now reach that job, and reading the agent's finished first job names the job it is running as ([#17020](https://github.com/can1357/oh-my-pi/pull/17020) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the agent reading a fallback engine's `web_search` results as the preferred provider's: the tool result now notes which provider answered and why the earlier ones failed ([#16948](https://github.com/can1357/oh-my-pi/pull/16948) by [@BAKocska](https://github.com/BAKocska))
 
 ## [18.12.6] - 2026-10-21
 
