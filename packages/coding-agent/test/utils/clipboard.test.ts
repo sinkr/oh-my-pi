@@ -5,7 +5,6 @@ import {
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
 } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import * as utils from "@oh-my-pi/pi-utils";
 import * as native from "@oh-my-pi/pi-natives/clipboard";
 import type { Subprocess } from "bun";
 
@@ -409,30 +408,11 @@ describe("readTextFromClipboard", () => {
 });
 
 describe("isClipboardTerminalLocal", () => {
-	const ssh = { SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22" };
-
-	afterEach(() => vi.restoreAllMocks());
-
-	it("trusts the clipboard outside SSH", () => {
-		expect(isClipboardTerminalLocal({}, "darwin")).toBe(true);
-	});
-
-	it("trusts only an sshd-forwarded X11 display over SSH", () => {
-		vi.spyOn(utils, "isWsl").mockReturnValue(false);
-		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" }, "linux")).toBe(true);
-		// Host-local displays reach the SSH host's own desktop clipboard.
-		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: ":0" }, "linux")).toBe(false);
-		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "unix:0" }, "linux")).toBe(false);
-		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "/tmp/.X11-unix/X0:0" }, "linux")).toBe(false);
-		// wl-paste is consulted before X11 and cannot be told apart from a host session.
-		expect(
-			isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0", WAYLAND_DISPLAY: "wayland-0" }, "linux"),
-		).toBe(false);
-		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" }, "darwin")).toBe(false);
-	});
-
-	it("rejects a forwarded display on WSL, whose reads go through the Windows host first", () => {
-		vi.spyOn(utils, "isWsl").mockReturnValue(true);
-		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" }, "linux")).toBe(false);
+	it("never trusts the system clipboard over SSH, even with a forwarded-looking display", () => {
+		const ssh = { SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22" };
+		// A tmux session can keep a stale forward whose port a later SSH session now owns.
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" })).toBe(false);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" })).toBe(false);
+		expect(isClipboardTerminalLocal({ DISPLAY: ":0" })).toBe(true);
 	});
 });

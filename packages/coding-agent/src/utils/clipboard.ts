@@ -69,23 +69,13 @@ function hasDisplay(): boolean {
 
 /**
  * True when the clipboard this process reads is the one the user's terminal copies into.
- * Over SSH the system clipboard belongs to the remote host (macOS `pbpaste`, the Windows host
- * behind WSL, Termux, a host-side X11/Wayland desktop), so reading it would paste the server's
- * contents. The one exception is X11 forwarding: sshd exports a TCP display (`localhost:10.0`),
- * whereas a host-local display is `:0`/`unix:0` or a socket path. Wayland has no display form
- * that reveals forwarding, and `readTextFromClipboard` consults it (and WSL/Termux) before X11,
- * so any of those disqualifies the session.
+ * Over SSH every backend reads a clipboard of the remote host (macOS `pbpaste`, the Windows host
+ * behind WSL, Termux, a host-side X11/Wayland desktop). Even an X11-forwarded `DISPLAY` cannot be
+ * trusted: a tmux session on the host keeps a stale `localhost:10.0` whose port a later SSH
+ * session (possibly another user's) can own, so SSH never reads the system clipboard.
  */
-export function isClipboardTerminalLocal(
-	env: NodeJS.ProcessEnv = process.env,
-	platform: NodeJS.Platform = process.platform,
-): boolean {
-	if (!isSshSession(env)) return true;
-	if (platform !== "linux" || env.WAYLAND_DISPLAY || env.TERMUX_VERSION || isWsl()) return false;
-	const display = env.DISPLAY ?? "";
-	const colon = display.lastIndexOf(":");
-	const host = colon > 0 ? display.slice(0, colon) : "";
-	return host !== "" && host !== "unix" && !host.startsWith("/");
+export function isClipboardTerminalLocal(env: NodeJS.ProcessEnv = process.env): boolean {
+	return !isSshSession(env);
 }
 
 /**
