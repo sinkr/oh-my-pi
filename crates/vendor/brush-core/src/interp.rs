@@ -2507,6 +2507,9 @@ fn is_native_fifo(shell: &Shell<impl extensions::ShellExtensions>, path: &Path) 
 			&& !path.starts_with("/proc")
 			&& shell.filesystem().is_native_local(path)
 			&& std::fs::metadata(path).is_ok_and(|meta| meta.file_type().is_fifo())
+			// A symlink to a descriptor path (or `/dev/../dev/stdout`) resolves
+			// under `/proc`, or fails to resolve when it reaches a pipe.
+			&& std::fs::canonicalize(path).is_ok_and(|real| !real.starts_with("/proc"))
 	}
 	#[cfg(not(unix))]
 	{
