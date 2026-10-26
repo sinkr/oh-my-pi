@@ -1357,6 +1357,50 @@ describe("AuthStorage OAuth refresh race", () => {
 		}
 	});
 
+	test("keeps a recent lease holder when a busy hand-back never lands", async () => {
+		if (!store || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-handback-never";
+		const credentialId = await seedLogin(provider);
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		const laterStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const later = new AuthStorage(laterStore);
+		// The clock jumps past the hand-back window; keep the caller waiting for the exchange.
+		const options = { ...refreshSpentToken(credentialId, () => {}), refreshTimeoutMs: 600_000 };
+		try {
+			// A refresher spent refresh-0 and is still saving refresh-1; its lease just lapsed.
+			expect(store.tryAcquireCredentialRefreshLease?.(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+			let busyHandBacks = 0;
+			vi.spyOn(peerStore, "handBackCredentialRefreshLease").mockImplementation(() => {
+				busyHandBacks += 1;
+				// The store stays busy past the whole hand-back window.
+				setSystemTime(new Date(Date.now() + 61_000));
+				throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+			});
+			const takeover = await peer.oauth.refreshStored(provider, options).then(
+				() => "resolved",
+				(error: unknown) => String(error),
+			);
+			expect(takeover).toContain("stalled refresher");
+			expect(busyHandBacks).toBeGreaterThan(0);
+			// The taker never released its lease, so the row still names a recent holder.
+			const holder = store.getCredentialRefreshLeaseHolder?.(credentialId);
+			expect(holder).toBeDefined();
+			expect(holder?.owner).not.toBe("stalled-peer");
+
+			// Another process has the same spent token rejected: the login stays.
+			const next = await later.oauth.refreshStored(provider, options).then(
+				() => "resolved",
+				(error: unknown) => String(error),
+			);
+			expect(next).toContain("stalled refresher");
+			expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({ refresh: "refresh-0" });
+		} finally {
+			peer.close();
+			later.close();
+		}
+	});
+
 	test("saves an exchanged token when a peer holds the lease handed back to the stalled refresher", async () => {
 		if (!authStorage || !store || !tempDir) throw new Error("test setup failed");
 		const provider = "unit-oauth-handback-save";
