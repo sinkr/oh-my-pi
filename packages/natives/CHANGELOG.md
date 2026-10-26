@@ -6,6 +6,9 @@
 
 - A failed `EditStore.apply` outcome carries `errorKind`, a stable class of the refusal (`unseen_lines`, `stale_tag`, `parse`, …), and `editErrorKinds()` lists every class ([#16608](https://github.com/can1357/oh-my-pi/pull/16608) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `exclude` to `grep()` options: glob patterns of files and folders to leave out of a directory search; a matched folder is not walked ([#16920](https://github.com/can1357/oh-my-pi/pull/16920) by [@will-bogusz](https://github.com/will-bogusz))
+### Changed
+
+- Faster native grep on minified and long lines ([#17016](https://github.com/can1357/oh-my-pi/pull/17016) by [@GTanger](https://github.com/GTanger))
 
 ### Fixed
 
