@@ -1938,6 +1938,8 @@ impl Utility for Rg {
 mod tests {
 	use super::*;
 	use crate::host::{Host, run_util};
+	#[cfg(unix)]
+	use crate::host::tree_with_sparse_file;
 
 	fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_util::<Rg>(args, stdin, "/");
@@ -2209,7 +2211,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn text_search_of_a_line_longer_than_the_limit_is_a_file_error() {
-		let tree = crate::grep::tests::tree_with_sparse_file();
+		let tree = tree_with_sparse_file();
 
 		let (code, capture) = run_util::<Rg>(&["-a", "needle", "."], "", tree.path());
 
@@ -2224,7 +2226,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn multiline_text_search_of_a_file_larger_than_the_limit_is_a_file_error() {
-		let tree = crate::grep::tests::tree_with_sparse_file();
+		let tree = tree_with_sparse_file();
 
 		let (code, capture) = run_util::<Rg>(&["-U", "-a", "needle\\n", "."], "", tree.path());
 
@@ -2239,7 +2241,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn pattern_file_larger_than_the_limit_is_refused() {
-		let tree = crate::grep::tests::tree_with_sparse_file();
+		let tree = tree_with_sparse_file();
 
 		let (code, capture) = run_util::<Rg>(&["-f", "big", "small"], "", tree.path());
 

@@ -1700,7 +1700,7 @@ pub(crate) fn grep_builtin<SE: ShellExtensions>() -> Registration<SE> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
 	use std::{
 		io::{self, Read, Write},
 		sync::Arc,
@@ -1711,6 +1711,8 @@ pub(crate) mod tests {
 	use super::*;
 	use brush_core::openfiles;
 	use crate::host::{Host, run_caught, run_util};
+	#[cfg(unix)]
+	use crate::host::tree_with_sparse_file;
 
 	#[test]
 	fn path_separator_rewrites_the_native_separator_on_windows() {
@@ -1833,17 +1835,6 @@ pub(crate) mod tests {
 		let (code, capture) = run_util::<Grep>(&["-f", "patterns", "haystack"], "", tree.path());
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "alpha\nbeta\n");
-	}
-
-	/// Writes `small` holding `needle` and a sparse `big` 64x the line limit
-	/// that holds no line terminator and takes no disk space.
-	#[cfg(unix)]
-	pub(crate) fn tree_with_sparse_file() -> tempfile::TempDir {
-		let tree = tempfile::tempdir().unwrap();
-		std::fs::write(tree.path().join("small"), "needle\n").unwrap();
-		let big = std::fs::File::create(tree.path().join("big")).unwrap();
-		big.set_len(64 * MAX_LINE_BYTES as u64).unwrap();
-		tree
 	}
 
 	/// A file with no line terminator used to make grep buffer it whole: on a
