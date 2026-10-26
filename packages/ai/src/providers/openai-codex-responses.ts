@@ -2855,6 +2855,9 @@ class CodexStreamProcessor {
 		if (await this.#tryReconnectWebSocketOnConnectionLimit(error)) {
 			return true;
 		}
+		if (await this.#tryRecoverNativeTurnLaneRejection(error)) {
+			return true;
+		}
 		if (await this.#tryRecoverPreviousResponseNotFound(error)) {
 			return true;
 		}
@@ -3039,6 +3042,44 @@ class CodexStreamProcessor {
 		return true;
 	}
 
+	/**
+	 * Recover when Codex's experimental native turn lane refuses a stateful frame
+	 * because the previous native turn has not released the lane
+	 * (`unsupported_native_inflight_message`). The provider's own remedy is to
+	 * start an independent turn, so drop the append baseline AND the sticky
+	 * `x-codex-turn-state` token and replay the full transcript. Keeping the token
+	 * — as the stale-chain recovery deliberately does — would re-enter the same
+	 * lane and be rejected again.
+	 */
+	async #tryRecoverNativeTurnLaneRejection(error: unknown): Promise<boolean> {
+		const websocketState = this.requestContext.websocketState;
+		if (
+			!(error instanceof CodexProviderStreamError) ||
+			error.code !== "unsupported_native_inflight_message" ||
+			!websocketState ||
+			this.runtime.transport !== "websocket" ||
+			this.output.content.length > 0 ||
+			this.options?.signal?.aborted ||
+			this.runtime.providerRetryAttempt >= CODEX_MAX_RETRIES
+		) {
+			return false;
+		}
+
+		this.runtime.providerRetryAttempt += 1;
+		resetCodexWebSocketAppendState(websocketState);
+		this.requestContext.turnState.value = undefined;
+		this.runtime.resetAccumulators();
+		this.runtime.sawTerminalEvent = false;
+		resetOutputState(this.output);
+		this.firstTokenTime = undefined;
+
+		CODEX_DEBUG &&
+			logger.debug("[codex] codex native turn lane busy; retrying as an independent turn", {
+				retry: this.runtime.providerRetryAttempt,
+			});
+		await this.#reopenWebSocketStream(websocketState);
+		return true;
+	}
 	async #tryRecoverPreviousResponseNotFound(error: unknown): Promise<boolean> {
 		const websocketState = this.requestContext.websocketState;
 		if (
