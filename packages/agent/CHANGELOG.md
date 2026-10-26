@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Remote compaction requests now carry the effective compaction request API (the configured `remoteCompaction.api` override, else the model's API), and request policy resolves from that API plus the effective compaction model (the configured `remoteCompaction.model` override, else the model's wire id), so request headers are chosen from the endpoint and model the request actually sends ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+- Remote compaction now sends cache and session headers for the endpoint and model the request actually uses, so a configured compaction override no longer inherits the live turn's routing ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 
 ### Fixed
 
