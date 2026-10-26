@@ -553,11 +553,8 @@ fn parse_ps_flag_group(
 	if bsd {
 		options.bsd_syntax = true;
 	}
-	let mut offset = 0;
-	while offset < group.len() {
-		let option = group.as_bytes()[offset] as char;
-		offset += 1;
-		let remainder = &group[offset..];
+	for (start, option) in group.char_indices() {
+		let remainder = &group[start + option.len_utf8()..];
 		match option {
 			'A' => options.all = true,
 			'e' if !bsd => options.all = true,
@@ -1470,6 +1467,22 @@ mod tests {
 			"Tue Jan  2 03:04:00 2024"
 		);
 		assert_eq!(format_ps_start(None, None, &TimeZone::UTC, false), "?");
+	}
+
+	#[test]
+	fn non_ascii_option_in_a_cluster_is_reported_not_a_panic() {
+		for (arg, message) in [
+			("-é", "unsupported option '-é'"),
+			("-eé", "unsupported option '-é'"),
+			// `-o` takes the rest of the cluster, here `é`, as its value.
+			("-eoé", "unknown output format specifier 'é'"),
+		] {
+			let Err((code, error)) = parse_ps_args(&[arg.to_string()], &ShellPaths::default()) else {
+				panic!("{arg:?} must be rejected");
+			};
+			assert_eq!(code, 1, "{arg:?}");
+			assert!(error.starts_with(message), "{arg:?}: {error}");
+		}
 	}
 }
 
