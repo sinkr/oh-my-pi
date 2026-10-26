@@ -6,6 +6,10 @@
 
 - Added a `hiddenContent` option to `htmlToMarkdown`: `"drop"` (default) omits hidden content, `"reachable"` keeps content the page can reveal such as collapsed sections and inactive tab panels, and `"all"` also keeps `<template>` and `<noscript>` content; other values throw ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
 
+### Fixed
+
+- Fixed the shell's `timeout` and a tool abort not stopping a built-in that was still reading: `timeout 1 cat /dev/zero`, `diff` or `grep -r` over a huge file, `cat /dev/zero | timeout 1 wc -c`, `timeout 1 mapfile < /dev/zero`, `timeout 1 ls -R /` and a read from a FIFO with no writer now stop at the limit, print nothing about it, and give no result for the part of the input they did read
+
 ## [18.12.2] - 2026-10-18
 
 ### Added

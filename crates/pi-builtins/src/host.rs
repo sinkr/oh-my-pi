@@ -108,7 +108,7 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 /// stdout is the common case).
 pub(crate) struct Host {
 	/// Standard input. Reads observe cancellation, so a blocked pipe read
-	/// returns EOF on abort instead of hanging the shell.
+	/// fails with the cancellation error on abort instead of hanging the shell.
 	pub stdin:  Stdin,
 	/// Standard output; the null device when fd 1 is closed. Raw: utilities
 	/// with bulk output buffer it themselves via [`Host::stdout_writer`].
@@ -234,15 +234,38 @@ enum GuardedStream {
 /// An [`openfiles::Stream`] wrapper that turns `EPIPE` into emulated SIGPIPE.
 /// Clones share the [`Sigpipe`] state, so `stdout_clone()` handles given to
 /// helper threads participate too.
+///
+/// It also emulates the other way a command dies: once the command is
+/// cancelled (abort, `timeout`, `kill %N`), a standalone utility would be
+/// killed and print nothing more, so every later write on either stream is
+/// dropped. This is the one place that silences what a cancelled utility
+/// says about its cancelled reads (`cat: /dev/zero: Operation canceled`,
+/// `tail: internal error`); utilities need no case of their own.
 struct SigpipeGuard {
 	inner:   OpenFile,
 	stream:  GuardedStream,
 	sigpipe: Arc<Sigpipe>,
+	cancel:  CommandCancel,
 }
 
 impl SigpipeGuard {
-	fn wrap(inner: OpenFile, stream: GuardedStream, sigpipe: &Arc<Sigpipe>) -> OpenFile {
-		OpenFile::Stream(Box::new(Self { inner, stream, sigpipe: Arc::clone(sigpipe) }))
+	fn wrap(
+		inner: OpenFile,
+		stream: GuardedStream,
+		sigpipe: &Arc<Sigpipe>,
+		cancel: &CommandCancel,
+	) -> OpenFile {
+		OpenFile::Stream(Box::new(Self {
+			inner,
+			stream,
+			sigpipe: Arc::clone(sigpipe),
+			cancel: cancel.clone(),
+		}))
+	}
+
+	/// Whether the emulated process is dead to this stream's reader.
+	fn discards(&self) -> bool {
+		self.cancel.fired() || matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit()
 	}
 }
 
@@ -254,14 +277,14 @@ impl Read for SigpipeGuard {
 
 impl Write for SigpipeGuard {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		if matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit() {
+		if self.discards() {
 			return Ok(buf.len());
 		}
 		self.inner.write(buf).inspect_err(|error| self.sigpipe.record(error))
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
-		if matches!(self.stream, GuardedStream::Stderr) && self.sigpipe.is_hit() {
+		if self.discards() {
 			return Ok(());
 		}
 		self.inner.flush().inspect_err(|error| self.sigpipe.record(error))
@@ -274,6 +297,7 @@ impl openfiles::Stream for SigpipeGuard {
 			inner:   self.inner.clone(),
 			stream:  self.stream,
 			sigpipe: Arc::clone(&self.sigpipe),
+			cancel:  self.cancel.clone(),
 		})
 	}
 
@@ -285,6 +309,21 @@ impl openfiles::Stream for SigpipeGuard {
 	#[cfg(unix)]
 	fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, Error> {
 		self.inner.try_borrow_as_fd()
+	}
+}
+
+/// Whether the command a utility runs for has been cancelled: its token fired
+/// (checked directly, so a diagnostic written before the adapter reacts is
+/// still dropped), or the adapter raised the host's flag.
+#[derive(Clone)]
+struct CommandCancel {
+	flag:  Arc<AtomicBool>,
+	token: Option<CancellationToken>,
+}
+
+impl CommandCancel {
+	fn fired(&self) -> bool {
+		self.flag.load(Ordering::Relaxed) || self.token.as_ref().is_some_and(CancellationToken::is_cancelled)
 	}
 }
 
@@ -339,7 +378,15 @@ impl ShellPaths {
 	/// command in `context`: usually just 0/1/2, plus any from `exec N>` or
 	/// process substitution.
 	pub fn new<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
+		// Scoped to the command's own cancellation (the operand's token under
+		// `timeout`), so a utility reading a host file stops when it fires
+		// instead of draining the file first: `timeout 1 cat /dev/zero` never
+		// returned.
 		let filesystem = context.shell.filesystem().blocking();
+		let filesystem = match context.cancel_token() {
+			Some(token) => filesystem.with_cancellation(token),
+			None => filesystem,
+		};
 		#[cfg(unix)]
 		let descriptors: Arc<[(brush_core::ShellFd, OpenFile)]> = context
 			.open_fds()
@@ -597,9 +644,9 @@ impl Host {
 	/// flag, and a cancelled walk traverses the whole tree before the utility
 	/// notices (#3949, #3933). The walker surfaces the error as
 	/// `WalkError::Interrupted`; `grep`, `rg`, and `fd` tell it from a real
-	/// failure with [`Host::is_cancelled`] and stay silent, since the shell
-	/// adapter owns the cancellation status (130), while `find` prints it as
-	/// `Error: cancelled`.
+	/// failure with [`Host::is_cancelled`], since the shell adapter owns the
+	/// cancellation status (130). Whatever a utility prints once cancelled is
+	/// dropped anyway (see [`SigpipeGuard`]).
 	pub fn cancel_heartbeat(&self) -> impl Fn() -> io::Result<()> + Send + Sync + 'static {
 		let cancel = Arc::clone(&self.cancel);
 		move || {
@@ -1381,8 +1428,11 @@ impl ChildEnv {
 ///
 /// On unix, when fd 0 is a real descriptor, reads wait for readiness in short
 /// slices so an abort or `timeout` is observed even when input never arrives on
-/// a blocked pipe; the utility then sees EOF and unwinds cleanly rather than
-/// leaving a detached thread writing to descriptors the host has moved on from.
+/// a blocked pipe. A cancelled read fails with [`pi_vfs::cancelled`], not EOF,
+/// so a utility never reports a result for input it did not finish reading
+/// (`timeout 1 md5sum - < big` printed a checksum of a prefix); it unwinds
+/// rather than leaving a detached thread writing to descriptors the host has
+/// moved on from, and what it says about the error is dropped.
 pub(crate) struct Stdin {
 	file:   OpenFile,
 	#[cfg_attr(not(unix), allow(dead_code, reason = "readiness polling is unix-only"))]
@@ -1410,6 +1460,13 @@ impl Stdin {
 		let fd = pollable_fd(&file);
 		Ok(Self { file, fd, cancel: Arc::clone(&self.cancel) })
 	}
+
+	/// Whether the command was cancelled, for utilities that read fd 0's
+	/// descriptor directly (`wc -c` splices a pipe) and so bypass the reads
+	/// that fail once it is.
+	pub fn is_cancelled(&self) -> bool {
+		self.cancel.load(Ordering::Relaxed)
+	}
 }
 
 /// The raw descriptor [`Stdin`] polls for readiness, so a blocked read
@@ -1430,13 +1487,13 @@ fn pollable_fd(file: &OpenFile) -> Option<i32> {
 impl Read for Stdin {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		if self.cancel.load(Ordering::Relaxed) {
-			return Ok(0);
+			return Err(pi_vfs::cancelled());
 		}
 		#[cfg(unix)]
 		if let Some(fd) = self.fd {
 			loop {
 				if self.cancel.load(Ordering::Relaxed) {
-					return Ok(0);
+					return Err(pi_vfs::cancelled());
 				}
 				let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
 				// SAFETY: one `pollfd` valid for the call; `fd` is owned by the
@@ -1877,6 +1934,7 @@ fn build_host<SE: ShellExtensions>(
 	// One flag, shared: the adapter flips it on cancellation, and a blocked
 	// `Stdin::read` must observe the very same flag or it never wakes.
 	let cancel = Arc::new(AtomicBool::new(false));
+	let command_cancel = CommandCancel { flag: Arc::clone(&cancel), token: context.cancel_token() };
 
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
 	let stdout_handle = if checks_stdout_path { output_handle(&stdout) } else { None };
@@ -1892,15 +1950,15 @@ fn build_host<SE: ShellExtensions>(
 	// so it takes the stdout guard: once the reader is gone every write fails
 	// and nothing is observable either way.
 	let (merged_out, stderr) = if stdout_destination.shares_with(&stderr_destination) {
-		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stdout, &sigpipe);
+		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stdout, &sigpipe, &command_cancel);
 		let shared =
 			Arc::new(Mutex::new(StreamWriter::new(guarded, stderr_destination.regular_file)));
 		(Some(Arc::clone(&shared)), StreamWriter::Shared(shared))
 	} else {
-		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stderr, &sigpipe);
+		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stderr, &sigpipe, &command_cancel);
 		(None, StreamWriter::new(guarded, stderr_destination.regular_file))
 	};
-	let stdout = SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe);
+	let stdout = SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe, &command_cancel);
 
 	Ok(Host {
 		stdin: Stdin {
@@ -1983,8 +2041,8 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OpenFiles, OsString, PathBuf, Read,
-		ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
+		Arc, AtomicBool, CommandCancel, GuardedStream, HashMap, Host, OpenFile, OpenFiles, OsString,
+		PathBuf, Read, ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
 		output_handle, run_caught,
 	};
 
@@ -2050,6 +2108,7 @@ mod testing {
 			};
 			let cancel = Arc::new(AtomicBool::new(false));
 			let sigpipe = Arc::new(Sigpipe::default());
+			let command_cancel = CommandCancel { flag: Arc::clone(&cancel), token: None };
 			let stdout = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&capture.stdout))));
 			let stderr = OpenFile::Stream(Box::new(MemStream::writer(Arc::clone(&capture.stderr))));
 			let host = Self {
@@ -2058,11 +2117,17 @@ mod testing {
 					fd:     None,
 					cancel: Arc::clone(&cancel),
 				},
-				stdout:                SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe),
+				stdout:                SigpipeGuard::wrap(
+					stdout,
+					GuardedStream::Stdout,
+					&sigpipe,
+					&command_cancel,
+				),
 				stderr:                StreamWriter::line(SigpipeGuard::wrap(
 					stderr,
 					GuardedStream::Stderr,
 					&sigpipe,
+					&command_cancel,
 				)),
 				stdout_is_file:        false,
 				stdout_handle:         None,
@@ -2090,7 +2155,8 @@ mod testing {
 			self.stdout_is_file = super::Destination::of(&file).regular_file;
 			self.stdout_handle = output_handle(&file);
 			self.stdout_metadata.take();
-			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
+			let command_cancel = CommandCancel { flag: Arc::clone(&self.cancel), token: None };
+			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe, &command_cancel);
 		}
 
 		/// Sets an exported variable on a test host.

@@ -526,3 +526,176 @@ fn descriptor_overlay_shares_the_pinned_file() {
 	assert!(fs.remove_file("/dev/fd/77").is_err());
 	assert!(path.exists());
 }
+
+/// A host file opened through a cancelled view fails its reads with the
+/// cancellation error, never `Interrupted` (which std read loops retry
+/// forever); so does a whole-file `read`. The same file through a view
+/// without a token reads as before, and a whole-file read through a
+/// cancellable view is still one allocation of the file's size.
+#[test]
+fn host_reads_through_a_cancelled_view_fail_with_the_cancellation_error() {
+	let dir = TempDir::new("host-cancel");
+	let path = dir.0.join("data");
+	std::fs::write(&path, vec![b'x'; 300_000]).unwrap();
+	let token = CancellationToken::new();
+	let plain = BlockingFs::native();
+	let scoped = plain.with_cancellation(token.clone());
+
+	let mut contents = Vec::new();
+	scoped
+		.open(&path)
+		.unwrap()
+		.read_to_end(&mut contents)
+		.unwrap();
+	assert_eq!(contents.len(), 300_000);
+	assert_eq!(contents.capacity(), 300_000, "sized from the file, not grown by doubling");
+	assert_eq!(scoped.read(&path).unwrap().len(), 300_000);
+
+	let mut opened_before = scoped.open(&path).unwrap();
+	token.cancel();
+	let errors = [
+		opened_before.read(&mut [0; 8]).unwrap_err(),
+		scoped
+			.open(&path)
+			.unwrap()
+			.read_to_end(&mut Vec::new())
+			.unwrap_err(),
+		scoped.read(&path).unwrap_err(),
+	];
+	for err in errors {
+		assert!(is_cancelled(&err), "{err}");
+		assert_ne!(err.kind(), io::ErrorKind::Interrupted);
+	}
+
+	assert_eq!(plain.read(&path).unwrap().len(), 300_000);
+	let mut text = String::new();
+	plain
+		.open(&path)
+		.unwrap()
+		.read_to_string(&mut text)
+		.unwrap();
+	assert_eq!(text.len(), 300_000);
+}
+
+/// Through a cancellable view, opening a FIFO waits for a writer as a
+/// blocking open does, so even a reader of the bare descriptor (an external
+/// child, `$(< f)`) gets a late writer's data. When no writer comes, the open
+/// fails once the token fires and leaves no reader behind for a later writer.
+#[cfg(unix)]
+#[test]
+fn fifo_opens_through_a_cancellable_view_wait_for_a_writer_and_observe_the_token() {
+	use std::os::unix::fs::OpenOptionsExt;
+	let dir = TempDir::new("fifo-cancel");
+	let fifo = dir.0.join("fifo");
+	BlockingFs::native()
+		.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+		.unwrap();
+	let token = CancellationToken::new();
+	let scoped = BlockingFs::native().with_cancellation(token.clone());
+
+	let writer_path = fifo.clone();
+	let writer = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(150));
+		std::fs::write(writer_path, "hi").unwrap();
+	});
+	let opened = scoped.open(&fifo).unwrap();
+	let mut descriptor = opened.native().unwrap();
+	let mut text = String::new();
+	descriptor.read_to_string(&mut text).unwrap();
+	writer.join().unwrap();
+	assert_eq!(text, "hi");
+	drop(opened);
+
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(150));
+		token.cancel();
+	});
+	let started = std::time::Instant::now();
+	let err = scoped.open(&fifo).unwrap_err();
+	canceller.join().unwrap();
+	assert!(is_cancelled(&err), "{err}");
+	assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+	let late_writer = std::fs::OpenOptions::new()
+		.write(true)
+		.custom_flags(libc::O_NONBLOCK)
+		.open(&fifo)
+		.unwrap_err();
+	assert_eq!(late_writer.raw_os_error(), Some(libc::ENXIO), "a reader was left open");
+}
+
+/// A cancel releases a waiting FIFO open by opening the FIFO for writing,
+/// which this process may not do to a FIFO it can only read. Such an open
+/// must still wait for a writer and hand back a blocking descriptor that
+/// reads all of its data, and on cancel it must return without leaving a
+/// reader that would swallow a later writer's data.
+#[cfg(target_os = "linux")]
+#[test]
+fn fifo_this_process_cannot_write_still_waits_and_observes_the_token() {
+	use std::{
+		io::Write,
+		os::unix::{
+			ffi::OsStrExt,
+			fs::{OpenOptionsExt, PermissionsExt},
+		},
+	};
+	let set_mode = |path: &std::path::Path, mode: u32| {
+		std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+	};
+	let dir = TempDir::new("fifo-read-only");
+	let fifo = dir.0.join("fifo");
+	BlockingFs::native()
+		.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+		.unwrap();
+	set_mode(&fifo, 0o400);
+	let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+	// SAFETY: `c_path` is a NUL-terminated string alive for the call.
+	if unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::W_OK, libc::AT_EACCESS) } == 0
+	{
+		eprintln!(
+			"skipped: this process may write a mode 0400 FIFO (root), so the case cannot arise"
+		);
+		return;
+	}
+	let token = CancellationToken::new();
+	let scoped = BlockingFs::native().with_cancellation(token.clone());
+
+	// The writer pauses between two writes, so a descriptor left
+	// non-blocking fails the second read with `WouldBlock`.
+	let writer_path = fifo.clone();
+	let writer = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(150));
+		set_mode(&writer_path, 0o600);
+		let mut file = std::fs::OpenOptions::new()
+			.write(true)
+			.open(&writer_path)
+			.unwrap();
+		set_mode(&writer_path, 0o400);
+		file.write_all(b"h").unwrap();
+		std::thread::sleep(Duration::from_millis(200));
+		file.write_all(b"i").unwrap();
+	});
+	let opened = scoped.open(&fifo).unwrap();
+	let mut descriptor = opened.native().unwrap();
+	let mut text = String::new();
+	descriptor.read_to_string(&mut text).unwrap();
+	writer.join().unwrap();
+	assert_eq!(text, "hi");
+	drop(opened);
+
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(150));
+		token.cancel();
+	});
+	let started = std::time::Instant::now();
+	let err = scoped.open(&fifo).unwrap_err();
+	canceller.join().unwrap();
+	assert!(is_cancelled(&err), "{err}");
+	assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+	set_mode(&fifo, 0o600);
+	let late_writer = std::fs::OpenOptions::new()
+		.write(true)
+		.custom_flags(libc::O_NONBLOCK)
+		.open(&fifo)
+		.unwrap_err();
+	assert_eq!(late_writer.raw_os_error(), Some(libc::ENXIO), "a reader was left open");
+}

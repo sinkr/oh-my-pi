@@ -82,7 +82,152 @@ pub trait FileHandle: Send + Sync + fmt::Debug + 'static {
 /// `*_async` equivalents. Synchronous I/O on provider handles is for blocking
 /// workers and foreign threads; async code must use the `*_async` methods.
 pub struct File {
-	repr: Repr,
+	repr:        Repr,
+	/// Cancellation of the facade that opened this host file: once it fires,
+	/// reads fail with [`crate::cancelled`]. Provider files keep theirs in
+	/// [`Shared`].
+	read_cancel: Option<HostCancel>,
+}
+
+/// How reads of a host file opened through a cancellable facade observe its
+/// token.
+#[derive(Clone)]
+struct HostCancel {
+	token: CancellationToken,
+	/// The file is not a regular file (a pipe, FIFO, terminal, socket or
+	/// device), so one read can block for as long as no data arrives: such a
+	/// read first waits for readiness in short slices, checking the token.
+	#[cfg(unix)]
+	poll:  bool,
+}
+
+impl HostCancel {
+	fn for_file(token: CancellationToken, file: &std::fs::File) -> Self {
+		#[cfg(not(unix))]
+		let _ = file;
+		Self {
+			token,
+			// A failed `fstat` leaves reads as they were: unpolled.
+			#[cfg(unix)]
+			poll: file
+				.metadata()
+				.is_ok_and(|meta| !meta.file_type().is_file()),
+		}
+	}
+}
+
+/// How long one readiness wait lasts before the token is checked again.
+#[cfg(unix)]
+pub(crate) const POLL_SLICE_MS: i32 = 100;
+
+/// Bytes one [`HostReader::read_to_end`] step reads into, at most; the
+/// buffer's spare capacity is zeroed one step at a time, never all at once.
+const READ_STEP: usize = 256 * 1024;
+
+/// A host file whose reads first check the opening facade's cancellation, so
+/// std's read loops (`read_to_end`) stop as well as single reads.
+struct HostReader<'a> {
+	file:   &'a std::fs::File,
+	cancel: &'a HostCancel,
+}
+
+impl HostReader<'_> {
+	fn check(&self) -> io::Result<()> {
+		if self.cancel.token.is_cancelled() {
+			Err(crate::cancelled())
+		} else {
+			Ok(())
+		}
+	}
+
+	/// Waits until a read would not block, checking the token between slices.
+	#[cfg(unix)]
+	fn wait_readable(&self) -> io::Result<()> {
+		use std::os::fd::AsRawFd;
+		let fd = self.file.as_raw_fd();
+		loop {
+			self.check()?;
+			let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+			// SAFETY: one `pollfd` valid for the call; `fd` belongs to the
+			// file borrowed for this reader's lifetime.
+			let ready = unsafe { libc::poll(&mut pfd, 1, POLL_SLICE_MS) };
+			if ready > 0 {
+				return Ok(());
+			}
+			if ready < 0 {
+				let error = io::Error::last_os_error();
+				if error.kind() != io::ErrorKind::Interrupted {
+					return Err(error);
+				}
+			}
+		}
+	}
+
+	/// Bytes left between the file position and the end, when the file has a
+	/// length (`None` for pipes and devices, which report 0).
+	fn remaining(&self) -> Option<usize> {
+		let len = self.file.metadata().ok()?.len();
+		let position = host(self.file).stream_position().ok()?;
+		usize::try_from(len.saturating_sub(position))
+			.ok()
+			.filter(|&n| n > 0)
+	}
+}
+
+impl Read for HostReader<'_> {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		self.check()?;
+		#[cfg(unix)]
+		if self.cancel.poll {
+			self.wait_readable()?;
+		}
+		host(self.file).read(buf)
+	}
+
+	/// Like std's `impl Read for &File`, reserves the bytes left in the file
+	/// first, so a whole-file read takes one allocation of the right size
+	/// instead of growing by doubling.
+	fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+		if let Some(remaining) = self.remaining() {
+			buf.try_reserve_exact(remaining)
+				.map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+		}
+		let start = buf.len();
+		loop {
+			if buf.len() == buf.capacity() {
+				// A full buffer may sit exactly at EOF: probe before growing it.
+				let mut probe = [0; 32];
+				match self.read(&mut probe) {
+					Ok(0) => return Ok(buf.len() - start),
+					Ok(n) => buf.extend_from_slice(&probe[..n]),
+					Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+					Err(error) => return Err(error),
+				}
+				continue;
+			}
+			let filled = buf.len();
+			let step = (buf.capacity() - filled).min(READ_STEP);
+			buf.resize(filled + step, 0);
+			match self.read(&mut buf[filled..]) {
+				Ok(0) => {
+					buf.truncate(filled);
+					return Ok(filled - start);
+				},
+				Ok(n) => buf.truncate(filled + n),
+				Err(error) if error.kind() == io::ErrorKind::Interrupted => buf.truncate(filled),
+				Err(error) => {
+					buf.truncate(filled);
+					return Err(error);
+				},
+			}
+		}
+	}
+
+	fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+		let mut bytes = Vec::new();
+		self.read_to_end(&mut bytes)?;
+		append_utf8(buf, bytes)
+	}
 }
 
 enum Repr {
@@ -152,7 +297,7 @@ impl fmt::Debug for File {
 
 impl From<std::fs::File> for File {
 	fn from(file: std::fs::File) -> Self {
-		Self { repr: Repr::Native(file) }
+		Self { repr: Repr::Native(file), read_cancel: None }
 	}
 }
 
@@ -207,18 +352,26 @@ impl File {
 	/// Wraps a shared provider handle; see [`File::from_handle`].
 	pub fn from_arc(handle: Arc<dyn FileHandle>) -> Self {
 		Self {
-			repr: Repr::Virtual(Arc::new(Shared {
+			repr:        Repr::Virtual(Arc::new(Shared {
 				handle:  Some(handle),
 				runtime: Handle::try_current().ok(),
 				cancel:  None,
 				closes:  None,
 			})),
+			read_cancel: None,
 		}
 	}
 
 	/// Attaches a facade's cancellation token and close tracker to a freshly
-	/// opened provider file.
+	/// opened file. A host file only takes the token, for its reads.
 	pub(crate) fn bind(mut self, scope: &Scope) -> Self {
+		if let Repr::Native(file) = &self.repr {
+			self.read_cancel = scope
+				.cancel
+				.clone()
+				.map(|token| HostCancel::for_file(token, file));
+			return self;
+		}
 		if let Repr::Virtual(shared) = &mut self.repr
 			&& let Some(shared) = Arc::get_mut(shared)
 		{
@@ -228,6 +381,16 @@ impl File {
 			if shared.closes.is_none() {
 				shared.closes.clone_from(&scope.closes);
 			}
+		}
+		self
+	}
+
+	/// [`Self::bind`] for a host file whose type the opener already knows
+	/// (`poll`: not a regular file), so binding takes no `fstat`.
+	#[cfg(unix)]
+	pub(crate) fn bind_host(mut self, token: CancellationToken, poll: bool) -> Self {
+		if matches!(self.repr, Repr::Native(_)) {
+			self.read_cancel = Some(HostCancel { token, poll });
 		}
 		self
 	}
@@ -243,7 +406,7 @@ impl File {
 	pub fn into_native(self) -> Result<std::fs::File, Self> {
 		match self.repr {
 			Repr::Native(file) => Ok(file),
-			repr @ Repr::Virtual(_) => Err(Self { repr }),
+			repr @ Repr::Virtual(_) => Err(Self { repr, read_cancel: self.read_cancel }),
 		}
 	}
 
@@ -254,11 +417,41 @@ impl File {
 	/// A second handle sharing this one's position (`dup`).
 	pub fn try_clone(&self) -> io::Result<Self> {
 		Ok(Self {
-			repr: match &self.repr {
+			repr:        match &self.repr {
 				Repr::Native(file) => Repr::Native(file.try_clone()?),
 				Repr::Virtual(shared) => Repr::Virtual(Arc::clone(shared)),
 			},
+			read_cancel: self.read_cancel.clone(),
 		})
+	}
+
+	/// Whether the facade that opened this file has been cancelled. For
+	/// callers that work on the descriptor directly (`splice`, `mmap`) and so
+	/// bypass the reads that fail once it is.
+	pub fn is_cancelled(&self) -> bool {
+		match &self.repr {
+			Repr::Native(_) => self
+				.read_cancel
+				.as_ref()
+				.is_some_and(|cancel| cancel.token.is_cancelled()),
+			Repr::Virtual(shared) => shared
+				.cancel
+				.as_ref()
+				.is_some_and(CancellationToken::is_cancelled),
+		}
+	}
+
+	/// Reads the host file `file` (this handle's own), through [`HostReader`]
+	/// when the facade that opened it is cancellable.
+	fn read_host<T>(
+		&self,
+		file: &std::fs::File,
+		read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
+	) -> io::Result<T> {
+		match &self.read_cancel {
+			Some(cancel) => read(&mut HostReader { file, cancel }),
+			None => read(&mut host(file)),
+		}
 	}
 
 	pub fn metadata(&self) -> io::Result<Metadata> {
@@ -350,7 +543,7 @@ impl File {
 
 	pub async fn read_async(&self, buf: &mut [u8]) -> io::Result<usize> {
 		match &self.repr {
-			Repr::Native(file) => host(file).read(buf),
+			Repr::Native(file) => self.read_host(file, |reader| reader.read(buf)),
 			Repr::Virtual(shared) => shared.guard(shared.handle().read(buf)).await,
 		}
 	}
@@ -371,14 +564,14 @@ impl File {
 
 	pub async fn read_to_end_async(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
 		match &self.repr {
-			Repr::Native(file) => host(file).read_to_end(buf),
+			Repr::Native(file) => self.read_host(file, |reader| reader.read_to_end(buf)),
 			Repr::Virtual(shared) => shared.guard(read_to_end_handle(shared.handle(), buf)).await,
 		}
 	}
 
 	pub async fn read_to_string_async(&self, buf: &mut String) -> io::Result<usize> {
 		match &self.repr {
-			Repr::Native(file) => host(file).read_to_string(buf),
+			Repr::Native(file) => self.read_host(file, |reader| reader.read_to_string(buf)),
 			Repr::Virtual(_) => {
 				let mut bytes = Vec::new();
 				self.read_to_end_async(&mut bytes).await?;
@@ -481,21 +674,21 @@ impl File {
 impl Read for &File {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		match &self.repr {
-			Repr::Native(file) => host(file).read(buf),
+			Repr::Native(file) => self.read_host(file, |reader| reader.read(buf)),
 			Repr::Virtual(shared) => shared.run(shared.handle().read(buf)),
 		}
 	}
 
 	fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
 		match &self.repr {
-			Repr::Native(file) => host(file).read_to_end(buf),
+			Repr::Native(file) => self.read_host(file, |reader| reader.read_to_end(buf)),
 			Repr::Virtual(shared) => shared.run(read_to_end_handle(shared.handle(), buf)),
 		}
 	}
 
 	fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
 		match &self.repr {
-			Repr::Native(file) => host(file).read_to_string(buf),
+			Repr::Native(file) => self.read_host(file, |reader| reader.read_to_string(buf)),
 			Repr::Virtual(_) => {
 				let mut bytes = Vec::new();
 				self.read_to_end(&mut bytes)?;

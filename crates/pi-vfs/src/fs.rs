@@ -183,6 +183,178 @@ fn native_open(scope: &Scope, path: &Path, options: &OpenOptions) -> io::Result<
 	}
 }
 
+/// Opens a host path for a facade and binds the file to the facade's scope,
+/// so its reads observe the scope's cancellation (see [`File`]).
+///
+/// Under a cancellable scope on Unix, a read-only open takes one `stat`
+/// first. Its file type says whether the file's reads must poll (anything but
+/// a regular file), so binding needs no `fstat`, and whether the open itself
+/// can block: a FIFO's open waits for a writer, so it goes through
+/// [`open_fifo_reader`], which the token can interrupt. If the path changes
+/// between the `stat` and the open, the file is opened and read as without a
+/// token.
+fn native_open_scoped(scope: &Scope, path: &Path, options: &OpenOptions) -> io::Result<File> {
+	#[cfg(unix)]
+	if let Some(token) = &scope.cancel
+		&& options.is_read()
+		&& !options.is_writable()
+		&& !options.is_create()
+		&& !options.is_create_new()
+		&& let Ok(meta) = std::fs::metadata(path)
+	{
+		use std::os::unix::fs::FileTypeExt;
+		let kind = meta.file_type();
+		let file = if kind.is_fifo() && options.get_custom_flags() & libc::O_NONBLOCK == 0 {
+			open_fifo_reader(path, options, token)?
+		} else {
+			native_open(scope, path, options)?
+		};
+		return Ok(file.bind_host(token.clone(), !kind.is_file()));
+	}
+	Ok(native_open(scope, path, options)?.bind(scope))
+}
+
+/// How many times a cancelled [`open_fifo_reader`] tries to release its
+/// helper's open, one poll slice apart, before it leaves the helper blocked.
+#[cfg(unix)]
+const FIFO_RELEASE_ATTEMPTS: usize = 10;
+
+/// Opens a FIFO for reading exactly as a blocking open does, returning once a
+/// writer connects, but on a helper thread, so the wait observes `token`.
+/// Once the token fires, a non-blocking write-only open of the FIFO connects
+/// as the writer the helper's open waits for and closes at once; it is tried
+/// again while the helper has not reached `open` yet (`ENXIO`). The helper's
+/// descriptor is closed, and the open fails with [`crate::cancelled`]. Other
+/// readers waiting on the same FIFO at that moment are released too and read
+/// EOF.
+///
+/// That release needs write access. A FIFO this process cannot write is
+/// opened by [`open_unwritable_fifo_reader`] instead.
+#[cfg(unix)]
+fn open_fifo_reader(
+	path: &Path,
+	options: &OpenOptions,
+	token: &CancellationToken,
+) -> io::Result<File> {
+	use std::{sync::mpsc, time::Duration};
+	if token.is_cancelled() {
+		return Err(crate::cancelled());
+	}
+	if !may_write(path) {
+		return open_unwritable_fifo_reader(path, options, token);
+	}
+	let slice = Duration::from_millis(u64::from(crate::file::POLL_SLICE_MS.unsigned_abs()));
+	let (sender, opened) = mpsc::sync_channel(1);
+	let (owned_path, owned_options) = (path.to_path_buf(), options.clone());
+	std::thread::Builder::new()
+		.name("pi-vfs-fifo-open".to_owned())
+		.spawn(move || {
+			// After a cancellation nobody receives; the file then closes here.
+			let _ = sender.send(native::open(&owned_path, &owned_options));
+		})?;
+	loop {
+		match opened.recv_timeout(slice) {
+			Ok(result) => return result,
+			Err(mpsc::RecvTimeoutError::Disconnected) => {
+				return Err(io::Error::other("FIFO open thread exited"));
+			},
+			Err(mpsc::RecvTimeoutError::Timeout) if token.is_cancelled() => break,
+			Err(mpsc::RecvTimeoutError::Timeout) => {},
+		}
+	}
+	let mut release = OpenOptions::new();
+	release.write(true).custom_flags(libc::O_NONBLOCK);
+	for _ in 0..FIFO_RELEASE_ATTEMPTS {
+		if let Err(err) = native::open(path, &release)
+			&& err.raw_os_error() != Some(libc::ENXIO)
+		{
+			break;
+		}
+		if !matches!(opened.recv_timeout(slice), Err(mpsc::RecvTimeoutError::Timeout)) {
+			break;
+		}
+	}
+	Err(crate::cancelled())
+}
+
+/// Whether this process may open `path` for writing (effective IDs).
+#[cfg(unix)]
+fn may_write(path: &Path) -> bool {
+	use std::os::unix::ffi::OsStrExt;
+	let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+		return false;
+	};
+	// SAFETY: `path` is a NUL-terminated string alive for the call.
+	unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::W_OK, libc::AT_EACCESS) == 0 }
+}
+
+/// Opens a FIFO this process may read but not write. No release is possible,
+/// so the open must not block. On Linux it opens non-blocking and waits in
+/// poll slices, checking the token, until a writer has written or closed:
+/// Linux reports nothing to such a reader until a writer has connected. The
+/// descriptor is then made blocking again. Elsewhere the open blocks, as
+/// without a token.
+#[cfg(unix)]
+fn open_unwritable_fifo_reader(
+	path: &Path,
+	options: &OpenOptions,
+	token: &CancellationToken,
+) -> io::Result<File> {
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = token;
+		native::open(path, options)
+	}
+	#[cfg(target_os = "linux")]
+	{
+		use std::os::fd::AsRawFd;
+		let mut nonblocking = options.clone();
+		nonblocking.custom_flags(options.get_custom_flags() | libc::O_NONBLOCK);
+		let file = native::open(path, &nonblocking)?;
+		let fd = file
+			.native()
+			.map(AsRawFd::as_raw_fd)
+			.ok_or_else(|| unsupported("FIFO descriptor"))?;
+		loop {
+			if token.is_cancelled() {
+				return Err(crate::cancelled());
+			}
+			let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+			// SAFETY: one `pollfd` valid for the call; `fd` belongs to `file`.
+			let ready = unsafe { libc::poll(&mut pfd, 1, crate::file::POLL_SLICE_MS) };
+			if ready > 0 {
+				break;
+			}
+			if ready < 0 {
+				let err = io::Error::last_os_error();
+				if err.kind() != io::ErrorKind::Interrupted {
+					return Err(err);
+				}
+			}
+		}
+		// SAFETY: `fd` belongs to `file`, which is alive for both calls.
+		let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+		// SAFETY: as above.
+		if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+			return Err(io::Error::last_os_error());
+		}
+		Ok(file)
+	}
+}
+
+/// Reads a whole host file. Under a cancellable scope the read goes through
+/// [`File`], so it stops when the token fires instead of draining the file
+/// (`/dev/zero`, a large sparse file); otherwise it is `std::fs::read`.
+fn native_read(scope: &Scope, path: &Path) -> io::Result<Vec<u8>> {
+	if scope.cancel.is_none() {
+		return std::fs::read(path);
+	}
+	let mut file = native_open_scoped(scope, path, &read_options())?;
+	let mut contents = Vec::new();
+	io::Read::read_to_end(&mut file, &mut contents)?;
+	Ok(contents)
+}
+
 /// Creates a host directory under the facade's creation mask: each directory
 /// it creates gets exactly its requested mode (`0o777` by default) less the
 /// mask, set again after creation as in [`native_open`]. Existing ones keep
@@ -401,9 +573,10 @@ impl Fs {
 		matches!(self.route(path.as_ref()), Ok(Route::Native))
 	}
 
-	/// A view whose provider operations, and data operations on provider files
-	/// opened through it, fail with [`crate::cancelled`] once `token` is
-	/// cancelled. Closes are never cancelled; host operations are unaffected.
+	/// A view whose provider operations, data operations on provider files
+	/// opened through it, and reads of host files opened through it fail with
+	/// [`crate::cancelled`] once `token` is cancelled. Closes are never
+	/// cancelled; other host operations are unaffected.
 	pub fn with_cancellation(&self, token: CancellationToken) -> Self {
 		let mut fs = self.clone();
 		fs.scope.cancel = Some(token);
@@ -530,7 +703,7 @@ impl Fs {
 	) -> io::Result<File> {
 		let path = path.as_ref();
 		match self.route(path)? {
-			Route::Native => native_open(&self.scope, path, options),
+			Route::Native => native_open_scoped(&self.scope, path, options),
 			Route::Provider(provider) => Ok(self
 				.guard(provider.open(path, options))
 				.await?
@@ -593,7 +766,7 @@ impl Fs {
 	pub async fn read(&self, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
 		let path = path.as_ref();
 		match self.route(path)? {
-			Route::Native => std::fs::read(path),
+			Route::Native => native_read(&self.scope, path),
 			Route::Provider(provider) => self.guard(provider.read(path)).await,
 			Route::Mounted(file) => {
 				let file = mount_open_async(file, &read_options()).await?;
@@ -1156,7 +1329,7 @@ impl BlockingFs {
 	pub fn open_with(&self, path: impl AsRef<Path>, options: &OpenOptions) -> io::Result<File> {
 		let path = path.as_ref();
 		match self.fs.route(path)? {
-			Route::Native => native_open(&self.fs.scope, path, options),
+			Route::Native => native_open_scoped(&self.fs.scope, path, options),
 			Route::Provider(provider) => {
 				Ok(self.run(provider.open(path, options))?.bind(&self.fs.scope))
 			},
@@ -1217,7 +1390,7 @@ impl BlockingFs {
 	pub fn read(&self, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
 		let path = path.as_ref();
 		match self.fs.route(path)? {
-			Route::Native => std::fs::read(path),
+			Route::Native => native_read(&self.fs.scope, path),
 			Route::Provider(provider) => self.run(provider.read(path)),
 			Route::Mounted(file) => {
 				let mut contents = Vec::new();

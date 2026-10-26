@@ -3929,6 +3929,7 @@ struct LsRuntime {
 	paths:  ShellPaths,
 	stderr: RefCell<OpenFile>,
 	status: Cell<i32>,
+	cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LsRuntime {
@@ -3940,6 +3941,12 @@ impl LsRuntime {
 	/// The shell's filesystem, which every listed path goes through.
 	fn fs(&self) -> &BlockingFs {
 		self.paths.fs()
+	}
+
+	/// Whether the shell cancelled this `ls` (abort, `timeout`): a `-R` walk
+	/// of `/` would otherwise run to the end first.
+	fn is_cancelled(&self) -> bool {
+		self.cancel.load(std::sync::atomic::Ordering::Relaxed)
 	}
 }
 
@@ -3969,6 +3976,7 @@ impl Utility for Ls {
 			paths: host.paths().clone(),
 			stderr: RefCell::new(host.stderr_clone()),
 			status: Cell::new(0),
+			cancel: host.cancel_flag(),
 		});
 		let config = match Config::from(&self.matches, host, Rc::clone(&runtime)) {
 			Ok(config) => config,
@@ -5038,6 +5046,9 @@ pub fn list(locs: Vec<&Path>, config: &Config, out: StreamWriter) -> std::io::Re
 	state.out.flush()?;
 
 	for (pos, path_data) in dirs.iter().enumerate() {
+		if config.runtime.is_cancelled() {
+			break;
+		}
 		let needs_blank_line = pos != 0 || !files.is_empty();
 		// Do read_dir call here to match GNU semantics by printing
 		// read_dir errors before directory headings, names and totals
@@ -5075,6 +5086,9 @@ pub fn list(locs: Vec<&Path>, config: &Config, out: StreamWriter) -> std::io::Re
 
 		// Only runs if it must list recursively.
 		while let Some(dir_data) = state.stack.pop() {
+			if config.runtime.is_cancelled() {
+				break;
+			}
 			let resolved_dir = config.runtime.paths.resolve(&dir_data.0);
 			let read_dir = match fs.read_dir(&resolved_dir) {
 				Err(err) => {

@@ -6131,6 +6131,33 @@ mod tests {
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
 	}
 
+	/// Every run reads through a cancellable filesystem, and its redirects must
+	/// still open a FIFO as a blocking open does. A non-blocking open let a
+	/// reader that reads the descriptor itself (an external `cat`, `$(< f)`)
+	/// see EOF before a late writer connected; the writer then blocked forever.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn fifo_redirect_waits_for_a_late_writer() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(
+				"/bin/sh -c 'sleep 0.15; echo one > f' & /bin/cat < f; /bin/sh -c 'sleep 0.15; echo \
+				 two > f' & x=$(< f); echo \"x=$x\"; wait",
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("a FIFO redirect waits for its writer and returns");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\nx=two\n"));
+	}
+
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
 	/// seconds. The deadline lives on the calling thread, so it still fires when
 	/// a builtin blocks the runtime's only worker.

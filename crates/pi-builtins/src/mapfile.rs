@@ -5,6 +5,11 @@ use clap::Parser;
 
 use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
 
+/// Work between yields to the runtime and cancellation checks, counted in
+/// bytes read; an entry counts as [`ENTRY_STEPS`] bytes.
+const CHECKPOINT_STEPS: usize = 64 * 1024;
+const ENTRY_STEPS: usize = 64;
+
 /// Read lines from standard input into an indexed array variable.
 #[derive(Parser)]
 pub(crate) struct MapFileCommand {
@@ -134,8 +139,20 @@ impl MapFileCommand {
 		let read_ahead =
 			if max_count == 0 && self.callback.is_none() { ReadAhead::ToEof } else { ReadAhead::Seekable };
 		let mut input = LineInput::new(input_file, read_ahead);
+		// Endless input (`< /dev/zero`, a line with no delimiter, or endless
+		// empty entries) never reaches EOF. The bytes are read without
+		// awaiting, so every so often yield to the runtime, which lets a
+		// `timeout` running this on the same task reach its deadline, and then
+		// notice cancellation (abort, `timeout`), as `read` does.
+		let cancel_token = context.cancel_token();
+		let mut steps = 0usize;
 
 		while max_count == 0 || entry_count < max_count {
+			steps += ENTRY_STEPS;
+			if steps >= CHECKPOINT_STEPS {
+				steps = 0;
+				yield_then_check(cancel_token.as_ref()).await?;
+			}
 			let mut line = vec![];
 			let mut saw_delimiter = false;
 
@@ -146,6 +163,11 @@ impl MapFileCommand {
 					break;
 				}
 				line.push(byte);
+				steps += 1;
+				if steps >= CHECKPOINT_STEPS {
+					steps = 0;
+					yield_then_check(cancel_token.as_ref()).await?;
+				}
 				if byte == delimiter {
 					saw_delimiter = true;
 					break;
@@ -192,6 +214,15 @@ impl MapFileCommand {
 
 		Ok(None)
 	}
+}
+
+/// Yields to the runtime, then fails with `Interrupted` if `cancel` fired.
+async fn yield_then_check(cancel: Option<&tokio_util::sync::CancellationToken>) -> Result<(), brush_core::Error> {
+	tokio::task::yield_now().await;
+	if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+		return Err(ErrorKind::Interrupted.into());
+	}
+	Ok(())
 }
 
 async fn run_callback<SE: brush_core::ShellExtensions>(

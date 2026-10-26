@@ -34,19 +34,26 @@ mod count_fast {
 	/// `splice` system call, which is faster than using `read`.
 	///
 	/// On error it returns the number of bytes it did manage to read, since the
-	/// caller will fall back to a simpler method.
+	/// caller will fall back to a simpler method. So it does once the command
+	/// is cancelled: `splice` bypasses the reads that fail then, and a pipe
+	/// whose writer never stops (`cat /dev/zero | timeout 1 wc -c`) or never
+	/// writes never reaches EOF here, so it waits for data in short slices and
+	/// checks `is_cancelled` between them.
 	#[inline]
 	#[cfg(any(target_os = "linux", target_os = "android"))]
-	fn count_bytes_using_splice(fd: &impl AsFd) -> Result<usize, usize> {
+	fn count_bytes_using_splice(fd: &impl AsFd, is_cancelled: &dyn Fn() -> bool) -> Result<usize, usize> {
 		let null_file = uucore::pipes::dev_null().ok_or(0_usize)?;
 		// todo: avoid generating broker if input is pipe (fcntl_setpipe_size succeed)
 		// and directly splice() to /dev/null to save RAM usage
 		let (pipe_rd, pipe_wr) = pipe().map_err(|_| 0_usize)?;
-	
+
 		let mut byte_count = 0;
 		// improve throughput from pipe
 		let _ = rustix::pipe::fcntl_setpipe_size(fd, MAX_ROOTLESS_PIPE_SIZE);
 		loop {
+			if !wait_readable(fd, is_cancelled) {
+				return Err(byte_count);
+			}
 			match splice(fd, &pipe_wr, MAX_ROOTLESS_PIPE_SIZE) {
 				Ok(0) => break,
 				Ok(res) => {
@@ -59,8 +66,26 @@ mod count_fast {
 				Err(_) => return Err(byte_count),
 			}
 		}
-	
+
 		Ok(byte_count)
+	}
+
+	/// Waits until `fd` has data or reached EOF; `false` once `is_cancelled`.
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	fn wait_readable(fd: &impl AsFd, is_cancelled: &dyn Fn() -> bool) -> bool {
+		let fd = fd.as_fd().as_raw_fd();
+		loop {
+			if is_cancelled() {
+				return false;
+			}
+			let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+			// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from the
+			// caller's live handle.
+			let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
+			if ready != 0 && !(ready < 0 && io::Error::last_os_error().kind() == ErrorKind::Interrupted) {
+				return true;
+			}
+		}
 	}
 	
 	/// In the special case where we only need to count the number of bytes. There
@@ -107,7 +132,7 @@ mod count_fast {
 				}
 				#[cfg(any(target_os = "linux", target_os = "android"))]
 				if (stat.st_mode as libc::mode_t & S_IFIFO) != 0 {
-					match count_bytes_using_splice(&fd) {
+					match count_bytes_using_splice(&fd, &|| handle.is_cancelled()) {
 						Ok(n) => return (n, None),
 						Err(n) => byte_count = n,
 					}
@@ -241,6 +266,9 @@ mod countable {
 		/// The native host file behind this input, when it has one.
 		#[cfg(windows)]
 		fn native_file(&self) -> Option<&std::fs::File>;
+		/// Whether the command was cancelled; for the descriptor shortcuts,
+		/// which bypass the reads that fail once it is.
+		fn is_cancelled(&self) -> bool;
 	}
 
 	impl WordCountable for &mut Stdin {
@@ -259,6 +287,10 @@ mod countable {
 		fn native_file(&self) -> Option<&std::fs::File> {
 			None
 		}
+
+		fn is_cancelled(&self) -> bool {
+			Stdin::is_cancelled(self)
+		}
 	}
 
 	impl WordCountable for File {
@@ -276,6 +308,10 @@ mod countable {
 		#[cfg(windows)]
 		fn native_file(&self) -> Option<&std::fs::File> {
 			self.native()
+		}
+
+		fn is_cancelled(&self) -> bool {
+			File::is_cancelled(self)
 		}
 	}
 }
