@@ -251,6 +251,12 @@ pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<O
 			"apps.open takes reveal or app, not both: reveal shows the item in Finder",
 		));
 	}
+	// Off macOS no document route exists, and `reveal`/`app` always ask for one:
+	// refuse before the inventory listing, which can fail on its own.
+	#[cfg(not(target_os = "macos"))]
+	if options.reveal.unwrap_or(false) || options.app.is_some() {
+		return open_document(&[], input, &options);
+	}
 	#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 	{
 		let apps = platform::list()?;
@@ -511,15 +517,21 @@ mod tests {
 	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn documents_and_reveal_are_unsupported_off_macos() {
-		for (input, options) in [
-			("https://example.com", ApplicationOpenOptions::default()),
-			(".", ApplicationOpenOptions { reveal: Some(true), ..Default::default() }),
-			(".", ApplicationOpenOptions { app: Some("Editor".into()), ..Default::default() }),
+		// `reveal` and `app` refuse before the inventory listing.
+		for options in [
+			ApplicationOpenOptions { reveal: Some(true), ..Default::default() },
+			ApplicationOpenOptions { app: Some("Editor".into()), ..Default::default() },
 		] {
-			let error = open(input, options).unwrap_err();
-			assert_eq!(error.code, super::super::error::ErrorCode::Unsupported, "{input}");
+			let error = open(".", options).unwrap_err();
+			assert_eq!(error.code, super::super::error::ErrorCode::Unsupported);
 			assert!(error.message.contains("on macOS only"), "{}", error.message);
 		}
+		// A URL routes to the document path, which refuses; `open` reaches it only
+		// after an inventory listing, which some hosts cannot produce.
+		let url = ApplicationOpenOptions::default();
+		assert_eq!(route(&[], "https://example.com", &url), Route::Document);
+		let error = open_document(&[], "https://example.com", &url).unwrap_err();
+		assert_eq!(error.code, super::super::error::ErrorCode::Unsupported);
 		// A file or folder path alone is still read as an application, as before.
 		let error = open(".", ApplicationOpenOptions::default()).unwrap_err();
 		assert_ne!(error.code, super::super::error::ErrorCode::Unsupported);
