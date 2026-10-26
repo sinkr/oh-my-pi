@@ -324,6 +324,10 @@ fn poll_slice() -> std::time::Duration {
 /// are released too: a reader reads EOF, a writer's first write fails with
 /// `EPIPE`.
 ///
+/// An open that is dropped before it finishes (the job that made it was
+/// aborted, its run task was dropped) is released the same way, on a
+/// detached thread, so the helper does not take the next connection.
+///
 /// When it may not (a FIFO this process can read but not write, or the
 /// reverse), or the release fails, the open still fails with
 /// [`crate::cancelled`], but the helper stays blocked in `open` until the
@@ -338,6 +342,8 @@ struct FifoOpening {
 	opened:     std::sync::mpsc::Receiver<io::Result<File>>,
 	/// Notified once the helper has sent its result.
 	done:       Arc<tokio::sync::Notify>,
+	/// Whether the open has ended: its result was taken, or it was released.
+	settled:    bool,
 }
 
 #[cfg(unix)]
@@ -369,16 +375,23 @@ impl FifoOpening {
 			releasable: may_access(path, end.release_access()),
 			opened,
 			done,
+			settled: false,
 		})
 	}
 
 	/// Waits for the open on this thread, in poll slices, checking `token`.
-	fn wait(self, token: &CancellationToken) -> io::Result<File> {
+	fn wait(mut self, token: &CancellationToken) -> io::Result<File> {
 		use std::sync::mpsc::RecvTimeoutError;
 		loop {
 			match self.opened.recv_timeout(poll_slice()) {
-				Ok(result) => return result,
-				Err(RecvTimeoutError::Disconnected) => return Err(helper_exited()),
+				Ok(result) => {
+					self.settled = true;
+					return result;
+				},
+				Err(RecvTimeoutError::Disconnected) => {
+					self.settled = true;
+					return Err(helper_exited());
+				},
 				Err(RecvTimeoutError::Timeout) if token.is_cancelled() => return self.cancel(),
 				Err(RecvTimeoutError::Timeout) => {},
 			}
@@ -386,15 +399,21 @@ impl FifoOpening {
 	}
 
 	/// Awaits the open or `token`, whichever comes first.
-	async fn wait_async(self, token: &CancellationToken) -> io::Result<File> {
+	async fn wait_async(mut self, token: &CancellationToken) -> io::Result<File> {
 		tokio::select! {
 			biased;
 			() = self.done.notified() => {},
 			() = token.cancelled() => {},
 		}
 		match self.opened.try_recv() {
-			Ok(result) => result,
-			Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(helper_exited()),
+			Ok(result) => {
+				self.settled = true;
+				result
+			},
+			Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+				self.settled = true;
+				Err(helper_exited())
+			},
 			Err(std::sync::mpsc::TryRecvError::Empty) => self.cancel(),
 		}
 	}
@@ -403,22 +422,53 @@ impl FifoOpening {
 	/// open the other end. The release takes microseconds unless the helper
 	/// has not reached `open` yet, and is bounded by [`FIFO_RELEASE_ATTEMPTS`]
 	/// slices.
-	fn cancel(self) -> io::Result<File> {
-		use std::sync::mpsc::RecvTimeoutError;
+	fn cancel(mut self) -> io::Result<File> {
 		if self.releasable {
-			let release = self.end.release_options();
-			for _ in 0..FIFO_RELEASE_ATTEMPTS {
-				if let Err(err) = native::open(&self.path, &release)
-					&& err.raw_os_error() != Some(libc::ENXIO)
-				{
-					break;
-				}
-				if !matches!(self.opened.recv_timeout(poll_slice()), Err(RecvTimeoutError::Timeout)) {
-					break;
-				}
-			}
+			release_fifo_open(&self.path, self.end, &self.opened);
 		}
+		self.settled = true;
 		Err(crate::cancelled())
+	}
+}
+
+#[cfg(unix)]
+impl Drop for FifoOpening {
+	/// Releases an open dropped before it ended, on a detached thread so that
+	/// no runtime worker waits for it.
+	fn drop(&mut self) {
+		if self.settled || !self.releasable {
+			return;
+		}
+		let (_, placeholder) = std::sync::mpsc::sync_channel(0);
+		let opened = std::mem::replace(&mut self.opened, placeholder);
+		let (path, end) = (std::mem::take(&mut self.path), self.end);
+		let _ = std::thread::Builder::new()
+			.name("pi-vfs-fifo-release".to_owned())
+			.spawn(move || release_fifo_open(&path, end, &opened));
+	}
+}
+
+/// Releases a helper's open of one end of the FIFO at `path` with a
+/// non-blocking open of the other end, tried again while the helper has not
+/// reached `open` yet (`ENXIO`), and waits for the helper's result, which it
+/// drops. Bounded by [`FIFO_RELEASE_ATTEMPTS`] slices.
+#[cfg(unix)]
+fn release_fifo_open(
+	path: &Path,
+	end: FifoEnd,
+	opened: &std::sync::mpsc::Receiver<io::Result<File>>,
+) {
+	use std::sync::mpsc::RecvTimeoutError;
+	let release = end.release_options();
+	for _ in 0..FIFO_RELEASE_ATTEMPTS {
+		if let Err(err) = native::open(path, &release)
+			&& err.raw_os_error() != Some(libc::ENXIO)
+		{
+			break;
+		}
+		if !matches!(opened.recv_timeout(poll_slice()), Err(RecvTimeoutError::Timeout)) {
+			break;
+		}
 	}
 }
 

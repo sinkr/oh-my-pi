@@ -6248,6 +6248,46 @@ mod tests {
 		assert!(output.ends_with("kill-job=143\nkill-pid=143\none\nwait=0\nsame-pid\n"), "{output}");
 	}
 
+	/// `kill %1` aborts a background job without polling it again, so a FIFO
+	/// open it was waiting in is dropped, not cancelled. Its helper thread then
+	/// stayed in `open` and took the next writer's connection, whose data was
+	/// lost. A dropped open must leave no reader behind.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn killed_job_leaves_no_reader_on_its_fifo() {
+		use std::os::unix::fs::OpenOptionsExt;
+		let root = tempfile::tempdir().expect("scratch directory");
+		let fifo = root.path().join("f");
+		pi_vfs::BlockingFs::native()
+			.make_node(&fifo, pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				"cat < f & sleep 0.2; kill %1; wait; echo done",
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the killed job ends");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "done\n"));
+
+		// The release runs on its own thread; give it time, then a writer that
+		// does not wait must find no reader.
+		time::sleep(Duration::from_millis(500)).await;
+		let writer = std::fs::OpenOptions::new()
+			.write(true)
+			.custom_flags(libc::O_NONBLOCK)
+			.open(&fifo);
+		assert_eq!(
+			writer.err().and_then(|err| err.raw_os_error()),
+			Some(libc::ENXIO),
+			"a reader was left on the FIFO"
+		);
+	}
+
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
 	/// seconds. The deadline lives on the calling thread, so it still fires when
 	/// a builtin blocks the runtime's only worker.
