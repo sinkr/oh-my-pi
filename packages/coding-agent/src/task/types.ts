@@ -8,7 +8,7 @@ export type {
 	SubagentLifecyclePayload,
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { type BaseType, type FluentType, type } from "@oh-my-pi/omptype";
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, isRecord } from "@oh-my-pi/pi-utils";
 
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -44,6 +44,28 @@ export interface SubagentEventPayload {
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
+
+// Seance-only per-spawn fields the task tool refuses for every other agent.
+const SEANCE_ITEM_KEYS = ["sourceSession", "model"] as const;
+
+/**
+ * Keep a batch item's seance-only keys through undeclared-key deletion: the
+ * item schema declares them only while seance is advertised. Argument
+ * validation re-attaches only root keys, so without this a `tasks[].model` pin
+ * on an ordinary agent is deleted before execute() and the child silently runs
+ * on its own model, while the flat form's root `model` reaches the refusal.
+ * Other stale item keys are still deleted, and the wire schema is unchanged.
+ */
+function keepSeanceItemKeys<T, I>(item: FluentType<T, I>): FluentType<unknown, I> {
+	return item.onUndeclaredKey("ignore").pipe((input: unknown): unknown => {
+		const out: unknown = item(input);
+		if (out instanceof type.errors || !isRecord(out) || !isRecord(input)) return out;
+		for (const key of SEANCE_ITEM_KEYS) {
+			if (Object.hasOwn(input, key) && !Object.hasOwn(out, key)) out[key] = input[key];
+		}
+		return out;
+	});
+}
 
 export const taskItemSchema = type({
 	"name?": "string",
@@ -90,12 +112,12 @@ const taskSchemaNoIsolation = type({
 });
 const taskSchemaBatch = type({
 	context: "string",
-	tasks: taskItemSchemaIsolated.array(),
+	tasks: keepSeanceItemKeys(taskItemSchemaIsolated).array(),
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
-	tasks: taskItemSchema.array(),
+	tasks: keepSeanceItemKeys(taskItemSchema).array(),
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
@@ -153,7 +175,7 @@ function createTaskSchema(options: {
 			});
 			return type.raw({
 				context: "string",
-				tasks: item.array(),
+				tasks: keepSeanceItemKeys(item).array(),
 				"+": "delete",
 			});
 		}
@@ -170,7 +192,7 @@ function createTaskSchema(options: {
 		});
 		return type.raw({
 			context: "string",
-			tasks: item.array(),
+			tasks: keepSeanceItemKeys(item).array(),
 			"+": "delete",
 		});
 	}
