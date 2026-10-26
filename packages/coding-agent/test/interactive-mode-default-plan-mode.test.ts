@@ -306,8 +306,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session!.getActiveToolNames()).toContain(mcpTool.name);
 	});
 
-	// Startup-deferred extensions bind after the composer accepts input, so their
-	// tools register while the startup plan mode is already active.
+	/** Enters startup plan mode, then registers and enables a tool as a startup-deferred extension does. */
 	async function startWithLateExtensionTool(): Promise<{ created: InteractiveMode; xdev: XdevState; name: string }> {
 		const writeTool = makeTool("write");
 		const xdev: XdevState = {

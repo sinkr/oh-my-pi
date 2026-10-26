@@ -1997,12 +1997,7 @@ export class SessionTools {
 		}, signal);
 	}
 
-	/**
-	 * Restores a non-MCP presentation snapshot while retaining the current MCP selection.
-	 * Non-built-in tools registered after the snapshot, such as those of startup-deferred
-	 * extensions, are absent from `registeredToolNames` and keep their current presentation.
-	 * Built-ins registered meanwhile, such as the plan-mode `write` transport, follow the snapshot.
-	 */
+	/** Restores a non-MCP presentation snapshot plus the MCP selection and non-built-in tools registered after it. */
 	restoreNonMCPToolPresentation(
 		nonMCPToolNames: string[],
 		nonMCPMountedToolNames: string[],

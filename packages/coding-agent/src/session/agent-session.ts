@@ -6949,10 +6949,7 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.setActiveToolPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
 	}
 
-	/**
-	 * Restores a non-MCP presentation snapshot while retaining the current MCP selection
-	 * and the tools registered after the snapshot.
-	 */
+	/** Restores a non-MCP presentation snapshot plus the MCP selection and non-built-in tools registered after it. */
 	restoreNonMCPToolPresentation(
 		nonMCPToolNames: string[],
 		nonMCPMountedToolNames: string[],
