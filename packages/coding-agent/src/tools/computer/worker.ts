@@ -28,7 +28,7 @@ import type {
 	OpenedApplication,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
