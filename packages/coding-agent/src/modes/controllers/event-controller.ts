@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -2429,8 +2430,9 @@ export class EventController {
 		this.ctx.syncRetryHintRow();
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
-		this.#idleRecapPending = true;
-		this.#scheduleIdleRecap();
+		this.#idleRecapPending = this.#priorMessageWasGenerated(event.messages);
+		if (this.#idleRecapPending) this.#scheduleIdleRecap();
+		else this.#cancelIdleRecap();
 		if (this.#settledRunStatus(event).state === "done") this.composerPrediction.request();
 		this.sendErrorNotification(event);
 		this.sendCompletionNotification(event);
@@ -2876,7 +2878,7 @@ export class EventController {
 	async #runIdleRecap(): Promise<void> {
 		if (!this.#idleConditionsHold()) return;
 		if (!this.ctx.viewSession.model) return;
-		if (this.ctx.viewSession.messages.length === 0) return;
+		if (!this.#priorMessageWasGenerated(this.ctx.viewSession.messages)) return;
 
 		const promptText = prompt.render(idleRecapPrompt, {
 			goal: this.#idleRecapGoalText() ?? "",
@@ -2906,6 +2908,24 @@ export class EventController {
 		if (this.ctx.viewSession.isCompacting) return false;
 		if (this.ctx.editor.getText().trim()) return false;
 		return true;
+	}
+
+	/**
+	 * Prior message is the last message of `messages`.
+	 * Generated means that message is an assistant message whose content has
+	 * non-empty text, non-empty thinking, or a tool call. stopReason is not a
+	 * veto: an aborted or errored turn that already produced that output still
+	 * recaps. An empty `messages` array is not generated, and this does not
+	 * fall back to an older session tail.
+	 */
+	#priorMessageWasGenerated(messages: readonly AgentMessage[]): boolean {
+		const last = messages.at(-1);
+		if (last?.role !== "assistant") return false;
+		return last.content.some(block => {
+			if (block.type === "text") return block.text.length > 0;
+			if (block.type === "thinking") return block.thinking.length > 0;
+			return block.type === "toolCall";
+		});
 	}
 
 	#idleRecapGoalText(): string | undefined {
