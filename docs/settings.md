@@ -371,6 +371,15 @@ The default is an empty array (nothing disabled). For the two subsystems' provid
 
 Native project `modelRoles` are also read directly from `.omp/config.yml`; disabling the `native` discovery provider does not suppress that model-role layer.
 
+## Resume picker scope
+
+By default, `omp --resume` and `/resume` include sessions from other worktrees of
+this repository in the current-folder list. To keep long-lived workspaces
+separate, run `omp config set session.worktreeScope directory` (or choose
+**Resume Worktree Scope** in `/settings`). Set it to `repo` to restore the default.
+The all-projects tab still shows sessions across every directory, including
+sessions in deleted worktrees; this setting only narrows the current-folder list.
+
 ## Settings catalog
 
 The catalog below highlights common settings; it is not the complete schema. `omp config list` is the authoritative reference for every key, current value, type, and description. Defaults and enum values shown here come from the schema. Settings that accept an env or flag override are noted; those overrides are process-local and not persisted.
