@@ -519,6 +519,8 @@ export interface SessionAdvisorsHost {
 	sessionId(): string;
 	/** Put an advisor's provider session under the primary session's account pools. */
 	restrictOAuthAccounts(providerSessionId: string): void;
+	/** Whether the owning session is the top-level main session or a spawned subagent (`"main"` when omitted). */
+	agentKind?(): "main" | "sub";
 }
 
 /**
@@ -1087,7 +1089,14 @@ export class SessionAdvisors {
 		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
+		const sessionKind = this.#host.agentKind?.() ?? "main";
 		for (const config of roster) {
+			if (
+				(config.scope === "main" && sessionKind !== "main") ||
+				(config.scope === "subagent" && sessionKind !== "sub")
+			) {
+				continue;
+			}
 			let slug = legacy ? "" : slugifyAdvisorName(config.name);
 			if (slug) {
 				let candidate = slug;
@@ -1223,6 +1232,8 @@ export class SessionAdvisors {
 		const budget = this.#advisorMaxNotesPerUpdate(config);
 		// The service tier is bound at build time, so a `tier.advisor` edit must rebuild.
 		const tier = cfgTierAdvisor.get(this.#host.settings);
+		const scope = config.scope ?? "all";
+		const includeReasoning = config.includeReasoning !== false ? "1" : "0";
 		return [
 			config.name,
 			slug,
@@ -1232,6 +1243,8 @@ export class SessionAdvisors {
 			instructions,
 			budget,
 			tier,
+			scope,
+			includeReasoning,
 		].join("\u001f");
 	}
 
@@ -1566,6 +1579,7 @@ export class SessionAdvisors {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator(),
+				includeReasoning: descriptor.config.includeReasoning,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
