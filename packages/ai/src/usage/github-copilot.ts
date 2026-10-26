@@ -339,6 +339,19 @@ function normalizeBillingUsage(data: BillingUsageResponse): UsageLimit[] {
 	return limits;
 }
 
+/**
+ * Rethrows when every endpoint `fetchUsage` attempted rejected the token with
+ * 401/403. AuthStorage purges the credential's last-good report only for a
+ * thrown auth error, while `null` serves the cached report as a transient
+ * failure; any non-auth failure (network, timeout, 5xx, 404) stays transient.
+ */
+function rethrowAuthRejection(failures: unknown[]): void {
+	const rejected = failures.every(
+		error => error instanceof AIError.ProviderHttpError && (error.status === 401 || error.status === 403),
+	);
+	if (failures.length > 0 && rejected) throw failures.at(-1);
+}
+
 export const githubCopilotUsageProvider: UsageProvider = {
 	id: "github-copilot",
 	supports: ({ provider, credential }) => {
@@ -353,6 +366,7 @@ export const githubCopilotUsageProvider: UsageProvider = {
 
 		const githubApiBaseUrl = resolveGitHubApiBaseUrl(params);
 		let report: UsageReport | null = null;
+		const failures: unknown[] = [];
 
 		if (params.credential.type === "api_key") {
 			let username: string | undefined;
@@ -386,6 +400,7 @@ export const githubCopilotUsageProvider: UsageProvider = {
 						},
 					};
 				} catch (error) {
+					failures.push(error);
 					ctx.logger?.warn("Copilot usage fetch failed", { error: String(error) });
 				}
 			}
@@ -405,6 +420,7 @@ export const githubCopilotUsageProvider: UsageProvider = {
 						raw: usage,
 					};
 				} catch (error) {
+					failures.push(error);
 					ctx.logger?.warn("Copilot usage fetch failed", { error: String(error) });
 				}
 			}
@@ -438,10 +454,12 @@ export const githubCopilotUsageProvider: UsageProvider = {
 					raw: usage,
 				};
 			} catch (error) {
+				failures.push(error);
 				ctx.logger?.warn("Copilot usage fetch failed", { error: String(error) });
 			}
 		}
 
+		if (!report) rethrowAuthRejection(failures);
 		return report;
 	},
 };
