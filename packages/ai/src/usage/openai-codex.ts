@@ -280,13 +280,16 @@ function parseSpendCap(payload: Record<string, unknown>): ParsedSpendCap | undef
 	const remaining = toNumber(individual.remaining);
 	const usedPercent = toNumber(individual.used_percent);
 	// The backend rounds `used_percent` to an integer; the absolute amounts
-	// keep sub-percent precision when both are present.
+	// keep sub-percent precision when both are present. A bare `remaining`
+	// of zero still proves the cap has no headroom.
 	const rawFraction =
 		used !== undefined && limit !== undefined && limit > 0
 			? used / limit
 			: usedPercent !== undefined
 				? usedPercent / 100
-				: undefined;
+				: remaining !== undefined && remaining <= 0
+					? 1
+					: undefined;
 	if (used === undefined && limit === undefined && remaining === undefined && rawFraction === undefined) {
 		return undefined;
 	}
@@ -610,6 +613,8 @@ function buildPlanMeterState(
 
 export const openaiCodexUsageProvider: UsageProvider = {
 	id: "openai-codex",
+	// v1: credit-billed seats gained the spend-cap limit; retire their limitless reports.
+	cacheVersion: 1,
 	supports(params: UsageFetchParams): boolean {
 		return params.provider === "openai-codex" && params.credential.type === "oauth";
 	},
