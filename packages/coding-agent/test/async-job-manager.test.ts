@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import {
-	AsyncJobError,
-	AsyncJobManager,
-	getUnfinishedManagedJobCount,
-} from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
@@ -420,10 +416,9 @@ describe("AsyncJobManager", () => {
 		expect(completions).toHaveLength(0);
 	});
 
-	test("keeps cancelled foreground work counted until its body settles", async () => {
-		const manager = new AsyncJobManager({});
+	test("bounds owner-job reap while preserving late settlement", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
 		const release = Promise.withResolvers<void>();
-		const baseline = getUnfinishedManagedJobCount();
 		const jobId = manager.register(
 			"task",
 			"ignores abort",
@@ -431,41 +426,18 @@ describe("AsyncJobManager", () => {
 				await release.promise;
 				return "late result";
 			},
-			{ ownerId: "owner", foreground: true },
+			{ ownerId: "owner" },
 		);
 
-		expect(getUnfinishedManagedJobCount()).toBe(baseline + 1);
 		const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now());
 
 		expect(reap.settled).toBe(false);
 		expect(reap.pendingJobIds).toEqual([jobId]);
 		expect(manager.getJob(jobId)?.status).toBe("cancelled");
-		expect(getUnfinishedManagedJobCount()).toBe(baseline + 1);
 
 		release.resolve();
 		await reap.completion;
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
-		expect(getUnfinishedManagedJobCount()).toBe(baseline);
-		manager.dispose();
-	});
-
-	test.each(["completed", "failed"] as const)("removes the count after a %s body settles", async outcome => {
-		const manager = new AsyncJobManager({});
-		const release = Promise.withResolvers<void>();
-		const baseline = getUnfinishedManagedJobCount();
-		const jobId = manager.register("eval", "deferred", async () => {
-			await release.promise;
-			if (outcome === "failed") throw new Error("expected failure");
-			return "finished";
-		});
-
-		expect(getUnfinishedManagedJobCount()).toBe(baseline + 1);
-		release.resolve();
-		await manager.waitForAll();
-
-		expect(manager.getJob(jobId)?.status).toBe(outcome);
-		expect(getUnfinishedManagedJobCount()).toBe(baseline);
-		manager.dispose();
 	});
 
 	test.each(["single", "bulk"] as const)("keeps %s cancelled work reapable past retention", async kind => {

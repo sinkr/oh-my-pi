@@ -100,6 +100,19 @@ describe("status-line background-job badge", () => {
 		expect(content).toContain(`${theme.icon.job} 2`);
 	});
 
+	it("uses the explicit session's jobs while deduplicating task agents shown as subagents", () => {
+		const component = makeComponent([runningJob("eval", 3)]);
+		component.setRunningSubagents(["task-0"]);
+		const root = {
+			getAsyncJobSnapshot: () => ({
+				running: [runningJob("task", 0), runningJob("bash", 1), runningJob("task", 2)],
+			}),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+
+		expect(component.runningBackgroundJobCount()).toBe(1);
+		expect(component.runningBackgroundJobCount(root)).toBe(2);
+	});
+
 	it("appends the freshest widget's headline and spark, and redraws when its data moves", () => {
 		const spark = (values: number[], last: string): JobWidgetView => ({
 			title: "verb-bench",

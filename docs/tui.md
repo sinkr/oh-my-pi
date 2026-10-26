@@ -227,18 +227,11 @@ void doWork(loader.signal).then(result => {
 return loader;
 ```
 
-## Pause settlement status
+## Pause status
 
-The `/pause` overlay reports unsettled agent turns, unfinished managed jobs,
-and retained shell background processes in both ANSI and native rendering.
-The count rows appear only while draining or waiting (including zero-valued
-categories) and are hidden once settled. “Draining” means an agent turn has
-not parked at the pause boundary; “Waiting” means tracked work remains after
-agent turns park. Managed jobs and retained children may continue running
-while paused. “Settled” means all tracked agent turns have parked or finished
-and the unfinished-job and background-process counts are zero; it does not
-indicate that unrelated device processes or all activity on the laptop have
-stopped.
+The `/pause` screen shows outstanding turn and job lifecycle counts in both ANSI and native (TSP) rendering. The main session counts while streaming, as do running subagents and advisors marked running whose review has not yielded. Jobs count while the main session marks them running, except task jobs already represented by a running subagent. A session remains outstanding when its agent is paused at the gate; a canceled job stops counting once its status is no longer running, even if its work is still unwinding.
+
+The screen says `Paused — outstanding work remains` while either count is nonzero and shows both rows (`Outstanding turns: N`, `Outstanding jobs: N`), including a zero-valued count. When both counts are zero, it says `No outstanding turns or jobs` and hides both rows. These lifecycle counts cover the tracked main session, subagents, advisors, and jobs; they do not indicate that the device or other processes are idle.
 
 ## Realistic custom component example (extension command)
 

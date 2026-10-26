@@ -76,17 +76,19 @@ describe("pause screen", () => {
 			expect(lines.length).toBe(24);
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("P A U S E D");
-			expect(text).toContain("paused for 1:05");
+			expect(text).toContain("No outstanding turns or jobs");
 			expect(text).toContain("█".repeat(5));
 		});
-		it("keeps every work count visible within the compact ANSI layout", () => {
-			const lines = renderPauseScreen(48, 12, 3_000, undefined, { unfinishedJobs: 12, backgroundProcesses: 3 }, 4);
+		it("shows both outstanding counters in the compact ANSI layout while either is positive", () => {
+			const lines = renderPauseScreen(48, 12, 3_000, undefined, {
+				unsettledTurns: 4,
+				unfinishedJobs: 12,
+			});
 			const text = lines.map(stripAnsi).join("\n");
 			expect(lines).toHaveLength(12);
-			expect(text).toContain("Draining — agent turns not parked");
-			expect(text).toContain("Unsettled turns: 4");
-			expect(text).toContain("Unfinished jobs: 12");
-			expect(text).toContain("Background processes: 3");
+			expect(text).toContain("Paused — outstanding work remains");
+			expect(text).toContain("Outstanding turns: 4");
+			expect(text).toContain("Outstanding jobs: 12");
 			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(48);
 		});
 
@@ -115,9 +117,8 @@ describe("pause screen", () => {
 			const lines = renderPauseScreen(40, 10, 3_000, "Compact Session Title");
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("Compact Session Title");
-			expect(text).not.toContain("Unsettled turns:");
-			expect(text).not.toContain("Unfinished jobs:");
-			expect(text).not.toContain("Background processes:");
+			expect(text).not.toContain("Outstanding turns:");
+			expect(text).not.toContain("Outstanding jobs:");
 			expect(text).toContain("to resume");
 			expect(text).toContain("▌▌ P A U S E D");
 		});
@@ -139,7 +140,6 @@ describe("pause screen", () => {
 		const countRoles: Record<string, true> = {
 			"omp.pause.unsettled-turn-count": true,
 			"omp.pause.unfinished-job-count": true,
-			"omp.pause.background-process-count": true,
 		};
 		const countNodes = (root: NativeChild): NativeNode[] =>
 			nodes(root).filter(n => countRoles[(n.p as { role?: string } | undefined)?.role ?? ""] === true);
@@ -147,11 +147,11 @@ describe("pause screen", () => {
 		const wireCountNodes = (root: TspNode): TspNode[] =>
 			wireNodes(root).filter(n => countRoles[(n.p as { role?: string } | undefined)?.role ?? ""] === true);
 
-		it("shows the live settlement state and counts in semantic text nodes", () => {
+		it("shows outstanding status and counts in semantic text nodes", () => {
 			const { host } = makeHost();
 			const sheet = new PauseScreenComponent(
 				{ ...host, sessionName: "Credit backpressure" },
-				{ getWorkStatus: () => ({ unfinishedJobs: 2, backgroundProcesses: 1 }) },
+				{ getWorkStatus: () => ({ unsettledTurns: 0, unfinishedJobs: 2 }) },
 			);
 			const root = sheet.describe();
 			const all = nodes(root);
@@ -159,11 +159,9 @@ describe("pause screen", () => {
 			expect(clock?.p).toMatchObject({ format: "clock" });
 			const shown = texts(root);
 			expect(shown).toContain("Credit backpressure");
-			expect(shown).toContain("Waiting — tracked work remains");
-			expect(shown).toContain("Unsettled turns: 0");
-			expect(shown).toContain("Unfinished jobs: 2");
-			expect(shown).toContain("Background processes: 1");
-			expect(shown).toContain("Counts cover tracked OMP work only.");
+			expect(shown).toContain("Paused — outstanding work remains");
+			expect(shown).toContain("Outstanding turns: 0");
+			expect(shown).toContain("Outstanding jobs: 2");
 
 			const buttons = all.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
 			expect(buttons.length).toBe(1);
@@ -178,16 +176,16 @@ describe("pause screen", () => {
 			const { host } = makeHost();
 			expect(texts(new PauseScreenComponent(host).describe())).toContain("Every agent in this session");
 		});
-		it("polls ANSI status while open, including settled and late work transitions in both layouts", async () => {
+		it("hides both counter rows at zero and restores them on late work in both layouts", async () => {
 			vi.useFakeTimers();
 			setNativeRendering(false);
-			const work: PauseWorkStatus = { unfinishedJobs: 1, backgroundProcesses: 0 };
+			const work: PauseWorkStatus = { unsettledTurns: 0, unfinishedJobs: 1 };
 			const { host, requestCount } = makeHost(24);
 			const sheet = new PauseScreenComponent(host, { getWorkStatus: () => work });
 			const layouts = () => [80, 48].map(width => sheet.render(width).map(stripAnsi).join("\n"));
-			const counters = ["Unsettled turns:", "Unfinished jobs:", "Background processes:"];
+			const counters = ["Outstanding turns:", "Outstanding jobs:"];
 			for (const text of layouts()) {
-				expect(text).toContain("Waiting — tracked work remains");
+				expect(text).toContain("Paused — outstanding work remains");
 				for (const counter of counters) expect(text).toContain(counter);
 			}
 
@@ -195,25 +193,23 @@ describe("pause screen", () => {
 			try {
 				work.unfinishedJobs = 0;
 				vi.advanceTimersByTime(1_000);
-				const settledLayouts = layouts();
-				for (const settled of settledLayouts) {
-					expect(settled).toContain("Settled — tracked work is paused or finished");
-					for (const counter of counters) expect(settled).not.toContain(counter);
-					expect(settled).toContain("Counts cover tracked OMP work only.");
-					expect(settled).toContain("paused for");
-					expect(settled).toContain("resume");
+				const zeroLayouts = layouts();
+				for (const zero of zeroLayouts) {
+					expect(zero).toContain("No outstanding turns or jobs");
+					for (const counter of counters) expect(zero).not.toContain(counter);
+					expect(zero).toContain("paused for");
+					expect(zero).toContain("resume");
 				}
-				const rendersAfterSettlement = requestCount();
+				const rendersAtZero = requestCount();
 
-				work.backgroundProcesses = 2;
+				work.unsettledTurns = 1;
 				vi.advanceTimersByTime(1_000);
 				for (const lateWork of layouts()) {
-					expect(lateWork).toContain("Waiting — tracked work remains");
-					expect(lateWork).toContain("Unsettled turns: 0");
-					expect(lateWork).toContain("Unfinished jobs: 0");
-					expect(lateWork).toContain("Background processes: 2");
+					expect(lateWork).toContain("Paused — outstanding work remains");
+					expect(lateWork).toContain("Outstanding turns: 1");
+					expect(lateWork).toContain("Outstanding jobs: 0");
 				}
-				expect(requestCount()).toBeGreaterThan(rendersAfterSettlement);
+				expect(requestCount()).toBeGreaterThan(rendersAtZero);
 			} finally {
 				sheet.handleInput("\r");
 				sheet.dispose();
@@ -221,10 +217,10 @@ describe("pause screen", () => {
 			}
 		});
 
-		it("invalidates the cached native tree only when the live status changes", async () => {
+		it("invalidates the cached native tree and deletes and restores counter rows as counts change", async () => {
 			vi.useFakeTimers();
 			setNativeRendering(true);
-			const work: PauseWorkStatus = { unfinishedJobs: 1, backgroundProcesses: 0 };
+			const work: PauseWorkStatus = { unsettledTurns: 0, unfinishedJobs: 1 };
 			const { host, requestCount } = makeHost();
 			const sheet = new PauseScreenComponent(host, { getWorkStatus: () => work });
 			const context: DescribeContext = {
@@ -247,51 +243,43 @@ describe("pause screen", () => {
 			expect(sheet.describe()).toBe(initial);
 			reconcile();
 			const initialCountIds = wireCountNodes(document.snapshot()).map(n => n.id);
-			expect(initialCountIds).toHaveLength(3);
+			expect(initialCountIds).toHaveLength(2);
 
 			const running = sheet.run();
 			try {
 				work.unfinishedJobs = 0;
 				vi.advanceTimersByTime(1_000);
-				const settled = sheet.describe();
-				const settledOps = reconcile();
-				expect(settled).not.toBe(initial);
-				expect(texts(settled)).toContain("Settled — tracked work is paused or finished");
-				const settledNodes = nodes(settled);
-				expect(settledNodes.some(n => n.k === "elapsed")).toBe(true);
-				expect(texts(settled)).toContain("Counts cover tracked OMP work only.");
-				const settledButtons = settledNodes.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
-				expect(settledButtons).toHaveLength(1);
-				expect(settledButtons[0]!.p).toMatchObject({ tone: "accent", actions: { click: "resume" } });
-				expect(countNodes(settled)).toHaveLength(0);
+				const zero = sheet.describe();
+				const zeroOps = reconcile();
+				expect(zero).not.toBe(initial);
+				expect(texts(zero)).toContain("No outstanding turns or jobs");
+				const zeroNodes = nodes(zero);
+				expect(zeroNodes.some(n => n.k === "elapsed")).toBe(true);
+				const zeroButtons = zeroNodes.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
+				expect(zeroButtons).toHaveLength(1);
+				expect(zeroButtons[0]!.p).toMatchObject({ tone: "accent", actions: { click: "resume" } });
+				expect(countNodes(zero)).toHaveLength(0);
 				expect(wireCountNodes(document.snapshot())).toHaveLength(0);
-				for (const id of initialCountIds) expect(settledOps).toContainEqual(["del", id]);
+				for (const id of initialCountIds) expect(zeroOps).toContainEqual(["del", id]);
 				expect(requestCount()).toBe(2);
 
 				vi.advanceTimersByTime(1_000);
-				expect(sheet.describe()).toBe(settled);
+				expect(sheet.describe()).toBe(zero);
 				expect(requestCount()).toBe(2);
 
-				work.backgroundProcesses = 2;
+				work.unsettledTurns = 1;
 				vi.advanceTimersByTime(1_000);
 				const lateWork = sheet.describe();
 				const lateWorkOps = reconcile();
-				expect(lateWork).not.toBe(settled);
-				expect(texts(lateWork)).toContain("Waiting — tracked work remains");
-				expect(countNodes(lateWork)).toHaveLength(3);
-				expect(wireCountNodes(document.snapshot())).toHaveLength(3);
+				expect(lateWork).not.toBe(zero);
+				expect(texts(lateWork)).toContain("Paused — outstanding work remains");
+				expect(countNodes(lateWork)).toHaveLength(2);
+				expect(wireCountNodes(document.snapshot())).toHaveLength(2);
 				expect(
 					lateWorkOps.flatMap(op => (op[0] === "add" ? wireCountNodes(op[4]) : [])).map(n => n.p?.role),
-				).toEqual(
-					expect.arrayContaining([
-						"omp.pause.unsettled-turn-count",
-						"omp.pause.unfinished-job-count",
-						"omp.pause.background-process-count",
-					]),
-				);
-				expect(texts(lateWork)).toContain("Unsettled turns: 0");
-				expect(texts(lateWork)).toContain("Unfinished jobs: 0");
-				expect(texts(lateWork)).toContain("Background processes: 2");
+				).toEqual(expect.arrayContaining(["omp.pause.unsettled-turn-count", "omp.pause.unfinished-job-count"]));
+				expect(texts(lateWork)).toContain("Outstanding turns: 1");
+				expect(texts(lateWork)).toContain("Outstanding jobs: 0");
 				const buttons = wireNodes(document.snapshot()).filter(
 					n => (n.p as { role?: string } | undefined)?.role === "omp.btn",
 				);

@@ -139,13 +139,6 @@ export interface AsyncJob {
 	retainedArtifactsCleanup?: () => Promise<void>;
 }
 
-const unfinishedManagedJobs = new Set<AsyncJob>();
-
-/** Process-wide count of managed job bodies whose run promise has not settled. */
-export function getUnfinishedManagedJobCount(): number {
-	return unfinishedManagedJobs.size;
-}
-
 /**
  * The process a job runs, for job inspectors (the jobs sheet): set by bodies
  * that spawn one (bash), absent for in-process work (eval, task).
@@ -414,7 +407,6 @@ export class AsyncJobManager {
 				});
 			}
 		};
-		unfinishedManagedJobs.add(job);
 		job.promise = (async () => {
 			try {
 				const outcome = await run({
@@ -448,9 +440,7 @@ export class AsyncJobManager {
 			}
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
-		})().finally(() => {
-			unfinishedManagedJobs.delete(job);
-		});
+		})();
 
 		this.#jobs.set(id, job);
 		return id;

@@ -292,11 +292,11 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 
 ## 10) Built-in command note: `/pause`
 
-`/pause` is available only in the interactive TUI. It engages a process-global gate for the main agent, in-process subagents, and the advisor. Each agent parks at its next safe boundary: in-flight calls finish, nothing is aborted, and no new work starts until the gate is released.
+`/pause` is available only in the interactive TUI. It engages the pause gate for the main agent, in-process subagents, and advisors; agents pause at their existing safe boundaries and resume when the gate is released.
 
-While the gate is engaged, the screen distinguishes draining from settled and shows process-wide unsettled agent turns, unfinished managed-job bodies, and retained live shell background children. Job counts include foreground-backed work and jobs marked cancelled until their bodies actually settle. Task/eval wrappers still waiting on a subagent parked at the gate remain unfinished; they are not treated as settled based only on the child agent's pause state. Shell counts come from OMP-managed shells, not an operating-system-wide process scan. The counter rows, including categories at zero, appear only while draining or waiting and are hidden once settled.
+While paused, the screen shows lifecycle counts from the main session. **Outstanding turns** counts the main session while streaming, running subagents, and advisors marked running whose review has not yielded. **Outstanding jobs** counts jobs the main session marks running, excluding task jobs already represented by a running subagent. A turn remains outstanding while its session is paused at the gate. A job stops counting when its status is no longer running, including when cancellation changes that status even if its work is still unwinding.
 
-Settled means the tracked OMP agent loops have parked or ended and the reported managed-job and retained-shell-child counts are zero. It is not a device-wide sleep guarantee: processes and activity outside tracked OMP work are not included.
+The screen shows `Paused — outstanding work remains` and both counter rows while either count is nonzero, including a zero-valued row; it shows `No outstanding turns or jobs` and hides both rows when both counts are zero. Zero counts describe only these tracked session, subagent, advisor, and job states; they do not establish that the device or other processes are idle.
 
 From the pause screen, press the configured interrupt key (Esc by default), Enter, Space, or Ctrl+C to resume. Ctrl+C resumes rather than aborting any agent.
 

@@ -9,9 +9,7 @@ import {
 	applyDirenvPreflight,
 	buildMinimizerOptions,
 	executeBash,
-	getRetainedBackgroundProcessCount,
 	isPersistentShellCdCommand,
-	releaseShellSessions,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -1361,40 +1359,9 @@ describe("executeBash :async: background retention", () => {
 		if (fs.existsSync(tmp)) removeSyncWithRetries(tmp);
 	});
 
-	it("counts shell children only after a foreground shell run settles", async () => {
-		const baselineProcesses = getRetainedBackgroundProcessCount();
-		const runResult = Promise.withResolvers<ShellRunResult>();
-		const runStarted = Promise.withResolvers<void>();
-		const runSpy = vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(() => {
-			runStarted.resolve();
-			return runResult.promise;
-		});
-		const liveCount = vi.spyOn(piNatives.Shell.prototype, "liveBackgroundJobCount").mockResolvedValue(1);
-		const execution = executeBash("true", {
-			sessionKey: "foreground-count-probe",
-			cwd: tmp,
-			timeout: 0,
-		});
-
-		try {
-			await runStarted.promise;
-			expect(getRetainedBackgroundProcessCount()).toBe(baselineProcesses);
-
-			runResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
-			await execution;
-			expect(getRetainedBackgroundProcessCount()).toBe(baselineProcesses + 1);
-		} finally {
-			runResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
-			liveCount.mockResolvedValue(0);
-			releaseShellSessions("foreground-count-probe");
-			runSpy.mockRestore();
-		}
-	});
-
 	it.skipIf(process.platform === "win32")(
 		"keeps a per-job :async: shell's plain-`&` background process alive across turns",
 		async () => {
-			const baselineProcesses = getRetainedBackgroundProcessCount();
 			const pidFile = path.join(tmp, "pid");
 			const sleepBin = $which("sleep");
 			if (!sleepBin) throw new Error("sleep executable not found");
@@ -1415,7 +1382,6 @@ describe("executeBash :async: background retention", () => {
 				);
 				expect(res.cancelled).toBe(false);
 				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-				expect(getRetainedBackgroundProcessCount()).toBe(baselineProcesses + 1);
 				expect(Number.isInteger(pid)).toBe(true);
 
 				// A later turn on a different per-job shell must not have killed it.

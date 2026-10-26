@@ -630,8 +630,7 @@ export function agentLoop(
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
-	const pauseTurn = agentPauseGate.beginTurn();
-	const stream = createAgentStream(pauseTurn);
+	const stream = createAgentStream();
 
 	(async () => {
 		try {
@@ -646,11 +645,9 @@ export function agentLoop(
 
 			stream.push({ type: "agent_start" });
 
-			await runLoop(currentContext, newMessages, config, signal, stream, pauseTurn, streamFn, prompts);
+			await runLoop(currentContext, newMessages, config, signal, stream, streamFn, prompts);
 		} catch (err) {
 			stream.fail(err);
-		} finally {
-			pauseTurn.finish();
 		}
 	})();
 
@@ -702,8 +699,7 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
-	const pauseTurn = agentPauseGate.beginTurn();
-	const stream = createAgentStream(pauseTurn);
+	const stream = createAgentStream();
 
 	(async () => {
 		try {
@@ -722,24 +718,18 @@ export function agentLoopContinue(
 					: { type: "agent_start" },
 			);
 
-			await runLoop(currentContext, newMessages, config, signal, stream, pauseTurn, streamFn);
+			await runLoop(currentContext, newMessages, config, signal, stream, streamFn);
 		} catch (err) {
 			stream.fail(err);
-		} finally {
-			pauseTurn.finish();
 		}
 	})();
 
 	return stream;
 }
 
-function createAgentStream(pauseTurn: AgentPauseTurnScope): EventStream<AgentEvent, AgentMessage[]> {
+function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	return new EventStream<AgentEvent, AgentMessage[]>(
-		(event: AgentEvent) => {
-			if (event.type !== "agent_end") return false;
-			pauseTurn.finish();
-			return true;
-		},
+		(event: AgentEvent) => event.type === "agent_end",
 		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
 	);
 }
@@ -1098,7 +1088,6 @@ async function runLoop(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
-	pauseTurn: AgentPauseTurnScope,
 	streamFn?: StreamFn,
 	initialMessages: AgentMessage[] = [],
 ): Promise<void> {
@@ -1118,7 +1107,6 @@ async function runLoop(
 				invokeAgentSpan,
 				stepCounter,
 				initialMessages,
-				pauseTurn,
 				streamFn,
 			),
 		);
@@ -1135,12 +1123,6 @@ async function runLoop(
 
 interface StepCounter {
 	count: number;
-}
-interface AgentPauseTurnScope {
-	waitUntilResumed(signal?: AbortSignal): Promise<void>;
-	suspendRoot(): () => void;
-	withParticipant<T>(work: (waitUntilResumed: (signal?: AbortSignal) => Promise<void>) => Promise<T>): Promise<T>;
-	finish(): void;
 }
 
 function isDeadlineExceeded(deadline: number | undefined): boolean {
@@ -1225,7 +1207,6 @@ async function runLoopBody(
 	invokeAgentSpan: Span | undefined,
 	stepCounter: StepCounter,
 	initialMessages: AgentMessage[],
-	pauseTurn: AgentPauseTurnScope,
 	streamFn?: StreamFn,
 ): Promise<void> {
 	let deadlineTimer: Timer | undefined;
@@ -1305,7 +1286,6 @@ async function runLoopBody(
 				telemetry,
 				invokeAgentSpan,
 				[],
-				pauseTurn,
 			);
 			for (const result of executionResult.toolResults) {
 				currentContext.messages.push(result);
@@ -1347,7 +1327,7 @@ async function runLoopBody(
 				// Park at the turn boundary while the process-wide pause gate is
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				if (agentPauseGate.paused) await pauseTurn.waitUntilResumed(signal);
+				if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1467,7 +1447,6 @@ async function runLoopBody(
 						telemetry,
 						invokeAgentSpan,
 						stepCounter,
-						pauseTurn,
 						streamFn,
 						harmonyRetryAttempt,
 						hostToolChoice,
@@ -1689,7 +1668,6 @@ async function runLoopBody(
 						telemetry,
 						invokeAgentSpan,
 						[...liveAccepted, ...liveDeferred],
-						pauseTurn,
 					);
 					toolResults.push(...executionResult.toolResults);
 
@@ -2021,7 +1999,6 @@ async function streamAssistantResponse(
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
 	stepCounter: StepCounter,
-	pauseTurn: AgentPauseTurnScope,
 	streamFn?: StreamFn,
 	harmonyRetryAttempt = 0,
 	hostToolChoice?: ToolChoice,
@@ -2229,7 +2206,6 @@ async function streamAssistantResponse(
 						context,
 						loopConfig: config,
 						signal: requestSignal,
-						trackPhysicalWork: work => pauseTurn.withParticipant(() => work()),
 					})
 				: undefined;
 			const speculationPlansFromStream =
@@ -3287,7 +3263,6 @@ async function executeToolCalls(
 	// Steering the provider took off the queue during the response that emitted
 	// this batch; it injects at this batch's boundary like queued steering.
 	liveSteering: readonly AgentMessage[],
-	pauseTurn: AgentPauseTurnScope,
 ): Promise<{ toolResults: ToolResultMessage[]; additionalContext?: string }> {
 	const tools = currentContext.tools;
 	const {
@@ -3514,11 +3489,7 @@ async function executeToolCalls(
 		flushResultMessages();
 	};
 
-	const runTool = async (
-		record: (typeof records)[number],
-		index: number,
-		waitUntilResumed: (signal?: AbortSignal) => Promise<void>,
-	): Promise<void> => {
+	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
 		// A pending interrupt preempts not-yet-started *interruptible* waits so
 		// the message injects promptly instead of sitting out a `wait`.
 		// Non-interruptible work is never skipped, whatever the source: the
@@ -3542,7 +3513,7 @@ async function executeToolCalls(
 		// Park before starting this tool while the process-wide pause gate is
 		// engaged. Tools already executing are unaffected (pausing never aborts);
 		// a batch interrupted mid-pause unwinds via the signal checks below.
-		if (agentPauseGate.paused) await waitUntilResumed(record.signal);
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(record.signal);
 
 		const { toolCall, tool } = record;
 		// Validation (and the beforeToolCall hook) ran in the prepare phase; a
@@ -3876,9 +3847,7 @@ async function executeToolCalls(
 			concurrency = concurrencyMode ?? "shared";
 		}
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
-		const task = start.then(() =>
-			pauseTurn.withParticipant(waitUntilResumed => runTool(record, index, waitUntilResumed)),
-		);
+		const task = start.then(() => runTool(record, index));
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
@@ -3887,11 +3856,9 @@ async function executeToolCalls(
 			sharedTasks.push(task);
 		}
 	}
-	const resumeRoot = pauseTurn.suspendRoot();
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
-		resumeRoot();
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);

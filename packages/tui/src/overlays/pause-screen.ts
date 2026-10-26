@@ -24,10 +24,10 @@ import { col, keyed, node, row, span, text } from "../native/describe";
 import { actionBar, actionButton } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
 
-/** Process-wide work counts supplied by the pause-screen host. */
+/** Outstanding turn and job counts supplied by the pause-screen host. */
 export interface PauseWorkStatus {
+	unsettledTurns: number;
 	unfinishedJobs: number;
-	backgroundProcesses: number;
 }
 
 /** Optional live work source for the pause overlay. */
@@ -50,31 +50,7 @@ export interface PauseScreenHost {
 	readonly sessionName?: string;
 }
 
-interface PauseWorkSnapshot extends PauseWorkStatus {
-	unsettledTurns: number;
-}
-
-const EMPTY_WORK_STATUS: PauseWorkStatus = { unfinishedJobs: 0, backgroundProcesses: 0 };
-
-function isSettled(snapshot: PauseWorkSnapshot): boolean {
-	return snapshot.unsettledTurns === 0 && snapshot.unfinishedJobs === 0 && snapshot.backgroundProcesses === 0;
-}
-
-function settlementLabel(snapshot: PauseWorkSnapshot): string {
-	if (isSettled(snapshot)) return "Settled — tracked work is paused or finished";
-	if (snapshot.unsettledTurns > 0) return "Draining — agent turns not parked";
-	return "Waiting — tracked work remains";
-}
-
-function formatStatusLines(snapshot: PauseWorkSnapshot): readonly string[] {
-	return [
-		settlementLabel(snapshot),
-		`Unsettled turns: ${snapshot.unsettledTurns}`,
-		`Unfinished jobs: ${snapshot.unfinishedJobs}`,
-		`Background processes: ${snapshot.backgroundProcesses}`,
-		"Counts cover tracked OMP work only.",
-	];
-}
+const EMPTY_WORK_STATUS: PauseWorkStatus = { unsettledTurns: 0, unfinishedJobs: 0 };
 
 function centerStyledLine(line: string, width: number): string {
 	return centerLine(truncateToWidth(line, width), width).trimEnd();
@@ -125,21 +101,19 @@ export function renderPauseScreen(
 	elapsedMs: number,
 	sessionName?: string,
 	workStatus: PauseWorkStatus = EMPTY_WORK_STATUS,
-	unsettledTurnCount = agentPauseGate.unsettledTurnCount,
 ): string[] {
 	const screenWidth = Math.max(1, Math.floor(width));
 	const screenHeight = Math.max(1, Math.floor(height));
 	const compact = screenWidth < MIN_FULL_WIDTH || screenHeight < MIN_FULL_HEIGHT;
-	const snapshot: PauseWorkSnapshot = {
-		unsettledTurns: unsettledTurnCount,
-		unfinishedJobs: workStatus.unfinishedJobs,
-		backgroundProcesses: workStatus.backgroundProcesses,
-	};
+	const outstanding = workStatus.unsettledTurns > 0 || workStatus.unfinishedJobs > 0;
+	const status = outstanding ? "Paused — outstanding work remains" : "No outstanding turns or jobs";
+	const workCounts = [
+		`Outstanding turns: ${workStatus.unsettledTurns}`,
+		`Outstanding jobs: ${workStatus.unfinishedJobs}`,
+	];
 	const content: string[] = [];
 	// Resume keys mirror PauseScreenComponent#handleInput: `app.interrupt` (raw Escape when unbound), Enter, Space.
 	const esc = interruptKey();
-	const statusLines = formatStatusLines(snapshot);
-	const settled = isSettled(snapshot);
 
 	if (compact) {
 		if (sessionName) {
@@ -148,13 +122,11 @@ export function renderPauseScreen(
 		content.push(centerStyledLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), screenWidth));
 		content.push("");
 		content.push(centerStyledLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth));
-		content.push(centerStyledLine(theme.fg(settled ? "success" : "warning", statusLines[0]!), screenWidth));
-		if (!settled) {
-			content.push(centerStyledLine(theme.fg("muted", statusLines[1]!), screenWidth));
-			content.push(centerStyledLine(theme.fg("muted", statusLines[2]!), screenWidth));
-			content.push(centerStyledLine(theme.fg("muted", statusLines[3]!), screenWidth));
+		content.push(centerStyledLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth));
+		if (outstanding) {
+			content.push(centerStyledLine(theme.fg("muted", workCounts[0]!), screenWidth));
+			content.push(centerStyledLine(theme.fg("muted", workCounts[1]!), screenWidth));
 		}
-		content.push(centerStyledLine(theme.fg("dim", statusLines[4]!), screenWidth));
 		content.push(centerStyledLine(theme.fg("dim", `${esc} to resume`), screenWidth));
 	} else {
 		if (sessionName) {
@@ -172,13 +144,11 @@ export function renderPauseScreen(
 		for (const line of BODY_LINES) {
 			content.push(centerStyledLine(theme.fg("muted", line), screenWidth));
 		}
-		content.push(centerStyledLine(theme.fg(settled ? "success" : "warning", statusLines[0]!), screenWidth));
-		if (!settled) {
-			content.push(centerStyledLine(theme.fg("muted", statusLines[1]!), screenWidth));
-			content.push(centerStyledLine(theme.fg("muted", statusLines[2]!), screenWidth));
-			content.push(centerStyledLine(theme.fg("muted", statusLines[3]!), screenWidth));
+		content.push(centerStyledLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth));
+		if (outstanding) {
+			content.push(centerStyledLine(theme.fg("muted", workCounts[0]!), screenWidth));
+			content.push(centerStyledLine(theme.fg("muted", workCounts[1]!), screenWidth));
 		}
-		content.push(centerStyledLine(theme.fg("dim", statusLines[4]!), screenWidth));
 		content.push(centerStyledLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth));
 		content.push("");
 		const resumeHint = `${esc} · ${formatKeyHint("enter")} · ${formatKeyHint("space")} — resume`;
@@ -200,7 +170,7 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 	#disposed = false;
 	#startedAt = Date.now();
 	#native: NativeNode | undefined;
-	#workSnapshot: PauseWorkSnapshot;
+	#workSnapshot: PauseWorkStatus;
 
 	constructor(
 		readonly host: PauseScreenHost,
@@ -254,23 +224,18 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 		this.#native = undefined;
 	}
 
-	#readWorkSnapshot(): PauseWorkSnapshot {
+	#readWorkSnapshot(): PauseWorkStatus {
 		const workStatus = this.options.getWorkStatus?.() ?? EMPTY_WORK_STATUS;
 		return {
-			unsettledTurns: agentPauseGate.unsettledTurnCount,
+			unsettledTurns: workStatus.unsettledTurns,
 			unfinishedJobs: workStatus.unfinishedJobs,
-			backgroundProcesses: workStatus.backgroundProcesses,
 		};
 	}
 
 	#refreshWorkSnapshot(): boolean {
 		const next = this.#readWorkSnapshot();
 		const previous = this.#workSnapshot;
-		if (
-			next.unsettledTurns === previous.unsettledTurns &&
-			next.unfinishedJobs === previous.unfinishedJobs &&
-			next.backgroundProcesses === previous.backgroundProcesses
-		) {
+		if (next.unsettledTurns === previous.unsettledTurns && next.unfinishedJobs === previous.unfinishedJobs) {
 			return false;
 		}
 		this.#workSnapshot = next;
@@ -289,34 +254,34 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 	describe(): NativeNode {
 		if (this.#native) return this.#native;
 		const snapshot = this.#workSnapshot;
-		const settled = isSettled(snapshot);
+		const outstanding = snapshot.unsettledTurns > 0 || snapshot.unfinishedJobs > 0;
 		const status = col(
 			[
 				keyed(
-					text([span(settlementLabel(snapshot), settled ? "success" : "warning")], {
-						role: "omp.pause.settlement",
-					}),
+					text(
+						[
+							span(
+								outstanding ? "Paused — outstanding work remains" : "No outstanding turns or jobs",
+								outstanding ? "warning" : "success",
+							),
+						],
+						{ role: "omp.pause.settlement" },
+					),
 					"settlement",
 				),
-				...(!settled
+				...(outstanding
 					? [
 							keyed(
-								text([span(`Unsettled turns: ${snapshot.unsettledTurns}`, "muted")], {
+								text([span(`Outstanding turns: ${snapshot.unsettledTurns}`, "muted")], {
 									role: "omp.pause.unsettled-turn-count",
 								}),
 								"unsettled-turns",
 							),
 							keyed(
-								text([span(`Unfinished jobs: ${snapshot.unfinishedJobs}`, "muted")], {
+								text([span(`Outstanding jobs: ${snapshot.unfinishedJobs}`, "muted")], {
 									role: "omp.pause.unfinished-job-count",
 								}),
 								"unfinished-jobs",
-							),
-							keyed(
-								text([span(`Background processes: ${snapshot.backgroundProcesses}`, "muted")], {
-									role: "omp.pause.background-process-count",
-								}),
-								"background-processes",
 							),
 						]
 					: []),
@@ -379,7 +344,6 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 				keyed(status, "settlement-status"),
 				keyed(facts, "facts"),
 				actionBar([
-					keyed(text([span("Counts cover tracked OMP work only.", "muted")], { role: "omp.pause.note" }), "note"),
 					null,
 					actionButton("Resume", "resume", {
 						keys: resumeKey,
@@ -407,7 +371,6 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 			elapsed,
 			this.host.sessionName,
 			this.#workSnapshot,
-			this.#workSnapshot.unsettledTurns,
 		);
 	}
 }
