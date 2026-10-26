@@ -1276,6 +1276,32 @@ describe("AuthStorage OAuth refresh race", () => {
 		30_000,
 	);
 
+	test.skipIf(process.platform === "win32")(
+		"a refresh that starts while exit cleanup runs is saved before exit",
+		async () => {
+			if (!store || !tempDir) throw new Error("test setup failed");
+			const dbPath = path.join(tempDir, "agent.db");
+			await authStorage!.credentials.set("anthropic", [
+				{ type: "oauth", access: "old", refresh: "old-refresh", expires: 0 },
+			]);
+			const child = Bun.spawn(
+				[process.execPath, path.join(import.meta.dir, "fixtures/oauth-refresh-during-exit-child.ts"), dbPath],
+				{ stdout: "pipe", stderr: "pipe" },
+			);
+			try {
+				expect(await child.exited).toBe(0);
+				expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject({
+					type: "oauth",
+					access: "new",
+					refresh: "new-refresh",
+				});
+			} finally {
+				if (child.exitCode === null) child.kill();
+				await child.exited;
+			}
+		},
+	);
+
 	test("a 401 names the token of the request that failed, not of the last request started", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		const provider = "unit-oauth-interleaved-401";

@@ -360,11 +360,13 @@ export class OAuthRefresher {
 
 	/** Keeps shutdown waiting until `pending` settles, so rotated tokens are persisted before exit. */
 	#track<R>(pending: Promise<R>): Promise<R> {
+		// Add before registering: a registration made while exit cleanup runs drains at
+		// once, and must find this work pending or the process exits without it.
+		this.#pendingRefreshes.add(pending);
 		this.#cancelRefreshCleanup ??= postmortem.register("oauth-refresh", () => this.#drainRefreshes(), {
 			exitOnly: true,
 			deadlineMs: OAUTH_REFRESH_SHUTDOWN_WAIT_MS,
 		});
-		this.#pendingRefreshes.add(pending);
 		const settled = () => {
 			this.#pendingRefreshes.delete(pending);
 			if (this.#pendingRefreshes.size === 0 && !this.#shuttingDown) {
