@@ -1587,8 +1587,8 @@ describe("AuthStorage OAuth refresh race", () => {
 		);
 		expect(first).toContain("stalled refresher");
 
-		// The refresher's exchange and save windows have both run out.
-		setSystemTime(new Date(Date.now() + 75_000));
+		// The refresher's exchange backstop and save window have both run out.
+		setSystemTime(new Date(Date.now() + 125_000));
 		expect(await authStorage.oauth.refreshStored(provider, options)).toMatchObject({ removed: true });
 		expect(invalidGrants).toBe(2);
 		expect(events).toHaveLength(1);
