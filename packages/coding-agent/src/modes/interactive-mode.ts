@@ -8593,12 +8593,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#inputController.handleQueueCommand(message, detached);
 	}
 
-	handleBtwCommand(question: string, title?: string): Promise<void> {
-		return this.#btwController.start(question, title);
+	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean> {
+		return this.#btwController.start(question, images, title);
 	}
 
-	handleTanCommand(work: string): Promise<void> {
-		return this.#tanCommandController.start(work);
+	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean> {
+		return this.#tanCommandController.start(work, images);
 	}
 
 	hasActiveBtw(): boolean {
@@ -8647,9 +8647,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		assistantMessage: AssistantMessage,
 		leafId: string,
 		sessionId: string,
+		images?: ImageContent[],
 	): Promise<void> {
 		try {
-			const result = await this.session.branchFromBtw(question, assistantMessage, leafId, sessionId);
+			const result = await this.session.branchFromBtw(question, assistantMessage, leafId, sessionId, images);
 			if (result.cancelled) {
 				this.showStatus("/btw branch cancelled", { dim: true });
 				return;

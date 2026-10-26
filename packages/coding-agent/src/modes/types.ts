@@ -560,8 +560,8 @@ export interface InteractiveModeContext {
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
 	): Promise<void>;
 	/** `title` heads the side question instead of its text, e.g. a side file command's `/sitrep the migration`. */
-	handleBtwCommand(question: string, title?: string): Promise<void>;
-	handleTanCommand(work: string): Promise<void>;
+	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean>;
+	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
 	handleBtwBranchKey(): Promise<boolean>;
@@ -576,6 +576,7 @@ export interface InteractiveModeContext {
 		assistantMessage: AssistantMessage,
 		leafId: string,
 		sessionId: string,
+		images?: ImageContent[],
 	): Promise<void>;
 	handleOmfgCommand(complaint: string): Promise<void>;
 	hasActiveOmfg(): boolean;

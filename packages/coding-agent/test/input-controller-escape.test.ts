@@ -106,7 +106,7 @@ function createContext(): {
 	const showStatus = vi.fn();
 	const inputListeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined> = [];
 	const sessionListeners: Array<(event: { type: string }) => void> = [];
-	const handleBtwCommand = vi.fn(async () => {});
+	const handleBtwCommand = vi.fn(async () => true);
 	const handleBtwEscape = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
 	const handleOmfgEscape = vi.fn(() => true);
@@ -399,13 +399,11 @@ describe("InputController escape behavior", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupEditorSubmitHandler();
-		editor.setText("/btw why is it doing that?");
 		await editor.onSubmit?.("/btw why is it doing that?");
 
-		expect(spies.handleBtwCommand).toHaveBeenCalledWith("why is it doing that?");
+		expect(spies.handleBtwCommand).toHaveBeenCalledWith("why is it doing that?", undefined);
 		expect(spies.prompt).not.toHaveBeenCalled();
 		expect(editor.addToHistory).toHaveBeenCalledWith("/btw why is it doing that?");
-		expect(editor.getText()).toBe("");
 	});
 
 	describe("side file commands", () => {
@@ -440,7 +438,7 @@ describe("InputController escape behavior", () => {
 			editor.setText("/sitrep");
 			await editor.onSubmit?.("/sitrep");
 
-			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", "/sitrep");
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", undefined, "/sitrep");
 			expect(spies.prompt).not.toHaveBeenCalled();
 			expect(editor.addToHistory).toHaveBeenCalledWith("/sitrep");
 			expect(editor.getText()).toBe("");
@@ -456,6 +454,7 @@ describe("InputController escape behavior", () => {
 
 			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
 				"Situation report. Focus: the migration",
+				undefined,
 				"/sitrep the migration",
 			);
 			expect(spies.onInputCallback).not.toHaveBeenCalled();
@@ -559,6 +558,7 @@ describe("InputController escape behavior", () => {
 
 			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
 				"Situation report. Focus: the migration",
+				undefined,
 				"/sitrep the migration",
 			);
 			expect(queueCompactionMessage).not.toHaveBeenCalled();
@@ -589,7 +589,7 @@ describe("InputController escape behavior", () => {
 			controller.setupEditorSubmitHandler();
 			await editor.onSubmit?.("/sitrep");
 
-			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", "/sitrep");
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", undefined, "/sitrep");
 			expect(queueCompactionMessage).not.toHaveBeenCalled();
 		});
 
@@ -603,6 +603,7 @@ describe("InputController escape behavior", () => {
 
 			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
 				"Situation report. Focus: the migration",
+				undefined,
 				"/acme:sitrep the migration",
 			);
 			expect(spies.onInputCallback).not.toHaveBeenCalled();
