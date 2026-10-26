@@ -433,11 +433,23 @@ impl FifoOpening {
 
 #[cfg(unix)]
 impl Drop for FifoOpening {
-	/// Releases an open dropped before it ended, on a detached thread so that
-	/// no runtime worker waits for it.
+	/// Releases an open dropped before it ended. The first attempt runs here,
+	/// so the release is done, and the helper's descriptor closed, before what
+	/// follows the drop (the next command) opens this FIFO; it takes
+	/// microseconds. A helper that has not reached `open` yet is left to a
+	/// detached thread, so that no runtime worker waits for it.
 	fn drop(&mut self) {
 		if self.settled || !self.releasable {
 			return;
+		}
+		match native::open(&self.path, &self.end.release_options()) {
+			Ok(_release) => {
+				// The helper's open returns as soon as it sees the release.
+				let _ = self.opened.recv_timeout(poll_slice());
+				return;
+			},
+			Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {},
+			Err(_) => return,
 		}
 		let (_, placeholder) = std::sync::mpsc::sync_channel(0);
 		let opened = std::mem::replace(&mut self.opened, placeholder);
@@ -448,28 +460,39 @@ impl Drop for FifoOpening {
 	}
 }
 
-/// Releases a helper's open of one end of the FIFO at `path` with a
-/// non-blocking open of the other end, tried again while the helper has not
-/// reached `open` yet (`ENXIO`), and waits for the helper's result, which it
-/// drops. Bounded by [`FIFO_RELEASE_ATTEMPTS`] slices.
+/// Releases a helper's open of one end of the FIFO at `path`; see
+/// [`release_attempt`]. Bounded by [`FIFO_RELEASE_ATTEMPTS`] attempts.
 #[cfg(unix)]
 fn release_fifo_open(
 	path: &Path,
 	end: FifoEnd,
 	opened: &std::sync::mpsc::Receiver<io::Result<File>>,
 ) {
-	use std::sync::mpsc::RecvTimeoutError;
-	let release = end.release_options();
 	for _ in 0..FIFO_RELEASE_ATTEMPTS {
-		if let Err(err) = native::open(path, &release)
-			&& err.raw_os_error() != Some(libc::ENXIO)
-		{
-			break;
-		}
-		if !matches!(opened.recv_timeout(poll_slice()), Err(RecvTimeoutError::Timeout)) {
+		if release_attempt(path, end, opened) {
 			break;
 		}
 	}
+}
+
+/// One attempt to release a helper's open of one end of the FIFO at `path`:
+/// a non-blocking open of the other end, then a wait of one poll slice for
+/// the helper's result, which is dropped. `false` when another attempt is
+/// due: the helper has not reached `open` yet (`ENXIO`) and has not
+/// answered.
+#[cfg(unix)]
+fn release_attempt(
+	path: &Path,
+	end: FifoEnd,
+	opened: &std::sync::mpsc::Receiver<io::Result<File>>,
+) -> bool {
+	use std::sync::mpsc::RecvTimeoutError;
+	if let Err(err) = native::open(path, &end.release_options())
+		&& err.raw_os_error() != Some(libc::ENXIO)
+	{
+		return true;
+	}
+	!matches!(opened.recv_timeout(poll_slice()), Err(RecvTimeoutError::Timeout))
 }
 
 #[cfg(unix)]

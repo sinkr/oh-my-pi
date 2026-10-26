@@ -6288,6 +6288,38 @@ mod tests {
 		);
 	}
 
+	/// The release of a killed job's FIFO open must be done when `kill`
+	/// returns: a release that came later woke the next command's open of the
+	/// same FIFO too, so that reader read EOF, its writer's data was lost, and
+	/// the writer then blocked with no reader.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn killed_job_releases_its_fifo_before_the_next_command() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(30),
+			run_command_capture(
+				concat!(
+					"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n",
+					"  cat < f & sleep 0.05; kill %%\n",
+					"  /bin/cat < f > got & sleep 0.1; echo \"hi$i\" > f; wait\n",
+					"  read -r x < got; [ \"$x\" = \"hi$i\" ] || echo \"lost $i\"\n",
+					"done; echo done",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("no writer is left without a reader");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "done\n"));
+	}
+
 	/// A background external command's descriptor path (`/dev/stdout`) reaches
 	/// the shell's own output pipe and looked like a FIFO, so it was left to
 	/// the child, which then wrote to its `/dev/null` placeholder. And the
