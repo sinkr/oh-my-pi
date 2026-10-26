@@ -70,6 +70,7 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { isXiaomiTokenPlanKey } from "../wire/xiaomi-token-plan";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
@@ -5532,7 +5533,7 @@ export function xiaomiModelManagerOptions(
 		: XIAOMI_TOKEN_PLAN_FALLBACK_BASE_URLS;
 	const XIAOMI_STANDARD_BASE_URL = "https://api.xiaomimimo.com/v1";
 	const isTokenPlanProvider = config?.tokenPlanRegion !== undefined || providerId.startsWith("xiaomi-token-plan-");
-	const isTokenPlanKey = isTokenPlanProvider || apiKey?.startsWith("tp-");
+	const isTokenPlanKey = isTokenPlanProvider || (apiKey !== undefined && isXiaomiTokenPlanKey(apiKey));
 	// Token-plan keys always use a TP cluster; config?.baseUrl (from catalog)
 	// would incorrectly pin to the standard endpoint (api.xiaomimimo.com).
 	const baseUrl = isTokenPlanKey ? tokenPlanBaseUrls[0] : (config?.baseUrl ?? XIAOMI_STANDARD_BASE_URL);
