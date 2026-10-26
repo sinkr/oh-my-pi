@@ -34,6 +34,8 @@
 - Fixed the built-in `ps` reporting an unsupported long option such as `--forest` as `unsupported option '--'`; it now names the option, and every unsupported-option error says that a system `ps`, if installed, may support more options when run by its full path ([#17018](https://github.com/can1357/oh-my-pi/pull/17018) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `kill %N` on a backgrounded compound command (such as `(while :; do :; done) &`) in a persistent shell session: the job was reported done but the in-process loop kept spinning until the process exited; it now stops at the next interpreter check ([#16937](https://github.com/can1357/oh-my-pi/pull/16937) by [@holny](https://github.com/holny))
 - Fixed `sort -t=` (and clusters such as `-nrt=`) failing with "separator must be exactly one character long"; an attached `=` now selects `=` as the field separator, as in GNU sort, and `-t=X` such as `-t==` is rejected as two characters ([#17017](https://github.com/can1357/oh-my-pi/pull/17017) by [@sjawhar](https://github.com/sjawhar))
+- Fixed macOS `press()` on a control with no press action, such as a button on a Chrome page, failing without saying what to do; the error now tells you to `click()` it instead ([#16916](https://github.com/can1357/oh-my-pi/pull/16916) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `kill %N` on a backgrounded compound command (such as `(while :; do :; done) &`) in a persistent shell session: the job was reported done but the in-process loop kept spinning until the process exited; it now stops at the next interpreter check ([#16937](https://github.com/can1357/oh-my-pi/pull/16937) by [@holny](https://github.com/holny))
 
 ## [18.12.5] - 2026-10-21
 
