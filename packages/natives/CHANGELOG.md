@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the shell's built-in `grep` and `rg` running the whole agent out of memory on a file with no line breaks, such as a large sparse file: a line over 256 MiB (or a `-f` pattern file over 256 MiB) is now reported as an error naming the cause, and the search continues
+- Fixed the shell's built-in `grep` and `rg` running the whole agent out of memory on a file with no line breaks, such as a large sparse file: a line over 256 MiB (or a `-f` pattern file over 256 MiB) is now reported as an error naming the cause, and the search continues ([#17108](https://github.com/can1357/oh-my-pi/pull/17108) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.0] - 2026-10-26
 
