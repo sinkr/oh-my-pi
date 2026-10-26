@@ -4,7 +4,7 @@
 
 ### Changed
 
-- TTSR interrupts include a bounded excerpt of the text that matched the rule.
+- TTSR interrupts include a bounded excerpt of the text that matched the rule ([#17099](https://github.com/can1357/oh-my-pi/pull/17099) by [@shgew](https://github.com/shgew))
 
 ## [18.13.0] - 2026-10-26
 
