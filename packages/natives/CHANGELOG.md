@@ -14,6 +14,7 @@
 - Fixed macOS `press()` on a control with no press action, such as a button on a Chrome page, failing without saying what to do; the error now tells you to `click()` it instead ([#16916](https://github.com/can1357/oh-my-pi/pull/16916) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS `openApplication("Contacts")` and `openApplication("Messages")` failing as ambiguous because a helper of the app (an agent app or a running app extension) has the same name; a name shared only with such helpers now opens the app ([#16911](https://github.com/can1357/oh-my-pi/pull/16911) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a macOS background right or middle double click pressing again after you clicked or typed in its app between its presses; it now stops there with `UserIntervened`, as a left click does ([#16770](https://github.com/can1357/oh-my-pi/pull/16770) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background `axType`, `axKeyChord` and `axClick` sending input into an app you switched to while it was busy answering the element's window or bounds lookup; they now read your front app first and refuse with `UserIntervened`, as window input does. The refusal for an element that does not take focus now says no keys were sent, since the focus request reached the app ([#16769](https://github.com/can1357/oh-my-pi/pull/16769) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.5] - 2026-10-21
 

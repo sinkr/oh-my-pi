@@ -54,6 +54,7 @@
 - The `power.sleepPrevention` setting now says it keeps the machine awake only while the agent is running a turn, not for as long as a session is open ([#16762](https://github.com/can1357/oh-my-pi/pull/16762) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the `computer` tool's `computer.window({ app })` failing for an app with no open window without saying what to do; the error now names the `computer.apps.open(…)` call that launches it (on macOS it also shows a window of a running app that has none), and `computer.window()` with no argument asks for a window id or filter instead of listing windows that "match undefined" ([#16912](https://github.com/can1357/oh-my-pi/pull/16912) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `read doc.pdf:page<N>.png` returning the PDF viewer's empty grey frame instead of the page on about half of reads ([#16585](https://github.com/can1357/oh-my-pi/pull/16585) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the `computer` tool prompt leaving `el.selectText` out of the element helpers; it now says a following `el.type` on that element replaces the selection ([#16769](https://github.com/can1357/oh-my-pi/pull/16769) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
