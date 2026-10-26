@@ -79,6 +79,14 @@ function ownerJobs(session: ToolSession): AsyncJob[] {
 	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
 }
 
+/**
+ * The running job of agent `agentId` under another id: a woken agent's turn job
+ * takes a `-N` suffix while the agent's earlier job row is still retained.
+ */
+function runningJobOfAgent(jobs: readonly AsyncJob[], agentId: string): AsyncJob | undefined {
+	return jobs.find(job => job.status === "running" && job.agentId === agentId && job.id !== agentId);
+}
+
 function textResource(
 	url: InternalUrl,
 	content: string,
@@ -196,8 +204,8 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				daemons: services,
 			});
 		}
-		const job = jobs.find(item => item.id === id);
 		const service = services.find(item => item.name === id);
+		const job = jobs.find(item => item.id === id) ?? (service ? undefined : runningJobOfAgent(jobs, id));
 		if (job && service) throw new Error(`proc://${id} is ambiguous: both job ${id} and service ${id} exist.`);
 		if (service) {
 			const header = `${serviceStatus(service)}\nready=${service.readyAt !== undefined || service.state === "ready" || service.state === "running"} persist=${service.persist} detached=${service.detached}${service.exitCode === undefined ? "" : ` exit=${service.exitCode}`}`;
@@ -221,6 +229,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				if (job.type === "task") lines.push(`agent://${job.agentId ?? job.id}`);
 				const artifact = details?.meta?.truncation?.artifactId;
 				if (artifact) lines.push(`artifact://${artifact}`);
+			} else if (job.type === "task") {
+				const agentId = job.agentId ?? job.id;
+				const successor = runningJobOfAgent(jobs, agentId);
+				if (successor) lines.push(`${agentId} is running again as job ${successor.id} (proc://${successor.id})`);
 			}
 			return textResource(url, lines.join("\n"), undefined, false, {
 				job: snapshotJobs(session, [job])[0],
@@ -248,7 +260,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
 		if (!id) throw new Error("Write requires proc://<id>, proc://<id>/kill, or proc://<id>/mode");
 		const ownerId = session.getAgentId?.() ?? undefined;
-		const job = ownerJobs(session).find(item => item.id === id);
+		const jobs = ownerJobs(session);
+		const exactJob = jobs.find(item => item.id === id);
+		const agentJob = exactJob ? undefined : runningJobOfAgent(jobs, id);
 		const agent = runningAgentsOutsideJobs(session).find(item => item.id === id);
 		let service: DaemonSnapshot | undefined;
 		if (cfgLaunchEnabled.get(session.settings)) {
@@ -258,13 +272,15 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				// Killing an in-process job or agent needs no broker. Skipping the
 				// lookup only loses the job/service collision check, which cannot be
 				// answered while the broker is down anyway.
-				if (context?.signal?.aborted || action !== "kill" || !(job || agent)) throw error;
+				if (context?.signal?.aborted || action !== "kill" || !(exactJob || agentJob || agent)) throw error;
 				logger.warn("Daemon broker lookup failed; cancelling in-process target", {
 					id,
 					error: error instanceof Error ? error.message : String(error),
 				});
 			}
 		}
+		// A service named like an agent wins over that agent's suffixed turn job.
+		const job = exactJob ?? (service ? undefined : agentJob);
 		if ((job || agent) && service)
 			throw new Error(`proc://${id} is ambiguous: both job ${id} and service ${id} exist.`);
 		if (action === "mode") {
@@ -293,7 +309,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if ((job || agent) && session.asyncJobManager) {
-			const result = await executeCancel(session, session.asyncJobManager, ownerId, [id]);
+			const result = await executeCancel(session, session.asyncJobManager, ownerId, [job?.id ?? id]);
 			return { content: result.content, details: { proc: result.details } };
 		}
 		if (agent) {
