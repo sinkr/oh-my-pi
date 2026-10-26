@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed the bash tool's `find` panicking and writing a native panic report to `~/.omp/logs` when the command reading its output exits early, as in `find . -printf '%p\n' | head -1`, or when its stderr is closed; it now stops quietly, and a failed `-fprintf` write is reported instead of `find: internal error` ([#17079](https://github.com/can1357/oh-my-pi/pull/17079) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed macOS `ax()` and `find()` leaving a text field with no label of its own, such as Reminders' Add Date and Add Location fields, unnamed; such a field is now named by its placeholder ([#16915](https://github.com/can1357/oh-my-pi/pull/16915) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
 - Fixed the bash tool's `rg` and `fd` on macOS and Linux finding nothing under a path that is a symlink to a directory, such as `/tmp` or `/etc` on macOS or a symlinked skill folder; like ripgrep and fd, they now search the folder the link points to ([#16598](https://github.com/can1357/oh-my-pi/pull/16598) by [@will-bogusz](https://github.com/will-bogusz))
