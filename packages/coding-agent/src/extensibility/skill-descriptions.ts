@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import {
 	getAgentDir,
 	getSkillDescriptionsDbPath,
@@ -14,7 +13,7 @@ import {
 	prompt,
 } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { getModelMatchPreferences, parseModelPattern, resolveRoleSelection } from "../config/model-resolver";
+import { resolveRoleChain, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
 import { Semaphore } from "../task/parallel";
@@ -42,8 +41,10 @@ export interface SkillDescriptionCompressor {
 class SkillDescriptionLengthError extends Error {}
 
 /**
- * Resolve the configured fast role for each background request, without using the foreground model.
- * `getTelemetry` supplies the telemetry handle for each request's chat span.
+ * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
+ * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
+ * Never uses the session's foreground model. `getTelemetry` supplies the telemetry handle for each
+ * request's chat span.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
@@ -53,14 +54,10 @@ export function createSkillDescriptionCompressor(
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
 		const available = registry.getAvailable();
-		const configured = resolveRoleSelection(["smol"], settings, available);
-		if (configured) return configured.model;
-		const preferences = getModelMatchPreferences(settings);
-		for (const pattern of roleDefaultModels().smol) {
-			const preferred = parseModelPattern(pattern, available, preferences).model;
-			if (preferred) return preferred;
-		}
-		return resolveRoleSelection(["tiny"], settings, available)?.model;
+		return (
+			resolveRoleChain("smol", settings, available)[0]?.model ??
+			resolveRoleSelection(["tiny"], settings, available)?.model
+		);
 	};
 	return {
 		modelKey() {
