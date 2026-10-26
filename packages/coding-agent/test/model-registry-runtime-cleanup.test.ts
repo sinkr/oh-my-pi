@@ -58,6 +58,43 @@ describe("ModelRegistry runtime source cleanup", () => {
 		expect(getCustomApi("custom-runtime-cleanup-api")).toBeUndefined();
 	});
 
+	test("clearing several sources removes each one's providers and rebuilds the catalog once", () => {
+		const registry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		const sources = ["ext://batch-a", "ext://batch-b", "ext://batch-c"];
+		sources.forEach((source, index) => {
+			registry.registerProvider(
+				`batch-provider-${index}`,
+				{
+					baseUrl: "https://batch.example.com/v1",
+					apiKey: "BATCH_KEY",
+					api: "openai-responses",
+					models: [baseModel],
+				},
+				source,
+			);
+		});
+		registry.registerProvider(
+			"kept-provider",
+			{ baseUrl: "https://kept.example.com/v1", apiKey: "KEPT_KEY", api: "openai-responses", models: [baseModel] },
+			"ext://kept",
+		);
+
+		const keys = registry.authStorage.keys;
+		const clearConfig = keys.clearConfig.bind(keys);
+		let rebuilds = 0;
+		keys.clearConfig = () => {
+			rebuilds++;
+			clearConfig();
+		};
+		registry.clearSourceRegistrations(sources);
+
+		expect(rebuilds).toBe(1);
+		for (let index = 0; index < sources.length; index++) {
+			expect(registry.find(`batch-provider-${index}`, "runtime-model")).toBeUndefined();
+		}
+		expect(registry.find("kept-provider", "runtime-model")).toBeDefined();
+	});
+
 	test("extension rebinding preserves unrelated credential-scoped cached models", async () => {
 		using tempDir = TempDir.createSync("@omp-model-registry-rebind-");
 		const provider = "opencode-go";
