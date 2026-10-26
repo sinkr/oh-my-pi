@@ -3,8 +3,6 @@
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
-import type { CacheRetention } from "../types";
-import { resolveCacheRetention } from "../utils";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
@@ -25,36 +23,32 @@ export interface InferenceHeaderOptions {
 	protocol: "anthropic" | "google" | "openai";
 	sessionId?: string;
 	/**
-	 * Shared task-sibling prompt-cache affinity (see
-	 * {@link resolveOpenCodeGoCacheAffinity}). Carried only by
-	 * `x-opencode-session` on the `opencode-go` backend; protocol-native
-	 * session headers and every other backend keep `sessionId`.
+	 * Shared prompt-cache affinity key (see {@link resolveOpenCodeGoCacheAffinity}).
+	 * Carried only by `x-opencode-session` on the `opencode-go` backend;
+	 * protocol-native session headers and every other backend keep `sessionId`.
 	 */
 	cacheAffinity?: string;
 }
 
 /**
- * Shared task-sibling prompt-cache affinity for the OpenCode Go backend (KDL
- * `task-sibling-prompt-cache`): sibling requests under one task warm and hit
- * the gateway's prefix cache under one family key, so Go's session header
- * must carry that key instead of the per-child conversation id.
+ * Shared prompt-cache affinity for the OpenCode Go backend: on lanes opted
+ * into KDL `shared-prompt-cache`, related requests (Task siblings, forks,
+ * explicit-key callers) warm and hit the gateway's prefix cache under one
+ * shared key, so Go's session header carries that key instead of the
+ * conversation id.
  *
- * The backend identity is `providerType ?? provider`, so a custom provider
- * declared as the Go backend follows the same rules as `opencode-go` itself;
- * catalog policy remains the only opt-in authority. Only opted-in Go models
- * sending an explicit cache key with prompt caching enabled qualify;
- * everything else stays on the conversation id.
+ * `promptCacheKey` MUST be an explicit, already retention-gated cache key —
+ * never the sessionId-derived fallback. The backend identity is
+ * `providerType ?? provider`; catalog policy is the only opt-in authority.
  */
 export function resolveOpenCodeGoCacheAffinity(
 	model: CatalogPolicyInputs,
 	promptCacheKey: string | undefined,
-	cacheRetention: CacheRetention | undefined,
 ): string | undefined {
 	if ((model.providerType ?? model.provider) !== "opencode-go") return undefined;
-	// An empty key must never replace a known real child session header.
+	// An empty key must never replace a known real conversation header.
 	if (!promptCacheKey) return undefined;
-	if (resolveCacheRetention(cacheRetention) === "none") return undefined;
-	return resolveCatalogPolicy(model).taskSiblingPromptCache === true ? promptCacheKey : undefined;
+	return resolveCatalogPolicy(model).sharedPromptCache === true ? promptCacheKey : undefined;
 }
 
 /** Set a header unless the map already contains that field under any casing. */

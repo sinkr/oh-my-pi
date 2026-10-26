@@ -24,6 +24,7 @@ import {
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
@@ -170,6 +171,23 @@ function resolveCompactionV2Model(model: Model): string {
 	if (compactionV2Api(model) !== "azure-openai-responses") return requestModel;
 	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel);
 	return mappedDeployment ?? requestModel;
+}
+
+/**
+ * Catalog-policy view of a remote compaction request (V1 and V2): the
+ * effective adapter (`remoteCompaction.api`) and the wire id the body sends
+ * (`remoteCompaction.model`). Under a model override the active lane's
+ * `requestModelId` and thinking classification describe a model that never
+ * reaches the wire, so they are dropped; `reasoning` stays because the
+ * compaction body derives its reasoning config from the active model.
+ */
+export function remoteCompactionPolicyModel(model: Model): CatalogPolicyInputs {
+	const api = compactionV2Api(model);
+	const overrideId = model.remoteCompaction?.model;
+	const base = { provider: model.provider, providerType: model.providerType, api, reasoning: model.reasoning };
+	return overrideId == null
+		? { ...base, id: model.id, requestModelId: model.requestModelId, thinking: model.thinking }
+		: { ...base, id: overrideId };
 }
 
 // ============================================================================
@@ -400,12 +418,6 @@ function buildCompactionV2Headers(
 	codexMetadata?: OpenAICodexCompatibilityMetadata,
 ): Record<string, string> {
 	const api = compactionV2Api(model);
-	// An explicit `remoteCompaction.model` sends a different id than the
-	// active lane (the same nullish presence the body resolves through
-	// `resolveCompactionV2Model`). Once it redirects the request, the active
-	// `requestModelId` and thinking classification describe a model that is
-	// NOT on the wire, so they must not reach the policy cascade.
-	const hasModelOverride = model.remoteCompaction?.model != null;
 	const cacheOptions = { sessionId: request.sessionId, promptCacheKey: request.promptCacheKey };
 	const routingSessionId = getOpenAIResponsesRoutingSessionId(cacheOptions);
 	const promptCacheSessionId = getOpenAIPromptCacheKey(cacheOptions);
@@ -420,27 +432,9 @@ function buildCompactionV2Headers(
 					"content-type": "application/json",
 					...resolveOpenAIRequestSetup(
 						{
-							provider: model.provider,
-							// The request adapter plus every fact the catalog policy
-							// cascade reads: the Go cache-affinity rules are `on-api`
-							// scoped, so a reduced projection that drops them silently
-							// disables the family header. The adapter is the EFFECTIVE
-							// compaction API (`remoteCompaction.api` override included),
-							// never the native lane the model would otherwise use, and
-							// the identity is the EFFECTIVE compaction wire id — the id
-							// this request actually sends, resolved by the same
-							// `resolveCompactionV2Model` the body uses. Under an
-							// override the active lane's `requestModelId` and thinking
-							// classification belong to a model that never reaches the
-							// wire, so they are dropped instead of overriding the id
-							// actually sent; without one the active pair keeps its
-							// usual `policyModelId` preference.
-							id: hasModelOverride ? resolveCompactionV2Model(model) : model.id,
-							api,
-							providerType: model.providerType,
-							reasoning: model.reasoning,
-							requestModelId: hasModelOverride ? undefined : model.requestModelId,
-							thinking: hasModelOverride ? undefined : model.thinking,
+							// `on-api` scoped cache policy must see the request this
+							// compaction actually sends, not the active lane.
+							...remoteCompactionPolicyModel(model),
 							baseUrl: model.baseUrl,
 							headers: model.headers,
 							compat: {

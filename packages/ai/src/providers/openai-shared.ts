@@ -345,34 +345,16 @@ export function resolveOpenAIRequestSetup(
 	}
 
 	// The conversation id stays authoritative for every native session header.
-	// Verified Go sibling lanes (KDL `task-sibling-prompt-cache`) additionally
-	// share one family cache key on `x-opencode-session`: the Go gateway warms
-	// its prefix cache under that family affinity, so the header carries the
-	// same family key instead of the per-child conversation id. This is
-	// protocol-neutral — the Responses body `prompt_cache_key` applies only
-	// where supported and is not universal (Completions sends no such body
-	// field), while the family header holds the affinity on every opted-in
-	// lane. Other providers, Zen, and non-opted Go lanes keep the conversation
-	// id.
+	// On Go lanes opted into KDL `shared-prompt-cache`, `x-opencode-session`
+	// carries the explicit shared cache key instead (see
+	// resolveOpenCodeGoCacheAffinity).
 	const sessionId = options.sessionId ?? options.promptCacheSessionId;
 	applyInferenceHeaders(headers, {
 		provider: model.provider,
 		providerType: model.providerType,
 		protocol: "openai",
 		sessionId,
-		// Only an EXPLICIT prompt-cache key feeds the affinity. The shared
-		// cache id (`promptCacheSessionId`) also falls back to the sessionId
-		// normalized to the 64-char wire limit, so reusing it unconditionally
-		// would flip a long ordinary conversation id to a `pc_` hash on
-		// opted-in lanes, retention-dependently. Callers pass the resolved
-		// cache id as `promptCacheAffinityKey` only when an explicit
-		// `promptCacheKey` was supplied; that value is already retention-gated
-		// (getOpenAIPromptCacheKey resolves an explicit request retention over
-		// PI_CACHE_RETENTION). The helper only distinguishes "none", so pass an
-		// enabled retention rather than re-reading the env — a second env gate
-		// would drop the affinity for explicit short/long requests under
-		// PI_CACHE_RETENTION=none.
-		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey, "short"),
+		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey),
 	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);

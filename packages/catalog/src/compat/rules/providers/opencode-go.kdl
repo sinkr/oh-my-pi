@@ -7,65 +7,33 @@ provider "opencode-go" {
 	// Replaces the provider check that disabled forced tool choice on Responses.
 	on-api "openai-responses" {
 		supports-forced-tool-choice #false
-		// The Go gateway proxies Muse Spark's Responses lane to Meta; warmed
-		// siblings hit 2/2 sharing the family body key plus the
-		// x-opencode-session header, vs 0/2 sharing only the body key under
-		// distinct child session ids (2026-10-22, Spark 1.3 Contributor and
-		// Spark 1.2 Contributor both measured the same 2/2-vs-0/2 pattern).
-		// Same shared-prefix prompt_cache_key routing as native muse-code;
-		// the opt-in lists exact verified ids only. The standard Spark 1.3
-		// variant was never exactly lane-verified — only Contributor 1.3
-		// and Contributor 1.2 measured the 2/2-vs-0/2 pattern — so it stays
-		// off until verified, and the unmeasured standard Spark 1.2 id
-		// likewise stays off.
-		models "muse-spark-1.3-contributor" "muse-spark-1.2-contributor" {
-			task-sibling-prompt-cache #true
-		}
-		// Re-probed 2026-10-25 with a cold / family-warm / different-family
-		// control sequence: repeating the family key returned a warm read
-		// (2791, 2789, 2816 and 3840 cached tokens on gpt-5.6-luna,
-		// gpt-6-luna, grok-4.6 and grok-4.7) while the different-family
-		// control sat at its own cold baseline (0, 0, 128 and 1152). The
-		// spread isolates the family key, not either field that carries it:
-		// on Responses both the body `prompt_cache_key` and
-		// x-opencode-session repeat that key. Conversation ids, credentials,
-		// and response state stay per-child.
-		models "gpt-5.6-luna" "gpt-6-luna" "grok-4.6" "grok-4.7" {
-			task-sibling-prompt-cache #true
+		// Go's x-opencode-session is the gateway's cache-affinity handle; on
+		// Responses the body prompt_cache_key carries the same shared key.
+		// Opt-in criterion: a cold / different-family / same-family probe
+		// (control sent BEFORE the family repeat) must warm on the repeated
+		// key and stay cold under the different key. 2026-10-26, 3 trials,
+		// cached tokens family vs control: Spark 1.3 Contributor 2/3 vs 0/3,
+		// Spark 1.2 Contributor 3/3 vs 1/3, gpt-5.6-luna 3/3 vs 0/3,
+		// gpt-6-luna 3/3 vs 0/3, grok-4.6 3/3 vs 0/3. Off: grok-4.7 (control
+		// warmed 2/3, key-independent) and the gateway-only standard Spark
+		// 1.3/1.2 ids (never lane-verified).
+		models "muse-spark-1.3-contributor" "muse-spark-1.2-contributor" "gpt-5.6-luna" "gpt-6-luna" "grok-4.6" {
+			shared-prompt-cache #true
 		}
 	}
-	// Affinity-compatible sibling lanes verified outside Responses (2026-10-22
-	// synthetic probe). Neither route accepts a prompt_cache_key body field:
-	// Chat Completions gates it on a compat flag the Go gateway does not set,
-	// and the Anthropic Messages wire has no such field, so on these lanes the
-	// shared family key appears only in x-opencode-session while each
-	// protocol's native cache body behavior is unchanged. All four lanes read
-	// 2/2 warm with distinct actual child session ids; the body-key baselines
-	// were also 2/2 on MiMo, DeepSeek and Haiku, and Kimi's 1/2 baseline ran
-	// under a shared initial prefix that pre-warmed some legs —
-	// affinity-compatibility evidence, not a comparative cache benefit.
-	// Conversation ids, credentials, and response state stay per-child.
-	//
-	// Re-probed 2026-10-25 with a cold / family-warm / different-family
-	// control sequence: these four ids returned a warm read only when the
-	// family key repeated (warm vs control cached tokens: deepseek-v4-pro
-	// 4608 vs 0, glm-5.1 2823 vs 10, glm-5.3-flash 4864 vs 0, omen-alpha
-	// 4736 vs 0), so they join this lane's opt-in. Off: qwen3.6-plus and
-	// gemini-4-argon showed no material warm hit (still unproven, not shown
-	// broken), mimo-v2.5-pro is unavailable here (the upstream rejects it
-	// with 400 Unsupported model), and the remaining cache-compatible Go
-	// lanes warmed under any key, so a shared family key buys them nothing.
+	// Chat Completions sends no prompt_cache_key body field here (the gateway
+	// leaves the compat flag unset), so the shared key rides only
+	// x-opencode-session. Same probe, 2026-10-26: deepseek-v4-pro 3/3 vs
+	// 0/3, omen-alpha 4/4 vs 0/4. Off as key-independent or inconsistent:
+	// glm-5.1 (control 3/5), glm-5.3-flash (family 2/7, control 1/7),
+	// kimi-k2.7-code (control 4/5), mimo-v2.6-flash (control 2/2, family
+	// 1/2), deepseek-v4.1-flash (control 2/2); also qwen3.6-plus and
+	// gemini-4-argon (no material warm hit) and mimo-v2.5-pro (upstream 400).
+	// Anthropic Messages: claude-haiku-5-5 warmed under any key (control
+	// 2/2), so no Messages lane opts in.
 	on-api "openai-completions" {
-		models "mimo-v2.6-flash" "kimi-k2.7-code" "deepseek-v4.1-flash" {
-			task-sibling-prompt-cache #true
-		}
-		models "deepseek-v4-pro" "glm-5.1" "glm-5.3-flash" "omen-alpha" {
-			task-sibling-prompt-cache #true
-		}
-	}
-	on-api "anthropic-messages" {
-		models "claude-haiku-5-5" {
-			task-sibling-prompt-cache #true
+		models "deepseek-v4-pro" "omen-alpha" {
+			shared-prompt-cache #true
 		}
 	}
 

@@ -36,6 +36,7 @@ import {
 	prepareCompaction,
 	promptBudgetTokens,
 	RESCUE_SHAKE_CONFIG,
+	remoteCompactionPolicyModel,
 	remotePreserveReusable,
 	resolveBudgetReserveTokens,
 	resolveThresholdTokens,
@@ -67,6 +68,7 @@ import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/o
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isRecord, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { writeArtifact } from "./artifacts";
@@ -479,8 +481,8 @@ export interface SessionMaintenanceHost {
 	): Promise<Context>;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation;
-	/** Model-gated cache identity: the agent's explicit key, else the session-header Task family key. */
-	getPromptCacheKeyForModel(model: Model | undefined): string | undefined;
+	/** Gated cache identity: the agent's explicit key, else the Task family key when `model` opts in. */
+	getPromptCacheKeyForModel(model: CatalogPolicyInputs | undefined): string | undefined;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
@@ -3582,14 +3584,12 @@ export class SessionMaintenance {
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
 						sessionId: this.#host.sessionId(),
-						// Only an EXPLICIT cache key may ride here: V2 treats any
-						// truthy value as provenance and flips x-opencode-session
-						// to the normalized cache id. The session id itself stays
-						// the header identity via `sessionId` above. The
-						// model-gated accessor resolves that explicit key: the
-						// agent's own key, else the session-header Task family
-						// key — never a sessionId fallback.
+						// Explicit cache keys only (never a sessionId fallback): V2
+						// treats any truthy key as provenance for x-opencode-session.
+						// Conventional summaries run on `candidate`; remote compaction
+						// may send a different api/model, so it is gated separately.
 						promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
+						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
 						// Route every summarization HTTP request through the
@@ -5410,10 +5410,12 @@ export class SessionMaintenance {
 									thinkingLevel: this.#host.thinkingLevel(),
 									tools: this.#host.agent.state.tools,
 									sessionId: this.#host.sessionId(),
-									// Explicit cache key only, resolved through the
-									// model-gated accessor — see the manual
-									// callsite in #compactWithFallbackModel.
+									// Same key split as the manual callsite in
+									// #compactWithFallbackModel.
 									promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
+									remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(
+										remoteCompactionPolicyModel(candidate),
+									),
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets(),
 									codexCompaction,

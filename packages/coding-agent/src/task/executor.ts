@@ -10,7 +10,6 @@ import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } fr
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
@@ -4749,29 +4748,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				);
 				({ session } = await awaitAbortable(sessionPromise));
 				if (preparedSession) untrackedSession = session;
-				// Stash the sibling family candidate as soon as the child session
-				// exists, independent of the initial model: deferred pattern/auth
-				// fallback resolution has finished inside createAgentSession, and a
-				// later runtime model change (the retry-fallback walk) must find the
-				// candidate at its first opted-in consumer request. Consumption stays
-				// gated per request by the policy check in getPromptCacheKeyForModel,
-				// so an ineligible initial model keeps its default wire routing. The
-				// stash itself is session-scoped and never persisted: the persisted
-				// header copy is seeded when the child's model opts in — at creation,
-				// or promoted from the stash by getPromptCacheKeyForModel at the first
-				// later eligible request — so forks, moves, and resets reconstitute
-				// from the persisted identity while ineligible children keep their
-				// wire routing and fork/provider lineage. An explicitly empty
-				// parent lineage derives no candidate: the string build would yield
-				// ":<agent>" and coalesce every empty-lineage parent onto one family,
-				// so the child keeps its own wire session identity. Nonempty opaque
-				// keys pass through untouched (no trimming).
+				// Stash the sibling family candidate once the child session exists,
+				// independent of its initial model, so a later model change (retry
+				// fallback, model switch) still finds it. Consumption is gated per
+				// request by AgentSession.getPromptCacheKeyForModel; the first primary
+				// request on an opted-in model persists it to the header so fork and
+				// reopen keep it. An empty parent lineage derives no candidate:
+				// ":<agent>" would coalesce every such parent onto one family.
 				if (options.parentPromptCacheKey) {
 					sessionManager.setTaskSiblingCandidate(`${options.parentPromptCacheKey}:${agent.name}`);
-					const childModel = session.agent.state.model;
-					if (childModel && resolveCatalogPolicy(childModel).taskSiblingPromptCache === true) {
-						await sessionManager.setTaskPromptCacheKey(`${options.parentPromptCacheKey}:${agent.name}`);
-					}
 				}
 			} catch (err) {
 				mcpFollower?.dispose();

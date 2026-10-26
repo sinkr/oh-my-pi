@@ -64,7 +64,7 @@ import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
-import { isOpenAiRemoteCompactionApi } from "./compaction-v2-streaming";
+import { isOpenAiRemoteCompactionApi, remoteCompactionPolicyModel } from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
 export * from "./compaction-v2-streaming";
@@ -937,36 +937,19 @@ export async function requestOpenAiRemoteCompaction(
 				Authorization: `Bearer ${apiKey}`,
 				...model.headers,
 			};
-	// Same KDL gate as the V2 request: the catalog task-sibling rule is
-	// on-api scoped, so the policy projection carries the EFFECTIVE V1
-	// compaction API (`remoteCompaction.api` override included) and the
-	// EFFECTIVE wire id — the id this request actually sends, resolved by
-	// `resolveOpenAiCompactModel`. Under a `remoteCompaction.model` override
-	// the active lane's requestModelId/thinking describe a model that never
-	// reaches the wire, so they are dropped instead of overriding the id
-	// actually sent; without one the active pair keeps its usual policy
-	// preference. Azure keeps its plain header shape (V2 skips the cascade
-	// there too), and only an EXPLICIT prompt-cache key feeds the affinity —
-	// the sessionId-derived fallback never does.
+	// Same gate as the V2 request, against the request this compaction actually
+	// sends. Azure keeps its plain header shape (V2 skips the cascade there too).
+	// Only an EXPLICIT prompt-cache key feeds the affinity; the sessionId-derived
+	// cache id never does. `promptCacheSessionId` is already retention-gated.
 	if (!isAzureOpenAiResponses) {
-		const hasModelOverride = model.remoteCompaction?.model != null;
 		applyInferenceHeaders(headers, {
 			provider: model.provider,
 			providerType: model.providerType,
 			protocol: "openai",
 			sessionId: opts?.sessionId,
 			cacheAffinity: resolveOpenCodeGoCacheAffinity(
-				{
-					id: hasModelOverride ? requestModel : model.id,
-					api: model.remoteCompaction?.api ?? model.api,
-					provider: model.provider,
-					providerType: model.providerType,
-					reasoning: model.reasoning,
-					requestModelId: hasModelOverride ? undefined : model.requestModelId,
-					thinking: hasModelOverride ? undefined : model.thinking,
-				},
+				remoteCompactionPolicyModel(model),
 				opts?.promptCacheKey ? promptCacheSessionId : undefined,
-				"short",
 			),
 		});
 	}

@@ -1153,13 +1153,13 @@ describe("requestCompactionV2Streaming", () => {
 		expect(sessionHeaders).toEqual(["child-1"]);
 	});
 	test("keeps the child session header when a native Completions Go model compacts on an overridden Responses endpoint", async () => {
-		// kimi-k2.7-code is opted for family affinity only on its NATIVE
+		// deepseek-v4-pro is opted for shared caching only on its NATIVE
 		// openai-completions lane; the Responses lane it is overridden onto is
 		// not opted, so the compaction request must keep the child conversation
 		// id instead of borrowing the family key.
 		const model = buildModel({
-			id: "kimi-k2.7-code",
-			name: "Kimi K2.7 Code",
+			id: "deepseek-v4-pro",
+			name: "DeepSeek V4 Pro",
 			api: "openai-completions",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
@@ -1168,49 +1168,6 @@ describe("requestCompactionV2Streaming", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 400000,
 			maxTokens: 128000,
-			remoteCompaction: { enabled: true, v2StreamingEnabled: true, api: "openai-responses" },
-		});
-		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
-		const request = buildCompactionV2Request(model, [userItem], "instructions", {
-			sessionId: "child-1",
-			promptCacheKey: "parent:task",
-		});
-		const sessionHeaders: (string | null)[] = [];
-		const endpoints: string[] = [];
-		const fetchMock: FetchImpl = async (input, init) => {
-			endpoints.push(String(input));
-			sessionHeaders.push(new Headers(init?.headers).get("x-opencode-session"));
-			return sseResponse([
-				{
-					type: "response.output_item.done",
-					output_index: 0,
-					item: { type: "compaction", encrypted_content: "enc" },
-				},
-				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
-			]);
-		};
-
-		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
-
-		expect(sessionHeaders).toEqual(["child-1"]);
-		expect(endpoints[0]?.endsWith("/responses")).toBe(true);
-	});
-	test("keeps the child session header when a native Anthropic Messages Go model compacts on an overridden Responses endpoint", async () => {
-		// claude-haiku-5-5 is opted for family affinity only on its NATIVE
-		// anthropic-messages lane; the Responses lane it is overridden onto is
-		// not opted, so the compaction request must keep the child conversation
-		// id instead of borrowing the family key.
-		const model = buildModel({
-			id: "claude-haiku-5-5",
-			name: "Claude Haiku 5.5",
-			api: "anthropic-messages",
-			provider: "opencode-go",
-			baseUrl: "https://api.anthropic.com",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 64_000,
 			remoteCompaction: { enabled: true, v2StreamingEnabled: true, api: "openai-responses" },
 		});
 		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
@@ -1315,13 +1272,13 @@ describe("requestCompactionV2Streaming", () => {
 		expect(sessionHeaders).toEqual(["parent:task"]);
 	});
 	test("shares the family affinity key when a native Completions Go model compacts as an opted Responses override", async () => {
-		// kimi-k2.7-code is opted on its NATIVE openai-completions lane only;
+		// deepseek-v4-pro is opted on its NATIVE openai-completions lane only;
 		// here the compaction request is an overridden Responses request for a
 		// verified Contributor id, so the Responses opt-in of the id actually
 		// sent decides the header — not the active lane's identity.
 		const model = buildModel({
-			id: "kimi-k2.7-code",
-			name: "Kimi K2.7 Code",
+			id: "deepseek-v4-pro",
+			name: "DeepSeek V4 Pro",
 			api: "openai-completions",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
@@ -1364,56 +1321,6 @@ describe("requestCompactionV2Streaming", () => {
 		expect(endpoints[0]?.endsWith("/responses")).toBe(true);
 		expect(sentModels).toEqual(["muse-spark-1.3-contributor"]);
 		expect(sessionHeaders).toEqual(["parent:task"]);
-	});
-	test("keeps the child session header when a native Anthropic Messages Go model compacts as an unverified Responses override", async () => {
-		// claude-haiku-5-5 is opted only on anthropic-messages; the Responses
-		// request carries the unverified standard Spark 1.3 id, so neither the
-		// active lane's opt-in nor its identity may leak into the header.
-		const model = buildModel({
-			id: "claude-haiku-5-5",
-			name: "Claude Haiku 5.5",
-			api: "anthropic-messages",
-			provider: "opencode-go",
-			baseUrl: "https://api.anthropic.com",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 64_000,
-			remoteCompaction: {
-				enabled: true,
-				v2StreamingEnabled: true,
-				api: "openai-responses",
-				model: "muse-spark-1.3",
-			},
-		});
-		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
-		const request = buildCompactionV2Request(model, [userItem], "instructions", {
-			sessionId: "child-1",
-			promptCacheKey: "parent:task",
-		});
-		const sessionHeaders: (string | null)[] = [];
-		const sentModels: unknown[] = [];
-		const endpoints: string[] = [];
-		const fetchMock: FetchImpl = async (input, init) => {
-			endpoints.push(String(input));
-			sessionHeaders.push(new Headers(init?.headers).get("x-opencode-session"));
-			sentModels.push(compactionBodyModel(JSON.parse(String(init?.body))));
-			return sseResponse([
-				{
-					type: "response.output_item.done",
-					output_index: 0,
-					item: { type: "compaction", encrypted_content: "enc" },
-				},
-				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
-			]);
-		};
-
-		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
-
-		expect(endpoints[0]?.endsWith("/responses")).toBe(true);
-		expect(sentModels).toEqual(["muse-spark-1.3"]);
-		expect(sessionHeaders).toEqual(["child-1"]);
 	});
 	test("resolves the family affinity key for a custom Go backend through its remote compaction model override", async () => {
 		// A credential-bearing custom provider declaring
@@ -1472,7 +1379,7 @@ describe("requestCompactionV2Streaming", () => {
 			baseUrl: "https://opencode.ai/zen/go/v1",
 			remoteCompaction: { enabled: true, v2StreamingEnabled: true, model: "review-memo-compact-alias" },
 		});
-		expect(resolveCatalogPolicy(model).taskSiblingPromptCache).toBe(true);
+		expect(resolveCatalogPolicy(model).sharedPromptCache).toBe(true);
 		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
 		const request = buildCompactionV2Request(model, [userItem], "instructions", {
 			sessionId: "child-1",
@@ -3462,7 +3369,7 @@ describe("compact() remote compaction failure handling", () => {
 			baseUrl: "https://opencode.ai/zen/go/v1",
 			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
 		});
-		expect(resolveCatalogPolicy(model).taskSiblingPromptCache).toBe(true);
+		expect(resolveCatalogPolicy(model).sharedPromptCache).toBe(true);
 		const preparation = makePreparation();
 		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
 		const requestedUrls: string[] = [];

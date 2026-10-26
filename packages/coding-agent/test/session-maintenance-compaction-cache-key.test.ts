@@ -259,4 +259,20 @@ describe("session-maintenance V2 compaction cache-key provenance", () => {
 		await triggerAutoCompaction();
 		expectFamilyKeyOnWire(familyKey);
 	});
+
+	it("gates the remote compaction key on the override target, not the unopted active model", async () => {
+		// Active lane grok-4.7 does not opt into shared prompt caching, but
+		// remote compaction sends the opted Contributor id: the family key must
+		// reach that request even though the live turn would not use it.
+		Object.assign(goModel, {
+			id: "grok-4.7",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true, model: "muse-spark-1.2-contributor" },
+		});
+		const familyKey = await seedTaskFamilyAffinity();
+		expect(session.getPromptCacheKeyForModel(goModel)).toBeUndefined();
+		const result = await session.compact();
+		await session.waitForIdle();
+		expect(result?.shortSummary).toBe("Remote compaction");
+		expectFamilyKeyOnWire(familyKey);
+	});
 });

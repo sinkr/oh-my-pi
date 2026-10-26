@@ -18,7 +18,7 @@ const OPENCODE_SESSION_HEADER = "x-opencode-session";
 
 const OPENCODE_GO_COMPLETIONS_MODEL = {
 	provider: "opencode-go",
-	id: "kimi-k2.7-code",
+	id: "deepseek-v4-pro",
 	api: "openai-completions",
 	reasoning: true,
 	baseUrl: "https://opencode.ai/zen/go/v1",
@@ -38,33 +38,10 @@ function chatSse(): Response {
 	});
 }
 
-function anthropicSse(): Response {
-	const events = [
-		{
-			type: "message_start",
-			message: {
-				id: "msg_test",
-				usage: { input_tokens: 5, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-			},
-		},
-		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
-		{ type: "content_block_stop", index: 0 },
-		{
-			type: "message_delta",
-			delta: { stop_reason: "end_turn" },
-			usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-		},
-		{ type: "message_stop" },
-	];
-	const payload = `${events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
-	return new Response(payload, { status: 200, headers: { "content-type": "text/event-stream" } });
-}
-
 function makeOpenCodeGoCompletionsModel(): Model<"openai-completions"> {
 	return buildModel({
 		...OPENCODE_GO_COMPLETIONS_MODEL,
-		name: "Kimi K2.7 Code",
+		name: "DeepSeek V4 Pro",
 		api: "openai-completions",
 		reasoning: false,
 		input: ["text"],
@@ -209,21 +186,6 @@ function makeOpenCodeGoAnthropicModel(): Model<"anthropic-messages"> {
 	});
 }
 
-function makeOpenCodeGoHaikuModel(): Model<"anthropic-messages"> {
-	return buildModel({
-		id: "claude-haiku-5-5",
-		name: "Claude Haiku 5.5",
-		api: "anthropic-messages",
-		provider: "opencode-go",
-		baseUrl: "https://opencode.ai/zen/go",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 8192,
-	});
-}
-
 /**
  * Custom credential-bearing provider declared as an OpenCode Go backend
  * (`providerType: "opencode-go"`): the credential identity stays `team-go`
@@ -259,22 +221,6 @@ function makeCustomGoResponsesModel(id = "muse-spark-1.3-contributor"): Model<"o
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 1_000_000,
 		maxTokens: 65_536,
-	});
-}
-
-function makeCustomGoHaikuModel(): Model<"anthropic-messages"> {
-	return buildModel({
-		provider: "team-go",
-		providerType: "opencode-go",
-		id: "claude-haiku-5-5",
-		name: "Claude Haiku 5.5",
-		api: "anthropic-messages",
-		baseUrl: "https://team-go.example",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 8192,
 	});
 }
 
@@ -545,7 +491,7 @@ describe("Go sibling prompt-cache wire affinity", () => {
 		},
 	);
 
-	it.each(["gpt-5.6-luna", "gpt-6-luna", "grok-4.6", "grok-4.7"])(
+	it.each(["gpt-5.6-luna", "gpt-6-luna", "grok-4.6"])(
 		"shares the family key across sibling children on the verified Go Responses lane %s",
 		id => {
 			const first = resolveOpenAIRequestSetup(makeOpenCodeGoResponsesModel(id), {
@@ -604,15 +550,12 @@ describe("Go sibling prompt-cache wire affinity", () => {
 		const sessionId = `child-${"0123456789".repeat(10)}`;
 		const derivedCacheId = normalizeOpenAIPromptCacheKey(sessionId);
 		expect(derivedCacheId?.startsWith("pc_")).toBe(true);
-		const setup = resolveOpenAIRequestSetup(
-			makeOpenCodeGoCompletionsLaneModel("mimo-v2.6-flash", "MiMo V2.6 Flash"),
-			{
-				apiKey: "key",
-				messages: [],
-				sessionId,
-				promptCacheSessionId: derivedCacheId,
-			},
-		);
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoCompletionsLaneModel("deepseek-v4-pro"), {
+			apiKey: "key",
+			messages: [],
+			sessionId,
+			promptCacheSessionId: derivedCacheId,
+		});
 		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(sessionId);
 	});
 
@@ -635,31 +578,26 @@ describe("Go sibling prompt-cache wire affinity", () => {
 		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe(sessionId);
 	});
 
-	it.each([
-		"mimo-v2.6-flash",
-		"kimi-k2.7-code",
-		"deepseek-v4.1-flash",
-		"deepseek-v4-pro",
-		"glm-5.1",
-		"glm-5.3-flash",
-		"omen-alpha",
-	])("sends the explicit shared cache key on the opted-in Go Completions lane %s", id => {
-		const model = makeOpenCodeGoCompletionsLaneModel(id);
-		const first = resolveOpenAIRequestSetup(model, {
-			apiKey: "key",
-			messages: [],
-			sessionId: "child-1",
-			promptCacheAffinityKey: "parent:task",
-		});
-		const second = resolveOpenAIRequestSetup(model, {
-			apiKey: "key",
-			messages: [],
-			sessionId: "child-2",
-			promptCacheAffinityKey: "parent:task",
-		});
-		expect(first.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
-		expect(second.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
-	});
+	it.each(["deepseek-v4-pro", "omen-alpha"])(
+		"sends the explicit shared cache key on the opted-in Go Completions lane %s",
+		id => {
+			const model = makeOpenCodeGoCompletionsLaneModel(id);
+			const first = resolveOpenAIRequestSetup(model, {
+				apiKey: "key",
+				messages: [],
+				sessionId: "child-1",
+				promptCacheAffinityKey: "parent:task",
+			});
+			const second = resolveOpenAIRequestSetup(model, {
+				apiKey: "key",
+				messages: [],
+				sessionId: "child-2",
+				promptCacheAffinityKey: "parent:task",
+			});
+			expect(first.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+			expect(second.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+		},
+	);
 
 	it("shares the family key across distinct child ids on the wire", async () => {
 		const headersSeen: Headers[] = [];
@@ -810,14 +748,13 @@ describe("Go sibling prompt-cache wire affinity", () => {
 
 	it("emits the family key on the Go header when no conversation session exists", () => {
 		// Regression (PR #16988): `sessionId` and the explicit cache key are
-		// independently optional — the V1 compaction path and direct
-		// client-options builds compute a valid family affinity with no
-		// conversation id in hand. The Go header must still carry that key;
+		// independently optional — the V1 compaction path computes a valid
+		// family affinity with no conversation id in hand. The Go header must
+		// still carry that key;
 		// applyInferenceHeaders used to return before the assignment.
 		const affinity = resolveOpenCodeGoCacheAffinity(
 			makeOpenCodeGoMuseModel("muse-spark-1.3-contributor"),
 			"parent:task",
-			"short",
 		);
 		expect(affinity).toBe("parent:task");
 		const headers: Record<string, string> = {};
@@ -874,67 +811,6 @@ describe("session header on the Anthropic transport", () => {
 		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("session-1");
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
 		expect(options.defaultHeaders["User-Agent"]).toBe(USER_AGENT);
-	});
-
-	it("sends the shared cache key as x-opencode-session while the Claude session header stays the child id", () => {
-		const options = buildAnthropicClientOptions({
-			model: makeOpenCodeGoHaikuModel(),
-			apiKey: "opencode_test_key",
-			sessionId: "child-1",
-			promptCacheKey: "parent:task",
-		});
-		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("parent:task");
-		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("child-1");
-	});
-
-	it("sends the family key as x-opencode-session when no conversation session exists", () => {
-		// Regression (PR #16988): a direct client-options build may carry the
-		// explicit family key with no independently-optional `sessionId`. The
-		// Go affinity header must still be set; only the protocol-native Claude
-		// session header stays absent.
-		const options = buildAnthropicClientOptions({
-			model: makeOpenCodeGoHaikuModel(),
-			apiKey: "opencode_test_key",
-			promptCacheKey: "parent:task",
-		});
-		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("parent:task");
-		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBeUndefined();
-	});
-
-	it("keeps the child session headers when cache retention is disabled", () => {
-		const options = buildAnthropicClientOptions({
-			model: makeOpenCodeGoHaikuModel(),
-			apiKey: "opencode_test_key",
-			sessionId: "child-1",
-			promptCacheKey: "parent:task",
-			cacheRetention: "none",
-		});
-		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("child-1");
-		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("child-1");
-	});
-
-	it("keeps the native Anthropic session header child-scoped on the wire", async () => {
-		const headersSeen: Headers[] = [];
-		const fetchMock = async (input: string | URL | Request, init?: RequestInit) => {
-			headersSeen.push(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
-			return anthropicSse();
-		};
-
-		const response = await completeSimple(
-			makeOpenCodeGoHaikuModel(),
-			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-			{
-				apiKey: "opencode_test_key",
-				sessionId: "child-1",
-				promptCacheKey: "parent:task",
-				fetch: fetchMock as typeof fetch,
-			},
-		);
-
-		expect(response.stopReason).toBe("stop");
-		expect(headersSeen).toHaveLength(1);
-		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
-		expect(headersSeen[0]?.get("X-Claude-Code-Session-Id")).toBe("child-1");
 	});
 
 	it("preserves the Claude fingerprint for OpenCode OAuth requests", () => {
@@ -1005,11 +881,10 @@ describe("custom provider backend identity on the OpenCode affinity lanes", () =
 	it("inherits the verified Go opt-in through providerType without new policy", () => {
 		const optedIn = [
 			makeCustomGoResponsesModel(),
-			makeCustomGoCompletionsModel("mimo-v2.6-flash", "MiMo V2.6 Flash"),
-			makeCustomGoHaikuModel(),
+			makeCustomGoCompletionsModel("deepseek-v4-pro", "DeepSeek V4 Pro"),
 		];
 		for (const model of optedIn) {
-			expect(resolveCatalogPolicy(model).taskSiblingPromptCache, model.id).toBe(true);
+			expect(resolveCatalogPolicy(model).sharedPromptCache, model.id).toBe(true);
 		}
 	});
 
@@ -1035,10 +910,7 @@ describe("custom provider backend identity on the OpenCode affinity lanes", () =
 		expect(headersSeen[0]?.get("Authorization")).toBe("Bearer team-key");
 	});
 
-	it.each([
-		["mimo-v2.6-flash", "MiMo V2.6 Flash"],
-		["kimi-k2.7-code", "Kimi K2.7 Code"],
-	])("shares the family key across distinct children on the custom Go Completions lane %s", async (id, name) => {
+	it("shares the family key across distinct children on the custom Go Completions lane", async () => {
 		const headersSeen: Headers[] = [];
 		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
 			headersSeen.push(new Headers(init?.headers));
@@ -1047,7 +919,7 @@ describe("custom provider backend identity on the OpenCode affinity lanes", () =
 
 		for (const sessionId of ["child-1", "child-2"]) {
 			await completeSimple(
-				makeCustomGoCompletionsModel(id, name),
+				makeCustomGoCompletionsModel("deepseek-v4-pro", "DeepSeek V4 Pro"),
 				{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
 				{ apiKey: "team-key", sessionId, promptCacheKey: "parent:task", fetch: fetchMock as typeof fetch },
 			);
@@ -1056,25 +928,6 @@ describe("custom provider backend identity on the OpenCode affinity lanes", () =
 		expect(headersSeen).toHaveLength(2);
 		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
 		expect(headersSeen[1]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
-	});
-
-	it("shares the family key on the custom Go Anthropic lane while the Claude header stays child-scoped", async () => {
-		const headersSeen: Headers[] = [];
-		const fetchMock = async (input: string | URL | Request, init?: RequestInit) => {
-			headersSeen.push(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
-			return anthropicSse();
-		};
-
-		await completeSimple(
-			makeCustomGoHaikuModel(),
-			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-			{ apiKey: "team-key", sessionId: "child-A", promptCacheKey: "parent:task", fetch: fetchMock as typeof fetch },
-		);
-
-		expect(headersSeen).toHaveLength(1);
-		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("parent:task");
-		expect(headersSeen[0]?.get("X-Claude-Code-Session-Id")).toBe("child-A");
-		expect(headersSeen[0]?.get("Authorization")).toBe("Bearer team-key");
 	});
 
 	it("projects the backend identity onto the custom Go Google lane", async () => {
@@ -1114,7 +967,7 @@ describe("custom provider backend identity on the OpenCode affinity lanes", () =
 	});
 
 	it("keeps a custom Go backend on the child id without an explicit cache key", () => {
-		const setup = resolveOpenAIRequestSetup(makeCustomGoCompletionsModel("mimo-v2.6-flash", "MiMo V2.6 Flash"), {
+		const setup = resolveOpenAIRequestSetup(makeCustomGoCompletionsModel("deepseek-v4-pro", "DeepSeek V4 Pro"), {
 			apiKey: "team-key",
 			messages: [],
 			sessionId: "child-1",
@@ -1130,7 +983,7 @@ describe("custom provider backend identity on the OpenCode affinity lanes", () =
 		};
 
 		await completeSimple(
-			makeCustomGoCompletionsModel("mimo-v2.6-flash", "MiMo V2.6 Flash"),
+			makeCustomGoCompletionsModel("deepseek-v4-pro", "DeepSeek V4 Pro"),
 			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
 			{
 				apiKey: "team-key",

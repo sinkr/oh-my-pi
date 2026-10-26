@@ -91,6 +91,7 @@ import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { type EditStore, type PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
 	$env,
@@ -7121,21 +7122,30 @@ export class AgentSession implements SettingsScope {
 		return this.#providerBoundary.prepareSimpleStreamOptions(options, provider);
 	}
 
-	/** Cache identity for the main loop and side requests that reuse its context. */
-	getPromptCacheKeyForModel(model: Model | undefined): string | undefined {
-		const headerKey = this.sessionManager.getHeader()?.taskPromptCacheKey;
-		const eligible = model !== undefined && resolveCatalogPolicy(model).taskSiblingPromptCache === true;
-		const candidate = headerKey ?? (eligible ? this.sessionManager.getTaskSiblingCandidate() : undefined);
-		// The executor stashes the family candidate for every child but seeds the
-		// persisted header copy only when the INITIAL model opts in; the first
-		// eligible request therefore promotes the stash, so fork() and reopen —
-		// which reconstitute from the persisted header alone — keep the key.
-		if (headerKey === undefined && candidate !== undefined && eligible) {
-			void this.sessionManager
-				.setTaskPromptCacheKey(candidate)
-				.catch(error => logger.warn("Failed to persist task prompt cache key", { error: String(error) }));
-		}
-		return this.agent.promptCacheKey ?? (candidate !== undefined && eligible ? candidate : undefined);
+	/**
+	 * Cache identity for the main loop and side requests that reuse its context:
+	 * the agent's explicit key, else the Task family key (persisted header copy,
+	 * then the session stash) when `model` opts into shared prompt caching.
+	 */
+	getPromptCacheKeyForModel(model: CatalogPolicyInputs | undefined): string | undefined {
+		if (this.agent.promptCacheKey !== undefined) return this.agent.promptCacheKey;
+		if (model === undefined || resolveCatalogPolicy(model).sharedPromptCache !== true) return undefined;
+		return this.sessionManager.getHeader()?.taskPromptCacheKey ?? this.sessionManager.getTaskSiblingCandidate();
+	}
+
+	/**
+	 * Persist the stashed Task family candidate once a primary request on an
+	 * opted-in model consumes it, so fork and reopen — which read only the
+	 * header — keep the key. No-op under an explicit key, which wins on the wire.
+	 */
+	promoteTaskSiblingCandidate(model: CatalogPolicyInputs): void {
+		if (this.agent.promptCacheKey !== undefined) return;
+		if (this.sessionManager.getHeader()?.taskPromptCacheKey !== undefined) return;
+		const candidate = this.sessionManager.getTaskSiblingCandidate();
+		if (candidate === undefined || resolveCatalogPolicy(model).sharedPromptCache !== true) return;
+		void this.sessionManager
+			.setTaskPromptCacheKey(candidate)
+			.catch(error => logger.warn("Failed to persist task prompt cache key", { error: String(error) }));
 	}
 
 	/** Current steering mode */
