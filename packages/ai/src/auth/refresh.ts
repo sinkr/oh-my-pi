@@ -1086,7 +1086,20 @@ export class OAuthRefresher {
 		options?: OAuthRefreshByIdOptions,
 	): Promise<AuthCredentialSnapshotEntry> {
 		const existing = this.#oauthRefreshInFlight.get(id);
-		if (existing) return raceSignal(existing, signal, "credential refresh aborted");
+		if (existing) {
+			const joined = await raceSignal(existing, signal, "credential refresh aborted");
+			// A refresh that started earlier can land on the very token this caller's
+			// request was refused with; that is no recovery, so refresh again.
+			if (
+				options?.rejectedAccess === undefined ||
+				joined.credential.type !== "oauth" ||
+				joined.credential.access !== options.rejectedAccess
+			) {
+				return joined;
+			}
+			// Whatever refresh runs now is checked against the rejected token the same way.
+			return this.refreshById(id, signal, options);
+		}
 		const recent = options?.reuseRecentMint ? this.#recentMint(id) : undefined;
 		// A token the provider has just rejected is not a usable recent mint.
 		if (recent && recent.credential.access !== options?.rejectedAccess) {

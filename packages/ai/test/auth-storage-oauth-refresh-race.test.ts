@@ -1351,6 +1351,49 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(interleaved.exchanges()).toBe(2);
 	});
 
+	test("a 401 recovery that joins a row refresh landing on the rejected token refreshes again", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "unit-oauth-joined-row-refresh";
+		const firstAnswer = Promise.withResolvers<void>();
+		let exchanges = 0;
+		oauthUtils.registerOAuthProvider({
+			id: provider,
+			name: provider,
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: 0 };
+			},
+			async refreshToken(current) {
+				exchanges += 1;
+				const generation = exchanges;
+				if (generation === 1) await firstAnswer.promise;
+				return {
+					...current,
+					access: `access-${generation}`,
+					refresh: `refresh-${generation}`,
+					expires: Date.now() + 3_600_000,
+				};
+			},
+			getApiKey(current) {
+				return current.access;
+			},
+		});
+		const credentialId = await seedLogin(provider);
+
+		// An older request starts a row refresh, which will land on access-1.
+		const first = authStorage.oauth.refresh(credentialId);
+		// A second request already got a 401 for access-1 (it was served access-1 from a
+		// peer, say) and recovers while the first refresh is still in flight.
+		const recovery = authStorage.oauth.refresh(credentialId, undefined, {
+			reason: "auth-recovery",
+			rejectedAccess: "access-1",
+		});
+		firstAnswer.resolve();
+		expect((await first).credential).toMatchObject({ access: "access-1" });
+		expect((await recovery).credential).toMatchObject({ access: "access-2" });
+		expect(exchanges).toBe(2);
+	});
+
 	test("a 401 recovery does not adopt a peer row that still carries the rejected access token", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 		const provider = "unit-oauth-peer-same-access";
