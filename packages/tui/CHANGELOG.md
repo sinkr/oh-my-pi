@@ -24,6 +24,7 @@
 - Fixed a table's last rows (such as its bottom border) going blank in scrollback when its SIXEL chart was drawn while the reply kept streaming, with the chart painted over them ([#16870](https://github.com/can1357/oh-my-pi/issues/16870))
 - Fixed Tern MCP tool cards showing only a clipped one-line summary of the arguments; the call and result cards now include a folded `Args` section with the full arguments ([#16765](https://github.com/can1357/oh-my-pi/issues/16765))
 - Fixed pasting an API key or redirect URL into the setup wizard's provider sign-in prompt silently doing nothing ([#16898](https://github.com/can1357/oh-my-pi/pull/16898) by [@camiloeferrera](https://github.com/camiloeferrera))
+- Fixed the usage dashboard averaging distinct quota buckets that share a label and window (Google Antigravity's Gemini and Gemini 4 Argon weeklies) into one row, which masked a drained bucket as "50% left"; buckets now group by quota identity, and shared Claude/GPT copies still merge ([#16790](https://github.com/can1357/oh-my-pi/issues/16790))
 
 ## [18.12.6] - 2026-10-21
 
