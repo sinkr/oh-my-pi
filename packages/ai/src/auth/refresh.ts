@@ -584,8 +584,9 @@ export class OAuthRefresher {
 
 	/**
 	 * Runs one token exchange under the row lease and persists the rotated
-	 * credential by CAS, then releases the lease. A non-definitive exchange error
-	 * resolves as `failure` so the waiting caller applies its failure policy.
+	 * credential by CAS, then releases the lease. An exchange error that does not
+	 * disable the login resolves as `failure` so the waiting caller applies its
+	 * failure policy.
 	 */
 	async #exchangeLeased<T extends OAuthCredential>(
 		provider: string,
@@ -689,10 +690,13 @@ export class OAuthRefresher {
 						spentRefresh: tokenFingerprint(current.refresh),
 						handedBack,
 					});
-					throw new AIError.OAuthError(
-						`OAuth refresh for ${provider} waits for a stalled refresher that may still save its token`,
-						{ kind: "token-refresh", provider },
-					);
+					// A transient failure, so the caller's failure policy applies to it.
+					return {
+						failure: new AIError.OAuthError(
+							`OAuth refresh for ${provider} waits for a stalled refresher that may still save its token`,
+							{ kind: "token-refresh", provider },
+						),
+					};
 				}
 				const disabledCause = options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`;
 				const disabled = this.#deps.store.tryDisableAuthCredentialIfMatches(

@@ -1344,6 +1344,42 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
 	});
 
+	test("a caller that keeps its credential on refresh failure gets it back after a takeover rejection", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-stalled-owner-keep";
+		await seedLogin(provider);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const takeLease = store.tryAcquireCredentialRefreshLease?.bind(store);
+		if (!takeLease) throw new Error("test store does not support refresh leases");
+		expect(takeLease(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+		const failures: unknown[] = [];
+
+		// The options an MCP server refresh passes: keep the current token on any
+		// refresh failure that does not disable the login.
+		const result = await authStorage.oauth.refreshStored(provider, {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			refresh: async () => {
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+			isDefinitiveFailure: error => error instanceof Error && error.message.includes("invalid_grant"),
+			disabledCause: () => "oauth refresh failed",
+			keepCredentialOnRefreshFailure: true,
+			onRefreshFailure: error => {
+				failures.push(error);
+			},
+		});
+
+		expect(result).toMatchObject({ refreshed: false, removed: false });
+		expect(result.credential).toMatchObject({ type: "oauth", refresh: "refresh-0" });
+		expect(failures).toHaveLength(1);
+		expect(String(failures[0])).toContain("stalled refresher");
+		expect(events).toHaveLength(0);
+		expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+	});
+
 	/** Refresh options for a 401 on access-0 whose refresh token the provider already rejects as spent. */
 	function refreshSpentToken(
 		credentialId: number,
