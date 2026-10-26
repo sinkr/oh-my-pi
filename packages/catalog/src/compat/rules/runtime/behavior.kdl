@@ -26,6 +26,11 @@ behavior {
 	// from seeding cross-provider bare-id enrichment references (#10932).
 	reference-isolated-providers "cline-pass"
 
+	// These hosts reuse an unchanged message prefix across turns; history
+	// rewrites otherwise discard their warm prompt cache.
+	append-only-context-providers "deepseek" "ollama" "ollama-cloud" "lm-studio" "llama.cpp" \
+		"google-antigravity" "google" "google-vertex"
+
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {
 		exact "o3"
