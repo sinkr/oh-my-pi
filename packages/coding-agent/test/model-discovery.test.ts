@@ -3197,6 +3197,11 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		const advertised = registry.find("openai-test", "acme-think-1");
+		// The same metadata block carries the route's identity and window; the
+		// bundled-catalog fallback must not shadow what the server advertises.
+		expect(advertised?.name).toBe("Acme Think 1");
+		expect(advertised?.contextWindow).toBe(272_000);
+		expect(advertised?.input).toEqual(["text", "image"]);
 		expect(advertised?.reasoning).toBe(true);
 		expect(advertised?.thinking?.mode).toBe("effort");
 		expect(advertised?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);

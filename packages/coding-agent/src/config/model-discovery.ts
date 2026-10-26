@@ -854,9 +854,16 @@ function extractOpenAIModelsListInputCapabilities(item: {
 	input?: unknown;
 	input_modalities?: unknown;
 	architecture?: unknown;
+	metadata?: unknown;
 }): ("text" | "image")[] | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
-	const modalities = collectModalities([item.input, item.input_modalities, architecture?.input_modalities]);
+	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+	const modalities = collectModalities([
+		item.input,
+		item.input_modalities,
+		architecture?.input_modalities,
+		metadata?.input_modalities,
+	]);
 	if (modalities.size === 0) return undefined;
 	return modalities.has("image") ? ["text", "image"] : ["text"];
 }
@@ -1042,6 +1049,10 @@ export async function discoverOpenAIModelsList(
 		// headers/baseUrl/cost stay local.
 		const reference = resolveModelReference(id, references) as ModelSpec<Api> | undefined;
 		const referenceCompat = reference?.compat as OpenAICompat | undefined;
+		// codex-lb and similar registries nest the route's identity beside its
+		// reasoning ladder: `display_name`, `context_window`, `input_modalities`.
+		const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+		const advertisedName = typeof metadata?.display_name === "string" ? metadata.display_name.trim() : "";
 		const input = nativeMetadataForModel?.input ??
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
@@ -1072,6 +1083,7 @@ export async function discoverOpenAIModelsList(
 		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
+			toPositiveNumberOrUndefined(metadata?.context_window) ??
 			reportedLimitsContextWindow ??
 			nativeMetadataForModel?.contextWindow ??
 			reference?.contextWindow ??
@@ -1084,7 +1096,7 @@ export async function discoverOpenAIModelsList(
 		if (task) {
 			specs.push({
 				id,
-				name: reference?.name ?? id,
+				name: advertisedName || reference?.name || id,
 				api: task.api,
 				kind: task.kind,
 				provider: providerConfig.provider,
@@ -1113,7 +1125,7 @@ export async function discoverOpenAIModelsList(
 		const advertisedReasoning = extractAdvertisedReasoning(item);
 		specs.push({
 			id,
-			name: reference?.name ?? id,
+			name: advertisedName || reference?.name || id,
 			api,
 			kind: runnerApiKind(api),
 			provider: providerConfig.provider,
