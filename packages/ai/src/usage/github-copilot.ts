@@ -150,26 +150,23 @@ async function fetchJson(ctx: UsageFetchContext, url: string, init: RequestInit)
 	return response.json();
 }
 
+/** Resolves the token owner's login via `/user`; throws `ProviderHttpError` on a non-2xx response. */
 async function resolveGitHubUsername(
 	ctx: UsageFetchContext,
 	baseUrl: string,
 	token: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	try {
-		const data = await fetchJson(ctx, `${baseUrl}/user`, {
-			headers: {
-				Accept: "application/vnd.github+json",
-				Authorization: `Bearer ${token}`,
-				"X-GitHub-Api-Version": "2022-11-28",
-			},
-			signal,
-		});
-		if (!isRecord(data)) return undefined;
-		return typeof data.login === "string" ? data.login : undefined;
-	} catch {
-		return undefined;
-	}
+	const data = await fetchJson(ctx, `${baseUrl}/user`, {
+		headers: {
+			Accept: "application/vnd.github+json",
+			Authorization: `Bearer ${token}`,
+			"X-GitHub-Api-Version": "2022-11-28",
+		},
+		signal,
+	});
+	if (!isRecord(data)) return undefined;
+	return typeof data.login === "string" ? data.login : undefined;
 }
 
 async function fetchInternalUsage(
@@ -376,7 +373,13 @@ export const githubCopilotUsageProvider: UsageProvider = {
 				username = candidate.trim();
 			}
 			if (!username && params.credential.apiKey) {
-				username = await resolveGitHubUsername(ctx, githubApiBaseUrl, params.credential.apiKey, params.signal);
+				try {
+					username = await resolveGitHubUsername(ctx, githubApiBaseUrl, params.credential.apiKey, params.signal);
+				} catch (error) {
+					// A failed lookup skips billing, so it votes in the auth consensus:
+					// a transient `/user` failure must keep the cached report.
+					failures.push(error);
+				}
 			}
 			if (!username) {
 				ctx.logger?.warn("Copilot usage requires username for billing API", { provider: params.provider });
@@ -434,11 +437,16 @@ export const githubCopilotUsageProvider: UsageProvider = {
 			try {
 				const usage = await fetchInternalUsage(ctx, githubApiBaseUrl, githubToken, params.signal);
 				let accountId = params.credential.accountId;
+				// The usage report already landed; the login only labels it.
 				if (!accountId && refreshToken) {
-					accountId = await resolveGitHubUsername(ctx, githubApiBaseUrl, refreshToken, params.signal);
+					accountId = await resolveGitHubUsername(ctx, githubApiBaseUrl, refreshToken, params.signal).catch(
+						() => undefined,
+					);
 				}
 				if (!accountId && accessToken) {
-					accountId = await resolveGitHubUsername(ctx, githubApiBaseUrl, accessToken, params.signal);
+					accountId = await resolveGitHubUsername(ctx, githubApiBaseUrl, accessToken, params.signal).catch(
+						() => undefined,
+					);
 				}
 				const normalized = normalizeQuotaSnapshots(usage, accountId);
 				report = {

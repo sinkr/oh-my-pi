@@ -158,8 +158,12 @@ describe("github copilot usage provider — billing units", () => {
 	});
 });
 
-/** Answers billing and `copilot_internal/user` with the given outcomes; `/user` resolves a login. */
-function endpointFetch(outcomes: { billing?: number | Error; internal: number | Error }): FetchImpl {
+/** Answers `/user`, billing, and `copilot_internal/user` with the given outcomes; `/user` defaults to a login. */
+function endpointFetch(outcomes: {
+	user?: number | Error;
+	billing?: number | Error;
+	internal: number | Error;
+}): FetchImpl {
 	const respond = (outcome: number | Error, body: unknown): Response => {
 		if (outcome instanceof Error) throw outcome;
 		return outcome === 200
@@ -179,12 +183,14 @@ function endpointFetch(outcomes: { billing?: number | Error; internal: number | 
 				},
 			});
 		}
-		return Response.json({ login: "octocat" });
+		return respond(outcomes.user ?? 200, { login: "octocat" });
 	};
 }
 
 const API_KEY: UsageCredential = { type: "api_key", apiKey: "gh-test", accountId: "octocat" };
 const OAUTH: UsageCredential = { type: "oauth", accessToken: "ghu-test", refreshToken: "ghu-test" };
+/** No `accountId`, so the provider must resolve the login via `/user` before billing. */
+const BARE_API_KEY: UsageCredential = { type: "api_key", apiKey: "gh-test" };
 
 function fetchWith(credential: UsageCredential, fetch: FetchImpl) {
 	return githubCopilotUsageProvider.fetchUsage({ provider: "github-copilot", credential }, { fetch });
@@ -198,6 +204,7 @@ describe("github copilot usage provider — auth rejection (#17081)", () => {
 			[OAUTH, { internal: 401 }],
 			[OAUTH, { internal: 403 }],
 			[API_KEY, { billing: 401, internal: 401 }],
+			[BARE_API_KEY, { user: 401, internal: 401 }],
 		] as const) {
 			const outcome = await fetchWith(credential, endpointFetch(outcomes)).catch(error => error);
 			expect(outcome).toBeInstanceOf(ProviderHttpError);
@@ -205,9 +212,14 @@ describe("github copilot usage provider — auth rejection (#17081)", () => {
 		}
 	});
 
-	it("keeps the internal fallback when billing rejects an API key", async () => {
-		const report = await fetchWith(API_KEY, endpointFetch({ billing: 403, internal: 200 }));
-		expect(report?.limits.find(limit => limit.id === "copilot:premium")?.amount.used).toBe(200);
+	it("keeps the report when a sibling endpoint rejects the token", async () => {
+		for (const [credential, outcomes] of [
+			[API_KEY, { billing: 403, internal: 200 }],
+			[OAUTH, { user: 401, internal: 200 }],
+		] as const) {
+			const report = await fetchWith(credential, endpointFetch(outcomes));
+			expect(report?.limits.find(limit => limit.id === "copilot:premium")?.amount.used).toBe(200);
+		}
 	});
 
 	it("stays transient when any attempt failed for a non-auth reason", async () => {
@@ -216,6 +228,8 @@ describe("github copilot usage provider — auth rejection (#17081)", () => {
 			[OAUTH, { internal: new TypeError("fetch failed") }],
 			[API_KEY, { billing: 401, internal: 503 }],
 			[API_KEY, { billing: 404, internal: 401 }],
+			[BARE_API_KEY, { user: 503, internal: 401 }],
+			[BARE_API_KEY, { user: new TypeError("fetch failed"), internal: 401 }],
 		] as const) {
 			expect(await fetchWith(credential, endpointFetch(outcomes))).toBeNull();
 		}
