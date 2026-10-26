@@ -310,6 +310,8 @@ interface AdvisorRetryFallbackState {
 	originalSelector: string;
 	originalThinkingLevel: ThinkingLevel;
 	lastAppliedThinkingLevel: ThinkingLevel;
+	/** Whether the active fallback selector explicitly follows the primary's effort. */
+	autoThinking: boolean;
 	/** Set by a classifier refusal: no cooldown restore until a compaction or new conversation replaces the context. */
 	pinned: boolean;
 }
@@ -1923,7 +1925,11 @@ export class SessionAdvisors {
 	}
 
 	/** Switch one advisor model while preserving its context and effort invariants. */
-	#setAdvisorModel(advisor: ActiveAdvisor, model: Model, requestedThinkingLevel: ThinkingLevel): ThinkingLevel {
+	#setAdvisorModel(
+		advisor: ActiveAdvisor,
+		model: Model,
+		requestedThinkingLevel: ThinkingLevel | undefined,
+	): ThinkingLevel {
 		const resolvedThinkingLevel = resolveThinkingLevelForModel(model, requestedThinkingLevel);
 		const nextThinkingLevel = resolvedThinkingLevel ?? ThinkingLevel.Inherit;
 		advisor.agent.setModel(model);
@@ -1959,9 +1965,9 @@ export class SessionAdvisors {
 	#retuneAutoThinkingAdvisors(): void {
 		const requested = this.#autoAdvisorThinkingLevel();
 		for (const advisor of this.#advisors) {
-			// A retry-fallback selector pinned its own effort for the fallback
-			// model; the retune resumes once the configured model is restored.
-			if (!advisor.autoThinking || advisor.runtime.disposed || advisor.retryFallback) continue;
+			// Concrete and bare fallback selectors keep their applied effort.
+			const autoThinking = advisor.retryFallback?.autoThinking ?? advisor.autoThinking;
+			if (!autoThinking || advisor.runtime.disposed) continue;
 			const next =
 				resolveThinkingLevelForModel(advisor.model, automaticThinkingLevel(advisor.model, requested)) ??
 				ThinkingLevel.Inherit;
@@ -1969,6 +1975,7 @@ export class SessionAdvisors {
 			advisor.agent.setThinkingLevel(toReasoningEffort(next));
 			advisor.agent.setDisableReasoning(shouldDisableReasoning(next));
 			advisor.thinkingLevel = next;
+			if (advisor.retryFallback) advisor.retryFallback.lastAppliedThinkingLevel = next;
 		}
 	}
 
@@ -2020,8 +2027,8 @@ export class SessionAdvisors {
 		if (!apiKey) return;
 		signal.throwIfAborted();
 
-		// An `auto` advisor skipped the retune while on the fallback: rejoin the
-		// primary's live level now, not the level it had when it fell back.
+		// Rejoin the primary's live level for an auto advisor, or restore the
+		// fixed effort it had before falling back.
 		const thinkingToApply = advisor.autoThinking
 			? this.#autoAdvisorThinkingLevel()
 			: advisor.thinkingLevel === fallback.lastAppliedThinkingLevel
@@ -2176,11 +2183,12 @@ export class SessionAdvisors {
 				// A `:auto` fallback entry follows the primary's resolved effort, like an `auto` advisor.
 				const requestedThinkingLevel =
 					selector.thinkingLevel === AUTO_THINKING
-						? this.#autoAdvisorThinkingLevel()
+						? automaticThinkingLevel(candidate, this.#autoAdvisorThinkingLevel())
 						: (selector.thinkingLevel ?? originalThinkingLevel);
 				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
 				if (advisor.retryFallback) {
 					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
+					advisor.retryFallback.autoThinking = selector.thinkingLevel === AUTO_THINKING;
 					advisor.retryFallback.pinned ||= primaryRefused;
 				} else {
 					advisor.retryFallback = {
@@ -2188,6 +2196,7 @@ export class SessionAdvisors {
 						originalSelector: currentSelector,
 						originalThinkingLevel,
 						lastAppliedThinkingLevel: nextThinkingLevel,
+						autoThinking: selector.thinkingLevel === AUTO_THINKING,
 						pinned: primaryRefused,
 					};
 				}
