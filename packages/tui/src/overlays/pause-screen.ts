@@ -139,6 +139,7 @@ export function renderPauseScreen(
 	// Resume keys mirror PauseScreenComponent#handleInput: `app.interrupt` (raw Escape when unbound), Enter, Space.
 	const esc = interruptKey();
 	const statusLines = formatStatusLines(snapshot);
+	const settled = isSettled(snapshot);
 
 	if (compact) {
 		if (sessionName) {
@@ -147,12 +148,12 @@ export function renderPauseScreen(
 		content.push(centerStyledLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), screenWidth));
 		content.push("");
 		content.push(centerStyledLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth));
-		content.push(
-			centerStyledLine(theme.fg(isSettled(snapshot) ? "success" : "warning", statusLines[0]!), screenWidth),
-		);
-		content.push(centerStyledLine(theme.fg("muted", statusLines[1]!), screenWidth));
-		content.push(centerStyledLine(theme.fg("muted", statusLines[2]!), screenWidth));
-		content.push(centerStyledLine(theme.fg("muted", statusLines[3]!), screenWidth));
+		content.push(centerStyledLine(theme.fg(settled ? "success" : "warning", statusLines[0]!), screenWidth));
+		if (!settled) {
+			content.push(centerStyledLine(theme.fg("muted", statusLines[1]!), screenWidth));
+			content.push(centerStyledLine(theme.fg("muted", statusLines[2]!), screenWidth));
+			content.push(centerStyledLine(theme.fg("muted", statusLines[3]!), screenWidth));
+		}
 		content.push(centerStyledLine(theme.fg("dim", statusLines[4]!), screenWidth));
 		content.push(centerStyledLine(theme.fg("dim", `${esc} to resume`), screenWidth));
 	} else {
@@ -171,12 +172,12 @@ export function renderPauseScreen(
 		for (const line of BODY_LINES) {
 			content.push(centerStyledLine(theme.fg("muted", line), screenWidth));
 		}
-		content.push(
-			centerStyledLine(theme.fg(isSettled(snapshot) ? "success" : "warning", statusLines[0]!), screenWidth),
-		);
-		content.push(centerStyledLine(theme.fg("muted", statusLines[1]!), screenWidth));
-		content.push(centerStyledLine(theme.fg("muted", statusLines[2]!), screenWidth));
-		content.push(centerStyledLine(theme.fg("muted", statusLines[3]!), screenWidth));
+		content.push(centerStyledLine(theme.fg(settled ? "success" : "warning", statusLines[0]!), screenWidth));
+		if (!settled) {
+			content.push(centerStyledLine(theme.fg("muted", statusLines[1]!), screenWidth));
+			content.push(centerStyledLine(theme.fg("muted", statusLines[2]!), screenWidth));
+			content.push(centerStyledLine(theme.fg("muted", statusLines[3]!), screenWidth));
+		}
 		content.push(centerStyledLine(theme.fg("dim", statusLines[4]!), screenWidth));
 		content.push(centerStyledLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth));
 		content.push("");
@@ -297,24 +298,28 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 					}),
 					"settlement",
 				),
-				keyed(
-					text([span(`Unsettled turns: ${snapshot.unsettledTurns}`, "muted")], {
-						role: "omp.pause.unsettled-turn-count",
-					}),
-					"unsettled-turns",
-				),
-				keyed(
-					text([span(`Unfinished jobs: ${snapshot.unfinishedJobs}`, "muted")], {
-						role: "omp.pause.unfinished-job-count",
-					}),
-					"unfinished-jobs",
-				),
-				keyed(
-					text([span(`Background processes: ${snapshot.backgroundProcesses}`, "muted")], {
-						role: "omp.pause.background-process-count",
-					}),
-					"background-processes",
-				),
+				...(!settled
+					? [
+							keyed(
+								text([span(`Unsettled turns: ${snapshot.unsettledTurns}`, "muted")], {
+									role: "omp.pause.unsettled-turn-count",
+								}),
+								"unsettled-turns",
+							),
+							keyed(
+								text([span(`Unfinished jobs: ${snapshot.unfinishedJobs}`, "muted")], {
+									role: "omp.pause.unfinished-job-count",
+								}),
+								"unfinished-jobs",
+							),
+							keyed(
+								text([span(`Background processes: ${snapshot.backgroundProcesses}`, "muted")], {
+									role: "omp.pause.background-process-count",
+								}),
+								"background-processes",
+							),
+						]
+					: []),
 			],
 			{ role: "omp.pause.settlement-status", gap: "sm" },
 		);

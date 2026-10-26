@@ -5,7 +5,7 @@
 ### Added
 
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
-- Added live `/pause` settlement status in ANSI and TSP rendering, with unsettled-turn, unfinished-job, and retained shell background-process counts.
+- Added live `/pause` settlement status in ANSI and TSP rendering, with unsettled-turn, unfinished-job, and retained shell background-process counts shown while draining or waiting and hidden once settled.
 
 ### Fixed
 

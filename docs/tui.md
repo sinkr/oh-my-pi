@@ -231,12 +231,14 @@ return loader;
 
 The `/pause` overlay reports unsettled agent turns, unfinished managed jobs,
 and retained shell background processes in both ANSI and native rendering.
-“Draining” means an agent turn has not parked at the pause boundary; “Waiting”
-means tracked work remains after agent turns park. Managed jobs and retained
-children may continue running while paused. “Settled” means all tracked agent
-turns have parked or finished and the unfinished-job and background-process
-counts are zero; it does not indicate that unrelated device processes or all
-activity on the laptop have stopped.
+The count rows appear only while draining or waiting (including zero-valued
+categories) and are hidden once settled. “Draining” means an agent turn has
+not parked at the pause boundary; “Waiting” means tracked work remains after
+agent turns park. Managed jobs and retained children may continue running
+while paused. “Settled” means all tracked agent turns have parked or finished
+and the unfinished-job and background-process counts are zero; it does not
+indicate that unrelated device processes or all activity on the laptop have
+stopped.
 
 ## Realistic custom component example (extension command)
 
