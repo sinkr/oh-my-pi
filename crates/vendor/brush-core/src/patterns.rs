@@ -1091,8 +1091,19 @@ mod tests {
 			Err(pi_vfs::unsupported("open"))
 		}
 
-		async fn metadata(&self, _path: &Path) -> std::io::Result<pi_vfs::Metadata> {
-			Err(std::io::ErrorKind::NotFound.into())
+		async fn metadata(&self, path: &Path) -> std::io::Result<pi_vfs::Metadata> {
+			let kind = match path.to_str() {
+				Some("mem://" | "mem://dir") => pi_vfs::FileKind::Dir,
+				Some("mem://a.md" | "mem://b.txt" | "mem://.hidden.md" | "mem://dir/c.md") => {
+					pi_vfs::FileKind::File
+				},
+				_ => return Err(std::io::ErrorKind::NotFound.into()),
+			};
+			Ok(pi_vfs::Metadata::new(
+				pi_vfs::FileType::from_kind(kind),
+				0,
+				pi_vfs::Permissions::from_mode(0o644),
+			))
 		}
 
 		async fn read_dir(&self, path: &Path) -> std::io::Result<pi_vfs::ReadDir> {
@@ -1134,6 +1145,15 @@ mod tests {
 		assert_eq!(expand("mem://d*/*.md", "/").await?, vec!["mem://dir/c.md".to_string()]);
 		assert_eq!(expand("*.md", "mem://dir").await?, vec!["c.md".to_string()]);
 		assert_eq!(expand("mem://*.none", "/").await?, Vec::<String>::new());
+
+		// A literal tail is checked through the provider at the lexically
+		// normalized path (`mem://./dir/` is asked about as `mem://dir`), and only
+		// existing paths are kept; `*/` keeps only directories.
+		assert_eq!(expand("mem://*/", "/").await?, vec!["mem://dir/".to_string()]);
+		assert_eq!(expand("mem://*/c.md", "/").await?, vec!["mem://dir/c.md".to_string()]);
+		assert_eq!(expand("mem://*/missing", "/").await?, Vec::<String>::new());
+		assert_eq!(expand("*/", "mem://").await?, vec!["dir/".to_string()]);
+		assert_eq!(expand("./*/", "mem://").await?, vec!["./dir/".to_string()]);
 
 		Ok(())
 	}
