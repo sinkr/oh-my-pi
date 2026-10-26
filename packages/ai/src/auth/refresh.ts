@@ -660,10 +660,9 @@ export class OAuthRefresher {
 					// Stop waiting even when the refresh ignores its signal, so the lease is released.
 					backstopReached.reject(error);
 				},
-				Math.max(
-					options.refreshTimeoutMs ?? OAUTH_REFRESH_OPERATION_TIMEOUT_MS,
-					OAUTH_REFRESH_EXCHANGE_BACKSTOP_MS,
-				),
+				// A fixed ceiling, whatever the caller's budget: a peer that takes over a
+				// lapsed lease, and shutdown, both assume no exchange runs longer.
+				OAUTH_REFRESH_EXCHANGE_BACKSTOP_MS,
 			);
 
 			let refreshed: OAuthCredentials;

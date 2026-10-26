@@ -1446,6 +1446,41 @@ describe("AuthStorage OAuth refresh race", () => {
 		}
 	});
 
+	test("a hung exchange gives up at the backstop even under a longer caller budget", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "unit-oauth-backstop-ceiling";
+		const credentialId = await seedLogin(provider);
+		vi.useFakeTimers();
+		try {
+			let exchangeSignal: AbortSignal | undefined;
+			const started = Promise.withResolvers<void>();
+			const refresh = authStorage.oauth.refreshStored(provider, {
+				credentialId,
+				credentialFromRow: row => row,
+				forceRefresh: true,
+				// Longer than the 60 s backstop that a peer taking over a lapsed lease relies on.
+				refreshTimeoutMs: 300_000,
+				refresh: (_current, signal) => {
+					exchangeSignal = signal;
+					started.resolve();
+					return Promise.withResolvers<never>().promise;
+				},
+			});
+			const settled = refresh.then(
+				() => "resolved",
+				(error: unknown) => String(error),
+			);
+			await started.promise;
+			vi.advanceTimersByTime(59_999);
+			expect(exchangeSignal?.aborted).toBe(false);
+			vi.advanceTimersByTime(1);
+			expect(exchangeSignal?.aborted).toBe(true);
+			expect(await settled).toContain("timed out");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	/** Refresh options for a 401 on access-0 whose refresh token the provider already rejects as spent. */
 	function refreshSpentToken(
 		credentialId: number,
