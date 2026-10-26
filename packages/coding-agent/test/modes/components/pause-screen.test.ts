@@ -210,7 +210,14 @@ describe("pause screen", () => {
 			displayName: "worker",
 			kind: "sub",
 			status: "running",
-			session: { agent: subagentAgent } as unknown as AgentSession,
+			session: { isStreaming: true, agent: subagentAgent } as unknown as AgentSession,
+		});
+		AgentRegistry.global().register({
+			id: "Main/stale-worker",
+			displayName: "stale worker",
+			kind: "sub",
+			status: "running",
+			session: { isStreaming: false, agent: { isPaused: false } } as unknown as AgentSession,
 		});
 		const { host, shown } = makeHost();
 		const ctx = {
@@ -241,8 +248,14 @@ describe("pause screen", () => {
 			expect(active).toContain("Unfinished jobs: 0");
 
 			rootAgent.isPaused = true;
-			subagentAgent.isPaused = true;
 			advisorStatus.yielded = true;
+			vi.advanceTimersByTime(1_000);
+			const liveWorkerOnly = component.render(80).map(stripAnsi).join("\n");
+			expect(liveWorkerOnly).toContain("Pausing — waiting for work to settle");
+			expect(liveWorkerOnly).toContain("Unsettled turns: 1");
+			expect(liveWorkerOnly).toContain("Unfinished jobs: 0");
+
+			subagentAgent.isPaused = true;
 			vi.advanceTimersByTime(1_000);
 			const quotaHalted = component.render(80).map(stripAnsi).join("\n");
 			expect(quotaHalted).toContain("Paused — ready to suspend");

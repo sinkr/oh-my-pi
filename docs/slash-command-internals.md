@@ -292,7 +292,7 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 
 ## 10) Built-in command note: `/pause`
 
-`/pause` (interactive only) holds the main agent, subagents, and advisors at safe boundaries; in-flight calls finish. The screen counts turns still draining and running jobs; parked agents stop counting, and when both counts reach zero it hides the rows and signals readiness.
+`/pause` (host interactive sessions only) holds agents at safe boundaries; in-flight calls finish. The screen counts draining turns and running jobs; parked or finished turns stop counting. When both counts reach zero, it hides the rows and signals readiness.
 
 The interrupt key (Esc by default), Enter, Space, or Ctrl+C resumes; Ctrl+C does not abort agents.
 
