@@ -1307,6 +1307,27 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(interleaved.exchanges()).toBe(2);
 	});
 
+	test("a 401 recovery does not adopt a peer row that still carries the rejected access token", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-peer-same-access";
+		const singleUse = registerSingleUseProvider(provider);
+		const credentialId = await seedLogin(provider);
+		const resolver = authStorage.keys.resolver(provider, { sessionId: "peer-same-access" });
+		expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "access-0" });
+
+		// A peer rewrote the row without replacing its access token: only the expiry moved.
+		store.updateAuthCredential(credentialId, {
+			type: "oauth",
+			access: "access-0",
+			refresh: "refresh-0",
+			expires: Date.now() + 2 * 3_600_000,
+		});
+		const unauthorized = Object.assign(new Error("401 revoked"), { status: 401 });
+		const recovered = await resolver({ lastChance: false, error: unauthorized, previousKey: "access-0" });
+		expect(recovered).toMatchObject({ apiKey: "access-1" });
+		expect(singleUse.exchanges()).toBe(1);
+	});
+
 	test("does not disable a login when its refresh token is rejected after taking over a stalled refresher", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 		const provider = "unit-oauth-stalled-owner";
