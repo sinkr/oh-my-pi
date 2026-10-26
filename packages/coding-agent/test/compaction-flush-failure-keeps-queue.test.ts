@@ -193,4 +193,66 @@ describe("flushCompactionQueue failure", () => {
 		await live.abort();
 		await running.catch(() => {});
 	});
+
+	it("does not send an already-sent first prompt again when a later message fails", async () => {
+		const { live, running } = await startStreamingSession();
+
+		// The first typed prompt is queued into the running turn; only then does the next message
+		// fail to deliver.
+		vi.spyOn(live, "steer").mockImplementation(async () => {
+			while (!live.getQueuedMessages().steering.includes("typed first")) await Bun.sleep(1);
+			throw new Error("delivery failed");
+		});
+		const typed: CompactionQueuedMessage[] = [
+			{ text: "typed first", mode: "steer" },
+			{ text: "typed second", mode: "steer" },
+		];
+		const ctx = flushContext(live, typed, () => {});
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+
+		// The session owns the first prompt and still delivers it; only the failed message goes back,
+		// so the next flush does not send the first prompt a second time.
+		expect(live.getQueuedMessages().steering).toEqual(["typed first"]);
+		expect(ctx.compactionQueuedMessages).toEqual([typed[1]]);
+
+		await live.abort();
+		await running.catch(() => {});
+	});
+
+	it("puts the first prompt back when it fails after a later message's failure left it out", async () => {
+		const { live, running } = await startStreamingSession();
+
+		// The first prompt is admitted (its turn setup begins) and only later fails.
+		const setupFails = Promise.withResolvers<void>();
+		vi.spyOn(live, "prompt").mockImplementation(async (_text, options) => {
+			options?.onPromptAdmitted?.();
+			await setupFails.promise;
+			throw new Error("No API key found");
+		});
+		vi.spyOn(live, "steer").mockImplementation(async () => {
+			throw new Error("delivery failed");
+		});
+		const typed: CompactionQueuedMessage[] = [
+			{ text: "typed first", mode: "steer" },
+			{ text: "typed second", mode: "steer" },
+		];
+		const reports: string[] = [];
+		const secondReport = Promise.withResolvers<void>();
+		const ctx = flushContext(live, typed, message => {
+			reports.push(message);
+			if (reports.length === 2) secondReport.resolve();
+		});
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+		expect(ctx.compactionQueuedMessages).toEqual([typed[1]]);
+
+		setupFails.resolve();
+		await secondReport.promise;
+		// Nothing is lost: the failed first prompt returns ahead of the message after it.
+		expect(ctx.compactionQueuedMessages).toEqual(typed);
+
+		await live.abort();
+		await running.catch(() => {});
+	});
 });

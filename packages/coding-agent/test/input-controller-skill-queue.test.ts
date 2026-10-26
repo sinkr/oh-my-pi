@@ -52,7 +52,13 @@ type PromptCustomMessage = Mock<
 			attribution?: string;
 			details: SkillPromptDetails;
 		},
-		options?: { streamingBehavior?: "steer" | "followUp"; queueChipText?: string; queueOnly?: boolean },
+		options?: {
+			streamingBehavior?: "steer" | "followUp";
+			queueChipText?: string;
+			queueOnly?: boolean;
+			onPromptQueued?: (queued: readonly unknown[]) => void;
+			onPromptAdmitted?: () => void;
+		},
 	) => Promise<void>
 >;
 
@@ -510,9 +516,12 @@ describe("compaction skill re-invocation", () => {
 		expect(renderedText.text).toContain("arg1 arg2");
 		expect(message.content[1]).toEqual(image);
 		expect(message.details).toMatchObject({ name: "test-skill", args: "arg1 arg2", lineCount: 1 });
+		// The flush also passes its own admission callbacks; the skill prompt is sent, not queue-only.
 		expect(options).toEqual({
 			streamingBehavior: "followUp",
 			queueChipText: "/skill:test-skill arg1 arg2",
+			onPromptQueued: expect.any(Function),
+			onPromptAdmitted: expect.any(Function),
 		});
 		expect(prompt).not.toHaveBeenCalled();
 		expect(steer).not.toHaveBeenCalled();

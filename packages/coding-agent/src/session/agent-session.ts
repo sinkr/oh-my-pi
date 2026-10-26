@@ -7700,6 +7700,7 @@ export class AgentSession implements SettingsScope {
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
 				rawText: typedText,
+				onPromptQueued: options?.onPromptQueued,
 				onPromptAdmitted: options?.onPromptAdmitted,
 				promptGeneration: queueGeneration,
 			});
@@ -7780,6 +7781,7 @@ export class AgentSession implements SettingsScope {
 					descriptionNotice: imageDescriptionNotice,
 				},
 				onPromptAdmitted: options?.onPromptAdmitted,
+				onPromptQueued: options?.onPromptQueued,
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -7881,6 +7883,7 @@ export class AgentSession implements SettingsScope {
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
+			onPromptQueued?: PromptOptions["onPromptQueued"];
 		},
 	): Promise<boolean> {
 		return this.#admitSubmission(() => this.#promptCustomMessage(message, options));
@@ -7891,6 +7894,7 @@ export class AgentSession implements SettingsScope {
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
+			onPromptQueued?: PromptOptions["onPromptQueued"];
 		},
 	): Promise<boolean> {
 		// Same barrier/claim protocol as prompt(): skill invocations, collab peer
@@ -7912,6 +7916,7 @@ export class AgentSession implements SettingsScope {
 			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
 					queueChipText?: string;
 					queueOnly?: boolean;
+					onPromptQueued?: PromptOptions["onPromptQueued"];
 			  })
 			| undefined,
 		outcome: PromptDispatchOutcome,
@@ -7954,6 +7959,7 @@ export class AgentSession implements SettingsScope {
 				queueChipText: options?.queueChipText,
 				prependMessages: queuedNotices,
 				onPromptAdmitted: options?.onPromptAdmitted,
+				onPromptQueued: options?.onPromptQueued,
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -8000,6 +8006,7 @@ export class AgentSession implements SettingsScope {
 				preprocessed: { content: preparedMessage.content, descriptionNotice },
 				prependMessages: queuedNotices,
 				onPromptAdmitted: options?.onPromptAdmitted,
+				onPromptQueued: options?.onPromptQueued,
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -8755,6 +8762,8 @@ export class AgentSession implements SettingsScope {
 			};
 			/** Called synchronously once the message is pushed onto its queue. See {@link PromptOptions.onPromptAdmitted}. */
 			onPromptAdmitted?: () => void;
+			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
+			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 			/**
 			 * `#promptGeneration` captured when prompt() took this submission. abort() (or a
 			 * history rewrite) bumps it; if that lands while images are being prepared, the
@@ -8820,6 +8829,8 @@ export class AgentSession implements SettingsScope {
 		// Publish the complete group without yielding: removal owns contiguous companions.
 		// The session-agent notice rides via prependMessages (from prompt()),
 		// so it arrives alongside the user message in the same turn (#14093).
+		const queuedGroup: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
+		if (imageDescriptionNotice) queuedGroup.push(imageDescriptionNotice);
 		if (mode === "followUp") {
 			for (const notice of prependMessages) this.agent.followUp(notice);
 			for (const notice of attachmentSourceNotices) this.agent.followUp(notice);
@@ -8832,6 +8843,7 @@ export class AgentSession implements SettingsScope {
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.followUp(userMessage);
+			queuedGroup.push(userMessage);
 		} else {
 			for (const notice of prependMessages) this.agent.steer(notice);
 			for (const notice of attachmentSourceNotices) this.agent.steer(notice);
@@ -8845,7 +8857,9 @@ export class AgentSession implements SettingsScope {
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.steer(userMessage);
+			queuedGroup.push(userMessage);
 		}
+		options?.onPromptQueued?.(queuedGroup);
 		options?.onPromptAdmitted?.();
 		this.#scheduleIdleQueueDrain();
 		return true;
@@ -9050,6 +9064,8 @@ export class AgentSession implements SettingsScope {
 			prependMessages?: readonly CustomMessage[];
 			/** Called synchronously once the message is pushed onto its queue. See {@link PromptOptions.onPromptAdmitted}. */
 			onPromptAdmitted?: () => void;
+			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
+			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 		},
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
@@ -9076,6 +9092,7 @@ export class AgentSession implements SettingsScope {
 		const preprocessed = options?.preprocessed;
 		const prependMessages = options?.prependMessages ?? [];
 		const onPromptAdmitted = options?.onPromptAdmitted;
+		const onPromptQueued = options?.onPromptQueued;
 		const normalizedAppMessage = preprocessed
 			? { ...appMessage, content: preprocessed.content }
 			: await this.#normalizeAgentMessageImages(appMessage);
@@ -9111,6 +9128,7 @@ export class AgentSession implements SettingsScope {
 			if (descriptionNotice) this.agent.steer(descriptionNotice);
 			this.agent.steer(normalizedAppMessage);
 		}
+		onPromptQueued?.([...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage]);
 		onPromptAdmitted?.();
 		this.#scheduleIdleQueueDrain();
 	}
@@ -9533,11 +9551,17 @@ export class AgentSession implements SettingsScope {
 	 * `until`, and agent or extension work that is not user input (with an agent-attributed
 	 * prompt's companions). A caller takes back a batch whose delivery failed by marking before
 	 * delivery and after it; user input another source queued between the two marks cannot be
-	 * told apart from the batch: it is removed with the batch and is not restored.
+	 * told apart from the batch: it is removed with the batch and is not restored. Messages in
+	 * `keep` always stay queued: input the caller has handed over to the session after all, such
+	 * as a prompt it already sent.
 	 */
-	dropUserInputQueuedSince(mark: ReadonlySet<AgentMessage>, until?: ReadonlySet<AgentMessage>): void {
+	dropUserInputQueuedSince(
+		mark: ReadonlySet<AgentMessage>,
+		until?: ReadonlySet<AgentMessage>,
+		keep?: ReadonlySet<AgentMessage>,
+	): void {
 		const callers = (message: AgentMessage): boolean =>
-			!mark.has(message) && (until === undefined || until.has(message));
+			!mark.has(message) && !keep?.has(message) && (until === undefined || until.has(message));
 		const keepFrom = (queue: readonly AgentMessage[]): AgentMessage[] => {
 			const kept: AgentMessage[] = [];
 			let companions: AgentMessage[] = [];
