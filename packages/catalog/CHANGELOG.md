@@ -34,6 +34,8 @@
 - Added Factory Droid's image models (GPT Image 2.5, GPT Image 2.5 Flare, Gemini 3 Pro Image) to the `image` role's choices, listed only while your Factory organization allows image generation and that model ([#16316](https://github.com/can1357/oh-my-pi/pull/16316) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed LiteLLM model groups with `mode: decisions` being listed as chat models; they now route to `openai-decisions` as judge models ([#16939](https://github.com/can1357/oh-my-pi/issues/16939))
 - Removed retired Anthropic models (Claude 3.x, Opus 4/4.1, Sonnet 4) from the bundled catalog and discovery ([#16755](https://github.com/can1357/oh-my-pi/issues/16755))
+- Fixed Kimi Code K3 and K3 256K (`k3`, `k3-256k`) pricing to include Kimi's $3/MTok cache-write rate, matching the Moonshot API `kimi-k3` card ([#16508](https://github.com/can1357/oh-my-pi/issues/16508), [#16903](https://github.com/can1357/oh-my-pi/pull/16903) by [@eggpeat](https://github.com/eggpeat))
+- Fixed Cursor Auto (`cursor/default`) being metered against the third-party ("Other Models") pool instead of the Cursor Models pool it bills to ([#17048](https://github.com/can1357/oh-my-pi/pull/17048) by [@trukhinyuri](https://github.com/trukhinyuri))
 
 ## [18.12.6] - 2026-10-21
 
