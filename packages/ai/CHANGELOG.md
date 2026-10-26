@@ -19,6 +19,12 @@
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - OpenCode Go requests on lanes that opt into shared prompt caching send an explicit prompt-cache key as `x-opencode-session`, so Task siblings, forks and their parent reuse one gateway cache; custom providers declaring `providerType: "opencode-go"` get the same OpenCode headers ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 
+### Changed
+
+- Google Antigravity requests now carry the same request labels as the official 2.26.0 client (`cascade_id`, `root_cascade_id`, `request_id`, `used_non_gemini_model`), and image model lookup sends the account's project ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+- Google Antigravity requests now send each model tier's own `model_enum` label, output cap and thinking setting from the serving account's model list, as the official client does: Claude 5.5 and Gemini 4 Argon tiers send a thinking level, Gemini 3.8 Flash tiers the tier's thinking budget ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+- Google Antigravity requests now number conversation steps like the official client (the first request is step 1, and each model turn and tool result adds one), send `Accept-Encoding: gzip` without an explicit `Accept`, and no longer send the Claude thinking beta header to Claude 5.5 ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+
 ### Fixed
 
 - Fixed an Anthropic stream that a gateway or proxy cuts after `message_start`, substituting an in-band `error` frame, being reported as a completed-turn provider failure instead of a retryable stream truncation ([#16990](https://github.com/can1357/oh-my-pi/pull/16990) by [@Maziar123](https://github.com/Maziar123))

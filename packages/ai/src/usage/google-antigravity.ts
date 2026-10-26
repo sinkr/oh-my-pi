@@ -1,5 +1,5 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
 	CredentialRankingContext,
@@ -437,7 +437,7 @@ async function fetchAntigravityEndpoint(
 				headers: {
 					Authorization: `Bearer ${request.accessToken}`,
 					"Content-Type": "application/json",
-					"User-Agent": getAntigravityUserAgent(),
+					...getAntigravityHeaders(),
 				},
 				body: JSON.stringify({ project: request.projectId }),
 				signal: request.signal,

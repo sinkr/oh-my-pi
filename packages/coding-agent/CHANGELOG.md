@@ -35,6 +35,10 @@
 - Added exclusions to `grep`: a `path` entry starting with `!` leaves matching files and folders out of the search (`src;!*.test.ts`, `!vendor;!gen`), where before it was taken as a path and found nothing ([#16920](https://github.com/can1357/oh-my-pi/pull/16920) by [@will-bogusz](https://github.com/will-bogusz))
 - `wait` and `read proc://` now show a running subagent's run time, request count, cost, context fill and stage, so a subagent that is looping is visible without opening its transcript ([#16863](https://github.com/can1357/oh-my-pi/pull/16863) by [@KimToehler](https://github.com/KimToehler))
 
+### Changed
+
+- Google Antigravity web search sends the same transport headers as the official client (`Accept-Encoding: gzip`, no explicit `Accept`) ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+
 ### Fixed
 
 - Fixed the compiled `omp` binaries trusting certificates from the compromised eMudhra intermediate CAs (CVE-2026-91403) and carrying the Brotli decoder out-of-bounds write (CVE-2026-111497); release binaries now build on Bun 1.4.4 ([#16822](https://github.com/can1357/oh-my-pi/issues/16822), [#16865](https://github.com/can1357/oh-my-pi/pull/16865) by [@bse-ai](https://github.com/bse-ai))

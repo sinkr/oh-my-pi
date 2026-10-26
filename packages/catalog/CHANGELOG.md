@@ -18,6 +18,10 @@
 
 - llama.cpp login instructions now list both default local base URLs (`http://127.0.0.1:8080`, then `http://127.0.0.1:9931`) ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 - Devin requests now identify as Devin CLI 3000.11.205, the current stable release, instead of 3000.11.3 ([#16906](https://github.com/can1357/oh-my-pi/pull/16906) by [@will-bogusz](https://github.com/will-bogusz))
+- Google Antigravity login now uses PKCE and requests the `aicode` scope like the official client; existing logins keep working, and the new scope applies at the next `/login` ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+- Antigravity requests identify as client 2.26.0 when the release manifest is unreachable (previously 2.19.1), and model discovery sends the account's project like the official client ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+- Antigravity's `User-Agent` now reports the native Antigravity build for the host OS (Linux `linux`/`amd64`, Windows `windows`/`amd64`) instead of always claiming macOS `darwin`/`arm64` ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
+- Antigravity model discovery now keeps each account's per-tier `model_enum`, output cap and thinking level or budget, and the bundled Antigravity models carry them for offline use; cached Antigravity model lists are refreshed once so they pick them up ([#17012](https://github.com/can1357/oh-my-pi/pull/17012) by [@apoc](https://github.com/apoc))
 
 ### Fixed
 
