@@ -6288,6 +6288,36 @@ mod tests {
 		);
 	}
 
+	/// A background external command's descriptor path (`/dev/stdout`) reaches
+	/// the shell's own output pipe and looked like a FIFO, so it was left to
+	/// the child, which then wrote to its `/dev/null` placeholder. And the
+	/// `/bin/sh` that makes deferred redirects stored the FIFO path in `f1`,
+	/// replacing an exported `f1` in the command's environment.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deferred_redirects_keep_descriptor_paths_and_the_environment() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					"/bin/echo out > /dev/stdout & wait\n",
+					"export f1=orig; /usr/bin/env > f & grep '^f1=' < f; wait",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the commands finish");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "out\nf1=orig\n"));
+	}
+
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
 	/// seconds. The deadline lives on the calling thread, so it still fires when
 	/// a builtin blocks the runtime's only worker.

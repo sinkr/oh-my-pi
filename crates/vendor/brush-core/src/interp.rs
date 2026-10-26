@@ -2495,13 +2495,17 @@ const fn deferred_open_operator(kind: &ast::IoFileRedirectKind) -> Option<&'stat
 	}
 }
 
-/// Whether `path` is a FIFO on the host, which a child process can open by
-/// name.
+/// Whether `path` names a FIFO on the host that a child process opens as the
+/// same FIFO. A descriptor path (`/dev/stdout`, `/dev/fd/N`, `/proc/self/fd/N`)
+/// does not qualify even when it reaches a pipe: it names a descriptor of
+/// whichever process opens it, and the child's is the placeholder.
 fn is_native_fifo(shell: &Shell<impl extensions::ShellExtensions>, path: &Path) -> bool {
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::FileTypeExt;
-		shell.filesystem().is_native_local(path)
+		openfiles::DescriptorPath::parse(path).is_none()
+			&& !path.starts_with("/proc")
+			&& shell.filesystem().is_native_local(path)
 			&& std::fs::metadata(path).is_ok_and(|meta| meta.file_type().is_fifo())
 	}
 	#[cfg(not(unix))]
@@ -2539,28 +2543,23 @@ pub(crate) async fn materialize_deferred_redirects(
 }
 
 /// The `/bin/sh -c` script that makes `redirects` and then becomes the
-/// command: `f1=$1; shift 1; exec "$@" 0<"$f1" 2>&1`. Paths travel as
-/// positional parameters, never in the script.
-pub(crate) fn deferred_redirect_script(redirects: &[DeferredRedirect]) -> (String, Vec<String>) {
+/// command given as its positional parameters: `exec "$@" 0<'/tmp/f' 2>&1`.
+/// Each path is a single-quoted literal (a `'` in it written `'\''`), so the
+/// script sets no variable that the command's environment could see.
+pub(crate) fn deferred_redirect_script(redirects: &[DeferredRedirect]) -> String {
 	use std::fmt::Write as _;
-	let mut paths = Vec::new();
-	let mut assignments = String::new();
-	let mut operations = String::new();
+	let mut script = String::from("exec \"$@\"");
 	for redirect in redirects {
 		match redirect {
 			DeferredRedirect::Open { fd, op, path, .. } => {
-				paths.push(path.clone());
-				let index = paths.len();
-				let _ = write!(assignments, "f{index}=${index}; ");
-				let _ = write!(operations, " {fd}{op}\"$f{index}\"");
+				let _ = write!(script, " {fd}{op}'{}'", path.replace('\'', "'\\''"));
 			},
 			DeferredRedirect::Duplicate { fd, from } => {
-				let _ = write!(operations, " {fd}>&{from}");
+				let _ = write!(script, " {fd}>&{from}");
 			},
 		}
 	}
-	let script = format!("{assignments}shift {}; exec \"$@\"{operations}", paths.len());
-	(script, paths)
+	script
 }
 
 const fn get_default_fd_for_redirect_kind(kind: &ast::IoFileRedirectKind) -> ShellFd {

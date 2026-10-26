@@ -887,9 +887,8 @@ pub(crate) async fn execute_external_command(
 		// `interp::DeferredRedirect`): `/bin/sh` makes them and then execs the
 		// command in place, so the pid the shell tracks is the command's. Its
 		// argv[0] is then the resolved path.
-		let (script, paths) = interp::deferred_redirect_script(context.params.deferred_redirects());
+		let script = interp::deferred_redirect_script(context.params.deferred_redirects());
 		let mut trampoline_args = vec!["-c".to_owned(), script, "sh".to_owned()];
-		trampoline_args.extend(paths);
 		trampoline_args.push(executable_path.to_owned());
 		trampoline_args.extend(cmd_args.iter().map(|arg| (*arg).clone()));
 		compose_std_command(&context, "/bin/sh", "sh", trampoline_args.as_slice(), false).await?
