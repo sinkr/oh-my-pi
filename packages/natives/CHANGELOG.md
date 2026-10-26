@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the embedded shell's globs keeping matches whose literal tail does not exist: `ls -d DIR/*/` now lists only directories instead of passing every file as `file/` (one "Not a directory" error each), and `*/name` keeps only matches that contain `name`, as in bash
+- Fixed the embedded shell's globs keeping matches whose literal tail does not exist: `ls -d DIR/*/` now lists only directories instead of passing every file as `file/` (one "Not a directory" error each), and `*/name` keeps only matches that contain `name`, as in bash ([#17110](https://github.com/can1357/oh-my-pi/pull/17110) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.0] - 2026-10-26
 
