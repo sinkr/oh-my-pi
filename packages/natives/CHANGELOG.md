@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed the embedded shell's globs keeping matches whose literal tail does not exist: `ls -d DIR/*/` now lists only directories instead of passing every file as `file/` (one "Not a directory" error each), and `*/name` keeps only matches that contain `name`, as in bash
+- Fixed the embedded shell ignoring `shopt -s globstar`: `**` now matches any number of directory levels as in bash 5.2 (`**/*.rs` finds files at every depth, `**/` lists every directory, and like bash the walk does not recurse through symlinked directories), and a timeout or interrupt stops a long `**` expansion
 
 ## [18.12.2] - 2026-10-18
 
