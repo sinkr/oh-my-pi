@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { mkdirSync } from "node:fs";
+import * as fs from "node:fs";
 import type { Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { buildRequest as buildGeminiRequest } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -1085,7 +1085,7 @@ describe("task sibling prompt-cache routing", () => {
 			// its own, so the onCwdChange hook can drive both the rejected and
 			// the committed switch below.
 			const altCwd = directory.join("alt");
-			mkdirSync(altCwd, { recursive: true });
+			fs.mkdirSync(altCwd, { recursive: true });
 			const { session: alt } = await sdk.createAgentSession({
 				cwd: altCwd,
 				agentDir: directory.path(),
@@ -1133,6 +1133,84 @@ describe("task sibling prompt-cache routing", () => {
 			await child.prompt("Review the alternate session.");
 			expect(requests.at(-1)?.cacheKey).toBeUndefined();
 			expect(requests.at(-1)?.wireKey).toBe(requests.at(-1)?.sessionId);
+		} finally {
+			await Promise.all(sessions.splice(0).map(session => session.dispose()));
+			authStorage.close();
+		}
+	});
+
+	// Thread F: the stash is scoped to the conversation that minted it, and a
+	// successful moveTo relocates that conversation to a new workspace and
+	// session bucket. The first opted-in request after a completed move must
+	// therefore stay child-scoped instead of promoting the pre-move parent
+	// family, while a move that rolls back never moved anything — the stash
+	// must keep feeding that child's opted-in requests.
+	it("drops the stashed family key after a successful moveTo but keeps it across a rolled-back move", async () => {
+		using directory = TempDir.createSync("@omp-task-cache-move-");
+		const h = await createUnoptedTaskFixture(directory);
+		const { authStorage, initialModel, optedModel, requests, createParent, runTask, childFor } = h;
+		try {
+			const parent = await createParent("parent-lineage", initialModel);
+			const tool = parent.getToolByName("task") as TaskTool;
+			await runTask(tool, "SiblingA");
+			await runTask(tool, "SiblingB");
+			expect(requests).toHaveLength(2);
+			const movedChild = childFor(requests[0]?.sessionId);
+			const rolledChild = childFor(requests[1]?.sessionId);
+			// The executor stashed the parent-derived family key for both
+			// unopted-start children; neither seeded its persisted header copy.
+			expect(movedChild.sessionManager.getTaskSiblingCandidate()).toBe("parent-lineage:task");
+			expect(rolledChild.sessionManager.getTaskSiblingCandidate()).toBe("parent-lineage:task");
+
+			// Normal successful move: the child relocates into a fresh cwd and
+			// session bucket, then switches onto the opted lane. The first
+			// eligible request after the move must not promote the pre-move
+			// parent family onto the wire.
+			const movedFile = movedChild.sessionManager.getSessionFile();
+			if (!movedFile) throw new Error("Expected a persisted Task child");
+			const movedCwd = directory.join("moved-cwd");
+			fs.mkdirSync(movedCwd, { recursive: true });
+			await movedChild.sessionManager.moveTo(movedCwd, directory.join("moved-sessions"));
+			expect(movedChild.sessionManager.getSessionFile()).not.toBe(movedFile);
+			expect(fs.existsSync(movedFile)).toBe(false);
+			movedChild.agent.setModel(optedModel);
+			await movedChild.prompt("Continue after the move.");
+			expect(requests.at(-1)?.cacheKey).toBeUndefined();
+			expect(requests.at(-1)?.wireKey).toBe(requests.at(-1)?.sessionId);
+			expect(movedChild.sessionManager.getTaskSiblingCandidate()).toBeUndefined();
+
+			// Rollback control: the session file renames into the destination
+			// bucket, the artifacts rename is denied, and moveTo renames the
+			// session file back before rethrowing — the conversation never
+			// moved, so the stash must survive it and still reach the wire on
+			// the child's first opted-in request.
+			const rolledFile = rolledChild.sessionManager.getSessionFile();
+			if (!rolledFile) throw new Error("Expected a persisted Task child");
+			const rolledArtifacts = rolledFile.slice(0, -".jsonl".length);
+			expect(fs.existsSync(rolledFile)).toBe(true);
+			fs.mkdirSync(rolledArtifacts, { recursive: true });
+			const rolledCwd = directory.join("rolled-cwd");
+			fs.mkdirSync(rolledCwd, { recursive: true });
+			const rename = fs.promises.rename.bind(fs.promises);
+			const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+				if (from.toString() === rolledArtifacts) {
+					throw Object.assign(new Error("artifact move denied"), { code: "EACCES" });
+				}
+				return rename(from, to);
+			});
+			try {
+				await expect(
+					rolledChild.sessionManager.moveTo(rolledCwd, directory.join("rolled-sessions")),
+				).rejects.toThrow("artifact move denied");
+			} finally {
+				renameSpy.mockRestore();
+			}
+			expect(rolledChild.sessionManager.getSessionFile()).toBe(rolledFile);
+			expect(rolledChild.sessionManager.getTaskSiblingCandidate()).toBe("parent-lineage:task");
+			rolledChild.agent.setModel(optedModel);
+			await rolledChild.prompt("Continue after the rolled-back move.");
+			expect(requests.at(-1)?.cacheKey).toBe("parent-lineage:task");
+			expect(requests.at(-1)?.wireKey).toBe("parent-lineage:task");
 		} finally {
 			await Promise.all(sessions.splice(0).map(session => session.dispose()));
 			authStorage.close();
