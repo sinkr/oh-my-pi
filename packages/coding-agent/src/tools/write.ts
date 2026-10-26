@@ -31,7 +31,14 @@ import {
 } from "@oh-my-pi/pi-utils/ar";
 import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/normalize";
 
-import { extractUriScheme, InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
+import {
+	extractUriScheme,
+	InternalUrlRouter,
+	LocalProtocolHandler,
+	resolveLocalRoot,
+	sessionResolveContext,
+	sessionWriteContext,
+} from "../internal-urls";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
 
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
@@ -40,6 +47,7 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
+import writeDeviceOnlyRefusal from "../prompts/tools/write-device-only-refusal.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
@@ -490,6 +498,17 @@ function isArchivePathNotFound(error: unknown): boolean {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOTDIR";
 }
 
+/**
+ * On-disk form of `local://<name>`, resolved the way the write itself resolves
+ * it (session context, then process override, then main session) and shortened
+ * to `~` so the refusal does not carry the home directory into transcripts;
+ * undefined when `local://` has no root for this session.
+ */
+function localFileDiskPathHint(session: ToolSession): string | undefined {
+	const options = LocalProtocolHandler.resolveOptions(sessionResolveContext(session));
+	return options ? shortenPath(path.join(resolveLocalRoot(options), "<name>")) : undefined;
+}
+
 function normalizeArchiveWriteSubPath(rawPath: string): string {
 	const normalized = rawPath.replace(/\\/g, "/");
 	if (normalized.length === 0) {
@@ -935,14 +954,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			// briefing names a file path. Without naming the channel that does work,
 			// the rejection reads as a dead end (#14308). Keyed on `yield` being
 			// active rather than on an `isReadOnlyAgent` flag, which never reaches
-			// this session: a caller without `yield` keeps today's message verbatim.
-			const yieldFallback =
-				this.session.isToolActive?.("yield") === true
-					? " To deliver results to the caller, return the content in `yield` instead."
-					: "";
+			// this session. When both the disk path and `yield` apply, the template
+			// names them as one route (return the path or the content through
+			// `yield`) instead of two competing deliverables.
 			throw new ToolError(
-				"This `write` tool is limited to the xd:// device transport and local:// session scratch: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices), or write a `local://<name>` file. Filesystem writes are not available elsewhere." +
-					yieldFallback,
+				prompt.render(writeDeviceOnlyRefusal, {
+					diskPath: localFileDiskPathHint(this.session),
+					canYield: this.session.isToolActive?.("yield") === true,
+				}),
 			);
 		}
 		return untilAborted(signal, async () => {
