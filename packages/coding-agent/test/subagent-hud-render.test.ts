@@ -11,6 +11,7 @@ import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	InteractiveMode,
@@ -34,7 +35,7 @@ import {
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-import { cfgDisplaySubagentLivePreview } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgDisplayPinnedAgents, cfgDisplaySubagentLivePreview } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgTaskShowResolvedModelBadge } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 function makeSession(overrides: Partial<ObservableSession> & { id: string }): ObservableSession {
@@ -994,6 +995,83 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("does not repaint unchanged background progress after the HUD settles", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
+		vi.useFakeTimers();
+		const payload = makeProgressPayload("Background", 0, "Compile", true);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
+		await Promise.resolve();
+		vi.runAllTimers();
+		await Promise.resolve();
+		requestRender.mockClear();
+		updateHud.mockClear();
+		for (let index = 0; index < 20; index++) {
+			eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+				...payload,
+				progress: { ...payload.progress, durationMs: index + 1 },
+			});
+			await Promise.resolve();
+			vi.runAllTimers();
+			await Promise.resolve();
+		}
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(updateHud).not.toHaveBeenCalled();
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Background", 0, "Link", true));
+		await Promise.resolve();
+		vi.runAllTimers();
+		await Promise.resolve();
+		expect(requestRender).toHaveBeenCalled();
+		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("Link");
+	});
+
+	it("repaints native checklist changes outside the terminal TODO window", async () => {
+		cfgDisplayPinnedAgents.override(Settings.instance, "off");
+		await mode.init({ suppressWelcomeIntro: true });
+		const cx: DescribeContext = {
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		let paintedStatus: string | undefined;
+		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
+			for (const child of mode.describeStatusHud([], cx).c ?? []) {
+				if ("k" in child && child.k === "checklist") {
+					paintedStatus = child.p?.phases[5]?.items[0]?.status;
+				}
+			}
+		});
+		mode.setTodos(
+			[
+				"Inspect inputs",
+				"Design interface",
+				"Implement parser",
+				"Check output",
+				"Document settings",
+				"Verify deployment",
+			].map((content, index) => ({
+				name: `Phase ${index + 1}`,
+				tasks: [{ content, status: "pending" as const }],
+			})),
+		);
+		expect(paintedStatus).toBe("pending");
+		vi.useFakeTimers();
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Unrelated work", true));
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		const terminalRows = [...mode.todoContainer.render(120)];
+		expect(terminalRows.join("\n")).not.toContain("Verify deployment");
+
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Verify deployment", true));
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(mode.todoContainer.render(120)).toEqual(terminalRows);
+		expect(paintedStatus).toBe("active");
+	});
+
 	it("applies the setting over a clicked expand override", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		for (let index = 0; index < 5; index++) {
@@ -1033,5 +1111,39 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		vi.advanceTimersByTime(1_000);
 		expect(mode.subagentContainer.children[0]).toBe(hud);
 		expect(hudText()).toContain("bash: sleep 40 · 21.1s");
+	});
+
+	it("repaints an identical new call after the elapsed timer painted the previous call", async () => {
+		cfgDisplaySubagentLivePreview.override(Settings.instance, true);
+		await mode.init({ suppressWelcomeIntro: true });
+		let painted = "";
+		vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
+			painted = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
+		});
+		vi.useFakeTimers();
+		setSystemTime(1_000_000);
+		const payload = makeProgressPayload("Builder", 0, "Build", true);
+		payload.progress = {
+			...payload.progress,
+			currentTool: "bash",
+			currentToolArgs: "build it",
+			currentToolStartMs: Date.now(),
+		};
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(painted).toContain("bash: build it");
+		expect(painted).not.toContain("bash: build it ·");
+
+		vi.advanceTimersByTime(6_000);
+		expect(painted).toContain("bash: build it ·");
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			...payload,
+			progress: { ...payload.progress, currentToolStartMs: Date.now(), toolCount: 2 },
+		});
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(painted).toContain("bash: build it");
+		expect(painted).not.toContain("bash: build it ·");
 	});
 });

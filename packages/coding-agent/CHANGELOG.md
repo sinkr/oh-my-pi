@@ -16,6 +16,7 @@
 
 ### Changed
 
+- Reduced redraws during background subagent progress while keeping elapsed previews and native checklists current ([#16647](https://github.com/can1357/oh-my-pi/pull/16647) by [@Komzpa](https://github.com/Komzpa)).
 - `ask` answers now name the option a note is on (`m: [X, Y] (note on Y: …)`, `User added note on Y: …`) ([#17126](https://github.com/can1357/oh-my-pi/pull/17126) by [@H4vC](https://github.com/H4vC))
 
 ## [18.13.0] - 2026-10-26
