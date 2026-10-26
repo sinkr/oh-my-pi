@@ -1065,6 +1065,30 @@ export function requestRpcSelect(
 	);
 }
 
+/** Sends an RPC input request, passing optional secret masking and timeout metadata. */
+export function requestRpcInput(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	title: string,
+	placeholder?: string,
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<string | undefined> {
+	return requestRpcDialog(
+		pendingRequests,
+		output,
+		dialogOptions,
+		undefined,
+		{
+			method: "input",
+			title,
+			placeholder,
+			timeout: dialogOptions?.timeout,
+			...(dialogOptions?.secret !== undefined ? { secret: dialogOptions.secret } : {}),
+		},
+		response => parseValueDialogResponse(response, dialogOptions),
+	);
+}
+
 /** Validates `ask` answers against the questions; any mismatch throws instead of guessing. */
 function parseAskDialogResponse(
 	response: RpcExtensionUIResponse,
@@ -1474,14 +1498,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			placeholder?: string,
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> {
-			return requestRpcDialog(
-				this.pendingRequests,
-				this.output,
-				dialogOptions,
-				undefined,
-				{ method: "input", title, placeholder, timeout: dialogOptions?.timeout },
-				response => parseValueDialogResponse(response, dialogOptions),
-			);
+			return requestRpcInput(this.pendingRequests, this.output, title, placeholder, dialogOptions);
 		}
 
 		onTerminalInput(): () => void {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ctx.ui.input` now accepts `{ secret: true }` to mask typed characters as bullets in the TUI, forward an optional `secret` host hint on RPC `extension_ui_request` frames, and refuse plaintext form elicitation in ACP mode ([#17080](https://github.com/can1357/oh-my-pi/pull/17080) by [@GTanger](https://github.com/GTanger))
+
 ## [18.13.0] - 2026-10-26
 
 ### Breaking Changes

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `HookInputComponent` (`showHookInput`) now accepts `{ secret: true }` to mask typed characters as bullets (`•`) in input overlays ([#17080](https://github.com/can1357/oh-my-pi/pull/17080) by [@GTanger](https://github.com/GTanger))
+
 ## [18.13.0] - 2026-10-26
 
 ### Breaking Changes
