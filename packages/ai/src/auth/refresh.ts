@@ -363,10 +363,7 @@ export class OAuthRefresher {
 		// Add before registering: a registration made while exit cleanup runs drains at
 		// once, and must find this work pending or the process exits without it.
 		this.#pendingRefreshes.add(pending);
-		this.#cancelRefreshCleanup ??= postmortem.register("oauth-refresh", () => this.#drainRefreshes(), {
-			exitOnly: true,
-			deadlineMs: OAUTH_REFRESH_SHUTDOWN_WAIT_MS,
-		});
+		this.#armShutdownDrain();
 		const settled = () => {
 			this.#pendingRefreshes.delete(pending);
 			if (this.#pendingRefreshes.size === 0 && !this.#shuttingDown) {
@@ -376,6 +373,17 @@ export class OAuthRefresher {
 		};
 		void pending.then(settled, settled);
 		return pending;
+	}
+
+	/**
+	 * Registers the shutdown drain if it is not registered yet. A registration made
+	 * once exit has begun drains at once, which sets `#shuttingDown`.
+	 */
+	#armShutdownDrain(): void {
+		this.#cancelRefreshCleanup ??= postmortem.register("oauth-refresh", () => this.#drainRefreshes(), {
+			exitOnly: true,
+			deadlineMs: OAUTH_REFRESH_SHUTDOWN_WAIT_MS,
+		});
 	}
 
 	async #drainRefreshes(): Promise<void> {
@@ -512,6 +520,9 @@ export class OAuthRefresher {
 			if (options.canRefresh && !options.canRefresh(current)) {
 				return { credential: current, refreshed: false, removed: false };
 			}
+			// Arm the drain first: once exit has begun, arming it sets `#shuttingDown`, so a
+			// refresh that starts then stops here instead of spending a token nobody saves.
+			this.#armShutdownDrain();
 			if (this.#shuttingDown || options.signal?.aborted) {
 				throw new AIError.AbortError("OAuth refresh stopped before token exchange");
 			}
@@ -687,7 +698,16 @@ export class OAuthRefresher {
 					// Never release this lease afterwards: a hand-back that landed left
 					// nothing to release, and one that did not must leave a recent owner.
 					keepLease = true;
-					const handedBack = await this.#handBackLease(leaseStore, leasedCredentialId, owner, takenOverFrom);
+					const handedBack = await this.#handBackLease(leaseStore, leasedCredentialId, owner, takenOverFrom).catch(
+						(error: unknown) => {
+							// The lease then expires still naming this refresher, a recent holder.
+							logger.warn("OAuth refresh could not hand a taken-over lease back", {
+								credentialId: row.id,
+								error: String(error),
+							});
+							return false;
+						},
+					);
 					logger.warn("OAuth refresh token rejected after taking over a stalled refresher; not disabling", {
 						provider,
 						credentialId: row.id,

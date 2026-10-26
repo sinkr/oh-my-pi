@@ -1276,31 +1276,43 @@ describe("AuthStorage OAuth refresh race", () => {
 		30_000,
 	);
 
-	test.skipIf(process.platform === "win32")(
-		"a refresh that starts while exit cleanup runs is saved before exit",
-		async () => {
-			if (!store || !tempDir) throw new Error("test setup failed");
-			const dbPath = path.join(tempDir, "agent.db");
-			await authStorage!.credentials.set("anthropic", [
-				{ type: "oauth", access: "old", refresh: "old-refresh", expires: 0 },
-			]);
-			const child = Bun.spawn(
-				[process.execPath, path.join(import.meta.dir, "fixtures/oauth-refresh-during-exit-child.ts"), dbPath],
-				{ stdout: "pipe", stderr: "pipe" },
-			);
-			try {
-				expect(await child.exited).toBe(0);
-				expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject({
-					type: "oauth",
-					access: "new",
-					refresh: "new-refresh",
-				});
-			} finally {
-				if (child.exitCode === null) child.kill();
-				await child.exited;
-			}
-		},
-	);
+	for (const stage of ["during-pass", "after-pass"] as const) {
+		test.skipIf(process.platform === "win32")(
+			`a refresh that starts once exit has begun never leaves a spent token (${stage})`,
+			async () => {
+				if (!store || !tempDir) throw new Error("test setup failed");
+				const dbPath = path.join(tempDir, "agent.db");
+				const marker = path.join(tempDir, "exchanged");
+				await authStorage!.credentials.set("anthropic", [
+					{ type: "oauth", access: "old", refresh: "old-refresh", expires: 0 },
+				]);
+				// `during-pass`: the refresh starts in another owner's cleanup; `after-pass`: just before the real exit.
+				const child = Bun.spawn(
+					[
+						process.execPath,
+						path.join(import.meta.dir, "fixtures/oauth-refresh-during-exit-child.ts"),
+						dbPath,
+						marker,
+						stage,
+					],
+					{ stdout: "pipe", stderr: "pipe" },
+				);
+				try {
+					expect(await child.exited).toBe(0);
+					expect(await Bun.file(`${marker}.started`).exists()).toBe(true);
+					// Either no exchange started, or the token it got was saved before exit.
+					const exchanged = await Bun.file(marker).exists();
+					expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject(
+						exchanged ? { access: "new", refresh: "new-refresh" } : { access: "old", refresh: "old-refresh" },
+					);
+				} finally {
+					if (child.exitCode === null) child.kill();
+					await child.exited;
+				}
+			},
+			30_000,
+		);
+	}
 
 	test("a 401 names the token of the request that failed, not of the last request started", async () => {
 		if (!authStorage) throw new Error("test setup failed");
@@ -1425,6 +1437,38 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(String(failures[0])).toContain("stalled refresher");
 		expect(events).toHaveLength(0);
 		expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+	});
+
+	test("a store error during the hand-back after a takeover rejection still goes through the failure policy", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-stalled-owner-handback-error";
+		await seedLogin(provider);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		expect(store.tryAcquireCredentialRefreshLease?.(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+		vi.spyOn(store, "handBackCredentialRefreshLease").mockImplementation(() => {
+			throw new Error("disk I/O error");
+		});
+		const failures: unknown[] = [];
+
+		const result = await authStorage.oauth.refreshStored(provider, {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			refresh: async () => {
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+			isDefinitiveFailure: error => error instanceof Error && error.message.includes("invalid_grant"),
+			disabledCause: () => "oauth refresh failed",
+			keepCredentialOnRefreshFailure: true,
+			onRefreshFailure: error => {
+				failures.push(error);
+			},
+		});
+
+		expect(result.credential).toMatchObject({ type: "oauth", refresh: "refresh-0" });
+		expect(String(failures[0])).toContain("stalled refresher");
+		expect(events).toHaveLength(0);
 	});
 
 	test("a caller leaving without an exchange does not wait for a busy lease hand-back", async () => {
