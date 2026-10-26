@@ -112,9 +112,52 @@ pub struct ExecutionParameters {
 	/// Optional flag a command raises when it reports an error yet goes on,
 	/// so its exit status does not show the failure.
 	reported_error:           Option<Arc<AtomicBool>>,
+	/// Whether redirections to a FIFO are left for the external command's
+	/// child to make (see [`DeferredRedirect`]). Set for a background external
+	/// command, whose parent spawns it before going on.
+	defer_fifo_redirects:     bool,
+	/// The redirections left for the child, in order.
+	deferred_redirects:       Vec<DeferredRedirect>,
 }
 
+/// A redirection a background external command's child makes itself, after
+/// the parent has spawned it. Opening a FIFO waits for its other end, which
+/// may be the next command (`/bin/cat < f & echo hi > f`), so the parent must
+/// not wait for it, as bash does not: bash opens it in the forked child. The
+/// child runs these through `/bin/sh -c 'exec "$@" …'` and becomes the
+/// command, so `$!`, `wait`, `kill` and `jobs` see its real pid.
+#[derive(Clone)]
+pub(crate) enum DeferredRedirect {
+	/// `fd OP path`; `options` reopen it in the parent if the redirections
+	/// must be made there after all.
+	Open { fd: ShellFd, op: &'static str, path: String, options: pi_vfs::OpenOptions },
+	/// `fd>&from`, where `from` is set by an earlier deferred redirection.
+	Duplicate { fd: ShellFd, from: ShellFd },
+}
+
+impl DeferredRedirect {
+	const fn fd(&self) -> ShellFd {
+		match self {
+			Self::Open { fd, .. } | Self::Duplicate { fd, .. } => *fd,
+		}
+	}
+}
+
+/// The highest descriptor a POSIX `sh` redirection is sure to accept.
+const MAX_DEFERRED_FD: ShellFd = 9;
+
 impl ExecutionParameters {
+	/// The redirections left for an external command's child to make; see
+	/// [`DeferredRedirect`].
+	pub(crate) fn deferred_redirects(&self) -> &[DeferredRedirect] {
+		&self.deferred_redirects
+	}
+
+	/// Whether a deferred redirection sets `fd`.
+	fn defers(&self, fd: ShellFd) -> bool {
+		self.deferred_redirects.iter().any(|redirect| redirect.fd() == fd)
+	}
+
 	/// Assigns a cancellation token for this execution.
 	pub fn set_cancel_token(&mut self, token: CancellationToken) {
 		self.cancel_token = Some(token);
@@ -454,7 +497,11 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 		// survives the host's descendant-walk teardown — the persistence agents
 		// reach for `nohup` expecting.
 		async_params.detach_reparent = detach_reparent;
-		match try_spawn_pipeline_as_job(&pipeline, ao_list.to_string(), shell, &async_params).await? {
+		// The parent spawns this command before going on, so it must not wait for
+		// a FIFO's other end; see `DeferredRedirect`.
+		let mut direct_params = async_params.clone();
+		direct_params.defer_fifo_redirects = true;
+		match try_spawn_pipeline_as_job(&pipeline, ao_list.to_string(), shell, &direct_params).await? {
 			Some(job) => job,
 			None => spawn_async_ao_list_in_task(ao_list, shell, &async_params),
 		}
@@ -2127,6 +2174,25 @@ pub(crate) async fn setup_redirect(
 
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
+					if let Some(op) = deferred_open_operator(kind)
+						&& params.defer_fifo_redirects
+						&& fd_num <= MAX_DEFERRED_FD
+						&& is_native_fifo(shell, &expanded_file_path)
+						&& let Some(path) = expanded_file_path.to_str()
+					{
+						params.deferred_redirects.push(DeferredRedirect::Open {
+							fd: fd_num,
+							op,
+							path: path.to_owned(),
+							options,
+						});
+						params.open_files.set_fd(fd_num, openfiles::null()?);
+						return Ok(());
+					}
+					if params.defers(fd_num) {
+						materialize_deferred_redirects(shell, params).await?;
+					}
+
 					let opened_file = shell
 						.open_file(&options, &expanded_file_path, params)
 						.await
@@ -2153,6 +2219,15 @@ pub(crate) async fn setup_redirect(
 					};
 
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
+
+					if params.defers(*fd) && fd_num <= MAX_DEFERRED_FD {
+						params.deferred_redirects.push(DeferredRedirect::Duplicate { fd: fd_num, from: *fd });
+						params.open_files.set_fd(fd_num, openfiles::null()?);
+						return Ok(());
+					}
+					if params.defers(fd_num) || params.defers(*fd) {
+						materialize_deferred_redirects(shell, params).await?;
+					}
 
 					if let Some(f) = params.try_fd(shell, *fd) {
 						let target_file = f.try_clone()?;
@@ -2192,6 +2267,26 @@ pub(crate) async fn setup_redirect(
 					} else {
 						false
 					};
+
+					if !dash
+						&& fd_num <= MAX_DEFERRED_FD
+						&& let Ok(source_fd_num) = expanded.parse::<ShellFd>()
+						&& params.defers(source_fd_num)
+					{
+						params.deferred_redirects.push(DeferredRedirect::Duplicate {
+							fd:   fd_num,
+							from: source_fd_num,
+						});
+						params.open_files.set_fd(fd_num, openfiles::null()?);
+						return Ok(());
+					}
+					if params.defers(fd_num)
+						|| expanded.parse::<ShellFd>().is_ok_and(|source| params.defers(source))
+					{
+						// A move (`N>&M-`) or close of a deferred descriptor is made in the
+						// parent, with every deferred redirection before it.
+						materialize_deferred_redirects(shell, params).await?;
+					}
 
 					if expanded.is_empty() {
 						// Nothing to do
@@ -2240,6 +2335,9 @@ pub(crate) async fn setup_redirect(
 
 							let fd_num =
 								specified_fd_num.unwrap_or_else(|| get_default_fd_for_redirect_kind(kind));
+							if params.defers(fd_num) || params.defers(substitution_fd) {
+								materialize_deferred_redirects(shell, params).await?;
+							}
 
 							params.open_files.set_fd(fd_num, target_file);
 						},
@@ -2266,6 +2364,9 @@ pub(crate) async fn setup_redirect(
 			};
 
 			let f = setup_open_file_with_contents(io_here_doc.as_str())?;
+			if params.defers(fd_num) {
+				materialize_deferred_redirects(shell, params).await?;
+			}
 
 			params.open_files.set_fd(fd_num, f);
 		},
@@ -2278,6 +2379,9 @@ pub(crate) async fn setup_redirect(
 			expanded_word.push('\n');
 
 			let f = setup_open_file_with_contents(expanded_word.as_str())?;
+			if params.defers(fd_num) {
+				materialize_deferred_redirects(shell, params).await?;
+			}
 
 			params.open_files.set_fd(fd_num, f);
 		},
@@ -2310,6 +2414,28 @@ async fn setup_redirect_output_and_error_to(
 		.truncate(!append)
 		.append(append);
 
+	if params.defer_fifo_redirects
+		&& is_native_fifo(shell, &abs_file_path)
+		&& let Some(path) = abs_file_path.to_str()
+	{
+		params.deferred_redirects.push(DeferredRedirect::Open {
+			fd:      OpenFiles::STDOUT_FD,
+			op:      if append { ">>" } else { ">" },
+			path:    path.to_owned(),
+			options: file_options,
+		});
+		params.deferred_redirects.push(DeferredRedirect::Duplicate {
+			fd:   OpenFiles::STDERR_FD,
+			from: OpenFiles::STDOUT_FD,
+		});
+		params.open_files.set_fd(OpenFiles::STDOUT_FD, openfiles::null()?);
+		params.open_files.set_fd(OpenFiles::STDERR_FD, openfiles::null()?);
+		return Ok(());
+	}
+	if params.defers(OpenFiles::STDOUT_FD) || params.defers(OpenFiles::STDERR_FD) {
+		materialize_deferred_redirects(shell, params).await?;
+	}
+
 	let stdout_file = shell
 		.open_file(&file_options, &abs_file_path, params)
 		.await
@@ -2326,6 +2452,87 @@ async fn setup_redirect_output_and_error_to(
 	params.open_files.set_fd(OpenFiles::STDERR_FD, stderr_file);
 
 	Ok(())
+}
+
+/// The `sh` operator a deferred FIFO open of `kind` replays; `None` for kinds
+/// whose open never waits (`<>`) or that are not plain opens.
+const fn deferred_open_operator(kind: &ast::IoFileRedirectKind) -> Option<&'static str> {
+	match kind {
+		ast::IoFileRedirectKind::Read => Some("<"),
+		ast::IoFileRedirectKind::Write | ast::IoFileRedirectKind::Clobber => Some(">"),
+		ast::IoFileRedirectKind::Append => Some(">>"),
+		ast::IoFileRedirectKind::ReadAndWrite
+		| ast::IoFileRedirectKind::DuplicateInput
+		| ast::IoFileRedirectKind::DuplicateOutput => None,
+	}
+}
+
+/// Whether `path` is a FIFO on the host, which a child process can open by
+/// name.
+fn is_native_fifo(shell: &Shell<impl extensions::ShellExtensions>, path: &Path) -> bool {
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::FileTypeExt;
+		shell.filesystem().is_native_local(path)
+			&& std::fs::metadata(path).is_ok_and(|meta| meta.file_type().is_fifo())
+	}
+	#[cfg(not(unix))]
+	{
+		let _ = (shell, path);
+		false
+	}
+}
+
+/// Makes the deferred redirections in the parent after all, in order, when a
+/// later redirection depends on them or the command turns out not to be an
+/// external one; the open of a FIFO then waits there, as it did before.
+pub(crate) async fn materialize_deferred_redirects(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+) -> Result<(), error::Error> {
+	for redirect in std::mem::take(&mut params.deferred_redirects) {
+		match redirect {
+			DeferredRedirect::Open { fd, path, options, .. } => {
+				let file = shell.open_file(&options, &path, params).await.map_err(|err| {
+					error::ErrorKind::RedirectionFailure(path.clone(), err.to_string())
+				})?;
+				params.open_files.set_fd(fd, file);
+			},
+			DeferredRedirect::Duplicate { fd, from } => {
+				let file = params
+					.try_fd(shell, from)
+					.ok_or(error::ErrorKind::BadFileDescriptor(from))?
+					.try_clone()?;
+				params.open_files.set_fd(fd, file);
+			},
+		}
+	}
+	Ok(())
+}
+
+/// The `/bin/sh -c` script that makes `redirects` and then becomes the
+/// command: `f1=$1; shift 1; exec "$@" 0<"$f1" 2>&1`. Paths travel as
+/// positional parameters, never in the script.
+pub(crate) fn deferred_redirect_script(redirects: &[DeferredRedirect]) -> (String, Vec<String>) {
+	use std::fmt::Write as _;
+	let mut paths = Vec::new();
+	let mut assignments = String::new();
+	let mut operations = String::new();
+	for redirect in redirects {
+		match redirect {
+			DeferredRedirect::Open { fd, op, path, .. } => {
+				paths.push(path.clone());
+				let index = paths.len();
+				let _ = write!(assignments, "f{index}=${index}; ");
+				let _ = write!(operations, " {fd}{op}\"$f{index}\"");
+			},
+			DeferredRedirect::Duplicate { fd, from } => {
+				let _ = write!(operations, " {fd}>&{from}");
+			},
+		}
+	}
+	let script = format!("{assignments}shift {}; exec \"$@\"{operations}", paths.len());
+	(script, paths)
 }
 
 const fn get_default_fd_for_redirect_kind(kind: &ast::IoFileRedirectKind) -> ShellFd {

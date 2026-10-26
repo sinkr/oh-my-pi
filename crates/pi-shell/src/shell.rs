@@ -6211,6 +6211,43 @@ mod tests {
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\ntwo\n"));
 	}
 
+	/// A background external command's FIFO redirect is opened by its child,
+	/// as in bash: the parent shell spawned it and then waited for the FIFO's
+	/// other end, which was the next command, so `/bin/cat < f & echo one > f`
+	/// never returned. Job control must still see the command's real pid:
+	/// `$!` is the pid the command itself reports, and `wait`, `jobs`, `kill
+	/// %N` and `kill $!` reach a command still waiting for its FIFO.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_external_command_opens_its_fifo_redirect_itself() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					// First, so the job is `%1`.
+					"/bin/sleep 30 < f & jobs; kill %1; wait $!; echo \"kill-job=$?\"\n",
+					"/bin/sleep 30 < f & kill $!; wait $!; echo \"kill-pid=$?\"\n",
+					"/bin/cat < f & pid=$!; echo one > f; wait $pid; echo \"wait=$?\"\n",
+					"/bin/sh -c 'echo $$' > f & bg=$!; read -r self < f; wait $bg\n",
+					"[ \"$self\" = \"$bg\" ] && echo same-pid",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert!(output.contains("Running"), "`jobs` lists the waiting command: {output}");
+		assert!(output.ends_with("kill-job=143\nkill-pid=143\none\nwait=0\nsame-pid\n"), "{output}");
+	}
+
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
 	/// seconds. The deadline lives on the calling thread, so it still fires when
 	/// a builtin blocks the runtime's only worker.
