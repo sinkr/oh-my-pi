@@ -76,6 +76,17 @@ fn ensure_not_cancelled(cancel: Option<&tokio_util::sync::CancellationToken>) ->
 	Ok(())
 }
 
+/// The path to ask the filesystem about: matches keep the pattern's spelling
+/// (`./`, `../`), but a virtual provider is only asked about lexically
+/// normalized paths.
+fn probe_path<'a>(fs: &pi_vfs::Fs, path: &'a Path) -> std::borrow::Cow<'a, Path> {
+	if fs.is_native_local(path) {
+		std::borrow::Cow::Borrowed(path)
+	} else {
+		std::borrow::Cow::Owned(pi_vfs::normalize_lexically(path))
+	}
+}
+
 /// Returns the `scheme://` root when the pattern's leading components spell a
 /// virtual path (`scheme:` then an empty component, from splitting on `/`).
 fn url_pattern_root(components: &[PatternWord]) -> Option<std::path::PathBuf> {
@@ -330,13 +341,17 @@ impl Pattern {
 					&& requires_expansion(piece.as_str(), self.enable_extended_globbing)
 			})
 		};
-		let mut globstar_modes: VecDeque<GlobstarMode> = if options.globstar {
+		// One slot per component, so the mode a `**` component gets cannot drift
+		// from the component the loop below is at.
+		let globstar_modes: Vec<Option<GlobstarMode>> = if options.globstar {
 			components
 				.iter()
 				.enumerate()
-				.filter(|(_, component)| is_globstar_component(component))
-				.map(|(index, _)| {
-					if components.get(index + 1).is_some_and(is_globstar_component) {
+				.map(|(index, component)| {
+					if !is_globstar_component(component) {
+						return None;
+					}
+					Some(if components.get(index + 1).is_some_and(is_globstar_component) {
 						GlobstarMode::Collapsed
 					} else if index == last_index {
 						// Bash spells the zero-depth match as the directory before
@@ -356,14 +371,14 @@ impl Pattern {
 						let link_bases = prefix_to_remove.is_none()
 							|| components[..index].iter().any(|c| !is_globstar_component(c));
 						GlobstarMode::Bases { link_bases }
-					}
+					})
 				})
 				.collect()
 		} else {
-			VecDeque::new()
+			Vec::new()
 		};
 		let relative_root = prefix_to_remove.is_some().then(|| working_dir.to_path_buf());
-		let globstar_walked = !globstar_modes.is_empty();
+		let globstar_walked = globstar_modes.iter().any(Option::is_some);
 
 		// URL spelling: an absolute `scheme://` pattern is already spelled
 		// percent-encoded, while a relative pattern under a virtual working
@@ -380,7 +395,7 @@ impl Pattern {
 		let mut globbed = false;
 		let mut unverified_suffix = false;
 		let mut trailing_slash = false;
-		for component in components {
+		for (index, component) in components.into_iter().enumerate() {
 			if !component.iter().any(|piece| {
 				matches!(piece, PatternPiece::Pattern(_))
 					&& requires_expansion(piece.as_str(), self.enable_extended_globbing)
@@ -403,8 +418,7 @@ impl Pattern {
 			globbed = true;
 			unverified_suffix = false;
 
-			if options.globstar && is_globstar_component(&component) {
-				let mode = globstar_modes.pop_front().unwrap_or(GlobstarMode::Bases { link_bases: false });
+			if let Some(mode) = globstar_modes.get(index).copied().flatten() {
 				if matches!(mode, GlobstarMode::Collapsed) {
 					continue;
 				}
@@ -439,34 +453,32 @@ impl Pattern {
 
 				// Matches keep the pattern's spelling (`./`, `../`), but a virtual
 				// provider is only asked to list a lexically normalized path.
-				let listing = if fs.is_native_local(&current_path) {
-					fs.read_dir(&current_path).await
-				} else {
-					fs.read_dir(pi_vfs::normalize_lexically(&current_path)).await
-				};
-				let mut matching_paths_in_dir: Vec<_> = match listing {
-					Ok(entries) => entries
-						.filter_map(Result::ok)
-						.filter_map(|entry| {
-							let file_name = entry.file_name();
-							let name = file_name.to_string_lossy();
-							if !allow_dot_files && name.starts_with('.') {
-								return None;
-							}
-							// Raw names match as on any filesystem; a pattern
-							// spelled as an absolute URL may also name the
-							// encoded segment (`my%20*`).
-							let matches = regex.is_match(name.as_ref()).unwrap_or(false)
-								|| (match_encoded && {
-									let encoded = pi_vfs::encode_segment(&file_name);
-									matches!(encoded, std::borrow::Cow::Owned(_))
-										&& regex.is_match(&encoded.to_string_lossy()).unwrap_or(false)
-								});
-							matches.then(|| pi_vfs::child_path(&current_path, &file_name))
-						})
-						.collect(),
-					Err(_) => vec![],
-				};
+				let listing = fs.read_dir(probe_path(fs, &current_path)).await;
+				let mut matching_paths_in_dir: Vec<_> = Vec::new();
+				if let Ok(entries) = listing {
+					for entry in entries.filter_map(Result::ok) {
+						// One directory can hold millions of entries, and nothing
+						// here yields on the native route.
+						ensure_not_cancelled(options.cancel.as_ref())?;
+						let file_name = entry.file_name();
+						let name = file_name.to_string_lossy();
+						if !allow_dot_files && name.starts_with('.') {
+							continue;
+						}
+						// Raw names match as on any filesystem; a pattern
+						// spelled as an absolute URL may also name the
+						// encoded segment (`my%20*`).
+						let matches = regex.is_match(name.as_ref()).unwrap_or(false)
+							|| (match_encoded && {
+								let encoded = pi_vfs::encode_segment(&file_name);
+								matches!(encoded, std::borrow::Cow::Owned(_))
+									&& regex.is_match(&encoded.to_string_lossy()).unwrap_or(false)
+							});
+						if matches {
+							matching_paths_in_dir.push(pi_vfs::child_path(&current_path, &file_name));
+						}
+					}
+				}
 
 				matching_paths_in_dir.sort();
 
@@ -479,11 +491,7 @@ impl Pattern {
 			for path in paths_so_far {
 				// After a `**` walk this probes a path under every directory.
 				ensure_not_cancelled(options.cancel.as_ref())?;
-				let probe = if fs.is_native_local(&path) {
-					std::borrow::Cow::Borrowed(path.as_path())
-				} else {
-					std::borrow::Cow::Owned(pi_vfs::normalize_lexically(&path))
-				};
+				let probe = probe_path(fs, &path);
 				// `*/` follows symlinks like bash (a link to a directory
 				// matches); a named suffix only has to exist, dangling or not.
 				let exists = if trailing_slash {
@@ -567,18 +575,10 @@ impl Pattern {
 		allow_dot_files: bool,
 		cancel: Option<&tokio_util::sync::CancellationToken>,
 	) -> Result<Vec<std::path::PathBuf>, error::Error> {
-		// A virtual provider is only asked about lexically normalized paths.
-		fn probe<'a>(fs: &pi_vfs::Fs, path: &'a Path) -> std::borrow::Cow<'a, Path> {
-			if fs.is_native_local(path) {
-				std::borrow::Cow::Borrowed(path)
-			} else {
-				std::borrow::Cow::Owned(pi_vfs::normalize_lexically(path))
-			}
-		}
-
 		let mut matches = Vec::new();
+
 		for base in bases {
-			if !fs.is_dir(probe(fs, &base)).await {
+			if !fs.is_dir(probe_path(fs, &base)).await {
 				continue;
 			}
 			// Byte comparison: `./**/` must still list `./`, though `cwd/.` and
@@ -599,10 +599,14 @@ impl Pattern {
 			let mut pending = vec![base];
 			while let Some(dir) = pending.pop() {
 				ensure_not_cancelled(cancel)?;
-				let Ok(listing) = fs.read_dir(probe(fs, &dir)).await else {
+				let Ok(listing) = fs.read_dir(probe_path(fs, &dir)).await else {
 					continue;
 				};
 				for entry in listing.filter_map(Result::ok) {
+					// A single directory can hold millions of entries, and on the
+					// native route nothing below yields, so a timeout arriving
+					// during this loop is only seen if it is read here.
+					ensure_not_cancelled(cancel)?;
 					let file_name = entry.file_name();
 					if !allow_dot_files && file_name.to_string_lossy().starts_with('.') {
 						continue;
@@ -615,7 +619,7 @@ impl Pattern {
 					let matched = match mode {
 						GlobstarMode::Entries { .. } => true,
 						GlobstarMode::Dirs | GlobstarMode::Bases { link_bases: true } => {
-							real_dir || (may_link_dir && fs.is_dir(probe(fs, &path)).await)
+							real_dir || (may_link_dir && fs.is_dir(probe_path(fs, &path)).await)
 						},
 						GlobstarMode::Bases { link_bases: false } | GlobstarMode::Collapsed => real_dir,
 					};
@@ -629,10 +633,10 @@ impl Pattern {
 			}
 		}
 
-		// One sorted list across all bases, as bash prints it; nested bases
-		// (`**/b*/**` with `a/b1` and `a/b1/b2`) reach the same path twice.
+		// One sorted list across all bases, as bash prints it. Nested bases
+		// (`**/b*/**` with `a/b1` and `a/b1/b2`) reach the same path once per
+		// base, and bash keeps each of those words.
 		matches.sort();
-		matches.dedup_by(|a, b| a.as_os_str() == b.as_os_str());
 		Ok(matches)
 	}
 
@@ -1441,7 +1445,7 @@ mod tests {
 		assert_eq!(expand("**/c1/*", true, false).await?, split("a1/b1/c1/y"));
 		assert_eq!(expand("ld/**/", true, false).await?, split("ld/|ld/sub/|ld/sub/deep/"));
 		// A globbed base is printed without its slash and walked even when it is
-		// a symlink; `**/**` is `**` with duplicates removed.
+		// a symlink; a run of `**` is one walk, so `**/**` is `**`.
 		assert_eq!(
 			expand("*/**", true, false).await?,
 			split("a1|a1/b1|a1/b1/c1|a1/b1/c1/y|a1/b1/x|a1/x|a2|d1|d1/sub|d1/sub/deep|d1/x|ld|ld/sub|ld/sub/deep|ld/x")
@@ -1522,6 +1526,48 @@ mod tests {
 		// Zero-depth spelling after a glob that is not directly before `**`.
 		assert_eq!(expand("**/sub/**").await?, split("d1/sub|d1/sub/deep|d1/sub/deep/q.rs|d1/sub/lback"));
 		assert_eq!(expand("a1/**/**").await?, split("a1|a1/b1|a1/b1/z.rs|a1/lup"));
+
+		Ok(())
+	}
+
+	/// Two `**` components with a component between them give overlapping bases,
+	/// and bash prints one word for every way the pattern reaches a path, so a
+	/// path a nested base reaches again appears again. Expected values are bash
+	/// 5.2.21's output on the same tree (`LC_ALL=C`).
+	#[tokio::test]
+	async fn test_globstar_keeps_duplicate_matches_like_bash() -> Result<()> {
+		let scratch = tempfile::tempdir()?;
+		let root = scratch.path();
+		std::fs::create_dir_all(root.join("b1/b2/c"))?;
+		for file in ["b1/x", "b1/b2/x", "b1/b2/c/x"] {
+			std::fs::write(root.join(file), "")?;
+		}
+
+		let fs = pi_vfs::Fs::native();
+		let options = FilenameExpansionOptions { globstar: true, ..Default::default() };
+		let expand = async |pattern: &str| {
+			let result = Pattern::from(pattern)
+				.set_extended_globbing(false)
+				.expand(&fs, root, &options)
+				.await?;
+			expect_expanded(result)
+		};
+		let split = |expected: &str| expected.split('|').map(str::to_string).collect::<Vec<_>>();
+
+		assert_eq!(
+			expand("**/b*/**").await?,
+			split("b1|b1/b2|b1/b2|b1/b2/c|b1/b2/c|b1/b2/c/x|b1/b2/c/x|b1/b2/x|b1/b2/x|b1/x")
+		);
+		assert_eq!(
+			expand("**/b*/**/x").await?,
+			split("b1/b2/c/x|b1/b2/c/x|b1/b2/x|b1/b2/x|b1/x")
+		);
+		assert_eq!(
+			expand("**/*/**/x").await?,
+			split("b1/b2/c/x|b1/b2/c/x|b1/b2/c/x|b1/b2/x|b1/b2/x|b1/x")
+		);
+		// A run of `**` is still one walk, so it repeats nothing.
+		assert_eq!(expand("b1/**/**/x").await?, split("b1/b2/c/x|b1/b2/x|b1/x"));
 
 		Ok(())
 	}
@@ -1626,6 +1672,77 @@ mod tests {
 				),
 				(listings, probes),
 				"`{pattern}`: (listings, probes) after the cancellation"
+			);
+		}
+
+		Ok(())
+	}
+
+	/// Serves `wide://`, one directory of 10,000 files, and cancels `cancel`
+	/// as it hands out the listing.
+	#[derive(Debug)]
+	struct WideDirectory {
+		cancel: tokio_util::sync::CancellationToken,
+	}
+
+	#[async_trait::async_trait]
+	impl pi_vfs::FileSystem for WideDirectory {
+		async fn open(
+			&self,
+			_path: &Path,
+			_options: &pi_vfs::OpenOptions,
+		) -> std::io::Result<pi_vfs::File> {
+			Err(pi_vfs::unsupported("open"))
+		}
+
+		async fn metadata(&self, _path: &Path) -> std::io::Result<pi_vfs::Metadata> {
+			Ok(pi_vfs::Metadata::new(
+				pi_vfs::FileType::from_kind(pi_vfs::FileKind::Dir),
+				0,
+				pi_vfs::Permissions::from_mode(0o755),
+			))
+		}
+
+		async fn read_dir(&self, path: &Path) -> std::io::Result<pi_vfs::ReadDir> {
+			self.cancel.cancel();
+			let entries: Vec<_> = (0..10_000)
+				.map(|i| {
+					let name = format!("f{i}");
+					Ok(pi_vfs::DirEntry::new(
+						pi_vfs::child_path(path, std::ffi::OsStr::new(&name)),
+						name.into(),
+						Some(pi_vfs::FileType::from_kind(pi_vfs::FileKind::File)),
+					))
+				})
+				.collect();
+			Ok(pi_vfs::ReadDir::from_entries(entries))
+		}
+	}
+
+	/// One directory can hold millions of entries, and both the `**` walk and
+	/// the listing of a component after it read them without yielding, so the
+	/// cancellation has to be read per entry: a cancellation that arrives while
+	/// a single directory is being consumed must still stop the expansion, even
+	/// when that directory holds no subdirectory to move on to.
+	#[tokio::test]
+	async fn test_expansion_stops_inside_one_wide_directory() -> Result<()> {
+		// `**` consumes the directory in the walk, `*` in the listing loop.
+		for pattern in ["wide://**", "wide://*"] {
+			let cancel = tokio_util::sync::CancellationToken::new();
+			let fs = pi_vfs::Fs::new(std::sync::Arc::new(WideDirectory { cancel: cancel.clone() }));
+			let options =
+				FilenameExpansionOptions { globstar: true, cancel: Some(cancel), ..Default::default() };
+
+			let result = Pattern::from(pattern)
+				.set_extended_globbing(false)
+				.expand(&fs, Path::new("/"), &options)
+				.await;
+
+			let err =
+				result.expect_err(&format!("`{pattern}` finished despite the cancellation"));
+			assert!(
+				matches!(err.kind(), error::ErrorKind::Interrupted),
+				"`{pattern}`: unexpected error: {err}"
 			);
 		}
 
