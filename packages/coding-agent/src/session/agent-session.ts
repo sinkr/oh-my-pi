@@ -108,6 +108,7 @@ import {
 	Snowflake,
 	stringProperty,
 	toError,
+	untilAborted,
 	withTimeout,
 	withFileLock,
 } from "@oh-my-pi/pi-utils";
@@ -1047,6 +1048,8 @@ export class AgentSession implements SettingsScope {
 		| undefined;
 	/** Active {@link holdIrcWakes} holds. */
 	#ircWakeHolds = 0;
+	/** IRC wakes waiting out a running idle compaction (see {@link #wakeForIrc}). */
+	#ircWakesAwaitingIdleCompaction = 0;
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1492,6 +1495,52 @@ export class AgentSession implements SettingsScope {
 	#wakeForIrc(wakeRecords: AgentMessage[]): void {
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(wakeRecords);
+			return;
+		}
+		// Idle compaction rewrites history without owning a turn. Wait it out without claiming
+		// the session (an in-flight wake would make input typed meanwhile find it busy), then
+		// decide afresh. Meanwhile the records live only in this closure, so they are counted
+		// for `ircWakesPending`.
+		const idleCompaction = this.#maintenance.waitForIdleCompaction();
+		if (idleCompaction) {
+			const promptGeneration = this.#promptGeneration;
+			const sessionGeneration = this.#sessionGeneration;
+			this.#ircWakesAwaitingIdleCompaction++;
+			void idleCompaction
+				.then(async () => {
+					// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so
+					// let it settle first: only then does the session generation say which transcript is live.
+					if (this.isSessionTransitioning) await this.waitForSessionTransition();
+					// The transcript these records were sent to was replaced (/new, /clear, a switch): drop them with it.
+					if (
+						this.#sessionGeneration !== sessionGeneration &&
+						(await this.#sessionGenerationChanged(sessionGeneration))
+					) {
+						return;
+					}
+					if (this.#isDisposed) return;
+					if (this.hasAdmittedSubmission) {
+						// Input admitted during the compaction goes first. Prompt setup folds pending IRC
+						// into its turn; whatever is still pending once it settles wakes as usual.
+						this.#irc.queueAside(wakeRecords);
+						await this.waitForAdmittedSubmissions();
+						this.#resumeStrandedIrcAsides();
+						return;
+					}
+					if (this.#promptGeneration !== promptGeneration) {
+						// An abort during the wait never saw this wake start, so it does not cancel it: the records
+						// take the stranded-aside path, which wakes for IRC messages as a delivery right after the
+						// abort would, and folds other asides while the user's interrupt holds.
+						this.#irc.queueAside(wakeRecords);
+						this.#resumeStrandedIrcAsides();
+						return;
+					}
+					this.#wakeForIrc(wakeRecords);
+				})
+				.catch(error => logger.warn("IRC wake after idle compaction failed", { error: String(error) }))
+				.finally(() => {
+					this.#ircWakesAwaitingIdleCompaction--;
+				});
 			return;
 		}
 		// While a driven run holds wakes, its monitor would take this turn's answer
@@ -2201,8 +2250,20 @@ export class AgentSession implements SettingsScope {
 				const keepalive = new EventLoopKeepalive();
 				try {
 					this.#schedulePostPromptTask(
-						async () => {
+						async signal => {
 							try {
+								// Idle compaction rewrites history without owning a turn; flush into the compacted context.
+								// Cancellation (abort, session change, disposal) stops the wait at once instead of holding
+								// their post-prompt drain behind the compaction; abort re-requests the flush once it settles.
+								const idleCompaction = this.#maintenance.waitForIdleCompaction();
+								if (idleCompaction) {
+									try {
+										await untilAborted(signal, idleCompaction);
+									} catch {
+										this.yieldQueue.cancelIdleFlushScheduling();
+										return;
+									}
+								}
 								await run();
 							} finally {
 								keepalive[Symbol.dispose]();
@@ -6449,6 +6510,9 @@ export class AgentSession implements SettingsScope {
 		// calls, and error state. agent.reset() keeps the model and system prompt.
 		this.#releaseQueuedTtsrReservations();
 		this.agent.reset();
+		// The cleared context is a new transcript: an aside or held message captured for the old one drops
+		// its record instead of landing here (mirrors newSession()).
+		this.#sessionGeneration++;
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -9844,8 +9908,30 @@ export class AgentSession implements SettingsScope {
 			| undefined,
 		outcome: PromptDispatchOutcome,
 	): Promise<boolean> {
-		// Captured before the normalization await below — see #sessionGeneration's doc comment.
+		// Captured before the awaits below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
+		// A message that may start a turn waits out idle compaction, as prompt() does; plain appends do not.
+		const idleCompaction =
+			options?.triggerTurn || options?.deliverAs === "aside" ? this.#maintenance.waitForIdleCompaction() : undefined;
+		if (idleCompaction) {
+			const promptGeneration = this.#promptGeneration;
+			await idleCompaction;
+			// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so let it
+			// settle first: only then does the session generation tell an abort from a session change.
+			if (this.isSessionTransitioning) await this.waitForSessionTransition();
+			// A session change or disposal during the wait drops the message with the transcript it was sent to.
+			if (
+				this.#isDisposed ||
+				(this.#sessionGeneration !== sessionGeneration && (await this.#sessionGenerationChanged(sessionGeneration)))
+			) {
+				return false;
+			}
+			// An abort supersedes only the turn. The message stays in this session's transcript, as it did when the
+			// aborted turn had already started, and is delivered like any message that triggers none.
+			if (this.#promptGeneration !== promptGeneration) {
+				options = { ...options, triggerTurn: false, deliverAs: undefined };
+			}
+		}
 		const normalizedPayload = normalizeCustomMessagePayload<T>(message);
 		const suppressQueueChip = options?.deliverAs === "nextTurn" || options?.deliverAs === "aside";
 		const details =
@@ -12255,11 +12341,12 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Whether IRC messages still wait here for a turn: under a {@link holdIrcWakes}
-	 * hold, or queued (e.g. behind a pooled yield contract). The lifecycle must not
-	 * park this session yet, since parking would drop them.
+	 * hold, behind a running idle compaction, or queued (e.g. behind a pooled yield
+	 * contract). The lifecycle must not park this session yet, since parking would
+	 * drop them.
 	 */
 	get ircWakesPending(): boolean {
-		return this.#ircWakeHolds > 0 || this.#irc.hasPending();
+		return this.#ircWakeHolds > 0 || this.#ircWakesAwaitingIdleCompaction > 0 || this.#irc.hasPending();
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

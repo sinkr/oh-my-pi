@@ -2016,6 +2016,19 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * The running idle compaction's cleanup barrier, or `undefined` when none runs (so
+	 * the common path adds no await). Paths that start a turn from idle outside
+	 * {@link waitForMaintenanceCleanup} (turn-triggering custom messages, IRC wakes,
+	 * yield-queue idle flushes) await it so the turn runs on the compacted context.
+	 * Every waiter shares this one promise, so they resume in arrival order, prompts
+	 * parked in {@link waitForMaintenanceCleanup} included. Only an idle-maintenance
+	 * timer starts the next pass, so none can begin before the waiters resume.
+	 */
+	waitForIdleCompaction(): Promise<void> | undefined {
+		return this.#idleCompactionCleanup;
+	}
+
+	/**
 	 * Register a dispatch that may start a turn while an interrupted-turn resume
 	 * decision is open (a prompt parked by {@link waitForMaintenanceCleanup}
 	 * has not released yet). `undefined` when no decision is open.
