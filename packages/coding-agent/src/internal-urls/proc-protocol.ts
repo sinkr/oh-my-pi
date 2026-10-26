@@ -7,6 +7,7 @@ import {
 	cancelAgentRegistration,
 	executeCancel,
 	runningAgentsOutsideJobs,
+	runningTaskProgressSuffix,
 	snapshotJobs,
 } from "../async/job-control";
 import {
@@ -183,13 +184,15 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			: { services: [], error: undefined };
 		if (!id) {
 			const now = Date.now();
+			const snapshots = snapshotJobs(session, jobs);
 			const rows = [
-				...jobs.map(job => {
+				...jobs.map((job, index) => {
 					const duration =
 						job.endTime === undefined
 							? `up ${formatDuration(now - job.startTime)}`
 							: `in ${formatDuration(job.endTime - job.startTime)}`;
-					return `${job.id} [${job.type}] ${job.status} ${duration} — ${job.label.replace(/\s+/g, " ")}`;
+					const progress = runningTaskProgressSuffix(snapshots[index], { duration: false });
+					return `${job.id} [${job.type}] ${job.status} ${duration} — ${job.label.replace(/\s+/g, " ")}${progress}`;
 				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent =>
@@ -199,7 +202,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				...(servicesError ? [`Services unavailable (daemon broker): ${servicesError}`] : []),
 			];
 			return textResource(url, rows.join("\n") || "No background jobs or services.", undefined, true, {
-				jobs: snapshotJobs(session, jobs),
+				jobs: snapshots,
 				agents: runningAgentsOutsideJobs(session),
 				daemons: services,
 			});
@@ -220,7 +223,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			);
 		}
 		if (job) {
-			const lines = [`${job.id} [${job.type}] — ${job.status} — ${job.label}`];
+			const snapshot = snapshotJobs(session, [job])[0];
+			const lines = [
+				`${job.id} [${job.type}] — ${job.status} — ${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}`,
+			];
 			if (job.resultText) lines.push(job.resultText);
 			if (job.errorText) lines.push(`Error: ${job.errorText}`);
 			if (job.status === "running") {
@@ -235,7 +241,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				if (successor) lines.push(`${agentId} is running again as job ${successor.id} (proc://${successor.id})`);
 			}
 			return textResource(url, lines.join("\n"), undefined, false, {
-				job: snapshotJobs(session, [job])[0],
+				job: snapshot,
 				log: lines.slice(1).join("\n"),
 			});
 		}
