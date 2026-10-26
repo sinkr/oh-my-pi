@@ -122,7 +122,7 @@ export function exitProcess(code: number): never {
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
 
-/** User-facing command printed before fatal cleanup so interrupted work can be resumed. */
+/** User-facing command printed after fatal or SIGTERM cleanup so interrupted work can be resumed. */
 export interface FatalRecoveryHint {
 	/** Stable label identifying the recoverable session or process. */
 	label: string;

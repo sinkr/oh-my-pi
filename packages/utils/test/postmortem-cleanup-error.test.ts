@@ -197,10 +197,12 @@ describe("postmortem expected cleanup errors", () => {
 				saved ? { label: "Main", command: "omp --resume 019cafe0-dead-beef" } : undefined,
 			);
 			postmortem.register("session", async () => {
+				// postmortem's own SIGTERM listener runs first, so once this one fires the
+				// repeated signal's handler has already joined the running cleanup.
+				const repeated = Promise.withResolvers<void>();
+				process.once("SIGTERM", () => repeated.resolve());
 				process.kill(process.pid, "SIGTERM");
-				// Real delay: the repeated signal arrives from the OS, so only a real wait keeps
-				// cleanup running while its handler starts.
-				await Bun.sleep(10);
+				await repeated.promise;
 				saved = true;
 				cancelHint();
 			});
