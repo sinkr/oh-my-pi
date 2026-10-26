@@ -201,6 +201,19 @@ export interface CompactionSettings {
 export const DEFAULT_RESERVE_TOKENS = 16384;
 
 /**
+ * Hysteresis band under the compaction trigger. Maintenance counts as having
+ * resolved threshold pressure only when residual context lands at or below
+ * `COMPACTION_RECOVERY_BAND × threshold`. Re-checking against the raw threshold
+ * lets a pass keep reclaiming a trickle of the previous turn's output and land
+ * just under the line every turn, sustaining the auto-continue dead loop
+ * reported in #2275; the same band stops the context-full / snapcompact tail
+ * from re-firing on a history whose single most-recent kept turn already
+ * exceeds the threshold. {@link prepareCompaction} sizes the kept tail to land
+ * inside it.
+ */
+export const COMPACTION_RECOVERY_BAND = 0.8;
+
+/**
  * Hard ceiling on a generated compaction summary.
  *
  * The summary budget is `floor(0.8 * reserveTokens)`, and the effective reserve is
@@ -1512,9 +1525,27 @@ export function prepareCompaction(
 		compactionMessages.push(message);
 	}
 
-	const lastUsage = getLastAssistantUsage(pathEntries);
+	const postCompactionStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
+	const lastUsage = getLastAssistantUsage(
+		postCompactionStart > 0 ? pathEntries.slice(postCompactionStart) : pathEntries,
+	);
 	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
 	let keepRecentTokens = settings.keepRecentTokens;
+	if (activeModel?.contextWindow && activeModel.contextWindow > 0) {
+		// The compacted context (kept tail + summary/prompt overhead) must land in
+		// the recovery band under the configured trigger, or it fires again at once.
+		// The trigger is the user's choice, so the kept tail gives way, not the trigger:
+		// it gets what the band leaves after the reserve floor (an upper bound on the
+		// summary), or half the band when the floor alone fills it.
+		const contextWindow = activeModel.contextWindow;
+		const recoveryBand = Math.floor(resolveThresholdTokens(contextWindow, settings) * COMPACTION_RECOVERY_BAND);
+		const reserveFloor = Math.min(
+			resolveBudgetReserveTokens(contextWindow, settings),
+			settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS,
+		);
+		const tailBudget = recoveryBand > reserveFloor ? recoveryBand - reserveFloor : Math.floor(recoveryBand / 2);
+		keepRecentTokens = Math.min(keepRecentTokens, Math.max(1, tailBudget));
+	}
 	if (lastUsage) {
 		const estimatedTokens = tokenizer.countMessages(compactionMessages);
 		const promptTokens = calculatePromptTokens(lastUsage);
