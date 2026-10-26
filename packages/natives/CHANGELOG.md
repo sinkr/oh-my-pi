@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the embedded shell's globs keeping matches whose literal tail does not exist: `ls -d DIR/*/` now lists only directories instead of passing every file as `file/` (one "Not a directory" error each), and `*/name` keeps only matches that contain `name`, as in bash ([#17110](https://github.com/can1357/oh-my-pi/pull/17110) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the embedded shell's globs keeping matches whose literal tail does not exist: `ls -d DIR/*/` now lists only directories instead of passing every file as `file/`, and `*/name` keeps only matches that contain `name`, as in bash ([#17110](https://github.com/can1357/oh-my-pi/pull/17110) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the embedded shell ignoring `shopt -s globstar`: `**` now matches any number of directory levels as in bash 5.2 (`**/*.rs` finds files at every depth, `**/` lists every directory, and like bash the walk does not recurse through symlinked directories), and a timeout or interrupt stops a long `**` expansion ([#17111](https://github.com/can1357/oh-my-pi/pull/17111) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.0] - 2026-10-26
