@@ -3755,7 +3755,16 @@ describe("AgentSession retry fallback", () => {
 				stopReason: "error",
 				stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
 				errorMessage: "Refusal (cyber): Classifier declined this turn.",
-			} as MockResponse,
+			},
+			settings: {},
+		},
+		{
+			name: "an account-policy denial and no sibling credential to rotate to",
+			failure: {
+				stopReason: "error",
+				errorMessage:
+					"This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+			},
 			settings: {},
 		},
 		{
