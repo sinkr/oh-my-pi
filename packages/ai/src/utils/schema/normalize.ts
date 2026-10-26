@@ -1832,7 +1832,7 @@ function normalizeOpenAIResponsesSchemaNode(
 		(value.type === "array" ||
 			(Array.isArray(value.type) && value.type.includes("array")) ||
 			(value.type === undefined && Array.isArray(value.prefixItems))) &&
-		!Object.hasOwn(value, "items")
+		value.items === undefined
 	) {
 		output.items = true;
 		changed = true;
