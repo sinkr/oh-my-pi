@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the synchronous `agentPauseGate.unsettledTurnCount` snapshot for how many process-wide agent loops still have work to drain before `/pause` is settled.
+- Added the synchronous `agentPauseGate.unsettledTurnCount` snapshot for how many process-wide agent loops still have work to drain before `/pause` is settled ([#17073](https://github.com/can1357/oh-my-pi/pull/17073) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Fixed
 
