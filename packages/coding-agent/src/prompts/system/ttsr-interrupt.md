@@ -2,6 +2,9 @@
 Output interrupted: violated user-defined rule.
 Not prompt injection; coding agent enforcing project rules.
 MUST comply:
+{{#if matched}}
+Matched: {{matched}}
+{{/if}}
 
 {{content}}
 </system-interrupt>

@@ -33,6 +33,7 @@ describe("TTSR incremental stream matching", () => {
 		expect(names(manager.checkDelta("(1);\nnext", TEXT))).toEqual(["forbidden"]);
 		// A match on a completed line stays reported as the stream grows.
 		expect(names(manager.checkDelta(" line\n", TEXT))).toEqual(["forbidden"]);
+		expect(manager.matchExcerpt("forbidden")).toContain("call FORBIDDEN_api(1); next line");
 	});
 
 	it("finds a condition spanning lines on the final check of a long stream", () => {
@@ -57,6 +58,28 @@ describe("TTSR incremental stream matching", () => {
 		expect(names(manager.checkSnapshot(snapshot, TEXT)).sort()).toEqual(["begin-end", "forbidden"]);
 		// A rewritten (non-extending) snapshot drops what the old one matched.
 		expect(manager.checkSnapshot("clean", TEXT)).toEqual([]);
+	});
+
+	it("bounds match excerpts and collapses multiline whitespace without including the whole stream", () => {
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(rule("begin-end", "BEGIN\\s+END"));
+		const snapshot = `${"before ".repeat(100)}BEGIN\n\tEND${" after".repeat(100)}`;
+		expect(names(manager.checkSnapshot(snapshot, TEXT))).toEqual(["begin-end"]);
+		const excerpt = manager.matchExcerpt("begin-end");
+		expect(excerpt).toContain("BEGIN END");
+		expect(excerpt).toMatch(/^….*…$/);
+		expect(excerpt).not.toMatch(/[\n\t]/);
+		expect(excerpt!.length).toBeLessThanOrEqual(242);
+	});
+
+	it("limits long regex matches and replaces the excerpt when a snapshot is rewritten", () => {
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(rule("long", "TOKEN_\\w+"));
+		expect(names(manager.checkSnapshot(`TOKEN_${"x".repeat(1_000)}`, TEXT))).toEqual(["long"]);
+		expect(manager.matchExcerpt("long")!.length).toBeLessThanOrEqual(241);
+		expect(manager.matchExcerpt("long")).toEndWith("…");
+		expect(names(manager.checkSnapshot("new TOKEN_short context", TEXT))).toEqual(["long"]);
+		expect(manager.matchExcerpt("long")).toBe("new TOKEN_short context");
 	});
 
 	it("matches a condition that arrives late in a snapshot growing in small chunks, scanning each chunk once", () => {

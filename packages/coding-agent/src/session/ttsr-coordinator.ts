@@ -228,6 +228,7 @@ export class TtsrCoordinator {
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
+					matched: this.#manager?.matchExcerpt(rule.name),
 					content: rule.content,
 				}),
 			)
@@ -348,7 +349,7 @@ export class TtsrCoordinator {
 		return `TTSR matched ${label}: ${rules.map(rule => rule.name).join(", ")}`;
 	}
 
-	#getInjectionContent(): { content: string; rules: Rule[] } | undefined {
+	#getInjectionContent(): { content: string; rules: Rule[]; matched: Record<string, string> } | undefined {
 		if (this.#pendingInjections.length === 0) return undefined;
 		const rules = this.#pendingInjections;
 		const content = rules
@@ -356,12 +357,22 @@ export class TtsrCoordinator {
 				prompt.render(ttsrInterruptTemplate, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
+					matched: this.#manager?.matchExcerpt(rule.name),
 					content: rule.content,
 				}),
 			)
 			.join("\n\n");
 		this.#pendingInjections = [];
-		return { content, rules };
+		return { content, rules, matched: this.#matchedExcerpts(rules) };
+	}
+
+	#matchedExcerpts(rules: Rule[]): Record<string, string> {
+		const matched: Record<string, string> = {};
+		for (const rule of rules) {
+			const excerpt = this.#manager?.matchExcerpt(rule.name);
+			if (excerpt) matched[rule.name] = excerpt;
+		}
+		return matched;
 	}
 
 	#displayRulePath(rulePath: string): string {
@@ -502,7 +513,7 @@ export class TtsrCoordinator {
 				customType: "ttsr-injection",
 				content: injection.content,
 				display: false,
-				details: { rules: ruleNames, deliveryId },
+				details: { rules: ruleNames, matched: injection.matched, deliveryId },
 				attribution: "agent",
 				timestamp: Date.now(),
 			});
@@ -701,7 +712,7 @@ export class TtsrCoordinator {
 				}
 				const injection = this.#getInjectionContent();
 				if (injection) {
-					const details = { rules: injection.rules.map(rule => rule.name) };
+					const details = { rules: injection.rules.map(rule => rule.name), matched: injection.matched };
 					this.#host.agent.appendMessage({
 						role: "custom",
 						customType: "ttsr-injection",

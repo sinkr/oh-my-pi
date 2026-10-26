@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- TTSR interrupts include a bounded excerpt of the text that matched the rule.
+
 ## [18.13.0] - 2026-10-26
 
 ### Breaking Changes
