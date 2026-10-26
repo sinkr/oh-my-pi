@@ -252,14 +252,22 @@ function parseAdditionalRateLimit(payload: unknown): ParsedAdditionalUsage | nul
  * not plan exhaustion is left alone for the same reason: credits answer
  * "allowance spent", not "request refused".
  */
-function hasPlanCreditOverage(payload: Record<string, unknown>, planLimitReached: boolean | undefined): boolean {
+function hasPlanCreditOverage(
+	payload: Record<string, unknown>,
+	planLimitReached: boolean | undefined,
+	spendCap: ParsedSpendCap | undefined,
+): boolean {
 	if (planLimitReached !== true) return false;
 	const credits = isRecord(payload.credits) ? payload.credits : undefined;
 	if (!credits) return false;
 	if (credits.unlimited !== true && credits.has_credits !== true) return false;
 	if (credits.overage_limit_reached === true) return false;
 	const spendControl = isRecord(payload.spend_control) ? payload.spend_control : undefined;
-	return spendControl?.reached !== true;
+	if (spendControl?.reached === true) return false;
+	// Without an explicit verdict, a spend cap whose counters show no headroom
+	// cannot fund overage either.
+	if (spendCap && spendCap.reached === undefined && (spendCap.usedFraction ?? 0) >= 1) return false;
+	return true;
 }
 
 function parseSpendCap(payload: Record<string, unknown>): ParsedSpendCap | undefined {
@@ -316,7 +324,7 @@ function parseUsagePayload(payload: unknown): ParsedUsage | null {
 		secondary: rateLimit ? parseUsageWindow(rateLimit.secondary_window) : undefined,
 		additional,
 		...(spendCap ? { spendCap } : {}),
-		creditOverage: hasPlanCreditOverage(payload, planLimitReached),
+		creditOverage: hasPlanCreditOverage(payload, planLimitReached, spendCap),
 		raw: payload as CodexUsagePayload,
 	};
 	if (
