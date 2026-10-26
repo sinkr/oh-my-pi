@@ -141,4 +141,31 @@ describe("wait structured output rendering", () => {
 
 		expect(text).toContain(`full payload at agent://Foo,`);
 	});
+
+	test("a woken agent's suffixed turn job names the agent's agent:// and history:// handles", async () => {
+		// Messaging a finished agent starts a new turn job; while the first
+		// turn's job is retained, the manager suffixes the new one (`Quick-2`).
+		// `agent://Quick-2` and `history://Quick-2` do not resolve, so the
+		// completed block must name the agent's own id.
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const first = manager.register("task", "Quick", async () => ({ text: "DONE1" }), {
+			ownerId: SELF_ID,
+			id: "Quick",
+			agentId: "Quick",
+		});
+		await manager.getJob(first)!.promise;
+		const jobId = manager.register("task", "Quick", async () => ({ text: "DONE2" }), {
+			ownerId: SELF_ID,
+			id: "Quick",
+			agentId: "Quick",
+		});
+		expect(jobId).toBe("Quick-2");
+		await manager.getJob(jobId)!.promise;
+		const result = buildJobResult(makeSession(manager), manager, "wait", [manager.getJob(jobId)!], []);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("### Quick-2 [task]");
+		expect(text).toContain("Agent: agent://Quick, history://Quick");
+		expect(text).not.toContain("agent://Quick-2");
+	});
 });

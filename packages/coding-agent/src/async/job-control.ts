@@ -292,6 +292,12 @@ export function buildJobResult(
 		for (const j of completed) {
 			lines.push(`### ${j.id} [${j.type}] — ${j.status}`);
 			lines.push(`Label: ${j.label}`);
+			// A task job's id can differ from its agent id (a messaged agent's next
+			// turn, vibe turns, workpool batches, /tan) while its output and
+			// transcript stay under the agent id, so name the reachable handles.
+			if (j.agentUrlId && j.agentUrlId !== j.id) {
+				lines.push(`Agent: agent://${j.agentUrlId}, history://${j.agentUrlId}`);
+			}
 			if (j.status !== "cancelled") {
 				lines.push(
 					alreadyConsumed.has(j.id)

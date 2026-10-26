@@ -500,6 +500,32 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(message?.content).not.toContain("agent://Foo-t1-2");
 	});
 
+	it("names the agent's agent:// and history:// handles for a woken agent's suffixed turn job", async () => {
+		// Messaging a finished agent starts a new turn job; while the first
+		// turn's job is retained, the manager suffixes the new one (`Quick-2`).
+		// An unstructured result carries no structured-output pointer, and
+		// `agent://Quick-2` / `history://Quick-2` do not resolve.
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const first = manager.register("task", "Quick", async () => ({ text: "DONE1" }), {
+			id: "Quick",
+			agentId: "Quick",
+		});
+		await manager.getJob(first)!.promise;
+		const jobId = manager.register("task", "Quick", async () => ({ text: "DONE2" }), {
+			id: "Quick",
+			agentId: "Quick",
+		});
+		expect(jobId).toBe("Quick-2");
+		const job = manager.getJob(jobId)!;
+		await job.promise;
+		const message = buildAsyncResultBatchMessage([{ jobId, result: "DONE2", job, durationMs: 10, epoch: 0 }]);
+
+		expect(message?.content).toContain("Background job Quick-2 has completed.");
+		expect(message?.content).toContain("Agent: agent://Quick, history://Quick");
+		expect(message?.content).not.toContain("agent://Quick-2");
+		await manager.dispose();
+	});
+
 	it("delivers completed and failed manager states with distinct native identities", async () => {
 		const messages: AsyncResultDetails[] = [];
 		const manager = new AsyncJobManager({
