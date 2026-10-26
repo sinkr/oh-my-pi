@@ -164,14 +164,21 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stderr).toContain("[Uncaught Exception] Error: unexpected cleanup exception");
 	});
 
-	it("prints registered recovery commands before fatal cleanup", async () => {
+	it("prints recovery commands for a session that fatal cleanup saved", async () => {
+		// Teardown can save a session (an unsent draft, an aborted first reply) and then
+		// unregister its hint, so the hint is read after cleanup from a snapshot.
 		const result = await runPostmortemProbe(`
 			import { postmortem } from "${postmortemModuleUrl}";
 
-			postmortem.registerFatalRecoveryHint(() => ({
-				label: "Main",
-				command: "omp --resume 019cafe0-dead-beef",
-			}));
+			let saved = false;
+			const cancelHint = postmortem.registerFatalRecoveryHint(() =>
+				saved ? { label: "Main", command: "omp --resume 019cafe0-dead-beef" } : undefined,
+			);
+			postmortem.register("session", async () => {
+				await Promise.resolve();
+				saved = true;
+				cancelHint();
+			});
 			Promise.reject(new Error("session crashed"));
 			await Promise.resolve();
 		`);
@@ -181,17 +188,20 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stderr).toContain("[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
 	});
 
-	it("prints registered recovery commands when SIGTERM stops the process", async () => {
-		// The session's own cleanup unregisters its hint (AgentSession.dispose does), so the
-		// hint must be read before cleanup runs or a stopped session prints nothing to resume.
+	it("prints recovery commands once when repeated SIGTERMs stop the process", async () => {
 		const result = await runPostmortemProbe(`
 			import { postmortem } from "${postmortemModuleUrl}";
 
-			const cancelHint = postmortem.registerFatalRecoveryHint(() => ({
-				label: "Main",
-				command: "omp --resume 019cafe0-dead-beef",
-			}));
-			postmortem.register("session", () => {
+			let saved = false;
+			const cancelHint = postmortem.registerFatalRecoveryHint(() =>
+				saved ? { label: "Main", command: "omp --resume 019cafe0-dead-beef" } : undefined,
+			);
+			postmortem.register("session", async () => {
+				process.kill(process.pid, "SIGTERM");
+				// Real delay: the repeated signal arrives from the OS, so only a real wait keeps
+				// cleanup running while its handler starts.
+				await Bun.sleep(10);
+				saved = true;
 				cancelHint();
 			});
 			// Keep-alive only: a real child process must stay open until its SIGTERM handler
@@ -202,6 +212,7 @@ describe("postmortem expected cleanup errors", () => {
 
 		expect(result.exitCode).toBe(143);
 		expect(result.stderr).toContain("[Stopped by SIGTERM]\n[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
+		expect(result.stderr.split("[Recovery]")).toHaveLength(2);
 	});
 
 	it("exits after an uncaught exception when terminal stderr is revoked", async () => {
