@@ -1427,26 +1427,62 @@ const ANTHROPIC_PING_EVENT: RawMessagePingEvent = { type: "ping" };
 /**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
  * `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`.
- * Surface the structured type + message instead of the raw JSON blob; the
- * error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
+ * Surface the structured type, code and message instead of the raw JSON blob;
+ * the error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
  * the message so `isProviderRetryableError`'s classification keys off the
  * structured type rather than incidental JSON substrings.
+ *
+ * `midMessage` marks a frame that lands inside an open message envelope — after
+ * `message_start`, before the terminal frame (`message_stop`, or a
+ * `message_delta` carrying `stop_reason`). Such a frame ends a message the wire
+ * can never complete, exactly as a connection dropped before `message_stop`
+ * does, so it is reported as a stream-envelope truncation
+ * ({@link AIError.AnthropicStreamEnvelopeError}) rather than as a completed-turn
+ * provider rejection: the envelope wording makes the turn retryable before
+ * replay-unsafe content streams and lets turn recovery continue a turn whose
+ * text is already committed instead of ending it. The provider's `type` and
+ * `code` stay in the diagnostic as `type=`/`code=` tokens, the same shape the
+ * Codex native-lane steer rejection uses, so a gateway-cut stream is
+ * identifiable after the `Error` instance is gone.
+ *
+ * Only frame types the provider loop already retries take the truncation path.
+ * A deterministic rejection (`invalid_request_error`, `authentication_error`,
+ * `billing_error`, `permission_error`, an account cap) is a decision the
+ * provider made about the request, not a cut wire: rewriting it as a truncation
+ * would replay a request that can never succeed and, once text is committed,
+ * continue a turn the provider refused. The gate is
+ * {@link AIError.isProviderRetryableError} on the very error that is otherwise
+ * thrown, so a frame keeps exactly the verdict it had before this classification
+ * existed — the retry decision moves nowhere, only the shape of a retryable
+ * failure changes.
  */
-function createAnthropicSseStreamError(data: string): Error {
+function createAnthropicSseStreamError(data: string, midMessage: boolean): Error {
+	let parsed: { error?: { type?: unknown; code?: unknown; message?: unknown } } | undefined;
 	try {
-		const parsed = JSON.parse(data) as { error?: { type?: unknown; message?: unknown } };
-		const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
-		const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
-		if (message) {
-			return new AIError.ProviderResponseError(
-				errorType ? `Anthropic stream error (${errorType}): ${message}` : `Anthropic stream error: ${message}`,
-				{ provider: "anthropic", kind: "output" },
-			);
-		}
+		parsed = JSON.parse(data) as { error?: { type?: unknown; code?: unknown; message?: unknown } };
 	} catch {
-		// Not a JSON envelope; fall through to the raw payload.
+		// Not a JSON envelope; the raw payload is the diagnostic.
 	}
-	return new AIError.ProviderResponseError(data, { provider: "anthropic", kind: "output" });
+	const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
+	const errorCode = typeof parsed?.error?.code === "string" ? parsed.error.code : undefined;
+	const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
+	const rejection = new AIError.ProviderResponseError(
+		message
+			? errorType
+				? `Anthropic stream error (${errorType}): ${message}`
+				: `Anthropic stream error: ${message}`
+			: data,
+		{ provider: "anthropic", kind: "output" },
+	);
+	if (!midMessage || !AIError.isProviderRetryableError(rejection)) {
+		return rejection;
+	}
+	const fields = [errorType ? `type=${errorType}` : undefined, errorCode ? `code=${errorCode}` : undefined]
+		.filter(field => field !== undefined)
+		.join(" ");
+	return new AIError.AnthropicStreamEnvelopeError(
+		`error frame received before message_stop${fields ? ` (${fields})` : ""}: ${message ?? data}`,
+	);
 }
 
 async function* iterateAnthropicEvents(
@@ -1460,13 +1496,21 @@ async function* iterateAnthropicEvents(
 
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
+	// A `message_delta` carrying `stop_reason` is the consumer's terminal stop
+	// signal: generation finished there, and a non-conforming gateway only omits
+	// the trailing `message_stop`. A later `error` frame is a completed-turn
+	// report, not a truncation, so the envelope has to count as closed here too.
+	let sawTerminalDelta = false;
 
 	// Capture `raw` only when the diagnostic observer exists; otherwise the
 	// per-frame wire-line array is pure token-path garbage.
 	for await (const sse of readSseEvents(response.body, signal, onSseEvent ? { captureRaw: true } : undefined)) {
 		notifyRawSseEvent(onSseEvent, sse);
+		// A frame inside an open message envelope ends a message the wire can never
+		// complete: classify it as the truncation family so the failure is
+		// retryable/continuable instead of a completed-turn provider rejection.
 		if (sse.event === "error") {
-			throw createAnthropicSseStreamError(sse.data);
+			throw createAnthropicSseStreamError(sse.data, sawMessageStart && !sawMessageEnd && !sawTerminalDelta);
 		}
 
 		if (sse.event === "ping") {
@@ -1488,6 +1532,8 @@ async function* iterateAnthropicEvents(
 				sawMessageStart = true;
 			} else if (event.type === "message_stop") {
 				sawMessageEnd = true;
+			} else if (event.type === "message_delta" && event.delta?.stop_reason) {
+				sawTerminalDelta = true;
 			}
 			yield event;
 		} catch (error) {

@@ -562,13 +562,23 @@ export function isStreamEnvelopeErrorText(text: string): boolean {
 	return text.includes(STREAM_ENVELOPE_ERROR_PREFIX);
 }
 
+/** Persisted-text form of a truncated stream envelope: an
+ *  `Anthropic stream envelope error:` diagnostic naming the frame the stream
+ *  never reached (`before message_start|delta|stop`). Covers both a connection
+ *  that dies inside an open envelope and an in-band `error` frame that a
+ *  gateway or proxy substitutes for the cut, so turn recovery can classify the
+ *  family by its envelope marker instead of per-gateway wording. */
+export function isStreamEnvelopeTruncationText(text: string): boolean {
+	return TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_TRUNCATION_PATTERN.test(text);
+}
+
 function isTransientErrorText(text: string): boolean {
 	return (
 		isUnexpectedSocketCloseMessage(text) ||
 		isStreamReadErrorText(text) ||
 		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
 		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text) ||
-		(TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_TRUNCATION_PATTERN.test(text)) ||
+		isStreamEnvelopeTruncationText(text) ||
 		TRANSIENT_TRANSPORT_PATTERN.test(text)
 	);
 }
