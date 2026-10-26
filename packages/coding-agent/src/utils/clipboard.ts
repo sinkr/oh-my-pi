@@ -4,6 +4,7 @@ import {
 	readImageFromClipboard as nativeReadImageFromClipboard,
 	readTextFromClipboard as nativeReadTextFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
+import { isSshSession } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -64,6 +65,17 @@ async function spawnCapture(
 
 function hasDisplay(): boolean {
 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+
+/**
+ * True when the clipboard this process reads is the one the user's terminal copies into.
+ * Over SSH the system clipboard belongs to the remote host (macOS `pbpaste`, a server-side
+ * desktop session), so reading it would paste the server's contents. A Linux session with
+ * `DISPLAY`/`WAYLAND_DISPLAY` set over SSH is a forwarded display, which reaches the client.
+ */
+export function isClipboardTerminalLocal(): boolean {
+	if (!isSshSession()) return true;
+	return process.platform === "linux" && Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
 
 /**
