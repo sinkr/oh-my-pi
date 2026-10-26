@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed crackling in live voice playback: the assistant's speech now plays through a short jitter buffer instead of dropping out whenever a packet arrives late, and a lost packet is concealed with its own length instead of inserting 100 ms of synthesized audio ([#17114](https://github.com/can1357/oh-my-pi/issues/17114))
+
 ## [18.13.0] - 2026-10-26
 
 ### Added
