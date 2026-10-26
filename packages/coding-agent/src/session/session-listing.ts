@@ -8,7 +8,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import { SESSION_EXIT_CUSTOM_TYPE } from "./exit-diagnostics";
+import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
@@ -723,7 +723,7 @@ export async function findMostRecentSession(
 
 /** Where the conversation of a resumed session file went on (see {@link findSessionContinuation}). */
 export interface SessionContinuation {
-	/** The copy of the conversation to resume: the one with the newest entry. */
+	/** The copy of the conversation to resume: the one with the newest turn. */
 	session: SessionInfo;
 	/** The session file that was asked for. */
 	from: string;
@@ -731,43 +731,95 @@ export interface SessionContinuation {
 	copies: number;
 }
 
-/** First tail window {@link lastActivityTime} reads; it grows when one large entry fills it. */
+/** First tail window {@link lastActivity} reads; it grows when one large entry fills it. */
 const ACTIVITY_TAIL_BYTES = 65_536;
 
 /**
- * Epoch milliseconds of the newest entry in `session` other than a
- * `session_exit` record: every process appends one as it exits, so it says
- * when a process stopped, not when the conversation last moved. Falls back to
- * the header's creation time, and to `-Infinity` for an unreadable file.
+ * Entry types that carry turns of the conversation. Everything else a process
+ * appends can land long after the last turn without adding one: the
+ * `session_exit` record every exiting process writes, the usage of cache
+ * refreshes sent while idle, an idle compaction (it only summarizes entries
+ * every copy already holds), settings changes, labels and extension state.
  */
-async function lastActivityTime(session: SessionInfo, storage: SessionStorage): Promise<number> {
+const CONVERSATION_ENTRY_TYPES: Record<string, true> = {
+	message: true,
+	custom_message: true,
+	branch_summary: true,
+};
+
+/** The newest conversation entry of a session file. */
+interface SessionActivity {
+	/** Epoch milliseconds of the entry. */
+	time: number;
+	/** The entry's id; `undefined` when the file holds no such entry. */
+	id: string | undefined;
+}
+
+/**
+ * The newest entry in `session` whose type is in {@link CONVERSATION_ENTRY_TYPES},
+ * other than an eval-state snapshot (a `custom_message` at startup, a `message`
+ * after a compaction): when the conversation last moved, not when a process
+ * last wrote. Falls back to the header's creation time, and to `-Infinity`
+ * for an unreadable file.
+ */
+async function lastActivity(session: SessionInfo, storage: SessionStorage): Promise<SessionActivity> {
 	for (let window = ACTIVITY_TAIL_BYTES; ; window *= 4) {
 		let suffix: string;
 		try {
 			[, suffix] = await storage.readTextSlices(session.path, 0, window);
 		} catch {
-			return Number.NEGATIVE_INFINITY;
+			return { time: Number.NEGATIVE_INFINITY, id: undefined };
 		}
 		const lines = suffix.split("\n");
-		for (let i = lines.length - 1; i >= 0; i--) {
+		let reachedHeader = false;
+		for (let i = lines.length - 1; i >= 0 && !reachedHeader; i--) {
 			const line = lines[i];
 			// Same cheap rejection as deriveSessionStatus: blank lines and the leading partial fragment.
 			if (line.charCodeAt(0) !== 123) continue;
-			let entry: { type?: unknown; customType?: unknown; timestamp?: unknown };
+			let entry: {
+				type?: unknown;
+				timestamp?: unknown;
+				id?: unknown;
+				customType?: unknown;
+				message?: { role?: unknown; customType?: unknown };
+			};
 			try {
 				entry = JSON.parse(line);
 			} catch {
 				continue;
 			}
-			if (entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE) continue;
+			// The header carries the session id, not an entry id; the creation time below covers it.
+			reachedHeader = entry.type === "session";
+			if (typeof entry.type !== "string" || !Object.hasOwn(CONVERSATION_ENTRY_TYPES, entry.type)) continue;
+			const customType = entry.type === "custom_message" ? entry.customType : entry.message?.customType;
+			if (customType === EVAL_STATE_CONTEXT_TYPE) continue;
 			const time = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
-			if (Number.isFinite(time)) return time;
+			if (Number.isFinite(time)) return { time, id: typeof entry.id === "string" ? entry.id : undefined };
 		}
-		if (window >= session.size) {
+		if (reachedHeader || window >= session.size) {
 			const created = session.created.getTime();
-			return Number.isFinite(created) ? created : Number.NEGATIVE_INFINITY;
+			return { time: Number.isFinite(created) ? created : Number.NEGATIVE_INFINITY, id: undefined };
 		}
 	}
+}
+
+/** True when the session file at `file` holds an entry with id `id`. */
+async function holdsEntry(file: string, id: string, storage: SessionStorage): Promise<boolean> {
+	let text: string;
+	try {
+		text = await storage.readText(file);
+	} catch {
+		return false;
+	}
+	const needle = JSON.stringify(id);
+	for (const line of text.split("\n")) {
+		if (line.charCodeAt(0) !== 123 || !line.includes(needle)) continue;
+		try {
+			const entry: { id?: unknown } = JSON.parse(line);
+			if (entry.id === id) return true;
+		} catch {}
+	}
+	return false;
 }
 
 /**
@@ -789,9 +841,12 @@ function sessionFileCreatedAt(file: string): number {
  * holds it) continues in a sibling whose header names the old session in
  * `continuationOf`, and that sibling can move on the same way. Resuming the
  * old file again would revive the conversation as it was before the move,
- * so resume follows those links and takes the copy with the newest entry,
- * keeping `sessionPath` on a tie. Forks never set `continuationOf`, so a
- * deliberate fork is never followed.
+ * so resume follows those links and takes the copy with the newest turn,
+ * keeping `sessionPath` on a tie. A copy is followed only when it holds the
+ * newest turn of `sessionPath`: when `sessionPath` itself went on after the
+ * move (its own process kept writing it), both copies hold turns the other
+ * lacks and `sessionPath` stays the one resumed. Forks never set
+ * `continuationOf`, so a deliberate fork is never followed.
  *
  * A continuation is named `<move time>_<id>.jsonl` and moves only after the
  * session it continues was created, so only files named after that creation
@@ -826,14 +881,15 @@ export async function findSessionContinuation(
 			copies.push(next);
 		}
 	}
+	const startActivity = await lastActivity(start, storage);
 	let newest = start;
-	let newestActivity = await lastActivityTime(start, storage);
+	let newestTime = startActivity.time;
 	for (const copy of copies.slice(1)) {
-		const activity = await lastActivityTime(copy, storage);
-		if (activity > newestActivity) {
-			newest = copy;
-			newestActivity = activity;
-		}
+		const { time } = await lastActivity(copy, storage);
+		if (time <= newestTime) continue;
+		if (startActivity.id !== undefined && !(await holdsEntry(copy.path, startActivity.id, storage))) continue;
+		newest = copy;
+		newestTime = time;
 	}
 	if (newest === start) return undefined;
 	logger.info("Resuming the newest copy of a session that continued in another file", {

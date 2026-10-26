@@ -206,8 +206,9 @@ with RpcClient() as client:
     client.set_event_filter(None)  # forward every session event again
 ```
 
-`open_session()` continues the newest non-empty session in the directory or
-starts a fresh one there (`resumed=False`). Pass `provider=` and `model_id=` to
+`open_session()` continues the newest non-empty session in the directory (or,
+like `--continue`, the file that session went on in after another omp process
+held it) or starts a fresh one there (`resumed=False`). Pass `provider=` and `model_id=` to
 use that model instead of the session's saved one; without them, a saved model
 that can no longer be restored fails the call with `RpcCommandError` and the
 previous session stays active. The event filter applies only to

@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EVAL_STATE_CONTEXT_TYPE } from "@oh-my-pi/pi-coding-agent/eval/state";
 import { createSessionManager } from "@oh-my-pi/pi-coding-agent/main";
+import { openRpcSession, type RpcOpenSessionSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type { SessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -31,11 +33,16 @@ afterEach(() => {
 	agentDir = undefined;
 });
 
+/** Writes a holder makes while nobody types; none of them is a turn. */
+type IdleWrite = "warm" | "compact";
+
 /**
  * Another live omp process that resumed `sessionFile`. Commands, one per line:
  * `append <text>` writes a user turn (the first write makes it the file's
- * owner); `exit` records the `session_exit` marker every omp process appends
- * on its way out, then closes.
+ * owner); `warm` records the usage of an idle cache refresh; `compact` writes
+ * an idle compaction and the eval-state snapshot that follows it; `exit`
+ * records the `session_exit` marker every omp process appends on its way out,
+ * then closes.
  */
 class Holder {
 	readonly #child: Bun.Subprocess<"pipe", "pipe", "pipe">;
@@ -63,7 +70,17 @@ class Holder {
 				"		await manager.flush();",
 				"		break;",
 				"	}",
-				'	manager.appendMessage({ role: "user", content: line.slice("append ".length), timestamp: Date.now() });',
+				'	if (line === "warm") {',
+				"		manager.appendModelUsage(",
+				'			{ purpose: "cache-warm", api: "openai-completions", provider: "stub", model: "stub", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop" },',
+				"			{ sessionId: manager.getSessionId(), parentId: manager.getLeafId() },",
+				"		);",
+				'	} else if (line === "compact") {',
+				'		manager.appendCompaction("summary", undefined, manager.getLeafId(), 0);',
+				`		manager.appendMessage({ role: "custom", customType: ${JSON.stringify(EVAL_STATE_CONTEXT_TYPE)}, content: "eval state", display: false, attribution: "agent", timestamp: Date.now() });`,
+				"	} else {",
+				'		manager.appendMessage({ role: "user", content: line.slice("append ".length), timestamp: Date.now() });',
+				"	}",
 				"	await manager.flush();",
 				"	report();",
 				"}",
@@ -99,6 +116,13 @@ class Holder {
 	/** Append one user turn; returns the file it was saved to. */
 	async append(text: string): Promise<string> {
 		this.#child.stdin.write(`append ${text}\n`);
+		this.#child.stdin.flush();
+		return this.#nextLine();
+	}
+
+	/** Make one write that is not a turn; returns the file it was saved to. */
+	async idle(write: IdleWrite): Promise<string> {
+		this.#child.stdin.write(`${write}\n`);
 		this.#child.stdin.flush();
 		return this.#nextLine();
 	}
@@ -177,7 +201,10 @@ async function continueElsewhere(sessionFile: string, sessionDir: string, text: 
  * resumes it and continues in a sibling, then the holder exits last (so the old
  * file's last write is its exit marker, after all of the sibling's turns).
  */
-async function movedOffSession(tempDir: TempDir): Promise<{ original: string; continuation: string }> {
+async function movedOffSession(
+	tempDir: TempDir,
+	idleAfterMove?: IdleWrite,
+): Promise<{ original: string; continuation: string }> {
 	const original = await createSession(tempDir);
 	const holder = await Holder.resume(tempDir, original);
 	let continuation: string;
@@ -189,6 +216,7 @@ async function movedOffSession(tempDir: TempDir): Promise<{ original: string; co
 		await Bun.sleep(5);
 		continuation = await continueElsewhere(original, tempDir.path(), "continued turn");
 		await Bun.sleep(5);
+		if (idleAfterMove) expect(await holder.idle(idleAfterMove)).toBe(original);
 	} finally {
 		await holder.exit();
 	}
@@ -197,18 +225,22 @@ async function movedOffSession(tempDir: TempDir): Promise<{ original: string; co
 
 describe("--resume of a session that continued in a sibling file", () => {
 	// `continue`: the old file holds the holder's exit record, so it is the most recently written file.
-	for (const by of ["path", "id", "continue"] as const) {
+	const idleWrites: Record<string, IdleWrite> = {
+		"path after an idle cache refresh": "warm",
+		"path after an idle compaction": "compact",
+	};
+	for (const by of ["path", "id", "continue", ...Object.keys(idleWrites)]) {
 		it(`resumes the continuation, not the superseded file, when resumed by ${by}`, async () => {
 			using tempDir = TempDir.createSync("@omp-resume-continuation-");
-			const { original, continuation } = await movedOffSession(tempDir);
+			const { original, continuation } = await movedOffSession(tempDir, idleWrites[by]);
 			const sessionId = await readSessionHeaderId(original);
 			if (!sessionId) throw new Error("Expected a session id");
 			const args =
-				by === "path"
-					? resumeArgs(original)
-					: by === "id"
-						? resumeArgs(sessionId, tempDir.path())
-						: continueArgs(tempDir.path());
+				by === "id"
+					? resumeArgs(sessionId, tempDir.path())
+					: by === "continue"
+						? continueArgs(tempDir.path())
+						: resumeArgs(original);
 
 			const followed: SessionContinuation[] = [];
 			const manager = await createSessionManager(args, tempDir.path(), stubSettings, async () => "unavailable", {
@@ -226,6 +258,29 @@ describe("--resume of a session that continued in a sibling file", () => {
 			expect(await userTurnsIn(continuation, tempDir.path())).toEqual(["before", "holder turn", "continued turn"]);
 		}, 30_000);
 	}
+
+	it("opens the continuation when an RPC host opens the session directory", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const { continuation } = await movedOffSession(tempDir);
+		const switchedTo: string[] = [];
+		// A process still on its startup session elsewhere; only the switch target matters.
+		const host = {
+			sessionFile: agentDir?.join("startup.jsonl"),
+			sessionId: "startup",
+			messages: [],
+			model: undefined,
+			setModel: async () => ({ switched: true }),
+			newSession: async () => true,
+			switchSession: async (sessionPath: string) => {
+				switchedTo.push(sessionPath);
+				return true;
+			},
+		} as unknown as RpcOpenSessionSession;
+
+		const opened = await openRpcSession(host, tempDir.path());
+		expect(opened.resumed).toBe(true);
+		expect(switchedTo).toEqual([continuation]);
+	}, 30_000);
 
 	it("moves off again when the continuation is itself open in another live process", async () => {
 		using tempDir = TempDir.createSync("@omp-resume-continuation-");
@@ -276,6 +331,34 @@ describe("--resume of a session that continued in a sibling file", () => {
 		} finally {
 			await holder.exit();
 		}
+
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(original);
+		} finally {
+			await manager?.close();
+		}
+	}, 30_000);
+
+	it("keeps the asked-for file when both copies went on, even if the continuation wrote last", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const holder = await Holder.resume(tempDir, original);
+		let continuation: string;
+		try {
+			await holder.append("holder turn");
+			await Bun.sleep(5);
+			continuation = await continueElsewhere(original, tempDir.path(), "continued turn");
+			await Bun.sleep(5);
+			await holder.append("holder kept going");
+			await Bun.sleep(5);
+		} finally {
+			await holder.exit();
+		}
+		const writer = await open(continuation, tempDir.path());
+		writer.appendMessage(userTurn("continuation wrote last"));
+		await writer.close();
+		expect(writer.getSessionFile()).toBe(continuation);
 
 		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
 		try {
