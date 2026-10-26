@@ -46,6 +46,7 @@ export const OAUTH_REFRESH_SKEW_MS = 60_000;
 const OAUTH_REMINT_COOLDOWN_MS = 5 * 60_000;
 const OAUTH_REFRESH_LEASE_TTL_MS = 15_000;
 const OAUTH_REFRESH_LEASE_POLL_MS = 50;
+const OAUTH_REFRESH_LEASE_WAIT_MAX_MS = 250;
 const OAUTH_REFRESH_LEASE_RENEW_MS = 5_000;
 const OAUTH_REFRESH_OPERATION_TIMEOUT_MS = 10_000;
 const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 10_000;
@@ -126,6 +127,11 @@ export class OAuthRefresher {
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	/** Access token this process last minted per credential id. */
 	#recentMints = new Map<number, { provider: string; access: string; at: number }>();
+	/**
+	 * Refresh tokens rejected after taking over a stalled refresher's lease, per
+	 * credential id: that refresher may still save their successor until `until`.
+	 */
+	#stalledRefreshes = new Map<number, { refresh: string; until: number }>();
 	#pendingRefreshes = new Set<Promise<unknown>>();
 	#cancelRefreshCleanup?: () => void;
 	#shuttingDown = false;
@@ -196,9 +202,13 @@ export class OAuthRefresher {
 	 * Save a token this process already exchanged. The provider consumed the old
 	 * refresh token, so a busy store is retried (re-arming the lease each time:
 	 * a blocked event loop can outlive its TTL, and an expired lease no peer
-	 * took is still ours) instead of dropping the only valid token.
+	 * took is still ours) instead of dropping the only valid token. A refused
+	 * save is retried too while the row still holds the spent token: a peer
+	 * that took over the lapsed lease hands it back once the provider rejects
+	 * that token, but the next peer can hold it at the moment this save lands.
 	 */
 	async #persistExchangedCredential(
+		provider: string,
 		credentialId: number,
 		expectedData: string,
 		credential: OAuthCredential,
@@ -206,8 +216,13 @@ export class OAuthRefresher {
 		fingerprints: Record<string, unknown>,
 	): Promise<boolean> {
 		const deadline = Date.now() + OAUTH_REFRESH_PERSIST_TIMEOUT_MS;
+		let refused = false;
 		for (let attempt = 0; ; attempt++) {
 			if (attempt > 0 && Date.now() >= deadline) {
+				if (refused) {
+					logger.warn("OAuth exchanged token not saved before the save deadline", fingerprints);
+					return false;
+				}
 				throw new AIError.ConfigurationError("OAuth exchanged token could not be saved: store stayed busy");
 			}
 			let renewed = true;
@@ -235,16 +250,30 @@ export class OAuthRefresher {
 						credential,
 						lease ? { owner: lease.owner, nowMs: Date.now() } : undefined,
 					) ?? false;
-				if (!saved) logger.warn("OAuth exchanged token not saved", { ...fingerprints, leaseHeld: renewed });
-				return saved;
+				if (saved) return true;
+				// A peer that saved first changed the row; otherwise no peer can hold a
+				// usable successor of the spent token, so wait for the lease instead.
+				const stored = this.#deps.store.listAuthCredentials(provider).find(entry => entry.id === credentialId);
+				if (!stored || serializeCredential(provider, stored.credential)?.data !== expectedData) {
+					logger.warn("OAuth exchanged token not saved", { ...fingerprints, leaseHeld: renewed });
+					return false;
+				}
+				if (!refused) {
+					logger.warn("OAuth exchanged token save refused while a peer holds the lease; retrying", {
+						...fingerprints,
+						leaseHeld: renewed,
+					});
+				}
+				refused = true;
 			} catch (error) {
 				if (!isSqliteBusyError(error)) {
 					logger.error("OAuth exchanged token could not be saved", { ...fingerprints, error: String(error) });
 					throw error;
 				}
+				refused = false;
 				logger.warn("OAuth exchanged token save hit a busy store; retrying", { ...fingerprints, attempt });
-				await Bun.sleep(Math.min(OAUTH_REFRESH_PERSIST_RETRY_MAX_MS, OAUTH_REFRESH_LEASE_POLL_MS * 2 ** attempt));
 			}
+			await Bun.sleep(Math.min(OAUTH_REFRESH_PERSIST_RETRY_MAX_MS, OAUTH_REFRESH_LEASE_POLL_MS * 2 ** attempt));
 		}
 	}
 
@@ -321,6 +350,22 @@ export class OAuthRefresher {
 			if (options.canRefresh && !options.canRefresh(current)) {
 				return { credential: current, refreshed: false, removed: false };
 			}
+			// This process already had this refresh token rejected after taking over
+			// a stalled refresher, which may still save its successor: wait for that
+			// save instead of replaying the token at the provider.
+			const stalled = this.#stalledRefreshes.get(row.id);
+			if (stalled) {
+				const remainingMs = stalled.until - Date.now();
+				if (stalled.refresh === current.refresh && remainingMs > 0) {
+					await raceSignal(
+						Bun.sleep(Math.min(remainingMs, OAUTH_REFRESH_LEASE_WAIT_MAX_MS)),
+						options.signal,
+						"OAuth refresh wait for a stalled refresher aborted by caller",
+					);
+					continue;
+				}
+				this.#stalledRefreshes.delete(row.id);
+			}
 			// A lease row still naming another owner means that owner stalled or died
 			// holding it. It may have spent the stored refresh token already and still
 			// be retrying the save of its successor, so remember it: a rejection of
@@ -341,7 +386,10 @@ export class OAuthRefresher {
 			const waitMs =
 				leaseExpiresAt === undefined
 					? OAUTH_REFRESH_LEASE_POLL_MS
-					: Math.min(Math.max(leaseExpiresAt - Date.now(), OAUTH_REFRESH_LEASE_POLL_MS), 250);
+					: Math.min(
+							Math.max(leaseExpiresAt - Date.now(), OAUTH_REFRESH_LEASE_POLL_MS),
+							OAUTH_REFRESH_LEASE_WAIT_MAX_MS,
+						);
 			await raceSignal(Bun.sleep(waitMs), options.signal, "OAuth refresh ownership wait aborted by caller");
 		}
 
@@ -444,6 +492,10 @@ export class OAuthRefresher {
 							// The owner whose lease lapsed may have spent this token and still be
 							// saving its successor. Give the lease back so it can, and fail this
 							// refresh as transient instead of disabling a login that may live.
+							this.#stalledRefreshes.set(row.id, {
+								refresh: current.refresh,
+								until: takenOverFrom.expiresAtMs + OAUTH_REFRESH_STALLED_OWNER_MS,
+							});
 							leaseStore.handBackCredentialRefreshLease?.(leasedCredentialId, owner, takenOverFrom);
 							logger.warn("OAuth refresh token rejected after taking over a stalled refresher; not disabling", {
 								provider,
@@ -519,6 +571,7 @@ export class OAuthRefresher {
 			if (this.#deps.store.tryUpdateAuthCredentialIfMatches) {
 				if (
 					!(await this.#persistExchangedCredential(
+						provider,
 						row.id,
 						serialized.data,
 						merged,
@@ -647,7 +700,13 @@ export class OAuthRefresher {
 		credential = normalizeOAuthCredentialExpiry(provider, credential);
 		if (credentialId !== undefined) {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
-			if (existing) return raceSignal(existing, signal, "credential refresh aborted");
+			if (existing) {
+				const joined = await raceSignal(existing, signal, "credential refresh aborted");
+				// A refresh started for another request may adopt the very token this
+				// request was refused with; refresh again instead of returning it.
+				if (rejectedAccess === undefined || joined.access !== rejectedAccess) return joined;
+				return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess);
+			}
 		}
 		if (Date.now() + OAUTH_REFRESH_SKEW_MS < credential.expires) return credential;
 		if (credentialId === undefined) {
