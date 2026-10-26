@@ -1063,13 +1063,13 @@ export class TurnRecovery {
 			if (providerEmptyOutput) {
 				finalError = "Assistant returned no final output after retry cap; try switching models";
 			} else if (outputTokensExcludingKnownReasoning > 0 && assistantMessage.content.length === 0) {
-				// Billed non-reasoning output on a truly zero-block stop means content was
-				// generated and then dropped downstream (a filter/refusal flattened to
-				// `finish_reason: "stop"` by a proxy, or a lossy API translation) — the
-				// context/`/shake images` hint is wrong here, so name the billed output
-				// instead. Known reasoning-only usage is not evidence that deliverable
-				// content was dropped, and thinking-only stops retain a thinking block.
-				finalError = `Assistant returned an empty stop after retry cap, but the provider billed ${outputTokens} output token${outputTokens === 1 ? "" : "s"} for it; content was generated and then dropped before delivery, which usually points to a provider-side content filter or a lossy API translation rather than a context problem`;
+				// Report the usage without inferring why no deliverable content arrived.
+				const reasoningTokens = assistantMessage.usage.reasoningTokens;
+				const reasoningDetail =
+					reasoningTokens === undefined
+						? ""
+						: ` (${reasoningTokens} reasoning token${reasoningTokens === 1 ? "" : "s"})`;
+				finalError = `Assistant returned an empty stop after retry cap; provider reported ${outputTokens} output token${outputTokens === 1 ? "" : "s"}${reasoningDetail}, but no text or tool calls were delivered. Usage alone does not establish the cause`;
 			} else {
 				finalError =
 					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
@@ -2990,6 +2990,7 @@ export class TurnRecovery {
 		// hidden redirect so the retried turn sees a directive to break the repeated
 		// pattern instead of re-sampling the same stalled reasoning.
 		this.#maybeInjectThinkingLoopRedirect(id);
+		this.#maybeInjectMalformedFunctionCallRedirect(id, maxRetries, preserveFailedTurn, switchedModel);
 
 		// Day-scale provider waits (a monthly quota reset parsed from the error
 		// text) exceed the signed 32-bit timer limit; sleepLong chunks the sleep
@@ -3128,6 +3129,25 @@ export class TurnRecovery {
 			undefined,
 			"agent",
 		);
+	}
+	#maybeInjectMalformedFunctionCallRedirect(
+		id: number,
+		maxRetries: number,
+		preserveFailedTurn: boolean,
+		switchedModel: boolean,
+	): void {
+		if (!AIError.is(id, AIError.Flag.MalformedFunctionCall)) return;
+		if (preserveFailedTurn || switchedModel) return;
+		const reminder = prompt.render(malformedFunctionCallRetryTemplate, {
+			retryCount: this.#retryAttempt,
+			maxRetries,
+		});
+		this.#host.agent.appendMessage({
+			role: "developer",
+			content: [{ type: "text", text: reminder }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
 	}
 
 	/**
