@@ -20,6 +20,13 @@ describe("bundled agent parsing", () => {
 		expect(task?.thinkingLevel).toBe(AUTO_THINKING);
 	});
 
+	it("exposes lsp and ast_grep on the bundled scout agent", () => {
+		const scout = getBundledAgent("scout");
+
+		expect(scout).toBeDefined();
+		expect(scout?.tools).toEqual(["read", "find", "grep", "glob", "lsp", "ast_grep", "web_search"]);
+	});
+
 	it("accepts security-reviewer findings with optional remediation metadata", () => {
 		const securityReviewer = getBundledAgent("security-reviewer");
 		const findingValidator = buildOutputValidator(securityReviewer?.output).validator?.validateSection.get(

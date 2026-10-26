@@ -17,6 +17,7 @@
 ### Changed
 
 - `ask` answers now name the option a note is on (`m: [X, Y] (note on Y: …)`, `User added note on Y: …`) ([#17126](https://github.com/can1357/oh-my-pi/pull/17126) by [@H4vC](https://github.com/H4vC))
+- Bundled `scout` subagents now include `lsp` and `ast_grep` in their default tool list, matching the agent prompt's AST-search directive and `task.enableLsp` / `astGrep.enabled` settings
 
 ## [18.13.0] - 2026-10-26
 
