@@ -303,6 +303,23 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(built.details.path.startsWith(pluginDir("2.0.0"))).toBe(true);
 	});
 
+	it("a /skill: invocation of a skill the upgrade dropped fails as unknown instead of reading the old version", async () => {
+		const session = await startSession();
+		const skill = session.skills.find(entry => entry.name === SKILL)!;
+
+		// 2.0.0 renames the skill; the 1.0.0 directory stays (another scope or a retained install).
+		const renamedDir = path.join(pluginDir("2.0.0"), "skills", "renamed-skill");
+		fs.mkdirSync(renamedDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(renamedDir, "SKILL.md"),
+			"---\nname: renamed-skill\ndescription: Plugin skill.\n---\n\nBody of the renamed skill.\n",
+		);
+		writeRegistry(userRegistryPath(), "2.0.0", "user");
+
+		await expect(session.buildUserSkillPrompt(skill, { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
+		expect(await readText(session, `skill://${SKILL}`)).toContain(`Unknown skill: ${SKILL}`);
+	});
+
 	it("a project-scope upgrade moves the project's session and leaves a session outside the project alone", async () => {
 		// Both scopes share the 1.0.0 cache directory; the project upgrade keeps it for the user scope.
 		writeRegistry(projectRegistryPath(), "1.0.0", "project");

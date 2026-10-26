@@ -701,7 +701,8 @@ export async function isSkillSuperseded(
 /**
  * The same-named skill to read instead of `skill`, which went stale: the holder's own entry when an
  * earlier rediscovery already moved it and that entry is current, otherwise one from a new
- * {@link rediscoverSkills} pass (the holder's entry can be stale too, after a second upgrade).
+ * {@link rediscoverSkills} pass (the holder's entry can be stale too, after a second upgrade). The
+ * pass's entry can name `skill`'s own file, when discovery still finds the skill there.
  */
 async function findRediscoveredSkill(
 	skill: Pick<Skill, "name" | "filePath">,
@@ -716,8 +717,7 @@ async function findRediscoveredSkill(
 	) {
 		return held;
 	}
-	const fresh = (await rediscoverSkills(host)).find(entry => entry.name === skill.name);
-	return fresh && fresh.filePath !== skill.filePath ? fresh : undefined;
+	return (await rediscoverSkills(host)).find(entry => entry.name === skill.name);
 }
 
 export interface BuiltSkillPromptMessage {
@@ -813,14 +813,18 @@ export async function loadSkillPrompt(
 ): Promise<LoadedSkillPrompt> {
 	const host = source?.skillRediscoveryHost?.();
 	if (host && (await isSkillSuperseded(skill, host))) {
-		skill = (await findRediscoveredSkill(skill, host)) ?? skill;
+		// The registries install the skill's plugin elsewhere: read what they expose under its name
+		// now. A new version that dropped or renamed the skill leaves nothing to read.
+		const current = await findRediscoveredSkill(skill, host);
+		if (!current) throw new Error(`Unknown skill: ${skill.name}`);
+		skill = current;
 	}
 	try {
 		return { skill, body: await loadSkillPromptBody(skill) };
 	} catch (error) {
 		if (!host || !isEnoent(error)) throw error;
 		const fresh = await findRediscoveredSkill(skill, host);
-		if (!fresh) throw error;
+		if (!fresh || fresh.filePath === skill.filePath) throw error;
 		return { skill: fresh, body: await loadSkillPromptBody(fresh) };
 	}
 }
