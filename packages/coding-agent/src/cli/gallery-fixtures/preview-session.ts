@@ -30,7 +30,7 @@ export function createGallerySession(options: GallerySessionOptions = {}): Agent
 	return {
 		messages,
 		systemPrompt: [],
-		agent: { state: { tools: [] } },
+		agent: { isPaused: false, state: { tools: [] } },
 		skills: [],
 		model,
 		state: { messages, model, thinkingLevel: "high" },
@@ -70,7 +70,14 @@ export function createGallerySession(options: GallerySessionOptions = {}): Agent
 			options.advisorStatus
 				? {
 						configured: true,
-						advisors: [{ status: options.advisorStatus, yielded: options.advisorYielded ?? false, backlog: 0 }],
+						advisors: [
+							{
+								status: options.advisorStatus,
+								yielded: options.advisorYielded ?? false,
+								backlog: 0,
+								isPaused: false,
+							},
+						],
 					}
 				: { configured: false, advisors: [] },
 		getAdvisorCost: () => options.advisorCost ?? 0.08,

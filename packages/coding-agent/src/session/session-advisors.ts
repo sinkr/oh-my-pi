@@ -523,13 +523,15 @@ export interface SessionAdvisorsHost {
 
 /**
  * One advisor's status-line slice: runtime status, whether it has finished
- * reviewing the current yield, and its queued or in-flight review backlog.
+ * reviewing the current yield, its queued or in-flight review backlog, and
+ * whether the live runtime is parked at the pause boundary.
  */
 export interface AdvisorStatusOverviewEntry {
 	name: string;
 	status: AdvisorRuntimeStatus;
 	yielded: boolean;
 	backlog: number;
+	isPaused: boolean;
 }
 
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
@@ -2811,7 +2813,7 @@ export class SessionAdvisors {
 
 	/**
 	 * Lightweight advisor status for the status line and pause screen: the
-	 * configured flag and each advisor's status, yield state, and review backlog.
+	 * configured flag and each advisor's status, yield and pause state, and review backlog.
 	 * Avoids re-tokenizing the advisor transcript on every render frame.
 	 */
 	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
@@ -2819,7 +2821,7 @@ export class SessionAdvisors {
 		// clear on reset() but #advisorStatuses lags until the next build.
 		const liveStatusBySlug = new Map<
 			string,
-			{ status: AdvisorRuntimeStatus; yielded: boolean; canReview: boolean; backlog: number }
+			{ status: AdvisorRuntimeStatus; yielded: boolean; canReview: boolean; backlog: number; isPaused: boolean }
 		>();
 		for (const a of this.#advisors) {
 			liveStatusBySlug.set(a.slug, {
@@ -2827,6 +2829,7 @@ export class SessionAdvisors {
 				backlog: a.runtime.backlog,
 				yielded: a.runtime.yielded,
 				canReview: !a.runtime.quotaExhausted && !a.runtime.halted && !a.runtime.disposed,
+				isPaused: a.agent.isPaused,
 			});
 		}
 		const advisors = [...this.#advisorStatuses.entries()].map(([slug, { name, status }]) => {
@@ -2835,6 +2838,7 @@ export class SessionAdvisors {
 				name,
 				status: live?.status ?? status,
 				backlog: live?.backlog ?? 0,
+				isPaused: live?.isPaused ?? false,
 				// The eye only closes after the primary itself has yielded: while it
 				// is streaming, an advisor that can still accept review work may
 				// receive (and comment on) new deltas even when its backlog is

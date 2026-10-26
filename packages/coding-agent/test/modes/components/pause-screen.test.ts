@@ -6,6 +6,8 @@ import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/
 import { Reconciler } from "@oh-my-pi/pi-tui/native/reconcile";
 import type { TspNode } from "@oh-my-pi/pi-wire";
 import { BUILTIN_CONTROL_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-control";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { Settings } from "../../../src/config/settings";
 import {
@@ -70,6 +72,7 @@ describe("pause screen", () => {
 		agentPauseGate.resume();
 		setNativeRendering(false);
 		vi.useRealTimers();
+		AgentRegistry.resetGlobalForTests();
 	});
 
 	describe("renderPauseScreen", () => {
@@ -78,7 +81,7 @@ describe("pause screen", () => {
 			expect(lines.length).toBe(24);
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("P A U S E D");
-			expect(text).toContain("No outstanding turns or jobs");
+			expect(text).toContain("Paused — ready to suspend");
 			expect(text).toContain("█".repeat(5));
 		});
 		it("shows both outstanding counters in the compact ANSI layout while either is positive", () => {
@@ -88,9 +91,9 @@ describe("pause screen", () => {
 			});
 			const text = lines.map(stripAnsi).join("\n");
 			expect(lines).toHaveLength(12);
-			expect(text).toContain("Paused — outstanding work remains");
-			expect(text).toContain("Outstanding turns: 4");
-			expect(text).toContain("Outstanding jobs: 12");
+			expect(text).toContain("Pausing — waiting for work to settle");
+			expect(text).toContain("Unsettled turns: 4");
+			expect(text).toContain("Unfinished jobs: 12");
 			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(48);
 		});
 
@@ -119,28 +122,38 @@ describe("pause screen", () => {
 			const lines = renderPauseScreen(40, 10, 3_000, "Compact Session Title");
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("Compact Session Title");
-			expect(text).not.toContain("Outstanding turns:");
-			expect(text).not.toContain("Outstanding jobs:");
+			expect(text).not.toContain("Unsettled turns:");
+			expect(text).not.toContain("Unfinished jobs:");
 			expect(text).toContain("to resume");
 			expect(text).toContain("▌▌ P A U S E D");
 		});
 	});
-	it("counts advisor reviews only while queued or in flight", async () => {
+	it("excludes parked agents and advisors from unsettled work", async () => {
 		vi.useFakeTimers();
 		setNativeRendering(false);
+		AgentRegistry.resetGlobalForTests();
+		const rootAgent = { isPaused: false };
+		const subagentAgent = { isPaused: false };
+		let advisorPaused = false;
+		AgentRegistry.global().register({
+			id: "Main/worker",
+			displayName: "worker",
+			kind: "sub",
+			status: "running",
+			session: { agent: subagentAgent } as unknown as AgentSession,
+		});
 		const { host, shown } = makeHost();
-		let backlog = 0;
 		const ctx = {
 			...host,
 			session: {
-				isStreaming: false,
+				isStreaming: true,
+				agent: rootAgent,
 				getAdvisorStatusOverview: () => ({
 					configured: true,
-					advisors: [{ name: "Review", status: "running", yielded: false, backlog }],
+					advisors: [{ name: "Review", status: "running", yielded: false, backlog: 1, isPaused: advisorPaused }],
 				}),
 			},
 			statusLine: {
-				subagentCount: 0,
 				runningBackgroundJobCount: () => 0,
 			},
 		};
@@ -151,26 +164,20 @@ describe("pause screen", () => {
 		const component = shown[0];
 		if (!(component instanceof PauseScreenComponent)) throw new Error("expected /pause screen");
 
-		const screen = () => component.render(80).map(stripAnsi).join("\n");
 		try {
-			const idle = screen();
-			expect(idle).toContain("No outstanding turns or jobs");
-			expect(idle).not.toContain("Outstanding turns:");
-			expect(idle).not.toContain("Outstanding jobs:");
+			const active = component.render(80).map(stripAnsi).join("\n");
+			expect(active).toContain("Pausing — waiting for work to settle");
+			expect(active).toContain("Unsettled turns: 3");
+			expect(active).toContain("Unfinished jobs: 0");
 
-			backlog = 1;
+			rootAgent.isPaused = true;
+			subagentAgent.isPaused = true;
+			advisorPaused = true;
 			vi.advanceTimersByTime(1_000);
-			const reviewing = screen();
-			expect(reviewing).toContain("Paused — outstanding work remains");
-			expect(reviewing).toContain("Outstanding turns: 1");
-			expect(reviewing).toContain("Outstanding jobs: 0");
-
-			backlog = 0;
-			vi.advanceTimersByTime(1_000);
-			const idleAgain = screen();
-			expect(idleAgain).toContain("No outstanding turns or jobs");
-			expect(idleAgain).not.toContain("Outstanding turns:");
-			expect(idleAgain).not.toContain("Outstanding jobs:");
+			const parked = component.render(80).map(stripAnsi).join("\n");
+			expect(parked).toContain("Paused — ready to suspend");
+			expect(parked).not.toContain("Unsettled turns:");
+			expect(parked).not.toContain("Unfinished jobs:");
 		} finally {
 			component.handleInput("\r");
 			await running;
@@ -212,9 +219,9 @@ describe("pause screen", () => {
 			expect(clock?.p).toMatchObject({ format: "clock" });
 			const shown = texts(root);
 			expect(shown).toContain("Credit backpressure");
-			expect(shown).toContain("Paused — outstanding work remains");
-			expect(shown).toContain("Outstanding turns: 0");
-			expect(shown).toContain("Outstanding jobs: 2");
+			expect(shown).toContain("Pausing — waiting for work to settle");
+			expect(shown).toContain("Unsettled turns: 0");
+			expect(shown).toContain("Unfinished jobs: 2");
 
 			const buttons = all.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
 			expect(buttons.length).toBe(1);
@@ -236,9 +243,9 @@ describe("pause screen", () => {
 			const { host, requestCount } = makeHost(24);
 			const sheet = new PauseScreenComponent(host, { getWorkStatus: () => work });
 			const layouts = () => [80, 48].map(width => sheet.render(width).map(stripAnsi).join("\n"));
-			const counters = ["Outstanding turns:", "Outstanding jobs:"];
+			const counters = ["Unsettled turns:", "Unfinished jobs:"];
 			for (const text of layouts()) {
-				expect(text).toContain("Paused — outstanding work remains");
+				expect(text).toContain("Pausing — waiting for work to settle");
 				for (const counter of counters) expect(text).toContain(counter);
 			}
 
@@ -248,7 +255,7 @@ describe("pause screen", () => {
 				vi.advanceTimersByTime(1_000);
 				const zeroLayouts = layouts();
 				for (const zero of zeroLayouts) {
-					expect(zero).toContain("No outstanding turns or jobs");
+					expect(zero).toContain("Paused — ready to suspend");
 					for (const counter of counters) expect(zero).not.toContain(counter);
 					expect(zero).toContain("paused for");
 					expect(zero).toContain("resume");
@@ -258,9 +265,9 @@ describe("pause screen", () => {
 				work.unsettledTurns = 1;
 				vi.advanceTimersByTime(1_000);
 				for (const lateWork of layouts()) {
-					expect(lateWork).toContain("Paused — outstanding work remains");
-					expect(lateWork).toContain("Outstanding turns: 1");
-					expect(lateWork).toContain("Outstanding jobs: 0");
+					expect(lateWork).toContain("Pausing — waiting for work to settle");
+					expect(lateWork).toContain("Unsettled turns: 1");
+					expect(lateWork).toContain("Unfinished jobs: 0");
 				}
 				expect(requestCount()).toBeGreaterThan(rendersAtZero);
 			} finally {
@@ -305,7 +312,7 @@ describe("pause screen", () => {
 				const zero = sheet.describe();
 				const zeroOps = reconcile();
 				expect(zero).not.toBe(initial);
-				expect(texts(zero)).toContain("No outstanding turns or jobs");
+				expect(texts(zero)).toContain("Paused — ready to suspend");
 				const zeroNodes = nodes(zero);
 				expect(zeroNodes.some(n => n.k === "elapsed")).toBe(true);
 				const zeroButtons = zeroNodes.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
@@ -325,14 +332,14 @@ describe("pause screen", () => {
 				const lateWork = sheet.describe();
 				const lateWorkOps = reconcile();
 				expect(lateWork).not.toBe(zero);
-				expect(texts(lateWork)).toContain("Paused — outstanding work remains");
+				expect(texts(lateWork)).toContain("Pausing — waiting for work to settle");
 				expect(countNodes(lateWork)).toHaveLength(2);
 				expect(wireCountNodes(document.snapshot())).toHaveLength(2);
 				expect(
 					lateWorkOps.flatMap(op => (op[0] === "add" ? wireCountNodes(op[4]) : [])).map(n => n.p?.role),
 				).toEqual(expect.arrayContaining(["omp.pause.unsettled-turn-count", "omp.pause.unfinished-job-count"]));
-				expect(texts(lateWork)).toContain("Outstanding turns: 1");
-				expect(texts(lateWork)).toContain("Outstanding jobs: 0");
+				expect(texts(lateWork)).toContain("Unsettled turns: 1");
+				expect(texts(lateWork)).toContain("Unfinished jobs: 0");
 				const buttons = wireNodes(document.snapshot()).filter(
 					n => (n.p as { role?: string } | undefined)?.role === "omp.btn",
 				);

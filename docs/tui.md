@@ -229,9 +229,7 @@ return loader;
 
 ## Pause status
 
-The `/pause` screen shows outstanding turn and job lifecycle counts in both ANSI and native (TSP) rendering. The main session counts while streaming, as do running subagents and advisors with queued or in-flight reviews; an initialized advisor with an empty backlog does not count just because it is marked running and has not yielded. Jobs count while the main session marks them running, except task jobs already represented by a running subagent. A session remains outstanding when its agent is paused at the gate; a canceled job stops counting once its status is no longer running, even if its work is still unwinding.
-
-The screen says `Paused — outstanding work remains` while either count is nonzero and shows both rows (`Outstanding turns: N`, `Outstanding jobs: N`), including a zero-valued count. When both counts are zero, it says `No outstanding turns or jobs` and hides both rows. These lifecycle counts cover the tracked main session, subagents, advisors, and jobs; they do not indicate that the device or other processes are idle.
+The `/pause` screen polls the same turn-and-job settlement state for ANSI and TSP: turns still draining and running jobs are counted, while parked agents stop counting; when both counts reach zero, it hides the counter rows and signals readiness. These counts cover OMP-tracked work only, not device-wide idleness.
 
 ## Realistic custom component example (extension command)
 

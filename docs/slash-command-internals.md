@@ -292,13 +292,9 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 
 ## 10) Built-in command note: `/pause`
 
-`/pause` is available only in the interactive TUI. It engages the pause gate for the main agent, in-process subagents, and advisors; agents pause at their existing safe boundaries and resume when the gate is released.
+`/pause` (interactive only) holds the main agent, subagents, and advisors at safe boundaries; in-flight calls finish. The screen counts turns still draining and running jobs; parked agents stop counting, and when both counts reach zero it hides the rows and signals readiness.
 
-While paused, the screen shows lifecycle counts from the main session. **Outstanding turns** counts the main session while streaming, running subagents, and advisors with queued or in-flight reviews. An initialized advisor with an empty backlog does not count just because its status is `running` or it has not yielded. **Outstanding jobs** counts jobs the main session marks running, excluding task jobs already represented by a running subagent. A turn remains outstanding while its session is paused at the gate. A job stops counting when its status is no longer running, including when cancellation changes that status even if its work is still unwinding.
-
-The screen shows `Paused — outstanding work remains` and both counter rows while either count is nonzero, including a zero-valued row; it shows `No outstanding turns or jobs` and hides both rows when both counts are zero. Zero counts describe only these tracked session, subagent, advisor, and job states; they do not establish that the device or other processes are idle.
-
-From the pause screen, press the configured interrupt key (Esc by default), Enter, Space, or Ctrl+C to resume. Ctrl+C resumes rather than aborting any agent.
+The interrupt key (Esc by default), Enter, Space, or Ctrl+C resumes; Ctrl+C does not abort agents.
 
 ## 11) Built-in command note: `/btw`
 

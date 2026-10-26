@@ -14,7 +14,7 @@
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { type Component, matchesKey, type OverlayFocusOwner, type OverlayHandle, type OverlayOptions } from "../index";
 import { formatCoarseDuration } from "../chrome/format";
-import { centerLine, truncateToWidth } from "../utils";
+import { centerLine } from "../utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../keybinding-matchers";
 import { formatKeyHint, formatTooltipKey } from "../app-keybindings";
@@ -51,10 +51,6 @@ export interface PauseScreenHost {
 }
 
 const EMPTY_WORK_STATUS: PauseWorkStatus = { unsettledTurns: 0, unfinishedJobs: 0 };
-
-function centerStyledLine(line: string, width: number): string {
-	return centerLine(truncateToWidth(line, width), width).trimEnd();
-}
 
 /** Refresh cadence for the live hold clock and work-status snapshot. */
 const TICK_MS = 1_000;
@@ -106,10 +102,10 @@ export function renderPauseScreen(
 	const screenHeight = Math.max(1, Math.floor(height));
 	const compact = screenWidth < MIN_FULL_WIDTH || screenHeight < MIN_FULL_HEIGHT;
 	const outstanding = workStatus.unsettledTurns > 0 || workStatus.unfinishedJobs > 0;
-	const status = outstanding ? "Paused — outstanding work remains" : "No outstanding turns or jobs";
+	const status = outstanding ? "Pausing — waiting for work to settle" : "Paused — ready to suspend";
 	const workCounts = [
-		`Outstanding turns: ${workStatus.unsettledTurns}`,
-		`Outstanding jobs: ${workStatus.unfinishedJobs}`,
+		`Unsettled turns: ${workStatus.unsettledTurns}`,
+		`Unfinished jobs: ${workStatus.unfinishedJobs}`,
 	];
 	const content: string[] = [];
 	// Resume keys mirror PauseScreenComponent#handleInput: `app.interrupt` (raw Escape when unbound), Enter, Space.
@@ -117,42 +113,42 @@ export function renderPauseScreen(
 
 	if (compact) {
 		if (sessionName) {
-			content.push(centerStyledLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth));
+			content.push(centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd());
 		}
-		content.push(centerStyledLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), screenWidth));
+		content.push(centerLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), screenWidth).trimEnd());
 		content.push("");
-		content.push(centerStyledLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth));
-		content.push(centerStyledLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth));
+		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth).trimEnd());
+		content.push(centerLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth).trimEnd());
 		if (outstanding) {
-			content.push(centerStyledLine(theme.fg("muted", workCounts[0]!), screenWidth));
-			content.push(centerStyledLine(theme.fg("muted", workCounts[1]!), screenWidth));
+			content.push(centerLine(theme.fg("muted", workCounts[0]!), screenWidth).trimEnd());
+			content.push(centerLine(theme.fg("muted", workCounts[1]!), screenWidth).trimEnd());
 		}
-		content.push(centerStyledLine(theme.fg("dim", `${esc} to resume`), screenWidth));
+		content.push(centerLine(theme.fg("dim", `${esc} to resume`), screenWidth).trimEnd());
 	} else {
 		if (sessionName) {
-			content.push(centerStyledLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth));
+			content.push(centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd());
 			content.push("");
 		}
 		const bar = "█".repeat(BAR_WIDTH);
 		const glyphRow = `${bar}${" ".repeat(BAR_GAP)}${bar}`;
 		for (let i = 0; i < BAR_ROWS; i++) {
-			content.push(centerStyledLine(theme.fg("accent", glyphRow), screenWidth));
+			content.push(centerLine(theme.fg("accent", glyphRow), screenWidth).trimEnd());
 		}
 		content.push("");
-		content.push(centerStyledLine(theme.bold(theme.fg("accent", TITLE)), screenWidth));
+		content.push(centerLine(theme.bold(theme.fg("accent", TITLE)), screenWidth).trimEnd());
 		content.push("");
 		for (const line of BODY_LINES) {
-			content.push(centerStyledLine(theme.fg("muted", line), screenWidth));
+			content.push(centerLine(theme.fg("muted", line), screenWidth).trimEnd());
 		}
-		content.push(centerStyledLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth));
+		content.push(centerLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth).trimEnd());
 		if (outstanding) {
-			content.push(centerStyledLine(theme.fg("muted", workCounts[0]!), screenWidth));
-			content.push(centerStyledLine(theme.fg("muted", workCounts[1]!), screenWidth));
+			content.push(centerLine(theme.fg("muted", workCounts[0]!), screenWidth).trimEnd());
+			content.push(centerLine(theme.fg("muted", workCounts[1]!), screenWidth).trimEnd());
 		}
-		content.push(centerStyledLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth));
+		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth).trimEnd());
 		content.push("");
 		const resumeHint = `${esc} · ${formatKeyHint("enter")} · ${formatKeyHint("space")} — resume`;
-		content.push(centerStyledLine(theme.fg("dim", resumeHint), screenWidth));
+		content.push(centerLine(theme.fg("dim", resumeHint), screenWidth).trimEnd());
 	}
 
 	const topPad = Math.max(0, Math.floor((screenHeight - content.length) / 2));
@@ -261,7 +257,7 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 					text(
 						[
 							span(
-								outstanding ? "Paused — outstanding work remains" : "No outstanding turns or jobs",
+								outstanding ? "Pausing — waiting for work to settle" : "Paused — ready to suspend",
 								outstanding ? "warning" : "success",
 							),
 						],
@@ -272,13 +268,13 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 				...(outstanding
 					? [
 							keyed(
-								text([span(`Outstanding turns: ${snapshot.unsettledTurns}`, "muted")], {
+								text([span(`Unsettled turns: ${snapshot.unsettledTurns}`, "muted")], {
 									role: "omp.pause.unsettled-turn-count",
 								}),
 								"unsettled-turns",
 							),
 							keyed(
-								text([span(`Outstanding jobs: ${snapshot.unfinishedJobs}`, "muted")], {
+								text([span(`Unfinished jobs: ${snapshot.unfinishedJobs}`, "muted")], {
 									role: "omp.pause.unfinished-job-count",
 								}),
 								"unfinished-jobs",

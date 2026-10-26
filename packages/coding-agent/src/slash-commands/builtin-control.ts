@@ -1,4 +1,9 @@
 import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import {
+	getRunningSubagentBadgeAgentRefs,
+	getRunningSubagentBadgeRegistry,
+} from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
+import { AgentRegistry } from "../registry/agent-registry";
 import { clearApprovalGrants } from "../tools/approval-cache";
 import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
@@ -85,9 +90,12 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			await runPauseScreen(ctx, {
 				getWorkStatus: () => ({
 					unsettledTurns:
-						Number(root.isStreaming) +
-						ctx.statusLine.subagentCount +
-						root.getAdvisorStatusOverview().advisors.filter(advisor => advisor.backlog > 0).length,
+						Number(root.isStreaming && !root.agent.isPaused) +
+						getRunningSubagentBadgeAgentRefs(
+							getRunningSubagentBadgeRegistry(ctx.collabGuest, AgentRegistry.global()),
+						).filter(ref => !ref.session?.agent?.isPaused).length +
+						root.getAdvisorStatusOverview().advisors.filter(advisor => advisor.backlog > 0 && !advisor.isPaused)
+							.length,
 					unfinishedJobs: ctx.statusLine.runningBackgroundJobCount(root),
 				}),
 			});
