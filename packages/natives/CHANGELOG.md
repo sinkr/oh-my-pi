@@ -11,6 +11,7 @@
 - Faster native grep on minified and long lines ([#17016](https://github.com/can1357/oh-my-pi/pull/17016) by [@GTanger](https://github.com/GTanger))
 - Faster native ANSI text wrapping on long lines with many words ([#16927](https://github.com/can1357/oh-my-pi/pull/16927) by [@GTanger](https://github.com/GTanger))
 - Faster native memory reranking when selecting many results ([#16921](https://github.com/can1357/oh-my-pi/pull/16921) by [@GTanger](https://github.com/GTanger))
+- Faster structural code summaries on large files ([#16993](https://github.com/can1357/oh-my-pi/pull/16993) by [@GTanger](https://github.com/GTanger))
 
 ### Fixed
 
