@@ -155,6 +155,8 @@ interface TrackedJobLike {
 	resultText?: string;
 	errorText?: string;
 	structured?: StructuredSubagentOutput;
+	/** See {@link AsyncJob.agentOutputPublished}. */
+	agentOutputPublished?: boolean;
 }
 
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
@@ -245,6 +247,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
 			...(!resultConsumed && latest.structured ? { structured: latest.structured } : {}),
 			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.id } : {}),
+			...(latest.agentOutputPublished !== undefined ? { agentOutputPublished: latest.agentOutputPublished } : {}),
 		};
 	});
 }
@@ -326,8 +329,17 @@ export function buildJobResult(
 			// A task job's id can differ from its agent id (a messaged agent's next
 			// turn, vibe turns, workpool batches, /tan) while its output and
 			// transcript stay under the agent id, so name the reachable handles.
+			// `agent://` only for a job that completed and did not report writing
+			// no output: a follow-up turn that neither yielded nor reported a
+			// message result, and a cancelled `/tan` clone, leave that id holding
+			// an earlier turn's output or none at all.
 			if (j.agentUrlId && j.agentUrlId !== j.id) {
-				lines.push(`Agent: agent://${j.agentUrlId}, history://${j.agentUrlId}`);
+				const agentUrlHolds = j.status === "completed" && j.agentOutputPublished !== false;
+				lines.push(
+					agentUrlHolds
+						? `Agent: agent://${j.agentUrlId}, history://${j.agentUrlId}`
+						: `Agent: history://${j.agentUrlId}`,
+				);
 			}
 			if (j.status !== "cancelled") {
 				lines.push(
