@@ -495,6 +495,126 @@ interface VimSessionState {
 	tracked: boolean;
 }
 
+/** Length of `lines.join("\n")` without building it. */
+function flatLength(lines: readonly string[]): number {
+	let length = lines.length - 1;
+	for (const line of lines) length += line.length;
+	return length;
+}
+
+/** `lines.join("\n").slice(start, end)` without joining the whole buffer. */
+function sliceFlat(lines: readonly string[], start: number, end: number): string {
+	let out = "";
+	let offset = 0;
+	for (let i = 0; i < lines.length && offset < end; i++) {
+		const line = lines[i]!;
+		const lineEnd = offset + line.length;
+		if (lineEnd >= start) {
+			out += line.slice(Math.max(0, start - offset), end - offset);
+			if (i < lines.length - 1 && lineEnd < end) out += "\n";
+		}
+		offset = lineEnd + 1;
+	}
+	return out;
+}
+
+/**
+ * Common prefix and non-overlapping common suffix of `before.join("\n")` and `after.join("\n")` —
+ * the split a flat char scan gives — without joining either buffer. Lines an edit left alone keep
+ * their string identity, so they are skipped whole and a keystroke costs O(lines), not O(chars).
+ */
+function diffFlatLines(
+	before: readonly string[],
+	after: readonly string[],
+	beforeLength: number,
+	afterLength: number,
+): { prefix: number; suffix: number } {
+	const prefixMax = Math.min(beforeLength, afterLength);
+	let prefix = 0;
+	let bl = 0;
+	let bc = 0;
+	let al = 0;
+	let ac = 0;
+	// `prefix < prefixMax` guarantees both sides still have a character; past a line's end it is "\n".
+	while (prefix < prefixMax) {
+		const bLine = before[bl]!;
+		const aLine = after[al]!;
+		if (
+			bc === 0 &&
+			ac === 0 &&
+			bl < before.length - 1 &&
+			al < after.length - 1 &&
+			prefix + bLine.length + 1 <= prefixMax &&
+			bLine === aLine
+		) {
+			prefix += bLine.length + 1;
+			bl++;
+			al++;
+			continue;
+		}
+		const b = bc < bLine.length ? bLine.charCodeAt(bc) : 10;
+		const a = ac < aLine.length ? aLine.charCodeAt(ac) : 10;
+		if (a !== b) break;
+		prefix++;
+		if (bc < bLine.length) {
+			bc++;
+		} else {
+			bl++;
+			bc = 0;
+		}
+		if (ac < aLine.length) {
+			ac++;
+		} else {
+			al++;
+			ac = 0;
+		}
+	}
+
+	const suffixMax = Math.min(beforeLength - prefix, afterLength - prefix);
+	let suffix = 0;
+	bl = before.length - 1;
+	al = after.length - 1;
+	bc = before[bl]!.length;
+	ac = after[al]!.length;
+	// Positions sit just past the next character to compare; before a line's start it is "\n".
+	while (suffix < suffixMax) {
+		const bLine = before[bl]!;
+		const aLine = after[al]!;
+		if (
+			bc === bLine.length &&
+			ac === aLine.length &&
+			bl > 0 &&
+			al > 0 &&
+			suffix + bLine.length + 1 <= suffixMax &&
+			bLine === aLine
+		) {
+			suffix += bLine.length + 1;
+			bl--;
+			al--;
+			bc = before[bl]!.length;
+			ac = after[al]!.length;
+			continue;
+		}
+		const b = bc > 0 ? bLine.charCodeAt(bc - 1) : 10;
+		const a = ac > 0 ? aLine.charCodeAt(ac - 1) : 10;
+		if (a !== b) break;
+		suffix++;
+		if (bc > 0) {
+			bc--;
+		} else {
+			bl--;
+			bc = before[bl]!.length;
+		}
+		if (ac > 0) {
+			ac--;
+		} else {
+			al--;
+			ac = after[al]!.length;
+		}
+	}
+	return { prefix, suffix };
+}
+
 /**
  * Typed characters that replace the provisional space a Tab word accept adds, so
  * they attach to the accepted word: closing punctuation, and `-` for compounds
@@ -1839,7 +1959,9 @@ export class Editor implements Component, Focusable {
 			const revision = this.#textRevision;
 			const line = this.#state.cursorLine;
 			const col = this.#state.cursorCol;
-			const flatBefore = session !== null && session.tracked && !session.replace ? flatten(this.#state).text : "";
+			// A line-array copy is pointer-sized per line; the edit diff below skips unchanged lines whole.
+			const linesBefore =
+				session !== null && session.tracked && !session.replace ? this.#state.lines.slice() : undefined;
 			next = this.#handleInputChunk(next);
 			// A bare cursor move inside one Insert/Replace session splits it, like Vim's arrow keys.
 			if (
@@ -1854,9 +1976,10 @@ export class Editor implements Component, Focusable {
 				session === this.#vimSession &&
 				session.tracked &&
 				!session.replace &&
+				linesBefore !== undefined &&
 				this.#textRevision !== revision
 			) {
-				this.#trackVimSessionEdit(session, flatBefore);
+				this.#trackVimSessionEdit(session, linesBefore);
 			}
 		}
 	}
@@ -1866,20 +1989,13 @@ export class Editor implements Component, Focusable {
 	 * `deleteBefore`/`deleteAfter` exact even when typed text coincides with what was deleted
 	 * (Backspace then retyping the same grapheme), which a final-text diff cannot recover.
 	 */
-	#trackVimSessionEdit(session: VimSessionState, flatBefore: string): void {
-		const flatAfter = flatten(this.#state).text;
-		let p = 0;
-		const pMax = Math.min(flatBefore.length, flatAfter.length);
-		while (p < pMax && flatBefore.charCodeAt(p) === flatAfter.charCodeAt(p)) p++;
-		let q = 0;
-		const qMax = Math.min(flatBefore.length - p, flatAfter.length - p);
-		while (
-			q < qMax &&
-			flatBefore.charCodeAt(flatBefore.length - 1 - q) === flatAfter.charCodeAt(flatAfter.length - 1 - q)
-		)
-			q++;
-		const removedEnd = flatBefore.length - q;
-		const insLen = flatAfter.length - p - q;
+	#trackVimSessionEdit(session: VimSessionState, linesBefore: readonly string[]): void {
+		const linesAfter = this.#state.lines;
+		const beforeLength = flatLength(linesBefore);
+		const afterLength = flatLength(linesAfter);
+		const { prefix: p, suffix: q } = diffFlatLines(linesBefore, linesAfter, beforeLength, afterLength);
+		const removedEnd = beforeLength - q;
+		const insLen = afterLength - p - q;
 		const leftCut = Math.max(0, Math.min(removedEnd, session.leftEnd) - p);
 		const rightCut = Math.max(0, removedEnd - Math.max(p, session.rightStart));
 		const typedCut = removedEnd - p - leftCut - rightCut;
@@ -1889,8 +2005,10 @@ export class Editor implements Component, Focusable {
 			session.tracked = false;
 			return;
 		}
-		if (leftCut > 0) session.delBefore += countGraphemes(flatBefore.slice(p, p + leftCut));
-		if (rightCut > 0) session.delAfter += countGraphemes(flatBefore.slice(removedEnd - rightCut, removedEnd));
+		if (leftCut > 0) session.delBefore += countGraphemes(sliceFlat(linesBefore, p, p + leftCut));
+		if (rightCut > 0) {
+			session.delAfter += countGraphemes(sliceFlat(linesBefore, removedEnd - rightCut, removedEnd));
+		}
 		session.leftEnd -= leftCut;
 		session.rightStart = session.rightStart - leftCut - typedCut + insLen;
 	}
