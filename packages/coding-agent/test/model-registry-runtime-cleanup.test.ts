@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import { type AssistantMessageEventStream, clearCustomApis, getCustomApi } from "@oh-my-pi/pi-ai";
 import { getOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
@@ -31,6 +31,7 @@ describe("ModelRegistry runtime source cleanup", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		clearCustomApis();
 		authStorage.close();
 	});
@@ -79,16 +80,11 @@ describe("ModelRegistry runtime source cleanup", () => {
 			"ext://kept",
 		);
 
-		const keys = registry.authStorage.keys;
-		const clearConfig = keys.clearConfig.bind(keys);
-		let rebuilds = 0;
-		keys.clearConfig = () => {
-			rebuilds++;
-			clearConfig();
-		};
+		const clearConfig = vi.spyOn(registry.authStorage.keys, "clearConfig");
 		registry.clearSourceRegistrations(sources);
 
-		expect(rebuilds).toBe(1);
+		// Every catalog rebuild clears the config-sourced keys first.
+		expect(clearConfig).toHaveBeenCalledTimes(1);
 		for (let index = 0; index < sources.length; index++) {
 			expect(registry.find(`batch-provider-${index}`, "runtime-model")).toBeUndefined();
 		}
