@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Exited bash-tool `&` jobs are reaped without another command; `wait` still reports their status, and `$!` works inside pipelines, subshells, and command substitutions ([#17144](https://github.com/can1357/oh-my-pi/issues/17144)).
+- On macOS, the bash tool's built-in `ps` includes other users' processes and unreaped zombies when selecting a PID ([#17144](https://github.com/can1357/oh-my-pi/issues/17144)).
+
 ## [18.13.0] - 2026-10-26
 
 ### Added
