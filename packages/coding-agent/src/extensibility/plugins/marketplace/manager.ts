@@ -86,6 +86,22 @@ export interface MarketplaceManagerOptions {
 	clearPluginRootsCache?: (extraPaths?: readonly string[]) => void;
 }
 
+export type VersionChange = "upgrade" | "reinstall" | "downgrade";
+
+/**
+ * How moving an installed plugin from `from` to `to` counts. Newer semver is an upgrade; any other
+ * pair of different non-semver tags also counts as an upgrade, since their order is unknown.
+ */
+export function classifyVersionChange(from: string, to: string): VersionChange {
+	if (to === from) return "reinstall";
+	try {
+		const order = Bun.semver.order(to, from);
+		return order > 0 ? "upgrade" : order < 0 ? "downgrade" : "reinstall";
+	} catch {
+		return "upgrade";
+	}
+}
+
 // ── Manager ──────────────────────────────────────────────────────────────────
 
 type InstallValidation = {
@@ -756,17 +772,7 @@ export class MarketplaceManager {
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
 		for (const row of await this.listCatalogVersions()) {
 			const { to } = row;
-			if (!to || to === row.from) continue;
-
-			// Treat newer semver as an update; fall back to inequality for non-semver tags.
-			let isNewer: boolean;
-			try {
-				isNewer = Bun.semver.order(to, row.from) > 0;
-			} catch {
-				isNewer = true;
-			}
-
-			if (isNewer) {
+			if (to && classifyVersionChange(row.from, to) === "upgrade") {
 				updates.push({ pluginId: row.pluginId, scope: row.scope, from: row.from, to });
 			}
 		}
@@ -826,42 +832,55 @@ export class MarketplaceManager {
 
 	// Re-install a specific plugin at the latest catalog version (force-overwrites).
 	async upgradePlugin(pluginId: string, scope?: "user" | "project"): Promise<InstalledPluginEntry> {
-		const parsed = parsePluginId(pluginId);
-		if (!parsed) {
-			throw new Error(`Invalid plugin ID: "${pluginId}". Expected "name@marketplace".`);
-		}
-
-		const { userEntries, projectEntries } = await this.#findInBothRegistries(pluginId);
-
-		const inUser = userEntries && userEntries.length > 0;
-		const inProject = projectEntries && projectEntries.length > 0;
-
-		if (!inUser && !inProject) {
-			throw new Error(`Plugin "${pluginId}" is not installed`);
-		}
-
-		let resolvedScope: "user" | "project";
-		if (inUser && inProject) {
-			if (!scope) {
-				throw new Error(
-					`Plugin "${pluginId}" is installed in both user and project scope. Use --scope user or --scope project to specify which to upgrade.`,
-				);
-			}
-			resolvedScope = scope;
-		} else if (inProject) {
-			if (scope === "user") throw new Error(`Plugin "${pluginId}" is not installed in user scope`);
-			resolvedScope = "project";
-		} else {
-			if (scope === "project") throw new Error(`Plugin "${pluginId}" is not installed in project scope`);
-			resolvedScope = "user";
-		}
-
-		return this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: resolvedScope });
+		const { name, marketplace, scopes } = await this.#resolveUpgradeScopes(pluginId, scope, { across: false });
+		return this.installPlugin(name, marketplace, { force: true, scope: scopes[0] });
 	}
 
 	// Upgrade a plugin across all scopes where it is installed.
 	// Returns one entry per scope upgraded (0–2 entries).
 	async upgradePluginAcrossScopes(pluginId: string): Promise<InstalledPluginEntry[]> {
+		const { name, marketplace, scopes } = await this.#resolveUpgradeScopes(pluginId, undefined, { across: true });
+		const results: InstalledPluginEntry[] = [];
+		for (const target of scopes) {
+			results.push(await this.installPlugin(name, marketplace, { force: true, scope: target }));
+		}
+		return results;
+	}
+
+	// What `upgradePlugin(pluginId, scope)` (scope given) or `upgradePluginAcrossScopes(pluginId)`
+	// (no scope) would reinstall, one row per scope in the same order, without changing anything.
+	// Throws the errors the real upgrade would throw before it writes. `to` is undefined when the
+	// catalog declares no version (known only after fetching the source).
+	async previewUpgradePlugin(
+		pluginId: string,
+		scope?: "user" | "project",
+	): Promise<
+		Array<{ scope: "user" | "project"; from: string | undefined; to: string | undefined; change?: VersionChange }>
+	> {
+		const { name, marketplace, scopes } = await this.#resolveUpgradeScopes(pluginId, scope, { across: !scope });
+		const versions = await this.listCatalogVersions();
+		const rows: Array<{
+			scope: "user" | "project";
+			from: string | undefined;
+			to: string | undefined;
+			change?: VersionChange;
+		}> = [];
+		for (const target of scopes) {
+			await this.validateInstallPlugin(name, marketplace, { force: true, scope: target });
+			const row = versions.find(v => v.pluginId === pluginId && v.scope === target);
+			const change = row?.to ? classifyVersionChange(row.from, row.to) : undefined;
+			rows.push({ scope: target, from: row?.from, to: row?.to, change });
+		}
+		return rows;
+	}
+
+	// The scopes an upgrade of `pluginId` reinstalls. `across`: every installed scope, project first.
+	// Otherwise exactly one: `scope` if given, else the only installed scope.
+	async #resolveUpgradeScopes(
+		pluginId: string,
+		scope: "user" | "project" | undefined,
+		opts: { across: boolean },
+	): Promise<{ name: string; marketplace: string; scopes: Array<"user" | "project"> }> {
 		const parsed = parsePluginId(pluginId);
 		if (!parsed) {
 			throw new Error(`Invalid plugin ID: "${pluginId}". Expected "name@marketplace".`);
@@ -876,18 +895,27 @@ export class MarketplaceManager {
 			throw new Error(`Plugin "${pluginId}" is not installed`);
 		}
 
-		const results: InstalledPluginEntry[] = [];
-
-		if (inProject) {
-			const entry = await this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: "project" });
-			results.push(entry);
+		let scopes: Array<"user" | "project">;
+		if (opts.across) {
+			scopes = [];
+			if (inProject) scopes.push("project");
+			if (inUser) scopes.push("user");
+		} else if (inUser && inProject) {
+			if (!scope) {
+				throw new Error(
+					`Plugin "${pluginId}" is installed in both user and project scope. Use --scope user or --scope project to specify which to upgrade.`,
+				);
+			}
+			scopes = [scope];
+		} else if (inProject) {
+			if (scope === "user") throw new Error(`Plugin "${pluginId}" is not installed in user scope`);
+			scopes = ["project"];
+		} else {
+			if (scope === "project") throw new Error(`Plugin "${pluginId}" is not installed in project scope`);
+			scopes = ["user"];
 		}
-		if (inUser) {
-			const entry = await this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: "user" });
-			results.push(entry);
-		}
 
-		return results;
+		return { name: parsed.name, marketplace: parsed.marketplace, scopes };
 	}
 
 	// Upgrade every (pluginId, scope) pair that checkForUpdates reports as outdated.

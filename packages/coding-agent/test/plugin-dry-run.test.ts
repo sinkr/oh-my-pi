@@ -169,6 +169,35 @@ describe("plugin --dry-run beyond install, uninstall and link", () => {
 		});
 	}
 
+	// Tags that are not semver have no known order, so every different tag counts as an upgrade,
+	// and both previews must use that same rule.
+	test("upgrade --dry-run with and without an id agree on a non-semver catalog version", async () => {
+		await writeMarketplace(marketplaceDir, "fixmkt", "nightly");
+		const expected = `Would upgrade ${PLUGIN_ID} (user): 1.0.0 -> nightly`;
+
+		await runPluginCommand({ action: "upgrade", args: [], flags: { dryRun: true } });
+		expect(logged()).toContain(expected);
+		output.length = 0;
+
+		await runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: { dryRun: true } });
+		expect(logged()).toContain(expected);
+	});
+
+	test("upgrade <id> --scope --dry-run reports a scope the plugin is not installed in, like the real command", async () => {
+		const exit = spyOn(process, "exit").mockImplementation(() => {
+			throw new Error("process.exit");
+		});
+		const before = await snapshotTree(root);
+
+		await expect(
+			runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: { dryRun: true, scope: "project" } }),
+		).rejects.toThrow("process.exit");
+
+		expect(exit).toHaveBeenCalledWith(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("is not installed in project scope"));
+		expect(await snapshotTree(root)).toEqual(before);
+	});
+
 	test("upgrade --scope --dry-run with no id keeps the --scope warning", async () => {
 		await runPluginCommand({ action: "upgrade", args: [], flags: { dryRun: true, scope: "user" } });
 

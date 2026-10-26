@@ -419,42 +419,13 @@ async function previewMarketplaceReinstall(
 	pluginId: string,
 	scope: "user" | "project" | undefined,
 ): Promise<void> {
-	const parsed = parsePluginId(pluginId);
-	if (!parsed) {
-		throw new Error(`Invalid plugin ID: "${pluginId}". Expected "name@marketplace".`);
+	for (const row of await manager.previewUpgradePlugin(pluginId, scope)) {
+		const label = `${pluginId} (${row.scope})`;
+		const line = row.to
+			? `Would ${row.change} ${label}: ${row.from ?? "?"} -> ${row.to}`
+			: `Would reinstall ${label} from ${row.from ?? "?"}; the new version is known only after fetching its source`;
+		console.log(chalk.dim(`[dry-run] ${line}`));
 	}
-	const installedScopes = new Set(
-		(await manager.listInstalledPlugins()).filter(p => p.id === pluginId && p.entries.length > 0).map(p => p.scope),
-	);
-	if (installedScopes.size === 0) {
-		throw new Error(`Plugin "${pluginId}" is not installed`);
-	}
-	if (scope && !installedScopes.has(scope)) {
-		throw new Error(`Plugin "${pluginId}" is not installed in ${scope} scope`);
-	}
-	// Same order as upgradePluginAcrossScopes: project first, then user.
-	const scopes = scope ? [scope] : (["project", "user"] as const).filter(s => installedScopes.has(s));
-	const versions = await manager.listCatalogVersions();
-	for (const target of scopes) {
-		// Surfaces the errors the real reinstall would hit first (marketplace or catalog entry gone, bad source).
-		await manager.validateInstallPlugin(parsed.name, parsed.marketplace, { force: true, scope: target });
-		const row = versions.find(v => v.pluginId === pluginId && v.scope === target);
-		console.log(chalk.dim(`[dry-run] ${describeReinstall(pluginId, target, row?.from, row?.to)}`));
-	}
-}
-
-function describeReinstall(pluginId: string, scope: string, from: string | undefined, to: string | undefined): string {
-	const label = `${pluginId} (${scope})`;
-	if (!to)
-		return `Would reinstall ${label} from ${from ?? "?"}; the new version is known only after fetching its source`;
-	let order = 0;
-	try {
-		order = from ? Bun.semver.order(to, from) : 0;
-	} catch {
-		// Non-semver tags: report a plain reinstall.
-	}
-	const verb = order > 0 ? "upgrade" : order < 0 ? "downgrade" : "reinstall";
-	return `Would ${verb} ${label}: ${from ?? "?"} -> ${to}`;
 }
 
 /** Upgrade an npm/git-installed plugin in place from its recorded source. */
@@ -1248,7 +1219,7 @@ ${chalk.bold("Options:")}
   --fix            Attempt automatic fixes (doctor)
   --force          Overwrite without prompting (install)
   --scope <scope>  Install scope: user (default) or project (install name@marketplace)
-  --dry-run        Preview changes without applying (install, uninstall, link, upgrade name@marketplace)
+  --dry-run        Preview changes without applying (install, uninstall, link, upgrade of marketplace plugins)
   -l, --local      Use project-local overrides
 
 ${chalk.bold("Examples:")}

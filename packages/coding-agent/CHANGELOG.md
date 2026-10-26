@@ -5,7 +5,7 @@
 ### Fixed
 
 - Fixed advisors dropping their review and showing a rate-limit error when the provider returns a timed 429 such as Codex's `turn_rate_limit_exceeded`; the advisor now waits out the Retry-After (within `retry.maxDelayMs`) and retries like the main agent ([#17087](https://github.com/can1357/oh-my-pi/pull/17087) by [@H4vC](https://github.com/H4vC))
-- Fixed `omp plugin upgrade --dry-run`, `omp update --plugins --check` and `omp plugin marketplace update --dry-run` installing or fetching for real: an upgrade dry run of marketplace plugins now lists each version change (upgrade, reinstall or downgrade) without installing, `omp plugin install <npm-pkg> --dry-run` no longer creates the plugins `package.json`, and `marketplace add|remove|update`, `upgrade` of npm/git plugins, `enable`, `disable`, `features` changes, `config set|delete` and `doctor --fix` reject `--dry-run` with an error instead of applying the change ([#17104](https://github.com/can1357/oh-my-pi/pull/17104) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `omp plugin` commands applying changes under `--dry-run`: `upgrade` and `omp update --plugins --check` now preview, and actions without a preview reject the flag ([#17104](https://github.com/can1357/oh-my-pi/pull/17104) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.0] - 2026-10-26
 
