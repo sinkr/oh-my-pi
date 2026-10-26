@@ -389,6 +389,61 @@ describe("date-cwd-reminder", () => {
 			expect(after.messages[2]?.content).toBe(rolled.messages[2]!.content);
 			expect(after.messages[2]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\ngo`);
 		});
+
+		it("keeps the main conversation's bytes when another conversation's request runs between two of its own", () => {
+			// An advisor and the session's side requests share the main loop's provider
+			// transform, and each sends its own history through this injector.
+			const injector = new DateCwdReminderInjector();
+			const first: Message = { role: "user", content: "first", timestamp: 1 };
+			const main = injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+			// The clock crosses midnight, and the advisor asks its own question.
+			const advisorTurn: Message = { role: "user", content: "review the turn", timestamp: 10 };
+			const advisor = injector.transform(
+				{ systemPrompt: ["advisor"], messages: [advisorTurn] },
+				"2026-08-15",
+				"/work",
+			);
+			const next: Message = { role: "user", content: "second", timestamp: 20 };
+			const after = injector.transform(
+				{ systemPrompt: ["system"], messages: [first, createAssistantMessage("a"), next] },
+				"2026-08-15",
+				"/work",
+			);
+
+			expect(advisor.messages[0]?.content).toBe(
+				`${renderDateCwdReminder("2026-08-15", "/work")}\n\nreview the turn`,
+			);
+			expect(after.messages[0]?.content).toBe(main.messages[0]!.content);
+			expect(after.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-14", "/work")}\n\nfirst`);
+			expect(after.messages[2]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nsecond`);
+		});
+
+		it("keeps a compaction's retained turns when another conversation's request came in between", () => {
+			const injector = new DateCwdReminderInjector();
+			const first: Message = { role: "user", content: "first", timestamp: 1 };
+			const kept: Message = { role: "user", content: "kept", timestamp: 2 };
+			injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+			const rolled = injector.transform(
+				{ systemPrompt: ["system"], messages: [first, createAssistantMessage("a"), kept] },
+				"2026-08-15",
+				"/work",
+			);
+			// An advisor request runs before the compaction's first request.
+			injector.transform(
+				{ systemPrompt: ["advisor"], messages: [{ role: "user", content: "review", timestamp: 10 }] },
+				"2026-08-15",
+				"/work",
+			);
+			const summary: Message = { role: "user", content: "summary", timestamp: 20 };
+			const after = injector.transform(
+				{ systemPrompt: ["system"], messages: [summary, kept, createAssistantMessage("b")] },
+				"2026-08-15",
+				"/work",
+			);
+
+			expect(after.messages[1]?.content).toBe(rolled.messages[2]!.content);
+			expect(after.messages[1]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nkept`);
+		});
 	});
 });
 
