@@ -2150,8 +2150,9 @@ mod tests {
 	/// a small stack, and deep enough that its paths pass `PATH_MAX` and one
 	/// descriptor per level would pass the default descriptor limit. Every
 	/// level also holds a file, so the walk keeps listing a directory after
-	/// coming back up out of its subdirectory.
-	#[cfg(unix)]
+	/// coming back up out of its subdirectory. Redox removes through the
+	/// provider walk rather than the descriptor walk, so it is not covered.
+	#[cfg(all(unix, not(target_os = "redox")))]
 	#[test]
 	fn removes_a_directory_chain_deeper_than_the_stack() {
 		use std::ffi::OsStr;
