@@ -334,7 +334,7 @@ export class IndexedSessionStorage implements SessionStorage {
 					if (commitGuard && !commitGuard()) {
 						const current = this.#index.get(path);
 						if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
-						this.#dropFrame(path, mtimeMs);
+						this.#abandonFrame(path, mtimeMs);
 						return;
 					}
 					await this.#backend.writeFull(path, content, mtimeMs, title, options?.expectedSize);
@@ -530,6 +530,22 @@ export class IndexedSessionStorage implements SessionStorage {
 		if (!frames) return;
 		const index = frames.findIndex(frame => frame.mtimeMs === mtimeMs);
 		if (index >= 0) frames.splice(index, 1);
+		if (frames.length === 0) this.#pendingFrames.delete(path);
+	}
+
+	/**
+	 * Drop the frame of an op that never published. A newer frame was queued
+	 * on top of this op's unpublished entry, so it inherits this frame's
+	 * previous entry, keeping the oldest live frame's previous durable state.
+	 */
+	#abandonFrame(path: string, mtimeMs: number): void {
+		const frames = this.#pendingFrames.get(path);
+		if (!frames) return;
+		const index = frames.findIndex(frame => frame.mtimeMs === mtimeMs);
+		if (index < 0) return;
+		const [abandoned] = frames.splice(index, 1);
+		const next = frames[index];
+		if (abandoned && next) next.previous = abandoned.previous;
 		if (frames.length === 0) this.#pendingFrames.delete(path);
 	}
 
