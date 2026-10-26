@@ -46,7 +46,10 @@ const outputSchemaInputSchema = type("object | boolean | string | null");
 const effortRule = '"lo" | "med" | "hi"' as const;
 
 // Seance-only per-spawn fields the task tool refuses for every other agent.
-const SEANCE_ITEM_KEYS = ["sourceSession", "model"] as const;
+// Typed against SeanceTaskSchemaFields so a field added there fails to compile
+// until it is listed here too; a missed key would be dropped on batch items.
+const SEANCE_ITEM_KEY_SET = { sourceSession: true, model: true } as const satisfies Record<SeanceItemKey, true>;
+const SEANCE_ITEM_KEYS = Object.keys(SEANCE_ITEM_KEY_SET);
 
 /**
  * Keep a batch item's seance-only keys through undeclared-key deletion: the
@@ -154,10 +157,15 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 	return "string";
 }
 
-type SeanceTaskSchemaFields = {
+/** Seance-only task fields; `seanceTaskSchemaFields` in ./seance must match it exactly. */
+export type SeanceTaskSchemaFields = {
 	"sourceSession?"?: FluentType<string>;
 	"model?"?: FluentType<string | string[]>;
 };
+
+type SeanceItemKey = {
+	[K in keyof SeanceTaskSchemaFields]-?: K extends `${infer Name}?` ? Name : never;
+}[keyof SeanceTaskSchemaFields];
 
 function createTaskSchema(options: {
 	isolationEnabled: boolean;
