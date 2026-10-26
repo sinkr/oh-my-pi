@@ -20,9 +20,14 @@ import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-code
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import { createOpenAICodexCompatibilityMetadata } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { applySessionHeader } from "@oh-my-pi/pi-ai/providers/inference-headers";
+import {
+	applyInferenceHeaders,
+	applySessionHeader,
+	resolveOpenCodeGoCacheAffinity,
+} from "@oh-my-pi/pi-ai/providers/inference-headers";
 import {
 	encodeResponsesToolResultOutput,
+	getOpenAIPromptCacheKey,
 	hoistInterleavedResponsesToolBatchMessages,
 	parseAzureDeploymentNameMap,
 	parseTextSignature,
@@ -360,6 +365,13 @@ export interface OpenAiRemoteCompactionRequest {
 	model: string;
 	input: Array<Record<string, unknown>>;
 	instructions: string;
+	/**
+	 * Responses body cache identity. Mirrors the V2 body: the explicit
+	 * prompt-cache key when supplied (normalized to the 64-char wire limit),
+	 * else the session-derived cache id — retention-gated through
+	 * `getOpenAIPromptCacheKey`; absent when it resolves to nothing.
+	 */
+	prompt_cache_key?: string;
 	reasoning?: {
 		context?: string;
 		[key: string]: unknown;
@@ -858,6 +870,13 @@ export async function requestOpenAiRemoteCompaction(
 		fetch?: FetchImpl;
 		timeoutMs?: number;
 		sessionId?: string;
+		/**
+		 * Explicit prompt-cache identity. Feeds the Go family affinity header
+		 * (`x-opencode-session`) and the Responses body `prompt_cache_key`
+		 * under the same KDL gate as the V2 request; an absent/empty key keeps
+		 * the child conversation id.
+		 */
+		promptCacheKey?: string;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		/** Forwarded to {@link trimRemoteCompactionInputToContextWindow}. */
@@ -889,6 +908,12 @@ export async function requestOpenAiRemoteCompaction(
 		});
 	}
 	assertRemoteCompactionInputFits(trimmed, model);
+	// Same cache identity as the V2 request: the resolved id prefers the
+	// explicit prompt-cache key and falls back to the session id, all
+	// retention-gated by getOpenAIPromptCacheKey (PI_CACHE_RETENTION=none
+	// resolves to nothing here, which then also drops the affinity below).
+	const cacheOptions = { sessionId: opts?.sessionId, promptCacheKey: opts?.promptCacheKey };
+	const promptCacheSessionId = getOpenAIPromptCacheKey(cacheOptions);
 	const request: OpenAiRemoteCompactionRequest = {
 		model: requestModel,
 		// Preserve the native transcript. Only oversized trailing tool outputs are
@@ -896,6 +921,7 @@ export async function requestOpenAiRemoteCompaction(
 		// reasoning, or call/result pairing.
 		input: trimmed.input,
 		instructions,
+		...(promptCacheSessionId ? { prompt_cache_key: promptCacheSessionId } : {}),
 	};
 	const isAzureOpenAiResponses = (model.remoteCompaction?.api ?? model.api) === "azure-openai-responses";
 	const isCodexResponses =
@@ -911,6 +937,39 @@ export async function requestOpenAiRemoteCompaction(
 				Authorization: `Bearer ${apiKey}`,
 				...model.headers,
 			};
+	// Same KDL gate as the V2 request: the catalog task-sibling rule is
+	// on-api scoped, so the policy projection carries the EFFECTIVE V1
+	// compaction API (`remoteCompaction.api` override included) and the
+	// EFFECTIVE wire id — the id this request actually sends, resolved by
+	// `resolveOpenAiCompactModel`. Under a `remoteCompaction.model` override
+	// the active lane's requestModelId/thinking describe a model that never
+	// reaches the wire, so they are dropped instead of overriding the id
+	// actually sent; without one the active pair keeps its usual policy
+	// preference. Azure keeps its plain header shape (V2 skips the cascade
+	// there too), and only an EXPLICIT prompt-cache key feeds the affinity —
+	// the sessionId-derived fallback never does.
+	if (!isAzureOpenAiResponses) {
+		const hasModelOverride = model.remoteCompaction?.model != null;
+		applyInferenceHeaders(headers, {
+			provider: model.provider,
+			providerType: model.providerType,
+			protocol: "openai",
+			sessionId: opts?.sessionId,
+			cacheAffinity: resolveOpenCodeGoCacheAffinity(
+				{
+					id: hasModelOverride ? requestModel : model.id,
+					api: model.remoteCompaction?.api ?? model.api,
+					provider: model.provider,
+					providerType: model.providerType,
+					reasoning: model.reasoning,
+					requestModelId: hasModelOverride ? undefined : model.requestModelId,
+					thinking: hasModelOverride ? undefined : model.thinking,
+				},
+				opts?.promptCacheKey ? promptCacheSessionId : undefined,
+				"short",
+			),
+		});
+	}
 	applySessionHeader(headers, model.compat, opts?.sessionId);
 
 	// Codex endpoints require additional auth headers

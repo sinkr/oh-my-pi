@@ -1970,6 +1970,7 @@ export async function compact(
 						{
 							fetch: summaryOptions.fetch,
 							sessionId: summaryOptions.sessionId,
+							promptCacheKey: summaryOptions.promptCacheKey,
 							providerSessionState: summaryOptions.providerSessionState,
 							codexCompaction: summaryOptions.codexCompaction,
 							rewriteOutputs,

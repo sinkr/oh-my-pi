@@ -3450,6 +3450,54 @@ describe("compact() remote compaction failure handling", () => {
 		expect(completeSpy).not.toHaveBeenCalled();
 	});
 
+	test("V2-fail fallback carries the explicit family key on the V1 compaction request", async () => {
+		// The V1 fallback re-enters the opted Go lane without V2's request
+		// context: the explicit prompt-cache key must reach BOTH the gateway
+		// session header (x-opencode-session) and the Responses body key
+		// (prompt_cache_key), exactly as the V2 path sends them.
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const model = makeOpenAiModel({
+			provider: "opencode-go",
+			id: "muse-spark-1.2-contributor",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		expect(resolveCatalogPolicy(model).taskSiblingPromptCache).toBe(true);
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		const requestedUrls: string[] = [];
+		let v1SessionHeader: string | null | undefined;
+		let v1PromptCacheKey: unknown;
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			requestedUrls.push(url);
+			if (url.endsWith("/responses/compact")) {
+				v1SessionHeader = new Headers(init?.headers).get("x-opencode-session");
+				const parsed: unknown = JSON.parse(String(init?.body));
+				v1PromptCacheKey =
+					parsed && typeof parsed === "object" && "prompt_cache_key" in parsed
+						? parsed.prompt_cache_key
+						: undefined;
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "enc-v1" }] });
+			}
+			return new Response("V2 unavailable", { status: 502, statusText: "Bad Gateway" });
+		};
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			sessionId: "child-1",
+			promptCacheKey: "parent:task",
+		});
+
+		// The fallthrough ran: V2 was attempted first, then the V1 endpoint.
+		expect(requestedUrls.some(url => url.endsWith("/responses"))).toBe(true);
+		expect(requestedUrls.some(url => url.endsWith("/responses/compact"))).toBe(true);
+		expect(result.shortSummary).toBe("Remote compaction");
+		expect(completeSpy).not.toHaveBeenCalled();
+		expect(v1SessionHeader).toBe("parent:task");
+		expect(v1PromptCacheKey).toBe("parent:task");
+	});
+
 	test("user abort during the remote compact request rejects without falling back to local summarization", async () => {
 		// Contract: Esc is a cancellation, not a remote failure. Before the fix
 		// the AbortError was swallowed by the fallback catch and compaction kept
