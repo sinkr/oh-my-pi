@@ -972,8 +972,11 @@ function extractAdvertisedReasoning(item: {
 	default_reasoning_level?: unknown;
 	reasoning?: unknown;
 }): AdvertisedReasoning | undefined {
-	if (item.reasoning === false) return { kind: "none" };
 	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+	// codex-lb nests every reasoning field under `metadata`; read the denial from
+	// the same place the ladder below comes from, or a nested `reasoning: false`
+	// would keep the reference dial alive.
+	if ((metadata?.reasoning ?? item.reasoning) === false) return { kind: "none" };
 	const raw = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
 	const efforts = extractReasoningLevels(raw);
 	if (efforts === undefined) return undefined;
@@ -1023,30 +1026,48 @@ function withAdvertisedEfforts(
 ): ModelSpec<Api> {
 	if (advertised === undefined) return spec;
 	if (advertised.kind === "none") return withoutReasoning(spec, isAnthropic);
-	const thinking = {
-		mode: "effort" as const,
-		efforts: advertised.efforts,
-		// Always pin the default so catalog policy cannot backfill a level this
-		// endpoint does not accept. `fillExplicitThinking` only fills an absent
-		// `defaultLevel`, so anchoring it to the ladder's lowest tier suppresses
-		// the inherited one; an advertised default still wins when it is a member.
-		defaultLevel: advertised.defaultLevel ?? advertised.efforts[0],
-	};
+	// `defaultLevel` is not decoration: `pickInitialThinkingLevel` (sdk.ts) and
+	// the model switcher read it ahead of the user's `defaultThinkingLevel`
+	// setting, so pinning it to the ladder's first tier would start every gateway
+	// model at its lowest effort and reset it on each model switch. Keep a
+	// default the ladder actually contains — the row's own, else whatever the
+	// catalog rule resolved — and only fall back when it falls outside the ladder.
+	// `resolveModelPolicy` already folds the catalog rule's default in, so an
+	// absent `advertised.defaultLevel` can still honor a rule default — but only
+	// when the ladder contains it. The value is always set, because an absent one
+	// would let `fillExplicitThinking` backfill the very level the ladder excludes.
+	const inheritedDefault = resolveModelPolicy(spec).thinking?.defaultLevel;
+	const preferredDefault = advertised.defaultLevel ?? inheritedDefault;
+	const defaultLevel =
+		preferredDefault !== undefined && advertised.efforts.includes(preferredDefault)
+			? preferredDefault
+			: advertised.efforts[0];
+	const thinking = { mode: "effort" as const, efforts: advertised.efforts, defaultLevel };
 	if (isAnthropic) {
 		const mode = resolveModelPolicy({ ...spec, reasoning: true }).thinking?.mode ?? "budget";
 		return { ...spec, reasoning: true, thinking: { ...thinking, mode } };
 	}
-	const { reasoningEffortMap: _map, omitReasoningEffort: _omit, ...compat } = (spec.compat ?? {}) as OpenAICompat;
 	return {
 		...spec,
 		reasoning: true,
 		thinking,
 		compat: {
-			...compat,
+			...stripBorrowedEffortCompat(spec),
 			supportsReasoningEffort: true,
 			...(advertised.acceptsNone ? { reasoningDisableMode: "none-effort" as const } : {}),
 		},
 	} as ModelSpec<Api>;
+}
+
+/**
+ * Drop transport facts a bundled reference lent this row, because they describe
+ * another host's wire: its `reasoningEffortMap` would rewrite tiers this
+ * endpoint declared, and its `omitReasoningEffort` would suppress the very
+ * field an advertised ladder enables.
+ */
+function stripBorrowedEffortCompat(spec: ModelSpec<Api>): OpenAICompat {
+	const { reasoningEffortMap: _map, omitReasoningEffort: _omit, ...compat } = (spec.compat ?? {}) as OpenAICompat;
+	return compat;
 }
 
 /**
@@ -1058,12 +1079,11 @@ function withAdvertisedEfforts(
  */
 function withoutReasoning(spec: ModelSpec<Api>, isAnthropic: boolean): ModelSpec<Api> {
 	if (isAnthropic) return { ...spec, reasoning: false, thinking: undefined };
-	const { reasoningEffortMap: _map, omitReasoningEffort: _omit, ...compat } = (spec.compat ?? {}) as OpenAICompat;
 	return {
 		...spec,
 		reasoning: false,
 		thinking: undefined,
-		compat: { ...compat, supportsReasoningEffort: false },
+		compat: { ...stripBorrowedEffortCompat(spec), supportsReasoningEffort: false },
 	} as ModelSpec<Api>;
 }
 

@@ -3748,6 +3748,123 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(model?.thinking).toBeUndefined();
 	});
 
+	test("proxy discovery keeps a catalog default that the advertised ladder contains", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "proxy" },
+			},
+		});
+		// `glm-5.3` carries a catalog class-rule default of `max`, and this
+		// endpoint's ladder contains it. Pinning the ladder's first tier instead
+		// would demote every gateway session to it, because
+		// `pickInitialThinkingLevel` reads `thinking.defaultLevel` ahead of the
+		// user's `defaultThinkingLevel` setting and each model switch reapplies it.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9998/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "glm-5.3",
+								supported_endpoint_types: ["openai"],
+								supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }, { effort: "max" }],
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "glm-5.3");
+		expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		// The catalog's default survives because the ladder contains it; only an
+		// out-of-ladder default falls back to the first tier.
+		expect(model?.thinking?.defaultLevel).toBe(Effort.Max);
+	});
+
+	test("proxy discovery reads a reasoning denial nested under metadata", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "proxy" },
+			},
+		});
+		// codex-lb nests the reasoning fields, including the denial. Reading only
+		// the top-level flag would keep the reference dial for exactly the ids
+		// that carry a reasoning-enabled bundled entry.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9998/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "gpt-5",
+								supported_endpoint_types: ["openai"],
+								metadata: { reasoning: false, supported_reasoning_levels: [{ effort: "low" }] },
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "gpt-5");
+		expect(model?.reasoning).toBe(false);
+		expect(model?.thinking).toBeUndefined();
+	});
+
+	test("proxy discovery keeps an Anthropic row's thinking mode while adopting the advertised ladder", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "proxy" },
+			},
+		});
+		// A proxy row routes to `anthropic-messages` via `supported_endpoint_types`.
+		// The advertised tiers replace the catalog ladder, but adaptive-vs-budget
+		// is an Anthropic wire choice the identity still owns: a `budget` mode
+		// would drop the adaptive `thinking` block the endpoint answers with.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9998/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "claude-sonnet-4-6",
+								supported_endpoint_types: ["anthropic"],
+								supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "claude-sonnet-4-6");
+		expect(model?.api).toBe("anthropic-messages");
+		expect(model?.thinking?.mode).toBe("anthropic-adaptive");
+		expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
 	test("litellm discovery maps rich model metadata and keeps runtime /v1 baseUrl", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
