@@ -167,6 +167,21 @@ describe("focused subagent view slash commands", () => {
 		expect(focused.prompt).not.toHaveBeenCalled();
 	});
 
+	it("keeps a builtin gated to the main session when a side file command shares its name", async () => {
+		const focused = createFocusedContext();
+		Object.assign(focused.raw, { fileSlashCommands: new Set(["clear"]) });
+		Object.assign(focused.raw.session, {
+			slashCommands: [{ name: "clear", description: "", content: "Side", side: true, source: "via OMP User" }],
+		});
+		const controller = new InputController(focused.ctx);
+		controller.setupEditorSubmitHandler();
+		focused.editor.setText("/clear");
+		await focused.ctx.editor.onSubmit?.("/clear");
+		expect(focused.raw.handleBtwCommand).not.toHaveBeenCalled();
+		expect(focused.raw.showStatus).toHaveBeenCalledTimes(1);
+		expect(focused.editor.getText()).toBe("/clear");
+	});
+
 	it("sets the focused agent's thinking level with /effort, leaving the main session alone", async () => {
 		const focused = createFocusedContext();
 		const setFocusedThinking = vi.fn();

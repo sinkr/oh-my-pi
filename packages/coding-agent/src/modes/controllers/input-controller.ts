@@ -1551,8 +1551,11 @@ export class InputController {
 				}
 			}
 		}
+		// Builtins keep precedence over side file commands, matching the main
+		// dispatch; non-viewer builtins fall through to the "return first" gate.
 		if (
 			text &&
+			!this.#matchesBuiltinSlashCommand(text) &&
 			(await this.#runSideFileCommand(text, {
 				detach: () => this.#detachSideSubmission(draftText, images, imageLinks),
 				restore: () => this.#restoreResetSubmission(text),
