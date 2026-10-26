@@ -3247,6 +3247,15 @@ export class SessionManager {
 		return (await this.#artifactManagerForSession()?.getPath(id)) ?? null;
 	}
 
+	/**
+	 * Content of a spill artifact kept in memory by a non-persistent session.
+	 * Null for unknown ids and for file-backed sessions, whose artifacts resolve
+	 * through {@link getArtifactPath}.
+	 */
+	getArtifactContent(id: string): string | null {
+		return this.#inMemoryArtifacts?.get(id) ?? null;
+	}
+
 	async saveDraft(text: string): Promise<void> {
 		const draftPath = this.#draftPath();
 		if (!draftPath || !this.#persist) return;
