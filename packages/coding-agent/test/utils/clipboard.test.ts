@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	isClipboardTerminalLocal,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
 } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
+import * as utils from "@oh-my-pi/pi-utils";
 import * as native from "@oh-my-pi/pi-natives/clipboard";
 import type { Subprocess } from "bun";
 
@@ -403,5 +405,34 @@ describe("readTextFromClipboard", () => {
 		expect(await readTextFromClipboard()).toBe("from powershell\n");
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
+	});
+});
+
+describe("isClipboardTerminalLocal", () => {
+	const ssh = { SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22" };
+
+	afterEach(() => vi.restoreAllMocks());
+
+	it("trusts the clipboard outside SSH", () => {
+		expect(isClipboardTerminalLocal({}, "darwin")).toBe(true);
+	});
+
+	it("trusts only an sshd-forwarded X11 display over SSH", () => {
+		vi.spyOn(utils, "isWsl").mockReturnValue(false);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" }, "linux")).toBe(true);
+		// Host-local displays reach the SSH host's own desktop clipboard.
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: ":0" }, "linux")).toBe(false);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "unix:0" }, "linux")).toBe(false);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "/tmp/.X11-unix/X0:0" }, "linux")).toBe(false);
+		// wl-paste is consulted before X11 and cannot be told apart from a host session.
+		expect(
+			isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0", WAYLAND_DISPLAY: "wayland-0" }, "linux"),
+		).toBe(false);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" }, "darwin")).toBe(false);
+	});
+
+	it("rejects a forwarded display on WSL, whose reads go through the Windows host first", () => {
+		vi.spyOn(utils, "isWsl").mockReturnValue(true);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" }, "linux")).toBe(false);
 	});
 });
