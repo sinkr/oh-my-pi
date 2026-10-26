@@ -2173,7 +2173,11 @@ export class SessionAdvisors {
 				signal.throwIfAborted();
 
 				const originalThinkingLevel = advisor.thinkingLevel;
-				const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
+				// A `:auto` fallback entry follows the primary's resolved effort, like an `auto` advisor.
+				const requestedThinkingLevel =
+					selector.thinkingLevel === AUTO_THINKING
+						? this.#autoAdvisorThinkingLevel()
+						: (selector.thinkingLevel ?? originalThinkingLevel);
 				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
 				if (advisor.retryFallback) {
 					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
