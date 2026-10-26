@@ -779,22 +779,30 @@ describe("AuthStorage OAuth refresh race", () => {
 		if (!stealLease) throw new Error("test store does not support refresh leases");
 		const save = store.tryUpdateAuthCredentialIfMatches?.bind(store);
 		if (!save) throw new Error("test store does not support compare-and-set updates");
+		const holderOf = store.getCredentialRefreshLeaseHolder?.bind(store);
+		if (!holderOf) throw new Error("test store does not report lease holders");
 		// A refused save is retried while the row is unchanged, until the save
-		// window ends; let that window pass after the first refusal.
-		const updateSpy = vi.spyOn(store, "tryUpdateAuthCredentialIfMatches").mockImplementation((...args) => {
+		// window ends. Record every attempt, and end the window after four.
+		const attempts: { saved: boolean; holder: string | undefined; holderLive: boolean }[] = [];
+		vi.spyOn(store, "tryUpdateAuthCredentialIfMatches").mockImplementation((...args) => {
+			const holder = holderOf(credentialId);
 			const saved = save(...args);
-			if (!saved) setSystemTime(new Date(now + 16_000 + 61_000));
+			attempts.push({ saved, holder: holder?.owner, holderLive: (holder?.expiresAtMs ?? 0) > Date.now() });
+			if (attempts.length === 4) setSystemTime(new Date(now + 16_000 + 61_000));
 			return saved;
 		});
 
 		const result = await authStorage.oauth.refreshStored("unit-oauth-lease-update", {
 			credentialFromRow: row => row,
 			forceRefresh: true,
+			// The clock jumps past the save window; keep the caller waiting for the save.
+			refreshTimeoutMs: 600_000,
 			refresh: async credential => {
 				// Keep the credential row bytes unchanged while expiring owner A's
 				// lease. A non-lease-fenced final CAS would still persist this token.
 				setSystemTime(new Date(now + 16_000));
-				expect(stealLease(credentialId, "peer-owner", now + 31_000)).toBe(true);
+				// The peer's lease outlives the whole save window.
+				expect(stealLease(credentialId, "peer-owner", now + 600_000)).toBe(true);
 				return {
 					...credential,
 					access: "access-from-lost-owner",
@@ -804,7 +812,8 @@ describe("AuthStorage OAuth refresh race", () => {
 			},
 		});
 
-		expect(updateSpy).toHaveBeenCalled();
+		expect(attempts).toHaveLength(4);
+		for (const attempt of attempts) expect(attempt).toEqual({ saved: false, holder: "peer-owner", holderLive: true });
 		expect(result).toMatchObject({ refreshed: false, removed: false });
 		expect(result.credential).toMatchObject({
 			type: "oauth",
@@ -819,6 +828,7 @@ describe("AuthStorage OAuth refresh race", () => {
 			access: "access-old",
 			refresh: "refresh-old",
 		});
+		expect(holderOf(credentialId)?.owner).toBe("peer-owner");
 	});
 
 	test("does not terminal-disable a credential when durable lease ownership is lost before CAS disable", async () => {
@@ -1305,6 +1315,48 @@ describe("AuthStorage OAuth refresh race", () => {
 		};
 	}
 
+	test("keeps a stalled refresher's lease when the store is busy at hand-back", async () => {
+		if (!store || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-handback-busy";
+		const credentialId = await seedLogin(provider);
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		const laterStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const later = new AuthStorage(laterStore);
+		const options = refreshSpentToken(credentialId, () => {});
+		try {
+			// A refresher spent refresh-0 and is still saving refresh-1; its lease just lapsed.
+			expect(store.tryAcquireCredentialRefreshLease?.(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+			const handBack = peerStore.handBackCredentialRefreshLease.bind(peerStore);
+			let busyHandBacks = 0;
+			vi.spyOn(peerStore, "handBackCredentialRefreshLease").mockImplementation((...args) => {
+				if (busyHandBacks === 0) {
+					busyHandBacks += 1;
+					throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+				}
+				return handBack(...args);
+			});
+			const takeover = await peer.oauth.refreshStored(provider, options).then(
+				() => "resolved",
+				(error: unknown) => String(error),
+			);
+			expect(takeover).toContain("stalled refresher");
+			expect(busyHandBacks).toBe(1);
+			expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+
+			// Another process has the same spent token rejected: the login stays.
+			const next = await later.oauth.refreshStored(provider, options).then(
+				() => "resolved",
+				(error: unknown) => String(error),
+			);
+			expect(next).toContain("stalled refresher");
+			expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({ refresh: "refresh-0" });
+		} finally {
+			peer.close();
+			later.close();
+		}
+	});
+
 	test("saves an exchanged token when a peer holds the lease handed back to the stalled refresher", async () => {
 		if (!authStorage || !store || !tempDir) throw new Error("test setup failed");
 		const provider = "unit-oauth-handback-save";
@@ -1364,6 +1416,92 @@ describe("AuthStorage OAuth refresh race", () => {
 			});
 			expect(events).toHaveLength(0);
 		} finally {
+			peer.close();
+		}
+	});
+
+	test("saves an exchanged token when its lease renewal finds a takeover peer holding the lease", async () => {
+		if (!authStorage || !store || !tempDir) throw new Error("test setup failed");
+		const provider = "unit-oauth-renewal-lost";
+		const credentialId = await seedLogin(provider);
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		const ownerStore = store;
+		// Run the lease-renewal interval and the save backoff without real waits.
+		const sleep = Bun.sleep;
+		vi.spyOn(Bun, "sleep").mockImplementation((ms: number | Date) =>
+			sleep(typeof ms === "number" ? Math.min(ms, 10) : ms),
+		);
+		let ownerLease: string | undefined;
+		const renewalLost = Promise.withResolvers<void>();
+		const acquire = ownerStore.tryAcquireCredentialRefreshLease?.bind(ownerStore);
+		if (!acquire) throw new Error("test store does not support refresh leases");
+		vi.spyOn(ownerStore, "tryAcquireCredentialRefreshLease").mockImplementation((...args) => {
+			const acquired = acquire(...args);
+			if (!acquired && args[1] === ownerLease) renewalLost.resolve();
+			return acquired;
+		});
+		const ownerSettled = Promise.withResolvers<void>();
+		const save = ownerStore.tryUpdateAuthCredentialIfMatches?.bind(ownerStore);
+		if (!save) throw new Error("test store does not support compare-and-set updates");
+		vi.spyOn(ownerStore, "tryUpdateAuthCredentialIfMatches").mockImplementation((...args) => {
+			const saved = save(...args);
+			if (!saved) ownerSettled.resolve();
+			return saved;
+		});
+		let takeover: Promise<string> | undefined;
+		try {
+			const result = await authStorage.oauth
+				.refreshStored(provider, {
+					credentialId,
+					credentialFromRow: row => row,
+					forceRefresh: true,
+					refresh: async current => {
+						// This exchange stalls past its lease, and a peer takes the lease over
+						// to send the refresh token this exchange already spent.
+						ownerLease = peerStore.getCredentialRefreshLeaseHolder(credentialId)?.owner;
+						if (!ownerLease) throw new Error("the refreshing process holds no lease");
+						expect(peerStore.renewCredentialRefreshLease(credentialId, ownerLease, Date.now() - 1_000)).toBe(
+							true,
+						);
+						takeover = peer.oauth
+							.refreshStored(provider, {
+								credentialId,
+								credentialFromRow: row => row,
+								forceRefresh: true,
+								rejectedAccess: "access-0",
+								refresh: async () => {
+									// The provider rejects the spent token once this exchange has
+									// returned and its first save attempt has been refused.
+									await ownerSettled.promise;
+									throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+								},
+								isDefinitiveFailure: error => error instanceof Error && error.message.includes("invalid_grant"),
+								disabledCause: () => "oauth refresh failed",
+							})
+							.then(
+								() => "resolved",
+								(error: unknown) => String(error),
+							);
+						expect(peerStore.getCredentialRefreshLeaseHolder(credentialId)?.owner).not.toBe(ownerLease);
+						// The exchange returns only after a lease renewal found the peer holding the lease.
+						await renewalLost.promise;
+						return { ...current, access: "access-1", refresh: "refresh-1", expires: Date.now() + 3_600_000 };
+					},
+					isDefinitiveFailure: () => false,
+				})
+				.finally(() => ownerSettled.resolve());
+
+			expect(await takeover).toContain("stalled refresher");
+			expect(result).toMatchObject({ refreshed: true, credential: { access: "access-1" } });
+			expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({
+				type: "oauth",
+				access: "access-1",
+				refresh: "refresh-1",
+			});
+			expect(events).toHaveLength(0);
+		} finally {
+			await takeover;
 			peer.close();
 		}
 	});

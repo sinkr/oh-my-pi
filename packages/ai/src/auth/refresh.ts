@@ -199,13 +199,39 @@ export class OAuthRefresher {
 	}
 
 	/**
+	 * Hand a taken-over lease back to the refresher that stalled holding it. A busy
+	 * store is retried within the save window: if this process released the lease
+	 * instead, the next refresher would find no owner and disable a login that
+	 * owner may still save. Returns false when the hand-back never landed; the
+	 * caller then keeps its own lease to expire, which still names a recent owner.
+	 */
+	async #handBackLease(
+		leaseStore: CredentialRefreshLeaseStore,
+		credentialId: number,
+		owner: string,
+		holder: CredentialRefreshLeaseHolder,
+	): Promise<boolean> {
+		const deadline = Date.now() + OAUTH_REFRESH_PERSIST_TIMEOUT_MS;
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return leaseStore.handBackCredentialRefreshLease?.(credentialId, owner, holder) ?? false;
+			} catch (error) {
+				if (!isSqliteBusyError(error)) throw error;
+				if (Date.now() >= deadline) return false;
+			}
+			await Bun.sleep(Math.min(OAUTH_REFRESH_PERSIST_RETRY_MAX_MS, OAUTH_REFRESH_LEASE_POLL_MS * 2 ** attempt));
+		}
+	}
+
+	/**
 	 * Save a token this process already exchanged. The provider consumed the old
 	 * refresh token, so a busy store is retried (re-arming the lease each time:
 	 * a blocked event loop can outlive its TTL, and an expired lease no peer
 	 * took is still ours) instead of dropping the only valid token. A refused
-	 * save is retried too while the row still holds the spent token: a peer
-	 * that took over the lapsed lease hands it back once the provider rejects
-	 * that token, but the next peer can hold it at the moment this save lands.
+	 * save is retried too, within the same 60 s window, while the row still
+	 * holds the spent token: a peer that took over the lapsed lease hands it
+	 * back once the provider rejects that token, but the next peer can hold it
+	 * at the moment this save lands.
 	 */
 	async #persistExchangedCredential(
 		provider: string,
@@ -315,6 +341,7 @@ export class OAuthRefresher {
 		const owner = crypto.randomUUID();
 		let leasedCredentialId: number | undefined;
 		let takenOverFrom: CredentialRefreshLeaseHolder | undefined;
+		let keepLease = false;
 
 		while (leaseStore) {
 			if (this.#shuttingDown) throw new AIError.AbortError("OAuth refresh stopped during shutdown");
@@ -496,11 +523,19 @@ export class OAuthRefresher {
 								refresh: current.refresh,
 								until: takenOverFrom.expiresAtMs + OAUTH_REFRESH_STALLED_OWNER_MS,
 							});
-							leaseStore.handBackCredentialRefreshLease?.(leasedCredentialId, owner, takenOverFrom);
+							// Stop renewing first: a renewal after the hand-back would take it back.
+							stopLeaseRenewal = true;
+							leaseRenewalStopped.resolve();
+							await leaseRenewal;
+							// Never release this lease afterwards: a hand-back that landed left
+							// nothing to release, and one that did not must leave a recent owner.
+							keepLease = true;
+							const handedBack = await this.#handBackLease(leaseStore, leasedCredentialId, owner, takenOverFrom);
 							logger.warn("OAuth refresh token rejected after taking over a stalled refresher; not disabling", {
 								provider,
 								credentialId: row.id,
 								spentRefresh: tokenFingerprint(current.refresh),
+								handedBack,
 							});
 							throw new AIError.OAuthError(
 								`OAuth refresh for ${provider} waits for a stalled refresher that may still save its token`,
@@ -566,7 +601,9 @@ export class OAuthRefresher {
 			logger.info("OAuth token exchange succeeded", fingerprints);
 			if (leaseRenewalError) {
 				logger.warn("OAuth refresh lost its lease before saving the exchanged token", fingerprints);
-				throw leaseRenewalError;
+				// The provider already consumed the old refresh token. The fenced save
+				// below writes only once the lease is ours again and the row is unchanged.
+				if (!this.#deps.store.tryUpdateAuthCredentialIfMatches) throw leaseRenewalError;
 			}
 			if (this.#deps.store.tryUpdateAuthCredentialIfMatches) {
 				if (
@@ -603,7 +640,7 @@ export class OAuthRefresher {
 			);
 			return { credential: merged, refreshed: true, removed: false };
 		} finally {
-			if (leasedCredentialId !== undefined && leaseStore) {
+			if (leasedCredentialId !== undefined && leaseStore && !keepLease) {
 				leaseStore.releaseCredentialRefreshLease(leasedCredentialId, owner);
 			}
 		}
