@@ -2211,6 +2211,8 @@ export class TurnRecovery {
 			wrapAround?: boolean;
 			/** This hop is a classifier-refusal walk, which visits each model at most once per turn. */
 			refusalWalk?: boolean;
+			/** Another attempt on the failed model is still allowed after this hop. */
+			sameModelRetryAvailable?: boolean;
 		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -2225,6 +2227,19 @@ export class TurnRecovery {
 			? this.#host.modelRegistry.find(failedMessage.provider, failedMessage.model)
 			: undefined;
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
+		// Deferring a sibling Anthropic candidate below is only worth it while
+		// another attempt on the model that signed the replayed thinking is still
+		// an option: the active model is that model, and the retry budget allows
+		// one. Any other failure — another provider's outage, or the signer's own
+		// budget spent — has no source model to go back to, so deferring left the
+		// whole chain untried and ended the turn on an error.
+		const sourceModel = this.#host.model();
+		const signerRetryRemains =
+			options?.sameModelRetryAvailable === true &&
+			latestAssistant !== undefined &&
+			!!sourceModel &&
+			sourceModel.provider === latestAssistant.provider &&
+			sourceModel.id === latestAssistant.model;
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -2246,10 +2261,11 @@ export class TurnRecovery {
 				if (this.#isNoOpRetryFallback(candidate, selector)) continue;
 				if (options?.excludeProvider === candidate.provider) continue;
 				// Anthropic signatures and redacted blocks are model-bound, while the
-				// latest assistant response must remain byte-identical. A same-provider
-				// model switch can satisfy neither constraint, so keep retrying the
-				// source model or consider a later cross-provider candidate whose
-				// message transform can safely demote the foreign thinking.
+				// latest assistant response must remain byte-identical. While another
+				// attempt on the model that signed them is still allowed, prefer it to a
+				// same-provider model switch, which satisfies neither constraint; a later
+				// cross-provider candidate's message transform can demote the foreign
+				// thinking safely.
 				// Exception: when redeeming Anthropic fallback credit on refusal, the server
 				// validates thinking blocks across the boundary itself using the credit token.
 				const canRedeemFallbackCredit =
@@ -2259,6 +2275,7 @@ export class TurnRecovery {
 					creditTargets.includes(candidate.id) &&
 					Date.now() < creditHandle.expiresAt;
 				if (
+					signerRetryRemains &&
 					!canRedeemFallbackCredit &&
 					candidate.api === "anthropic-messages" &&
 					latestAssistant?.api === "anthropic-messages" &&
@@ -2782,6 +2799,35 @@ export class TurnRecovery {
 			/\bGoUsageLimitError\b/.test(errorMessage) &&
 			(!this.#hasReplayUnsafeOutput(message) || this.#unexecutedToolCallsReplaySafe(message));
 
+		// Fail-fast cap: if the provider asks us to wait longer than
+		// retry.maxDelayMs and we have no fallback credential or model to
+		// switch to, surface the error instead of sleeping. Defends against
+		// 3-hour Anthropic rate-limit windows that would otherwise leave a
+		// subagent (or interactive session) silently hung. The original
+		// assistant error message is preserved in agent state so the caller
+		// can act on it.
+		// Opt-out: retry.waitForUsageReset lets a provider-stated usage-limit
+		// reset (Flag.UsageLimit — 5h/weekly quota windows, CN 使用上限, spend
+		// caps, … on any provider) sleep past the cap. Gated on authoritative
+		// provider timing: either a parsed reset hint from the error text, or
+		// a complete usage-report window (every exhausted limit carries a
+		// future reset). Usage-limit errors with neither fall back to the
+		// 30-minute QUOTA_EXHAUSTED heuristic, and sleeping on that for a
+		// permanent error (402 balance, dead spend cap) would hold the session
+		// through repeated heuristic sleeps instead of surfacing it. Bounded
+		// by the stated wait so an unrelated large backoff cannot sneak
+		// through.
+		const maxDelayMs = retrySettings.maxDelayMs;
+		const exceedsDelayCap = (waitMs: number): boolean => {
+			const waitForUsageReset =
+				retrySettings.waitForUsageReset === true &&
+				recordedUsageLimitOutcome !== undefined &&
+				(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome.reportResetAtMs !== undefined) &&
+				effectiveUsageLimitWaitMs !== undefined &&
+				waitMs <= effectiveUsageLimitWaitMs;
+			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
+		};
+
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
 			// classifier refusal is not that: retrying the same model reproduces it, and
@@ -2823,6 +2869,24 @@ export class TurnRecovery {
 					refusalWalk: classifierRefusal,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
+					// Deferring a chain candidate only pays when the code below makes
+					// another attempt on this model. Each term is a branch below that,
+					// with no switch, ends the turn instead: a spent budget, a refusal
+					// or account-policy denial, a hard-error or Fast-degrade consult the
+					// classifier would not retry, and a wait past the fail-fast cap.
+					sameModelRetryAvailable:
+						!retryBudgetExhausted &&
+						!classifierRefusal &&
+						!accountPolicyDenial &&
+						!(
+							(options?.fireworksFastFallback || options?.hardErrorFallback) &&
+							!this.isRetryableError(message)
+						) &&
+						!exceedsDelayCap(
+							usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
+								? parsedRetryAfterMs
+								: delayMs,
+						),
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
@@ -2894,32 +2958,8 @@ export class TurnRecovery {
 			return false;
 		}
 
-		// Fail-fast cap: if the provider asks us to wait longer than
-		// retry.maxDelayMs and we have no fallback credential or model to
-		// switch to, surface the error instead of sleeping. Defends against
-		// 3-hour Anthropic rate-limit windows that would otherwise leave a
-		// subagent (or interactive session) silently hung. The original
-		// assistant error message is preserved in agent state so the caller
-		// can act on it.
-		// Opt-out: retry.waitForUsageReset lets a provider-stated usage-limit
-		// reset (Flag.UsageLimit — 5h/weekly quota windows, CN 使用上限, spend
-		// caps, … on any provider) sleep past the cap. Gated on authoritative
-		// provider timing: either a parsed reset hint from the error text, or
-		// a complete usage-report window (every exhausted limit carries a
-		// future reset). Usage-limit errors with neither fall back to the
-		// 30-minute QUOTA_EXHAUSTED heuristic, and sleeping on that for a
-		// permanent error (402 balance, dead spend cap) would hold the session
-		// through repeated heuristic sleeps instead of surfacing it. Bounded
-		// by the stated wait so an unrelated large backoff cannot sneak
-		// through.
-		const maxDelayMs = retrySettings.maxDelayMs;
-		const waitForUsageReset =
-			retrySettings.waitForUsageReset === true &&
-			recordedUsageLimitOutcome !== undefined &&
-			(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome.reportResetAtMs !== undefined) &&
-			effectiveUsageLimitWaitMs !== undefined &&
-			delayMs <= effectiveUsageLimitWaitMs;
-		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
+		// The fail-fast cap (`exceedsDelayCap`, defined above the chain consult).
+		if (exceedsDelayCap(delayMs) && !switchedCredential && !switchedModel) {
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
 			await this.#closeRetrySaga(
