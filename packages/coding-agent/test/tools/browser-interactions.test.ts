@@ -298,6 +298,59 @@ return { fragments, clicked: await tab.evaluate(() => window.clicked), ternHit }
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 30_000);
+	test("clicks a shadow button through its own slotted content, still refusing a real overlay, on puppeteer and Tern", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-slotted-button" };
+		const tabName = `slotted-${crypto.randomUUID()}`;
+		// The slotted icon fills the button's centre, so the hit test lands on light-DOM content the button renders.
+		const slottedHtml = `<!doctype html><slot-button id="open"><span style="display:inline-flex;width:40px;height:40px">x</span></slot-button>
+<slot-button id="covered"><span style="display:inline-flex;width:40px;height:40px">x</span></slot-button>
+<div id="overlay" style="position:absolute;left:0;top:70px;width:300px;height:100px"></div>
+<script>
+customElements.define("slot-button", class extends HTMLElement {
+	constructor() {
+		super();
+		this.attachShadow({ mode: "open" }).innerHTML = '<style>:host{display:block;height:70px}button{width:120px;height:64px}</style><button id="' + this.id + '-inner"><slot></slot></button>';
+	}
+});
+window.clicked = [];
+document.addEventListener("click", event => clicked.push(event.composedPath().find(node => node.localName === "button")?.id));
+</script>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(slottedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const open = await tab.click("pierce/#open-inner").then(() => "clicked", error => error.message);
+const covered = await tab.click("pierce/#covered-inner").then(() => "clicked", error => error.message);
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const tern = await tab.evaluate(async () => {
+	const aim = async query => {
+		const target = await globalThis.__ompTernKit.target({ engine: "pierce", query }, "click");
+		return target.ok ? "ok" : target.detail;
+	};
+	return { open: await aim("#open-inner"), covered: await aim("#covered-inner") };
+});
+return { open, covered, clicked: await tab.evaluate(() => window.clicked), tern };`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({
+				open: "clicked",
+				covered: 'tab.click("pierce/#covered-inner") blocked: covered by <div#overlay>',
+				clicked: ["open-inner"],
+				tern: { open: "ok", covered: "<div#overlay>" },
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
 	test("refuses to fill or type into a disabled or read-only field", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);

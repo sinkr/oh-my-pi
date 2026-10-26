@@ -105,6 +105,8 @@ interface PageElement {
 	readonly dataset: Record<string, string>;
 	readonly style: Record<string, string>;
 	parentElement: PageElement | null;
+	/** The `<slot>` rendering this node, its parent in the flat tree; `null` when unslotted. */
+	assignedSlot: PageElement | null;
 	shadowRoot: PageShadowRoot | null;
 	getBoundingClientRect(): PageRect;
 	getClientRects(): ArrayLike<PageRect>;
@@ -160,13 +162,14 @@ function requireFiniteNumber(value: number, label: string): void {
 
 /**
  * Page function (self-contained; serialisable via `.toString()`): whether `descendant` is `ancestor` or
- * sits inside it, crossing the shadow-root boundaries `Node.contains` stops at.
+ * renders inside it — its flat-tree ancestry, which follows slot assignment into shadow trees and climbs
+ * shadow-root boundaries out to their hosts, where `Node.contains` stops.
  */
 export function composedContains(ancestor: unknown, descendant: unknown): boolean {
 	for (let current = descendant as PageElement | null; current;) {
 		if (current === ancestor) return true;
 		const root: PageRoot = current.getRootNode();
-		current = current.parentElement ?? root.host ?? null;
+		current = current.assignedSlot ?? current.parentElement ?? root.host ?? null;
 	}
 	return false;
 }
@@ -237,7 +240,7 @@ function checkClickActionable(
 		let current: PageElement | null = hit;
 		while (current && current !== owner) {
 			if (current.matches(interactiveContent)) return false;
-			current = current.parentElement ?? current.getRootNode().host ?? null;
+			current = current.assignedSlot ?? current.parentElement ?? current.getRootNode().host ?? null;
 		}
 		return current === owner;
 	};
@@ -650,7 +653,7 @@ function measureBoxInPage(el: unknown): MeasuredBox {
 			if (!nested || nested === hit) break;
 			hit = nested;
 		}
-		for (let node = hit; node; node = node.parentElement ?? node.getRootNode().host ?? null) {
+		for (let node = hit; node; node = node.assignedSlot ?? node.parentElement ?? node.getRootNode().host ?? null) {
 			if (node === element) return true;
 		}
 		return false;
