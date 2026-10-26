@@ -12,6 +12,8 @@ import type {
 	Effort,
 	ImageContent,
 	Model,
+	TextContent,
+	ThinkingContent,
 	ToolExample,
 } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
@@ -38,7 +40,7 @@ import type { BtwHistoryRecord } from "../../session/btw-history";
 
 /**
  * `set_event_filter` projection: `"full"` keeps both accumulated snapshots in `message_update`, `"delta"` replaces them
- * with the block a start/end event touches (see {@link RpcDeltaAssistantMessageEvent}).
+ * with the block a start event opens or an end event closes (see {@link RpcDeltaAssistantMessageEvent}).
  */
 export type RpcMessageUpdates = "full" | "delta";
 
@@ -674,16 +676,17 @@ type DeltaOf<Type extends AssistantMessageEvent["type"]> = WithoutPartial<
 >;
 
 /**
- * `assistantMessageEvent` of a delta `message_update`: `*_delta` carries only the increment, every other block event
- * the block it opened or closed (`partial.content[contentIndex]`), and a re-`start` the whole message it restarts from.
+ * `assistantMessageEvent` of a delta `message_update`: `*_delta` carries only the increment; a `*_start` carries the
+ * block it opened (`partial.content[contentIndex]`); `text_end`/`thinking_end` carry the rest of the block (everything
+ * but the text their `content` already holds); `image_end` and `toolcall_end` carry the whole block as `content` /
+ * `toolCall`; a re-`start` carries the whole message it restarts from. `block` is absent only if the provider's
+ * `contentIndex` points at no block.
  */
 export type RpcDeltaAssistantMessageEvent =
-	| DeltaOf<"text_delta" | "thinking_delta" | "toolcall_delta">
-	| (DeltaOf<
-			"text_start" | "text_end" | "thinking_start" | "thinking_end" | "toolcall_start" | "toolcall_end" | "image_end"
-	  > & {
-			block: AssistantMessage["content"][number];
-	  })
+	| DeltaOf<"text_delta" | "thinking_delta" | "toolcall_delta" | "image_end" | "toolcall_end">
+	| (DeltaOf<"text_start" | "thinking_start" | "toolcall_start"> & { block?: AssistantMessage["content"][number] })
+	| (DeltaOf<"text_end"> & { block?: Omit<TextContent, "text"> })
+	| (DeltaOf<"thinking_end"> & { block?: Omit<ThinkingContent, "thinking"> })
 	| (DeltaOf<"start"> & { message: AssistantMessage })
 	| Extract<AssistantMessageEvent, { type: "done" | "error" }>;
 

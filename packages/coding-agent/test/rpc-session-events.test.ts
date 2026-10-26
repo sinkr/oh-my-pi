@@ -90,7 +90,7 @@ describe("RpcSessionEventForwarder", () => {
 		}
 	});
 
-	test("a delta stream carries each block once, at its start and end", () => {
+	test("a delta stream carries each block once: whole at its start, only the missing metadata at its end", () => {
 		const message = makeAssistantMessage();
 		const text = { type: "text" as const, text: "hello", textSignature: "sig-1" };
 		const thinking = { type: "thinking" as const, thinking: "hmm", thinkingSignature: "sig-2" };
@@ -119,16 +119,55 @@ describe("RpcSessionEventForwarder", () => {
 			{ type: "start", message },
 			{ type: "text_start", contentIndex: 0, block: text },
 			{ type: "text_delta", contentIndex: 0, delta: "hello" },
-			{ type: "text_end", contentIndex: 0, content: "hello", block: text },
+			{ type: "text_end", contentIndex: 0, content: "hello", block: { type: "text", textSignature: "sig-1" } },
 			{ type: "thinking_start", contentIndex: 1, block: thinking },
 			{ type: "thinking_delta", contentIndex: 1, delta: "hmm" },
-			{ type: "thinking_end", contentIndex: 1, content: "hmm", block: thinking },
-			{ type: "image_end", contentIndex: 2, content: image, block: image },
+			{
+				type: "thinking_end",
+				contentIndex: 1,
+				content: "hmm",
+				block: { type: "thinking", thinkingSignature: "sig-2" },
+			},
+			{ type: "image_end", contentIndex: 2, content: image },
 			{ type: "toolcall_start", contentIndex: 3, block: toolCall },
 			{ type: "toolcall_delta", contentIndex: 3, delta: "{}" },
-			{ type: "toolcall_end", contentIndex: 3, toolCall, block: toolCall },
+			{ type: "toolcall_end", contentIndex: 3, toolCall },
 		]);
 		for (const event of events) expect(event).not.toHaveProperty("partial");
+	});
+
+	test("a large end event is not doubled and still rebuilds its block", () => {
+		const size = 600_000;
+		const text = "x".repeat(size);
+		const message = makeAssistantMessage();
+		message.content = [{ type: "text", text, textSignature: "sig" }] as unknown as typeof message.content;
+		const frames: RpcProjectedSessionEventFrame[] = [];
+		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		forwarder.setFilter(null, "delta");
+		forwarder.forward({
+			type: "message_update",
+			message,
+			assistantMessageEvent: { type: "text_end", contentIndex: 0, content: text, partial: message },
+		});
+		const line = JSON.stringify(frames[0]);
+		expect(line.length).toBeLessThan(size + 1_000);
+		const update = (frames[0] as RpcDeltaMessageUpdateFrame).assistantMessageEvent;
+		if (update.type !== "text_end") throw new Error("expected text_end");
+		expect({ ...update.block, text: update.content }).toEqual(message.content[0]);
+	});
+
+	test("a contentIndex pointing at no block omits `block` instead of sending undefined", () => {
+		const message = makeAssistantMessage();
+		const frames: RpcProjectedSessionEventFrame[] = [];
+		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		forwarder.setFilter(null, "delta");
+		for (const assistantMessageEvent of [
+			{ type: "text_start", contentIndex: 5, partial: message },
+			{ type: "text_end", contentIndex: 5, content: "", partial: message },
+			{ type: "thinking_end", contentIndex: 5, content: "", partial: message },
+		] satisfies AssistantMessageEvent[])
+			forwarder.forward({ type: "message_update", message, assistantMessageEvent });
+		for (const frame of frames) expect(frame).not.toHaveProperty("assistantMessageEvent.block");
 	});
 
 	test("switching projection mid-message keeps identity and omission restores byte-identical full updates", () => {
@@ -240,12 +279,33 @@ function applyDelta(message: AssistantMessage, event: RpcDeltaMessageUpdateFrame
 	if (update.type === "start") return structuredClone(update.message);
 	if (update.type === "done" || update.type === "error") return message;
 	const index = update.contentIndex;
-	if ("block" in update) message.content[index] = structuredClone(update.block);
-	else {
-		const block = message.content[index] as Block & { text?: string; thinking?: string };
-		if (update.type === "text_delta") block.text += update.delta;
-		else if (update.type === "thinking_delta") block.thinking += update.delta;
-		// toolcall_delta: the arguments stay as the start event left them until toolcall_end.
+	switch (update.type) {
+		case "text_start":
+		case "thinking_start":
+		case "toolcall_start":
+			message.content[index] = structuredClone(update.block!);
+			break;
+		case "text_delta":
+			(message.content[index] as { text: string }).text += update.delta;
+			break;
+		case "thinking_delta":
+			(message.content[index] as { thinking: string }).thinking += update.delta;
+			break;
+		case "text_end":
+			message.content[index] = { ...update.block!, text: update.content } as Block;
+			break;
+		case "thinking_end":
+			message.content[index] = { ...update.block!, thinking: update.content } as Block;
+			break;
+		case "image_end":
+			message.content[index] = structuredClone(update.content);
+			break;
+		case "toolcall_end":
+			message.content[index] = structuredClone(update.toolCall);
+			break;
+		case "toolcall_delta":
+			// A fragment of the arguments JSON: the arguments are complete only at toolcall_end.
+			break;
 	}
 	return message;
 }

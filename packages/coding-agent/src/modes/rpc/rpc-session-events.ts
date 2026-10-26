@@ -27,9 +27,31 @@ function toDelta(event: AssistantMessageEvent): RpcDeltaAssistantMessageEvent {
 			const { partial: _partial, ...increment } = event;
 			return increment;
 		}
+		case "text_end": {
+			// `content` already carries the text; the block adds only what it cannot (the signature).
+			const { partial, ...rest } = event;
+			const block = partial.content[event.contentIndex];
+			if (block?.type !== "text") return rest;
+			const { text: _text, ...meta } = block;
+			return { ...rest, block: meta };
+		}
+		case "thinking_end": {
+			const { partial, ...rest } = event;
+			const block = partial.content[event.contentIndex];
+			if (block?.type !== "thinking") return rest;
+			const { thinking: _thinking, ...meta } = block;
+			return { ...rest, block: meta };
+		}
+		case "image_end":
+		case "toolcall_end": {
+			// `content` / `toolCall` is the whole block.
+			const { partial: _partial, ...rest } = event;
+			return rest;
+		}
 		default: {
 			const { partial, ...rest } = event;
-			return { ...rest, block: partial.content[event.contentIndex] };
+			const block = partial.content[event.contentIndex];
+			return block === undefined ? rest : { ...rest, block };
 		}
 	}
 }
