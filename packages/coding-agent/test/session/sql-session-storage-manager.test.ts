@@ -32,6 +32,7 @@ function fakeUsage(input: number, output: number): Usage {
 class HeldSqlClient implements SqlSessionStorageClient {
 	readonly options: SqlSessionStorageClient["options"];
 	holdNextReplace = false;
+	holdQueryPrefix = "UPDATE omp_session_files SET content";
 	readonly replaceStarted = Promise.withResolvers<void>();
 	readonly allowReplace = Promise.withResolvers<void>();
 	readonly #client: InstanceType<typeof SQL>;
@@ -42,7 +43,7 @@ class HeldSqlClient implements SqlSessionStorageClient {
 	}
 
 	unsafe(query: string, values?: unknown[]) {
-		if (this.holdNextReplace && query.startsWith("UPDATE omp_session_files SET content")) {
+		if (this.holdNextReplace && query.startsWith(this.holdQueryPrefix)) {
 			this.holdNextReplace = false;
 			this.replaceStarted.resolve();
 			return this.allowReplace.promise.then(() => this.#client.unsafe(query, values));
@@ -216,6 +217,28 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		expect(body).toContain("fenced append");
 		expect(body).toContain("later turn");
 		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
+		await manager.close();
+		await client.end();
+	});
+
+	it("counts a new session as resumable only once SQL confirms its first write", async () => {
+		// The index entry appears before the backend acknowledges the write; an exit-time
+		// resume hint read in that window would advertise a session the exit then loses.
+		const client = new SQL("sqlite::memory:");
+		const heldClient = new HeldSqlClient(client);
+		const storage = await SqlSessionStorage.create({ client: heldClient });
+		const manager = SessionManager.create("/cwd", virtualDir("/sessions/unconfirmed"), storage);
+		heldClient.holdQueryPrefix = "INSERT INTO omp_session_files";
+		heldClient.holdNextReplace = true;
+
+		const firstWrite = manager.ensureOnDisk();
+		await heldClient.replaceStarted.promise;
+		expect(manager.isSessionOnDisk()).toBe(true);
+		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
+
+		heldClient.allowReplace.resolve();
+		await firstWrite;
+		expect(manager.isSessionConfirmedOnDisk()).toBe(true);
 		await manager.close();
 		await client.end();
 	});

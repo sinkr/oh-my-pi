@@ -184,6 +184,12 @@ export class IndexedSessionStorage implements SessionStorage {
 		return this.#index.has(path);
 	}
 
+	existsConfirmedSync(path: string): boolean {
+		// The oldest live frame's previous entry is the last state the backend confirmed.
+		const oldest = this.#pendingFrames.get(path)?.[0];
+		return oldest ? oldest.previous !== undefined : this.#index.has(path);
+	}
+
 	/**
 	 * Resolve once the publishes queued for `path` have settled, rejecting when
 	 * one failed. The path tail is installed synchronously by `#enqueuePaths`,
