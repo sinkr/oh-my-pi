@@ -8,6 +8,7 @@
 - Fixed a tool abort leaving a background in-process command, such as `cat /dev/zero > /dev/null &`, running and keeping a core busy after its shell session was gone ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a shell redirect to or from a FIFO whose other end is a background job, such as `echo hi > f & cat < f`, hanging the command; a tool abort now also stops a write redirect to a FIFO that has no reader ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a background external command with a FIFO redirect, such as `/bin/cat < f & echo hi > f`, hanging the shell until the FIFO's other end opened; the command's own process now opens it, as in bash ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `timeout` printing `error: interrupted` when its limit stopped a built-in command; like GNU `timeout`, it now prints nothing of its own and exits 124 ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.0] - 2026-10-26
 

@@ -214,6 +214,9 @@ impl builtins::Command for TimeoutCommand {
 			ProcessGroupPolicy::NewProcessGroup
 		};
 		params.set_cancel_token(child_cancel.clone());
+		// GNU's killed command says nothing; neither does the shell that ran an
+		// in-process operand once the limit cancels it.
+		params.set_quiet_cancellation(true);
 		params.set_spawn_observer(Arc::clone(&spawns) as Arc<dyn SpawnObserver>);
 
 		let mut command_line = String::new();
@@ -594,6 +597,27 @@ mod tests {
 			assert_eq!(ran.status, 124, "{command}");
 			assert!(!ran.stderr.contains("tail") && !ran.stderr.contains("sha256sum"), "{command}: {}", ran.stderr);
 		}
+	}
+
+	/// When the limit cancels an in-process operand, the shell that ran it
+	/// printed `error: interrupted` (and a builtin's own `mapfile:
+	/// interrupted`). GNU `timeout` kills its command, which says nothing; the
+	/// status alone reports the timeout.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn timeout_prints_nothing_of_its_own_when_the_limit_fires() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		for command in [
+			"timeout 0.2 cat /dev/zero",
+			"timeout 0.2 mapfile -t a < /dev/zero",
+			"timeout 0.2 eval 'cat /dev/zero'",
+		] {
+			let ran = run_in_process(&mut shell, command, None).await;
+			assert_eq!((ran.status, ran.stderr.as_str()), (124, ""), "{command}");
+		}
+		let ran = run_in_process(&mut shell, "timeout 0.5 cat nosuch; echo st=$?", None).await;
+		assert!(ran.stderr.contains("nosuch"), "an error before the limit is still printed: {}", ran.stderr);
 	}
 
 	/// A cancelled read of standard input looked like EOF, so `md5sum` printed

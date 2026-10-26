@@ -118,6 +118,9 @@ pub struct ExecutionParameters {
 	defer_fifo_redirects:     bool,
 	/// The redirections left for the child, in order.
 	deferred_redirects:       Vec<DeferredRedirect>,
+	/// Whether this context's own cancellation goes unreported; see
+	/// [`ExecutionParameters::set_quiet_cancellation`].
+	quiet_cancellation:       bool,
 }
 
 /// A redirection a background external command's child makes itself, after
@@ -156,6 +159,22 @@ impl ExecutionParameters {
 	/// Whether a deferred redirection sets `fd`.
 	fn defers(&self, fd: ShellFd) -> bool {
 		self.deferred_redirects.iter().any(|redirect| redirect.fd() == fd)
+	}
+
+	/// Leaves the end of this context unreported once its token has fired:
+	/// the errors that stop the commands still running (`interrupted`, or a
+	/// builtin's own `mapfile: interrupted`) are not printed. `timeout` sets
+	/// this for its operand, which GNU `timeout` kills without a word; the
+	/// status reports the timeout.
+	pub fn set_quiet_cancellation(&mut self, quiet: bool) {
+		self.quiet_cancellation = quiet;
+	}
+
+	/// Whether an error that ends a command in this context is printed: not
+	/// once the context was cancelled with its cancellation set to go
+	/// unreported.
+	pub(crate) fn reports_errors(&self) -> bool {
+		!(self.quiet_cancellation && self.is_cancelled())
 	}
 
 	/// Assigns a cancellation token for this execution.
@@ -416,7 +435,9 @@ impl Execute for ast::Program {
 				Ok(exec_result) => result = exec_result,
 				Err(err) => {
 					// Display the error and convert to an execution result.
-					let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+					if params.reports_errors() {
+						let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+					}
 					result = err.into_result(shell);
 				},
 			}
@@ -1151,8 +1172,10 @@ impl Execute for ast::CompoundCommand {
 					Ok(result) => result,
 					Err(error) => {
 						// Display the error to stderr, but prevent fatal error propagation
-						let mut stderr = params.stderr(shell);
-						let _ = shell.display_error(&mut stderr, &error).await;
+						if params.reports_errors() {
+							let mut stderr = params.stderr(shell);
+							let _ = shell.display_error(&mut stderr, &error).await;
+						}
 
 						// Convert error to result in subshell context
 						error.into_result(&subshell)
@@ -1755,6 +1778,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		// If we have a command, then execute it.
 		if let Some(CommandArg::String(cmd_name)) = args.first().cloned() {
 			let mut stderr = params.stderr(&context.shell);
+			// The token that leaves this command's end unreported, if any; see
+			// `ExecutionParameters::set_quiet_cancellation`.
+			let quiet_token = params.quiet_cancellation.then(|| params.cancel_token()).flatten();
 
 			let (owned_shell, parent_shell) = match context.shell {
 				commands::ShellForCommand::ParentShell(shell) => (None, shell),
@@ -1777,7 +1803,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match execute_command(context, params, cmd_name, assignments, args).await {
 				Ok(result) => Ok(result),
 				Err(err) => {
-					let _ = parent_shell.display_error(&mut stderr, &err).await;
+					if !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
+						let _ = parent_shell.display_error(&mut stderr, &err).await;
+					}
 
 					let result = err.into_result(parent_shell);
 					Ok(result.into())
