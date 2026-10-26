@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
 import { getProjectDir, isEnoent, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
@@ -21,7 +22,7 @@ import {
 	clearPluginRootsAndCaches,
 	compareSkillOrder,
 	isSupersededPluginPath,
-	registeredPluginIdOf,
+	registeredPluginRootOf,
 	scanSkillsFromDir,
 } from "../discovery/helpers";
 import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
@@ -640,9 +641,9 @@ export interface SkillRediscoverySource {
  * and the discovery file cache still name the old directory, so both are dropped first. A holder
  * that rediscovers its own skills refreshes in place, so its list, its prompt and the process
  * snapshot follow. A fixed list (a subagent given its parent's) keeps every entry whose file still
- * exists; an entry whose file is gone is re-pointed at a fresh discovery's same-named skill from
- * the same plugin (or, for a skill outside any plugin, from outside any plugin), or dropped when
- * there is none. The holder stores the result, so the next lookup needs no new pass.
+ * exists; an entry whose file is gone is re-pointed, under the name it already has, at a fresh
+ * discovery's same skill of the same plugin ({@link findStaleSkillStandIn}), or dropped when there
+ * is none. The holder stores the result, so the next lookup needs no new pass.
  */
 export function rediscoverSkills(host: SkillRediscoveryHost): Promise<readonly Skill[]> {
 	const rediscover = () => rediscoverHostSkills(host);
@@ -670,20 +671,46 @@ async function rediscoverHostSkills(host: SkillRediscoveryHost): Promise<readonl
 		disabledExtensions: cfgDisabledExtensions.get(host.settings),
 		extensionRoots: host.extensionRoots,
 	});
-	const byName = new Map(discovered.skills.map(skill => [skill.name, skill]));
 	const repointed: Skill[] = [];
 	for (const skill of host.skills) {
 		if (!(await isMissingFile(skill.filePath))) {
 			repointed.push(skill);
 			continue;
 		}
-		const fresh = byName.get(skill.name);
-		// The fresh discovery runs in the holder's cwd, which can differ from the creator's (a worktree
-		// subagent): a same-named skill there from another source has other instructions.
-		if (fresh && registeredPluginIdOf(fresh.filePath) === registeredPluginIdOf(skill.filePath)) repointed.push(fresh);
+		const fresh = findStaleSkillStandIn(skill, discovered.skills);
+		// Under the name this list (and the prompt built from it) already gives it, if a collision renamed it.
+		if (fresh) repointed.push(fresh.name === skill.name ? fresh : { ...fresh, name: skill.name });
 	}
 	await host.replaceSkills?.(repointed);
 	return repointed;
+}
+
+/**
+ * The skill in `skills`, found by a rediscovery, that stands in for `stale`: one from the same
+ * registered plugin that is the same skill there, by name or else by its file's path inside the
+ * plugin (a collision can list a plugin's skill under another name: the upgrade that rewrites the
+ * registry moves the plugin after one with a same-named skill, which then keeps the bare name).
+ * A skill outside any plugin stands in only for a same-named one outside any plugin. A same-named
+ * skill from elsewhere has other instructions: another plugin's colliding skill takes the bare name
+ * when an upgrade drops it, and a worktree subagent's discovery, which runs in its own cwd, finds
+ * that project's skills.
+ */
+export function findStaleSkillStandIn(
+	stale: Pick<Skill, "name" | "filePath">,
+	skills: readonly Skill[],
+): Skill | undefined {
+	const staleRoot = registeredPluginRootOf(stale.filePath);
+	const staleRelativePath = staleRoot && path.relative(staleRoot.root, stale.filePath);
+	let samePath: Skill | undefined;
+	for (const candidate of skills) {
+		const candidateRoot = registeredPluginRootOf(candidate.filePath);
+		if (candidateRoot?.pluginId !== staleRoot?.pluginId) continue;
+		if (candidate.name === stale.name) return candidate;
+		if (candidateRoot && staleRelativePath === path.relative(candidateRoot.root, candidate.filePath)) {
+			samePath ??= candidate;
+		}
+	}
+	return samePath;
 }
 
 /**
@@ -703,16 +730,16 @@ export async function isSkillSuperseded(
 }
 
 /**
- * The same-named skill to read instead of `skill`, which went stale: the holder's own entry when an
- * earlier rediscovery already moved it and that entry is current, otherwise one from a new
- * {@link rediscoverSkills} pass (the holder's entry can be stale too, after a second upgrade). The
- * pass's entry can name `skill`'s own file, when discovery still finds the skill there.
+ * The skill to read instead of `skill`, which went stale ({@link findStaleSkillStandIn}): the holder's
+ * own entry when an earlier rediscovery already moved it and that entry is current, otherwise one
+ * from a new {@link rediscoverSkills} pass (the holder's entry can be stale too, after a second
+ * upgrade). The pass's entry can name `skill`'s own file, when discovery still finds the skill there.
  */
 async function findRediscoveredSkill(
 	skill: Pick<Skill, "name" | "filePath">,
 	host: SkillRediscoveryHost,
 ): Promise<Skill | undefined> {
-	const held = host.skills.find(entry => entry.name === skill.name);
+	const held = findStaleSkillStandIn(skill, host.skills);
 	if (
 		held &&
 		held.filePath !== skill.filePath &&
@@ -721,7 +748,7 @@ async function findRediscoveredSkill(
 	) {
 		return held;
 	}
-	return (await rediscoverSkills(host)).find(entry => entry.name === skill.name);
+	return findStaleSkillStandIn(skill, await rediscoverSkills(host));
 }
 
 export interface BuiltSkillPromptMessage {
@@ -808,8 +835,9 @@ export interface LoadedSkillPrompt {
 /**
  * Reads a skill's instruction body. With `source`, a stale skill (its instruction file is gone, or
  * for a session that rediscovers its own skills, its plugin install was replaced; see
- * {@link rediscoverSkills}) is replaced by the same-named skill from a rediscovery; the returned
- * `skill` names the file actually read, so render with it.
+ * {@link rediscoverSkills}) is replaced by the same skill of the same plugin from a rediscovery
+ * ({@link findStaleSkillStandIn}); the returned `skill` names the file actually read, so render
+ * with it.
  */
 export async function loadSkillPrompt(
 	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
@@ -817,8 +845,9 @@ export async function loadSkillPrompt(
 ): Promise<LoadedSkillPrompt> {
 	const host = source?.skillRediscoveryHost?.();
 	if (host && (await isSkillSuperseded(skill, host))) {
-		// The registries install the skill's plugin elsewhere: read what they expose under its name
-		// now. A new version that dropped or renamed the skill leaves nothing to read.
+		// The registries install the skill's plugin elsewhere: read what they expose for it now. A
+		// new version that dropped the skill, or renamed it and moved its file, leaves nothing to read,
+		// even when another plugin's same-named skill took the bare name.
 		const current = await findRediscoveredSkill(skill, host);
 		if (!current) throw new Error(`Unknown skill: ${skill.name}`);
 		skill = current;

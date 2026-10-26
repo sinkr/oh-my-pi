@@ -125,6 +125,45 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		if (previous) removeSyncWithRetries(pluginDir(previous));
 	}
 
+	/** A version of the plugin that renames its skill, so it no longer has {@link SKILL}. */
+	function writePluginVersionWithoutSkill(version: string): void {
+		const renamedDir = path.join(pluginDir(version), "skills", "renamed-skill");
+		fs.mkdirSync(renamedDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(renamedDir, "SKILL.md"),
+			"---\nname: renamed-skill\ndescription: Plugin skill.\n---\n\nBody of the renamed skill.\n",
+		);
+	}
+
+	function otherPluginDir(): string {
+		return path.join(tempHomeDir, ".omp", "plugins", "cache", "plugins", "market___other-plugin___1.0.0");
+	}
+
+	/**
+	 * Registers the plugin at `version` and another plugin with a different skill also named
+	 * {@link SKILL}. The plugin registered first keeps the bare name and the other one's skill is
+	 * namespaced. `upgradedLast` is the order `omp plugin upgrade` leaves: it rewrites the upgraded
+	 * plugin's entry, which moves it after the other plugin.
+	 */
+	function writeRegistryWithCollidingPlugin(version: string, upgradedLast = false): void {
+		const skillDir = path.join(otherPluginDir(), "skills", SKILL);
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(skillDir, "SKILL.md"),
+			`---\nname: ${SKILL}\ndescription: Another plugin's skill.\n---\n\nBody of the other plugin.\n`,
+		);
+		const upgraded: [string, unknown] = [
+			"upgrade-plugin@market",
+			[{ scope: "user", installPath: pluginDir(version), version }],
+		];
+		const other: [string, unknown] = [
+			"other-plugin@market",
+			[{ scope: "user", installPath: otherPluginDir(), version: "1.0.0" }],
+		];
+		const plugins = Object.fromEntries(upgradedLast ? [other, upgraded] : [upgraded, other]);
+		fs.writeFileSync(userRegistryPath(), JSON.stringify({ version: 2, plugins }));
+	}
+
 	/** A project skill at `<cwd>/.omp/skills/<name>/SKILL.md`. */
 	function writeProjectSkill(cwd: string, name: string, body: string): void {
 		const skillDir = path.join(cwd, ".omp", "skills", name);
@@ -328,16 +367,99 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		const skill = session.skills.find(entry => entry.name === SKILL)!;
 
 		// 2.0.0 renames the skill; the 1.0.0 directory stays (another scope or a retained install).
-		const renamedDir = path.join(pluginDir("2.0.0"), "skills", "renamed-skill");
-		fs.mkdirSync(renamedDir, { recursive: true });
-		fs.writeFileSync(
-			path.join(renamedDir, "SKILL.md"),
-			"---\nname: renamed-skill\ndescription: Plugin skill.\n---\n\nBody of the renamed skill.\n",
-		);
+		writePluginVersionWithoutSkill("2.0.0");
 		writeRegistry(userRegistryPath(), "2.0.0", "user");
 
 		await expect(session.buildUserSkillPrompt(skill, { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
 		expect(await readText(session, `skill://${SKILL}`)).toContain(`Unknown skill: ${SKILL}`);
+	});
+
+	it("a skill the upgrade dropped and kept on disk is unknown, not another plugin's same-named skill", async () => {
+		writeRegistryWithCollidingPlugin("1.0.0");
+		const session = await startSession();
+		const skill = session.skills.find(entry => entry.name === SKILL)!;
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+		// A tool session copied before the upgrade keeps the old list in `context.skills`.
+		const toolSession = { skills: session.skills, skillRediscoveryHost: () => session.skillRediscoveryHost() };
+		const context = { skills: session.skills, session: toolSession as unknown as ToolSession };
+
+		writePluginVersionWithoutSkill("2.0.0");
+		writeRegistryWithCollidingPlugin("2.0.0");
+
+		await expect(session.buildUserSkillPrompt(skill, { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
+		// That rediscovery gave the other plugin's skill the bare name; the copy's lookup still refuses it.
+		expect(session.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(otherPluginDir())).toBe(true);
+		await expect(new SkillProtocolHandler().resolve(parseInternalUrl(`skill://${SKILL}`), context)).rejects.toThrow(
+			`Unknown skill: ${SKILL}`,
+		);
+	});
+
+	it("a skill the upgrade dropped and deleted is unknown, not another plugin's same-named skill", async () => {
+		writeRegistryWithCollidingPlugin("1.0.0");
+		const session = await startSession();
+		const skill = session.skills.find(entry => entry.name === SKILL)!;
+		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 1.0.0.");
+
+		writePluginVersionWithoutSkill("2.0.0");
+		writeRegistryWithCollidingPlugin("2.0.0");
+		removeSyncWithRetries(pluginDir("1.0.0"));
+
+		const text = await readText(session, `skill://${SKILL}`);
+		expect(text).not.toContain("Body of the other plugin.");
+		expect(text).toContain(`Unknown skill: ${SKILL}`);
+		// The rediscovery that refused the read gave the other plugin's skill the bare name.
+		await expect(session.buildUserSkillPrompt(skill, { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
+	});
+
+	it("an upgrade that leaves another plugin's same-named skill the bare name still serves the new version", async () => {
+		writeRegistryWithCollidingPlugin("1.0.0");
+		const session = await startSession();
+		const skill = session.skills.find(entry => entry.name === SKILL)!;
+		const child = await startSession({ skills: session.skills });
+		// A tool session copied before the upgrade keeps the old list in `context.skills`.
+		const toolSession = { skills: session.skills, skillRediscoveryHost: () => session.skillRediscoveryHost() };
+		const context = { skills: session.skills, session: toolSession as unknown as ToolSession };
+		const handler = new SkillProtocolHandler();
+
+		installPluginVersion("2.0.0", "1.0.0");
+		writeRegistryWithCollidingPlugin("2.0.0", true);
+
+		// The first lookup rediscovers; the second finds the session's list moved on.
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const resource = await handler.resolve(parseInternalUrl(`skill://${SKILL}/notes.md`), context);
+			expect(resource.content).toContain("Notes of version 2.0.0.");
+		}
+		// The rediscovery gave the other plugin's skill the bare name; the upgraded one is namespaced.
+		expect(session.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(otherPluginDir())).toBe(true);
+		const built = await session.buildUserSkillPrompt(skill, { args: "" });
+		expect(built.message).toContain("Body of version 2.0.0.");
+		// A fixed list re-points the entry under the name it already lists, so later reads by that name keep working.
+		for (let attempt = 0; attempt < 2; attempt++) {
+			expect(await readText(child, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+		}
+	});
+
+	it("a new version that gives the skill's name to another folder serves that folder, not the renamed old one", async () => {
+		const session = await startSession();
+		const skill = session.skills.find(entry => entry.name === SKILL)!;
+
+		// 2.0.0 renames the skill in its old folder and gives its name to a skill in a new folder.
+		for (const [folder, name, body] of [
+			[SKILL, "renamed-skill", "Body of the renamed folder."],
+			["moved-skill", SKILL, "Body of the moved skill."],
+		]) {
+			const skillDir = path.join(pluginDir("2.0.0"), "skills", folder);
+			fs.mkdirSync(skillDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(skillDir, "SKILL.md"),
+				`---\nname: ${name}\ndescription: Plugin skill.\n---\n\n${body}\n`,
+			);
+		}
+		writeRegistry(userRegistryPath(), "2.0.0", "user");
+		removeSyncWithRetries(pluginDir("1.0.0"));
+
+		const built = await session.buildUserSkillPrompt(skill, { args: "" });
+		expect(built.message).toContain("Body of the moved skill.");
 	});
 
 	it("a project-scope upgrade moves the project's session and leaves a session outside the project alone", async () => {

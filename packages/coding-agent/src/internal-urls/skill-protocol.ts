@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
 import {
+	findStaleSkillStandIn,
 	getActiveSkills,
 	isSkillSuperseded,
 	rediscoverSkills,
@@ -58,18 +59,14 @@ interface SkillTarget {
 	path: string;
 }
 
-/**
- * Path a skill:// URL addresses, after traversal and plugin-root containment
- * checks. A bare URL addresses the skill's instruction file, or its base
- * directory when `directory` is set. The path may not exist; with `create`, a
- * missing plugin-skill target is only returned when writing it stays in the plugin root.
- */
-async function skillTargetPath(
-	url: InternalUrl,
-	skills: readonly Skill[],
-	directory: boolean,
-	create = false,
-): Promise<SkillTarget> {
+/** The loaded skill a skill:// URL names, and the URL path inside that skill. */
+interface UrlSkill {
+	skill: Skill;
+	urlPath: string;
+}
+
+/** The loaded skill in `skills` that a skill:// URL names. */
+function findUrlSkill(url: InternalUrl, skills: readonly Skill[]): UrlSkill {
 	const skillName = url.rawHost || url.hostname;
 	if (!skillName) {
 		throw new Error("skill:// URL requires a skill name: skill://<name>");
@@ -93,7 +90,21 @@ async function skillTargetPath(
 		const availableStr = available.length > 0 ? available.join(", ") : "none";
 		throw new UnknownSkillError(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
 	}
+	return { skill, urlPath };
+}
 
+/**
+ * Path `urlPath` addresses inside `skill`, after traversal and plugin-root containment
+ * checks. An empty path addresses the skill's instruction file, or its base
+ * directory when `directory` is set. The path may not exist; with `create`, a
+ * missing plugin-skill target is only returned when writing it stays in the plugin root.
+ */
+async function skillTargetPath(
+	url: InternalUrl,
+	{ skill, urlPath }: UrlSkill,
+	directory: boolean,
+	create = false,
+): Promise<SkillTarget> {
 	let resolvedPath: string;
 	if (!urlPath || urlPath === "/") {
 		resolvedPath = path.resolve(directory ? skill.baseDir : skill.filePath);
@@ -179,10 +190,12 @@ async function isStaleTarget(
 }
 
 /**
- * {@link skillTargetPath}, resolved once more when the skill that owns the target is stale: first
- * against the holder's current list, when it moved on since `context.skills` was taken (a copied
- * tool session, a read that began before a rediscovery), and only if that is stale too against
- * rediscovered skills ({@link rediscoverSkills}).
+ * {@link skillTargetPath}, resolved once more when the skill that owns the target is stale. Its
+ * stand-in is the same skill of the same plugin ({@link findStaleSkillStandIn}), which a collision
+ * can list under another name, at the same path inside it: first from the holder's current list,
+ * when it moved on since `context.skills` was taken (a copied tool session, a read that began
+ * before a rediscovery), and only if that is stale too from rediscovered skills
+ * ({@link rediscoverSkills}).
  */
 async function locateSkillTarget(
 	url: InternalUrl,
@@ -191,16 +204,23 @@ async function locateSkillTarget(
 	create = false,
 ): Promise<LocatedSkillTarget> {
 	const skills = context?.skills ?? getActiveSkills();
-	let target = await skillTargetPath(url, skills, directory, create);
+	const named = findUrlSkill(url, skills);
+	let target = await skillTargetPath(url, named, directory, create);
 	let stats = await statIfExists(target.path);
 	const host = contextRediscoveryHost(skills, context);
 	if (await isStaleTarget(target, stats, host)) {
-		if (host.skills !== skills) {
-			const held = await skillTargetPath(url, host.skills, directory, create);
-			const heldStats = await statIfExists(held.path);
-			if (!(await isStaleTarget(held, heldStats, host))) return { path: held.path, stats: heldStats };
+		const held = host.skills !== skills ? findStaleSkillStandIn(named.skill, host.skills) : undefined;
+		if (held) {
+			const heldTarget = await skillTargetPath(url, { skill: held, urlPath: named.urlPath }, directory, create);
+			const heldStats = await statIfExists(heldTarget.path);
+			if (!(await isStaleTarget(heldTarget, heldStats, host))) return { path: heldTarget.path, stats: heldStats };
 		}
-		target = await skillTargetPath(url, await rediscoverSkills(host), directory, create);
+		const rediscovered = findStaleSkillStandIn(named.skill, await rediscoverSkills(host));
+		// Not an UnknownSkillError: when an upgrade dropped the skill, another plugin's colliding skill
+		// can own its name now, and neither an MCP server nor a second lookup (`resolve` after `locate`
+		// defers) may answer for the dropped one with it.
+		if (!rediscovered) throw new Error(`Unknown skill: ${named.skill.name}`);
+		target = await skillTargetPath(url, { skill: rediscovered, urlPath: named.urlPath }, directory, create);
 		stats = await statIfExists(target.path);
 	}
 	return { path: target.path, stats };

@@ -1273,13 +1273,19 @@ async function recordRegisteredPluginRoots(roots: readonly ClaudePluginRoot[]): 
 	);
 }
 
-/** Plugin id of the registered plugin root (see {@link isSupersededPluginPath}) that holds `filePath`, if any. */
-export function registeredPluginIdOf(filePath: string): string | undefined {
-	let pluginId: string | undefined;
-	for (const [root, id] of registeredPluginRootIds) {
-		if (pathIsWithin(root, filePath)) pluginId = id;
+/** A registered plugin root (see {@link isSupersededPluginPath}) and the id of its plugin. */
+export interface RegisteredPluginRoot {
+	root: string;
+	pluginId: string;
+}
+
+/** The registered plugin root that holds `filePath`, if any. */
+export function registeredPluginRootOf(filePath: string): RegisteredPluginRoot | undefined {
+	let found: [string, string] | undefined;
+	for (const entry of registeredPluginRootIds) {
+		if (pathIsWithin(entry[0], filePath)) found = entry;
 	}
-	return pluginId;
+	return found && { root: found[0], pluginId: found[1] };
 }
 
 /**
@@ -1290,7 +1296,7 @@ export function registeredPluginIdOf(filePath: string): string | undefined {
  * root, or in a plugin the registries no longer install at all, is not superseded.
  */
 export async function isSupersededPluginPath(filePath: string, home: string, cwd?: string): Promise<boolean> {
-	const pluginId = registeredPluginIdOf(filePath);
+	const pluginId = registeredPluginRootOf(filePath)?.pluginId;
 	if (pluginId === undefined) return false;
 	const installs = (await readPluginRoots(home, cwd, true)).roots.filter(root => root.id === pluginId);
 	if (installs.length === 0) return false;
