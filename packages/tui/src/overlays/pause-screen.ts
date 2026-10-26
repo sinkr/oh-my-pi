@@ -14,7 +14,7 @@
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { type Component, matchesKey, type OverlayFocusOwner, type OverlayHandle, type OverlayOptions } from "../index";
 import { formatCoarseDuration } from "../chrome/format";
-import { centerLine } from "../utils";
+import { centerLine, visibleWidth } from "../utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../keybinding-matchers";
 import { formatKeyHint, formatTooltipKey } from "../app-keybindings";
@@ -133,7 +133,13 @@ export function renderPauseScreen(
 			if (screenHeight === 1) {
 				const counts = `T:${workStatus.unsettledTurns} J:${workStatus.unfinishedJobs}`;
 				const summary = outstanding ? `${counts} · ${esc} to resume` : `Paused · ${esc} to resume`;
-				content.push(centerLine(theme.fg(outstanding ? "warning" : "success", summary), screenWidth).trimEnd());
+				const abbreviatedSummary = outstanding
+					? `T${workStatus.unsettledTurns} J${workStatus.unfinishedJobs} ${esc} resume`
+					: `${esc} resume`;
+				const visibleSummary = visibleWidth(summary) > screenWidth ? abbreviatedSummary : summary;
+				content.push(
+					centerLine(theme.fg(outstanding ? "warning" : "success", visibleSummary), screenWidth).trimEnd(),
+				);
 			} else if (screenHeight === 2 && outstanding) {
 				const counts = `Pausing · T:${workStatus.unsettledTurns} J:${workStatus.unfinishedJobs}`;
 				content.push(centerLine(theme.fg("warning", counts), screenWidth).trimEnd(), resumeLine);

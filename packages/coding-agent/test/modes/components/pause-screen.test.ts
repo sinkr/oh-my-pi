@@ -139,6 +139,28 @@ describe("pause screen", () => {
 			}
 		});
 
+		it("keeps abbreviated active counts and resume visible on a 16-column one-row screen", () => {
+			const lines = renderPauseScreen(16, 1, 3_000, undefined, {
+				unsettledTurns: 1,
+				unfinishedJobs: 2,
+			});
+			const text = lines.map(stripAnsi).join("\n");
+			expect(lines).toHaveLength(1);
+			expect(text).toContain("T1");
+			expect(text).toContain("J2");
+			expect(text).toContain("resume");
+			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(16);
+		});
+
+		it("keeps resume visible without counters on a settled 16-column one-row screen", () => {
+			const lines = renderPauseScreen(16, 1, 3_000);
+			const text = lines.map(stripAnsi).join("\n");
+			expect(lines).toHaveLength(1);
+			expect(text).toContain("resume");
+			expect(text).not.toMatch(/\bT:?\d|\bJ:?\d/);
+			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(16);
+		});
+
 		it("drops to the compact card on small terminals", () => {
 			const lines = renderPauseScreen(40, 10, 3_000);
 			expect(lines.length).toBe(10);
