@@ -617,8 +617,13 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 
 	// Let the job flag its own task for cancellation: the interpreter checks
 	// these parameters between commands and loop iterations, so `kill %N` also
-	// stops a body that never yields (a loop of synchronous builtins).
-	let cancellation = CancellationToken::new();
+	// stops a body that never yields (a loop of synchronous builtins). It is a
+	// child of the run's token, so cancelling the run (a tool abort) stops the
+	// job too; a run that completes never cancels its token, so a job still
+	// outlives the command line that started it.
+	let cancellation = params
+		.cancel_token()
+		.map_or_else(CancellationToken::new, |token| token.child_token());
 	cloned_params.set_cancel_token(cancellation.clone());
 
 	let join_handle = tokio::spawn(async move {
@@ -1175,8 +1180,11 @@ impl Execute for ast::CoprocessCommand {
 		let body = self.body.clone();
 		let cancel_token = child_params.cancel_token();
 		// Give the coprocess its own cancellation flag so `kill %N` ends it at its
-		// next interpreter check, even when the body never yields.
-		let cancellation = CancellationToken::new();
+		// next interpreter check, even when the body never yields; a child of the
+		// run's token, as for a background job.
+		let cancellation = cancel_token
+			.as_ref()
+			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		child_params.set_cancel_token(cancellation.clone());
 		let join_handle = tokio::spawn(async move {
 			let pipeline_context = PipelineExecutionContext {
