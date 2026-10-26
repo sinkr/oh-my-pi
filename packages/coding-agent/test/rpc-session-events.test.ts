@@ -1,10 +1,23 @@
-import { describe, expect, test } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai";
+import { afterEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MAX_RPC_FRAME_BYTES, RpcFrameEncoder } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { RpcSessionEventForwarder } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-events";
-import type { RpcProjectedSessionEventFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type {
+	RpcDeltaMessageUpdateFrame,
+	RpcProjectedSessionEventFrame,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { makeAssistantMessage } from "./session-manager/helpers";
 
 const reply = { role: "assistant", content: [] } as unknown as AgentMessage;
@@ -65,14 +78,57 @@ describe("RpcSessionEventForwarder", () => {
 			const { partial: _partial, ...expected } = assistantMessageEvent as AssistantMessageEvent & {
 				partial?: unknown;
 			};
-			expect(frames.at(-1)).toEqual({
+			expect(frames.at(-1)).toMatchObject({
 				...event,
 				message: { role: "assistant" },
 				assistantMessageEvent: expected,
 				messageId: "msg-1",
 			});
+			expect(frames.at(-1)).toHaveProperty("message", { role: "assistant" });
+			expect(frames.at(-1)).not.toHaveProperty("assistantMessageEvent.partial");
 			expect(JSON.stringify(event)).toBe(before);
 		}
+	});
+
+	test("a delta stream carries each block once, at its start and end", () => {
+		const message = makeAssistantMessage();
+		const text = { type: "text" as const, text: "hello", textSignature: "sig-1" };
+		const thinking = { type: "thinking" as const, thinking: "hmm", thinkingSignature: "sig-2" };
+		const image = { type: "image" as const, data: "aGVsbG8=", mimeType: "image/png" };
+		const toolCall = { type: "toolCall" as const, id: "call-1", name: "read", arguments: { path: "file" } };
+		message.content = [text, thinking, image, toolCall] as unknown as typeof message.content;
+		const frames: RpcProjectedSessionEventFrame[] = [];
+		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		forwarder.setFilter(null, "delta");
+		const send = (assistantMessageEvent: AssistantMessageEvent) =>
+			forwarder.forward({ type: "message_update", message, assistantMessageEvent });
+		send({ type: "start", partial: message });
+		send({ type: "text_start", contentIndex: 0, partial: message });
+		send({ type: "text_delta", contentIndex: 0, delta: "hello", partial: message });
+		send({ type: "text_end", contentIndex: 0, content: "hello", partial: message });
+		send({ type: "thinking_start", contentIndex: 1, partial: message });
+		send({ type: "thinking_delta", contentIndex: 1, delta: "hmm", partial: message });
+		send({ type: "thinking_end", contentIndex: 1, content: "hmm", partial: message });
+		send({ type: "image_end", contentIndex: 2, content: image, partial: message });
+		send({ type: "toolcall_start", contentIndex: 3, partial: message });
+		send({ type: "toolcall_delta", contentIndex: 3, delta: "{}", partial: message });
+		send({ type: "toolcall_end", contentIndex: 3, toolCall, partial: message });
+		const events = frames.flatMap(frame => (frame.type === "message_update" ? [frame.assistantMessageEvent] : []));
+
+		expect(events).toEqual([
+			{ type: "start", message },
+			{ type: "text_start", contentIndex: 0, block: text },
+			{ type: "text_delta", contentIndex: 0, delta: "hello" },
+			{ type: "text_end", contentIndex: 0, content: "hello", block: text },
+			{ type: "thinking_start", contentIndex: 1, block: thinking },
+			{ type: "thinking_delta", contentIndex: 1, delta: "hmm" },
+			{ type: "thinking_end", contentIndex: 1, content: "hmm", block: thinking },
+			{ type: "image_end", contentIndex: 2, content: image, block: image },
+			{ type: "toolcall_start", contentIndex: 3, block: toolCall },
+			{ type: "toolcall_delta", contentIndex: 3, delta: "{}" },
+			{ type: "toolcall_end", contentIndex: 3, toolCall, block: toolCall },
+		]);
+		for (const event of events) expect(event).not.toHaveProperty("partial");
 	});
 
 	test("switching projection mid-message keeps identity and omission restores byte-identical full updates", () => {
@@ -173,5 +229,151 @@ describe("RpcSessionEventForwarder", () => {
 			["agent_end", undefined],
 			["message_start", "msg-2"],
 		]);
+	});
+});
+
+type Block = AssistantMessage["content"][number];
+
+/** What a plain RPC client does with delta frames: no snapshots, only starts, increments, and ends. */
+function applyDelta(message: AssistantMessage, event: RpcDeltaMessageUpdateFrame) {
+	const update = event.assistantMessageEvent;
+	if (update.type === "start") return structuredClone(update.message);
+	if (update.type === "done" || update.type === "error") return message;
+	const index = update.contentIndex;
+	if ("block" in update) message.content[index] = structuredClone(update.block);
+	else {
+		const block = message.content[index] as Block & { text?: string; thinking?: string };
+		if (update.type === "text_delta") block.text += update.delta;
+		else if (update.type === "thinking_delta") block.thinking += update.delta;
+		// toolcall_delta: the arguments stay as the start event left them until toolcall_end.
+	}
+	return message;
+}
+
+describe("delta message updates over a real session run", () => {
+	let session: AgentSession | undefined;
+	let tempDir: string | undefined;
+
+	afterEach(async () => {
+		await session?.dispose();
+		session = undefined;
+		if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	test("every streamed message rebuilds from delta frames alone and matches the full-mode message", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let turn = 0;
+		// Mutates one partial message in place and yields between events, like a provider reading a socket.
+		const streamFn = (streamModel: Model, _context: Context) => {
+			const stream = new AssistantMessageEventStream();
+			const first = turn++ === 0;
+			void (async () => {
+				const push = async (event: AssistantMessageEvent) => {
+					stream.push(event);
+					await Bun.sleep(0);
+				};
+				const partial: AssistantMessage = {
+					role: "assistant",
+					content: [],
+					api: streamModel.api,
+					provider: streamModel.provider,
+					model: streamModel.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				await push({ type: "start", partial });
+				if (first) {
+					partial.content.push({ type: "thinking", thinking: "" });
+					await push({ type: "thinking_start", contentIndex: 0, partial });
+					for (const delta of ["let me ", "think"]) {
+						(partial.content[0] as { thinking: string }).thinking += delta;
+						await push({ type: "thinking_delta", contentIndex: 0, delta, partial });
+					}
+					(partial.content[0] as { thinkingSignature?: string }).thinkingSignature = "sig-think";
+					await push({ type: "thinking_end", contentIndex: 0, content: "let me think", partial });
+				}
+				partial.content.push({ type: "text", text: "" });
+				const textIndex = partial.content.length - 1;
+				await push({ type: "text_start", contentIndex: textIndex, partial });
+				for (const delta of ["hel", "lo ", "there"]) {
+					(partial.content[textIndex] as { text: string }).text += delta;
+					await push({ type: "text_delta", contentIndex: textIndex, delta, partial });
+				}
+				(partial.content[textIndex] as { textSignature?: string }).textSignature = "sig-text";
+				await push({ type: "text_end", contentIndex: textIndex, content: "hello there", partial });
+				if (first) {
+					const toolCall = { type: "toolCall" as const, id: "call-1", name: "missing_tool", arguments: {} };
+					partial.content.push(toolCall);
+					await push({ type: "toolcall_start", contentIndex: 2, partial });
+					await push({ type: "toolcall_delta", contentIndex: 2, delta: '{"path":', partial });
+					await push({ type: "toolcall_delta", contentIndex: 2, delta: '"file"}', partial });
+					toolCall.arguments = { path: "file" };
+					await push({ type: "toolcall_end", contentIndex: 2, toolCall, partial });
+					partial.stopReason = "toolUse";
+				}
+				await push({ type: "done", reason: first ? "toolUse" : "stop", message: partial });
+			})();
+			return stream;
+		};
+
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "rpc-delta-rebuild-"));
+		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn,
+			convertToLlm,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+		});
+
+		// Frames are serialized when emitted, as on the wire: the provider keeps mutating its partial afterwards.
+		const full: string[] = [];
+		const delta: string[] = [];
+		const fullForwarder = new RpcSessionEventForwarder(frame => full.push(JSON.stringify(frame)));
+		const deltaForwarder = new RpcSessionEventForwarder(frame => delta.push(JSON.stringify(frame)));
+		deltaForwarder.setFilter(null, "delta");
+		session.subscribe(event => {
+			fullForwarder.forward(event);
+			deltaForwarder.forward(event);
+		});
+		await session.prompt("go");
+
+		const fullFrames = full.map(line => JSON.parse(line) as RpcProjectedSessionEventFrame);
+		const deltaFrames = delta.map(line => JSON.parse(line) as RpcProjectedSessionEventFrame);
+		expect(deltaFrames.map(frame => frame.type)).toEqual(fullFrames.map(frame => frame.type));
+
+		let rebuilt: AssistantMessage | undefined;
+		let streamed = 0;
+		let compared = 0;
+		for (const [index, fullFrame] of fullFrames.entries()) {
+			const deltaFrame = deltaFrames[index]!;
+			if (deltaFrame.type === "message_start" && deltaFrame.message.role === "assistant") {
+				rebuilt = structuredClone(deltaFrame.message);
+				streamed++;
+			}
+			if (fullFrame.type !== "message_update" || deltaFrame.type !== "message_update") continue;
+			expect(deltaFrame.messageId).toBe(fullFrame.messageId);
+			rebuilt = applyDelta(rebuilt!, deltaFrame as RpcDeltaMessageUpdateFrame);
+			// A tool call's arguments are only complete at toolcall_end.
+			if (fullFrame.assistantMessageEvent.type === "toolcall_delta") continue;
+			expect(rebuilt.content).toEqual((fullFrame.message as AssistantMessage).content);
+			compared++;
+		}
+		expect(streamed).toBe(2);
+		expect(compared).toBeGreaterThan(10);
 	});
 });
