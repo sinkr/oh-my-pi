@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- A process stopped by SIGTERM now prints its registered recovery commands after the terminal is handed back, so a stopped omp session shows `omp --resume <id>` instead of leaving its last frame above the shell prompt like a crash.
+
 ## [18.12.2] - 2026-10-18
 
 ### Added

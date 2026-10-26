@@ -181,6 +181,29 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stderr).toContain("[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
 	});
 
+	it("prints registered recovery commands when SIGTERM stops the process", async () => {
+		// The session's own cleanup unregisters its hint (AgentSession.dispose does), so the
+		// hint must be read before cleanup runs or a stopped session prints nothing to resume.
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			const cancelHint = postmortem.registerFatalRecoveryHint(() => ({
+				label: "Main",
+				command: "omp --resume 019cafe0-dead-beef",
+			}));
+			postmortem.register("session", () => {
+				cancelHint();
+			});
+			// Keep-alive only: a real child process must stay open until its SIGTERM handler
+			// exits it, and a fake clock cannot hold the event loop open.
+			setInterval(() => {}, 60_000);
+			process.kill(process.pid, "SIGTERM");
+		`);
+
+		expect(result.exitCode).toBe(143);
+		expect(result.stderr).toContain("[Stopped by SIGTERM]\n[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
+	});
+
 	it("exits after an uncaught exception when terminal stderr is revoked", async () => {
 		const result = await runPostmortemProbe(`
 			import { spyOn } from "bun:test";

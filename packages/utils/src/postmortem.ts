@@ -480,7 +480,7 @@ export function interceptUnhandledRejections(interceptor: (reason: unknown) => b
 
 /**
  * Register a synchronous recovery command to print when the process exits
- * through an uncaught exception or unhandled rejection.
+ * through an uncaught exception, an unhandled rejection, or SIGTERM.
  */
 export function registerFatalRecoveryHint(provider: FatalRecoveryHintProvider): () => void {
 	fatalRecoveryHintProviders.add(provider);
@@ -519,6 +519,16 @@ function formatFatalError(label: string, err: Error): string {
 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
 }
 
+/** Write a final report to stderr once terminal owners have handed the terminal back. */
+function writeTerminalReport(output: string): void {
+	restoreTerminalStderr();
+	// A revoked terminal can make stream writes raise another fatal error. Use
+	// the descriptor directly so failure stays synchronous and contained.
+	try {
+		fs.writeSync(2, output);
+	} catch {}
+}
+
 async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
 	const forcedExit = setTimeout(() => exitProcess(1), CLEANUP_DEADLINE_MS);
 	try {
@@ -526,12 +536,7 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 		// completion promise. TUI owners therefore hand the cursor back before the
 		// fatal report is written, while slower resource cleanup continues afterward.
 		const cleanup = runCleanup(reason);
-		restoreTerminalStderr();
-		// A revoked terminal can make stream writes raise another fatal error. Use
-		// the descriptor directly so failure stays synchronous and contained.
-		try {
-			fs.writeSync(2, output);
-		} catch {}
+		writeTerminalReport(output);
 		logger.error(logMessage, { err });
 		await cleanup;
 	} finally {
@@ -640,7 +645,13 @@ if (Bun.isMainThread) {
 			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
 		})
 		.on("SIGTERM", async () => {
-			await runCleanup(Reason.SIGTERM);
+			// A stopped session otherwise leaves its last frame above the shell prompt,
+			// which reads as a crash. Read the hints first: cleanup unregisters them.
+			// Only the signal that starts cleanup reports, so a repeated SIGTERM prints once.
+			const hints = cleanupStage === "idle" ? formatFatalRecoveryHints() : "";
+			const cleanup = runCleanup(Reason.SIGTERM);
+			if (hints) writeTerminalReport(`\n[Stopped by SIGTERM]${hints}`);
+			await cleanup;
 			exitProcess(143); // 128 + SIGTERM (15)
 		})
 		.on("SIGHUP", async () => {
