@@ -398,10 +398,10 @@ next job's microVM starts cold but with warm dependencies from the local store.
    the change, and the import/helm-upgrade/verify steps roll the new tag out.
    The next job's microVM boots warm with the updated toolchain.
 
-   A bun bump reaches running runners only after this reload. The
-   `bun-install` action reuses the preloaded bun only when it satisfies the
-   `packageManager` floor in the root `package.json`, so raise that floor with a
-   security bump: CI then installs a patched bun per job until the reload lands.
+   A bun bump reaches running runners only after this reload. Until then the
+   `bun-install` action sees that the preloaded bun does not match the exact
+   `packageManager` pin in the root `package.json` and installs the pinned bun
+   per job, so CI runs the pinned version but pays the download cost.
 
 ---
 
