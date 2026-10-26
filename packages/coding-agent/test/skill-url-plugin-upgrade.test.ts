@@ -322,6 +322,34 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(rediscoveries).toHaveBeenCalledTimes(1);
 	});
 
+	it("a skill:// resolve whose target is deleted by an upgrade after the stale check reads the new version", async () => {
+		const session = await startSession();
+		const toolSession = { skills: session.skills, skillRediscoveryHost: () => session.skillRediscoveryHost() };
+		const context = { skills: session.skills, session: toolSession as unknown as ToolSession };
+		const handler = new SkillProtocolHandler();
+		expect((await handler.resolve(parseInternalUrl(`skill://${SKILL}`), context)).content).toContain(
+			"Body of version 1.0.0.",
+		);
+
+		// The first superseded check answers from the registry as it was; the upgrade then publishes
+		// 2.0.0 and deletes 1.0.0 before resolve reads the path that check accepted.
+		const isSuperseded = discoveryHelpers.isSupersededPluginPath;
+		let upgraded = false;
+		vi.spyOn(discoveryHelpers, "isSupersededPluginPath").mockImplementation(async (...args) => {
+			const superseded = await isSuperseded(...args);
+			if (!upgraded) {
+				upgraded = true;
+				installPluginVersion("2.0.0", "1.0.0");
+			}
+			return superseded;
+		});
+
+		const resource = await handler.resolve(parseInternalUrl(`skill://${SKILL}`), context);
+		expect(upgraded).toBe(true);
+		expect(resource.content).toContain("Body of version 2.0.0.");
+		expect(resource.sourcePath?.startsWith(pluginDir("2.0.0"))).toBe(true);
+	});
+
 	it("concurrent reads after the upgrade share one rediscovery", async () => {
 		const session = await startSession();
 

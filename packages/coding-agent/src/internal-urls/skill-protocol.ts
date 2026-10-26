@@ -206,6 +206,29 @@ async function locateSkillTarget(
 	return { path: target.path, stats };
 }
 
+/** The file or directory resource at a located target; a target removed since it was located rejects with ENOENT. */
+async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Promise<InternalResource> {
+	const { path: targetPath, stats } = target;
+	if (!stats) throw new Error(`File not found: ${targetPath}`);
+
+	if (stats.isDirectory()) {
+		return buildDirectoryResource(url.href, targetPath);
+	}
+	if (!stats.isFile()) {
+		throw new Error(`skill:// URL must resolve to a file or directory: ${url.href}`);
+	}
+
+	const content = await Bun.file(targetPath).text();
+	return {
+		url: url.href,
+		content,
+		contentType: contentTypeForPath(targetPath),
+		size: Buffer.byteLength(content, "utf-8"),
+		sourcePath: targetPath,
+		notes: [],
+	};
+}
+
 /**
  * Handler for skill:// URLs.
  */
@@ -261,25 +284,15 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			return { ...resource, unbounded: false };
 		}
 
-		const { path: targetPath, stats } = target;
-		if (!stats) throw new Error(`File not found: ${targetPath}`);
-
-		if (stats.isDirectory()) {
-			return buildDirectoryResource(url.href, targetPath);
+		try {
+			return await readSkillTarget(url, target);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			// The target was removed after it was located: an upgrade published the plugin's new
+			// version and deleted the old directory between the check and the read. Locate it again,
+			// which now finds the old skill gone and rediscovers it.
+			return readSkillTarget(url, await locateSkillTarget(url, context, false));
 		}
-		if (!stats.isFile()) {
-			throw new Error(`skill:// URL must resolve to a file or directory: ${url.href}`);
-		}
-
-		const content = await Bun.file(targetPath).text();
-		return {
-			url: url.href,
-			content,
-			contentType: contentTypeForPath(targetPath),
-			size: Buffer.byteLength(content, "utf-8"),
-			sourcePath: targetPath,
-			notes: [],
-		};
 	}
 
 	/**
