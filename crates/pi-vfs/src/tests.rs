@@ -699,3 +699,75 @@ fn fifo_this_process_cannot_write_still_waits_and_observes_the_token() {
 		.unwrap_err();
 	assert_eq!(late_writer.raw_os_error(), Some(libc::ENXIO), "a reader was left open");
 }
+
+/// A write-only open of a FIFO (`echo hi > f`) waits for a reader. Through a
+/// cancellable view it still hands the reader its data, and with no reader it
+/// fails once the token fires, leaving no writer behind: a later reader reads
+/// EOF at once instead of waiting. Mode 0600 takes the release path (a
+/// non-blocking read open releases the wait); mode 0200, which this process
+/// may not read, retries a non-blocking write open instead.
+#[cfg(unix)]
+#[test]
+fn fifo_write_opens_through_a_cancellable_view_wait_for_a_reader_and_observe_the_token() {
+	use std::os::unix::{
+		ffi::OsStrExt,
+		fs::{OpenOptionsExt, PermissionsExt},
+	};
+	for mode in [0o600, 0o200] {
+		let dir = TempDir::new("fifo-write");
+		let fifo = dir.0.join("fifo");
+		BlockingFs::native()
+			.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+			.unwrap();
+		std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(mode)).unwrap();
+		let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+		// SAFETY: `c_path` is a NUL-terminated string alive for the call.
+		let readable =
+			unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::R_OK, libc::AT_EACCESS) }
+				== 0;
+		if mode == 0o200 && readable {
+			eprintln!("skipped mode 0200: this process may read it (root), so the case cannot arise");
+			continue;
+		}
+		let token = CancellationToken::new();
+		let scoped = BlockingFs::native().with_cancellation(token.clone());
+		let mut redirect = OpenOptions::new();
+		redirect.write(true).create(true).truncate(true);
+
+		let reader_path = fifo.clone();
+		let reader = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(150));
+			let set = |mode| {
+				std::fs::set_permissions(&reader_path, std::fs::Permissions::from_mode(mode)).unwrap();
+			};
+			set(0o600);
+			let mut file = std::fs::File::open(&reader_path).unwrap();
+			set(mode);
+			let mut text = String::new();
+			file.read_to_string(&mut text).unwrap();
+			text
+		});
+		let mut writer = scoped.open_with(&fifo, &redirect).unwrap();
+		writer.write_all(b"hi").unwrap();
+		drop(writer);
+		assert_eq!(reader.join().unwrap(), "hi", "mode {mode:o}");
+
+		let canceller = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(150));
+			token.cancel();
+		});
+		let started = std::time::Instant::now();
+		let err = scoped.open_with(&fifo, &redirect).unwrap_err();
+		canceller.join().unwrap();
+		assert!(is_cancelled(&err), "mode {mode:o}: {err}");
+		assert!(started.elapsed() < Duration::from_secs(2), "mode {mode:o}: {:?}", started.elapsed());
+		std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o600)).unwrap();
+		let mut late_reader = std::fs::OpenOptions::new()
+			.read(true)
+			.custom_flags(libc::O_NONBLOCK)
+			.open(&fifo)
+			.unwrap();
+		let read = late_reader.read(&mut [0; 8]);
+		assert_eq!(read.ok(), Some(0), "mode {mode:o}: a writer was left open");
+	}
+}

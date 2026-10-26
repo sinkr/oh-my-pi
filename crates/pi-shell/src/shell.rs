@@ -6176,6 +6176,41 @@ mod tests {
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\nx=two\n"));
 	}
 
+	/// A FIFO redirect's open waits for the other end, which is often a
+	/// background job queued on the same runtime worker: `echo hi > f & cat <
+	/// f` deadlocked when the open held the worker. On a one-worker runtime,
+	/// both orders must finish.
+	#[cfg(unix)]
+	#[test]
+	fn fifo_redirects_do_not_hold_the_worker_their_other_end_needs() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		for name in ["f", "g"] {
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join(name), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+		}
+		let cwd = root.path().to_path_buf();
+		let (tx, rx) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.enable_all()
+				.build()
+				.expect("single-worker runtime");
+			let _ = tx.send(runtime.block_on(run_command_capture(
+				"echo one > f & cat < f; cat < g & echo two > g; wait",
+				Some(&cwd),
+				None,
+				CancelToken::default(),
+			)));
+		});
+		let (result, output) = rx
+			.recv_timeout(Duration::from_secs(5))
+			.expect("a FIFO redirect must not hold the worker its other end needs");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\ntwo\n"));
+	}
+
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
 	/// seconds. The deadline lives on the calling thread, so it still fires when
 	/// a builtin blocks the runtime's only worker.
