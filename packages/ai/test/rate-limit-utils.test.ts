@@ -40,6 +40,53 @@ function googleRpc429(reason: string, retryDelay?: string, message = "Resource e
 		},
 	})}`;
 }
+function googleRpcQuotaFailure429(
+	violations: Array<{ quotaId?: string; quotaMetric?: string; description?: string }>,
+	retryDelay?: string,
+	message = "Resource has been exhausted (e.g. check quota).",
+): string {
+	const details: Array<Record<string, unknown>> = [
+		{
+			"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+			violations,
+		},
+	];
+	if (retryDelay) {
+		details.push({
+			"@type": "type.googleapis.com/google.rpc.RetryInfo",
+			retryDelay,
+		});
+	}
+	return `Cloud Code Assist API error (429): ${JSON.stringify({
+		error: {
+			code: 429,
+			message,
+			status: "RESOURCE_EXHAUSTED",
+			details,
+		},
+	})}`;
+}
+
+function googleRpcRetryInfo429(
+	retryDelay: string,
+	message = "Resource has been exhausted (e.g. check quota).",
+): string {
+	const details: Array<Record<string, unknown>> = [
+		{
+			"@type": "type.googleapis.com/google.rpc.RetryInfo",
+			retryDelay,
+		},
+	];
+	return `Cloud Code Assist API error (429): ${JSON.stringify({
+		error: {
+			code: 429,
+			message,
+			status: "RESOURCE_EXHAUSTED",
+			details,
+		},
+	})}`;
+}
+
 
 describe("parseRateLimitReason", () => {
 	it("classifies Google Quota exceeded as QUOTA_EXHAUSTED", () => {
@@ -315,6 +362,57 @@ describe("parseRateLimitReason", () => {
 		const body = "Cloud Code Assist API error (429): Too many requests";
 		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
 		expect(isUsageLimitOutcome(429, body)).toBe(false);
+	});
+
+	it("classifies structured MODEL_CAPACITY_EXHAUSTED as transient even on quota-worded message", () => {
+		const body = googleRpc429(
+			"MODEL_CAPACITY_EXHAUSTED",
+			"10s",
+			"Resource has been exhausted (e.g. check quota).",
+		);
+		expect(parseRateLimitReason(body)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
+		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(false);
+	});
+
+	it("classifies structured QuotaFailure per-minute requests as transient RATE_LIMIT_EXCEEDED", () => {
+		const body = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+				},
+			],
+			"20s",
+			"Quota exceeded for quota metric 'Generate Content API requests'",
+		);
+		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
+		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(false);
+	});
+
+	it("classifies structured QuotaFailure per-day requests as QUOTA_EXHAUSTED", () => {
+		const body = googleRpcQuotaFailure429([
+			{
+				quotaId: "GenerateContentRequestsPerDayPerProject",
+				quotaMetric: "Generate Content API requests",
+			},
+		]);
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(true);
+	});
+
+	it("classifies standalone RetryInfo on generic resource exhaustion according to delay threshold", () => {
+		const shortBody = googleRpcRetryInfo429("25s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(shortBody)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, shortBody)).toBe(false);
+		expect(isUsageLimit(Object.assign(new Error(shortBody), { status: 429 }))).toBe(false);
+
+		const longBody = googleRpcRetryInfo429("3600s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(longBody)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, longBody)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(longBody), { status: 429 }))).toBe(true);
 	});
 });
 
