@@ -37,6 +37,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
 import { resolveApproval, resolveApprovalFromContext } from "./tools/approval";
+import { getApprovalGrants } from "./tools/approval-cache";
 import {
 	confineToWorkspace,
 	resolveReadPathAsync,
@@ -278,6 +279,20 @@ function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 	};
 }
 
+function buildUnavailableToolResult(
+	options: CursorExecBridgeOptions,
+	toolCallId: string,
+	toolName: string,
+): ToolResultMessage {
+	const names = [...options.tools.keys()];
+	const shown = names.slice(0, 12).join(", ") || "none";
+	const extra = names.length > 12 ? ` and ${names.length - 12} more` : "";
+	const result = buildToolErrorResult(
+		`Tool "${toolName}" not available to this agent; calling it again fails the same way. Use one of: ${shown}${extra}.`,
+	);
+	return createToolResultMessage(toolCallId, toolName, result, true);
+}
+
 async function executeTool(
 	options: CursorExecBridgeOptions,
 	toolName: string,
@@ -287,8 +302,7 @@ async function executeTool(
 ): Promise<ToolResultMessage> {
 	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
 	if (!tool) {
-		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
-		return createToolResultMessage(toolCallId, toolName, result, true);
+		return buildUnavailableToolResult(options, toolCallId, toolName);
 	}
 
 	// Same rule as synthesizeCursorExecToolCall: optional kwargs must be absent,
@@ -355,12 +369,14 @@ function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
  * proceed, or the refusal text to answer with.
  */
 function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string, pathArg: string): string | null {
-	const { approvalMode, userPolicies } = resolveApprovalFromContext(options.getToolContext?.());
+	const context = options.getToolContext?.();
+	const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
 	const approval = resolveApproval(
 		{ name: toolName, approval: "write" },
 		{ path: pathArg },
 		approvalMode,
 		userPolicies,
+		getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
 	);
 	if (approval.policy === "allow") return null;
 	return approval.policy === "deny"
@@ -372,8 +388,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	const toolName = "delete";
 
 	if (!allowsDirectFileMutation(options)) {
-		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
-		return createToolResultMessage(toolCallId, toolName, result, true);
+		return buildUnavailableToolResult(options, toolCallId, toolName);
 	}
 
 	// Unlike every other frame, this one mutates the filesystem directly instead
@@ -614,8 +629,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolName = "bash";
 		const tool = this.options.tools.get(toolName);
 		if (!tool) {
-			const result = buildToolErrorResult(`Tool "${toolName}" not available`);
-			return createToolResultMessage(toolCallId, toolName, result, true);
+			return buildUnavailableToolResult(this.options, toolCallId, toolName);
 		}
 
 		const timeoutSeconds = shellDeadlineSeconds(args);
@@ -1083,12 +1097,14 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			? this.options.getEditReplaceTool?.()
 			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
 		if (!tool) return false;
-		const { approvalMode, userPolicies } = resolveApprovalFromContext(this.options.getToolContext?.());
+		const context = this.options.getToolContext?.();
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
 		const approval = resolveApproval(
 			tool,
 			preferReplace ? normalizeCursorReplaceArgs(args) : args,
 			approvalMode,
 			userPolicies,
+			getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
 		);
 		return approval.policy === "allow";
 	}

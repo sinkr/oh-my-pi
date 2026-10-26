@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -27,6 +28,7 @@ import type {
 	OpenedApplication,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -46,6 +48,7 @@ import {
 	type ComputerSessionSnapshot,
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
+	type ControlVerdict,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
@@ -129,6 +132,12 @@ export type NativeDesktopSessionFactory = (
 type WindowFilter = { id?: string | number; app?: string; title?: string };
 /** Window listings are session-transcript payload; `window()` lookups search the whole native list. */
 const MAX_LISTED_WINDOWS = 48;
+/**
+ * Run time a `control.acquire` confirmation leaves unspent, so an unanswered prompt closes while the script can
+ * still act on `{ active: false, reason: "unanswered" }` instead of the run timing out around it. A run shorter
+ * than four times this keeps a quarter of its timeout instead.
+ */
+const CONTROL_ANSWER_RESERVE_MS = 5_000;
 type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
@@ -163,7 +172,7 @@ interface ComputerRunContext {
 	readOnly: boolean;
 	snapshot: ComputerSessionSnapshot;
 	output: RunOutput;
-	confirmControl(reason: string): Promise<boolean>;
+	confirmControl(reason: string): Promise<ControlVerdict>;
 	screenshots: ComputerScreenshot[];
 }
 
@@ -366,6 +375,36 @@ function refuseForeground(
 	throw new ToolError(
 		`${BACKGROUND_UNAVAILABLE}${call} would ${effect}, and the user's computer.backgroundFallback setting is "refuse", which keeps the agent in the background; nothing was sent${to}. ${route}`,
 	);
+}
+
+/** A URL (`https:`, `x-apple.systempreferences:`, Windows `shell:`); never a drive letter. */
+const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
+
+/**
+ * `apps.open`'s target or `app` selector, against the session's folder
+ * `cwd` when it names a path there: one written as a relative path (`./a`,
+ * `a/b`), even if missing, or a bare name of an existing entry. An exact
+ * application ID or native path (`listed`) keeps precedence over a same-named
+ * entry; absolute paths, URLs and other names pass through to native
+ * resolution.
+ */
+async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
+	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
+	const local = path.resolve(cwd, value);
+	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);
+	if (!written && !(await entryExists(local))) return value;
+	return (await listed(value)) ? value : local;
+}
+
+/** Whether `local` names an entry (a link counts as itself), without blocking the worker. */
+async function entryExists(local: string): Promise<boolean> {
+	try {
+		await fs.lstat(local);
+		return true;
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
 }
 
 const MENU_ROUTE =
@@ -1395,7 +1434,8 @@ export class ComputerWorkerCore {
 			snapshot: message.session,
 			output,
 			screenshots,
-			confirmControl: reason => this.#confirmControl(active, reason),
+			confirmControl: reason =>
+				this.#confirmControl(active, reason, deadline - Math.min(CONTROL_ANSWER_RESERVE_MS, message.timeoutMs / 4)),
 		};
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
@@ -1623,13 +1663,15 @@ export class ComputerWorkerCore {
 		return await promise;
 	}
 
-	async #confirmControl(active: ActiveRun, reason: string): Promise<boolean> {
+	async #confirmControl(active: ActiveRun, reason: string, answerDeadline: number): Promise<ControlVerdict> {
 		throwIfAborted(active.signal);
 		const id = `computer-control-${active.id}-${crypto.randomUUID()}`;
 		const pending = Promise.withResolvers<unknown>();
 		active.pendingTools.set(id, pending);
-		this.#transport.send({ type: "control-request", id, runId: active.id, reason });
-		return (await pending.promise) === true;
+		const timeoutMs = Math.max(0, Math.floor(answerDeadline - performance.now()));
+		this.#transport.send({ type: "control-request", id, runId: active.id, reason, timeoutMs });
+		const verdict = await pending.promise;
+		return verdict === "approved" || verdict === "no-ui" || verdict === "unanswered" ? verdict : "denied";
 	}
 
 	#deliverToolReply(id: string, reply: ToolReply): void {
@@ -1732,14 +1774,32 @@ export class ComputerWorkerCore {
 							"Call apps.open without activate, which opens the application behind the user's.",
 						);
 					}
+					if (open.reveal === true) {
+						refuseForeground(
+							context,
+							"apps.open with reveal: true",
+							"bring Finder to the front",
+							"Open the containing folder with apps.open(folder) instead, which opens it behind the user's app.",
+						);
+					}
+					// A relative path names an item in the session's folder, not the omp process's.
+					const listed = async (value: string): Promise<boolean> =>
+						(await nativeCall(context.signal, () => session.listApplications())).some(
+							app => app.id === value || app.path === value,
+						);
+					const cwd = context.snapshot.cwd;
+					const target = await sessionPath(id, cwd, listed);
+					if (typeof open.app === "string") open.app = await sessionPath(open.app, cwd, listed);
 					const { window: shown, ...application } = await nativeCall(context.signal, () =>
-						session.openApplication(id, open),
+						session.openApplication(target, open),
 					);
 					return { ...application, window: shown ? makeWin(shown) : null };
 				},
 			},
 			control: {
-				acquire: async (options: { reason: string }): Promise<{ active: boolean }> => {
+				acquire: async (options: {
+					reason: string;
+				}): Promise<{ active: boolean; reason?: Exclude<ControlVerdict, "approved"> }> => {
 					const context = getContext();
 					guardRun(context, "control.acquire");
 					refuseForeground(
@@ -1752,9 +1812,9 @@ export class ComputerWorkerCore {
 					if (typeof options.reason !== "string" || !options.reason.trim())
 						throw new ToolError("control.acquire requires a non-empty reason");
 					if (session.controlState().active) return { active: true };
-					const approved = await context.confirmControl(options.reason);
+					const verdict = await context.confirmControl(options.reason);
 					throwIfAborted(context.signal);
-					if (!approved) return { active: false };
+					if (verdict !== "approved") return { active: false, reason: verdict };
 					return await nativeCall(context.signal, () => session.acquireControl());
 				},
 				release: async (): Promise<void> => {
@@ -1780,12 +1840,19 @@ export class ComputerWorkerCore {
 					typeof selector === "string" || typeof selector === "number"
 						? windows.filter(window => window.id === String(selector))
 						: windows.filter(window => matchesFilter(window, selector));
+				// Untyped scripts may pass nothing or `null`, which `matchesFilter` accepts as no filter: a desktop with one
+				// window returns it, and otherwise the error names the missing selector.
+				const unfiltered =
+					selector == null
+						? "computer.window() without an id or { app, title } filter matches every open window"
+						: "";
 				if (matches.length === 0) {
-					// Untyped scripts may pass `null`, which `matchesFilter` accepts as no filter.
 					const app = typeof selector === "object" ? selector?.app : undefined;
-					throw new ToolError(
-						`no window matches ${JSON.stringify(selector)}\n${describeWindowMiss(windows, app)}`,
-					);
+					const route = session.capabilities.backend === "quartz" ? "shows-window" : "launches";
+					const lead = unfiltered
+						? `${unfiltered}, and none is open`
+						: `no window matches ${JSON.stringify(selector)}`;
+					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route)}`);
 				}
 				if (matches.length > 1) {
 					const candidates = matches
@@ -1794,7 +1861,10 @@ export class ComputerWorkerCore {
 						.join("\n");
 					const omitted = matches.length - MAX_LISTED_WINDOWS;
 					const more = omitted > 0 ? `\n… ${omitted} more` : "";
-					throw new ToolError(`multiple windows match ${JSON.stringify(selector)}:\n${candidates}${more}`);
+					const lead = unfiltered
+						? `${unfiltered}; pass a window id or filter to pick one`
+						: `multiple windows match ${JSON.stringify(selector)}`;
+					throw new ToolError(`${lead}:\n${candidates}${more}`);
 				}
 				return makeWin(matches[0]!);
 			},
