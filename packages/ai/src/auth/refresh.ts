@@ -378,7 +378,8 @@ export class OAuthRefresher {
 
 	async #drainRefreshes(): Promise<void> {
 		this.#shuttingDown = true;
-		await Promise.allSettled(this.#pendingRefreshes);
+		// Work tracked while draining (a lease hand-back a returning caller left behind) is waited for too.
+		while (this.#pendingRefreshes.size > 0) await Promise.allSettled([...this.#pendingRefreshes]);
 	}
 
 	async #refreshStored<T extends OAuthCredential = OAuthCredential>(
@@ -548,7 +549,9 @@ export class OAuthRefresher {
 			return this.#refreshFailed(options, current, outcome.failure);
 		} finally {
 			if (leasedCredentialId !== undefined && leaseStore) {
-				await this.#leaveLease(leaseStore, leasedCredentialId, owner, takenOverFrom);
+				// A hand-back retries a busy store for the save window; the caller, which is
+				// leaving with its budget spent or its signal aborted, does not wait for it.
+				void this.#track(this.#leaveLease(leaseStore, leasedCredentialId, owner, takenOverFrom));
 			}
 		}
 	}

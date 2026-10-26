@@ -1380,6 +1380,51 @@ describe("AuthStorage OAuth refresh race", () => {
 		expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
 	});
 
+	test("a caller leaving without an exchange does not wait for a busy lease hand-back", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-detached-hand-back";
+		await seedLogin(provider);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const takeLease = store.tryAcquireCredentialRefreshLease?.bind(store);
+		const handBack = store.handBackCredentialRefreshLease?.bind(store);
+		if (!takeLease || !handBack) throw new Error("test store does not support lease hand-back");
+		expect(takeLease(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+		let storeBusy = true;
+		vi.spyOn(store, "handBackCredentialRefreshLease").mockImplementation((...args) => {
+			if (storeBusy) throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+			return handBack(...args);
+		});
+		let canRefreshCalls = 0;
+
+		const refresh = authStorage.oauth.refreshStored(provider, {
+			credentialId,
+			credentialFromRow: row => row,
+			forceRefresh: true,
+			// Allowed before the lease, refused after it: the caller leaves holding a taken-over lease.
+			canRefresh: () => ++canRefreshCalls === 1,
+			refresh: async () => {
+				throw new Error("the caller must leave before any exchange");
+			},
+		});
+		try {
+			// The hand-back retries the busy store for up to a minute; the caller must not.
+			const first = await Promise.race([refresh.then(() => "returned"), Bun.sleep(2_000).then(() => "waiting")]);
+			expect(first).toBe("returned");
+			expect((await refresh).credential).toMatchObject({ type: "oauth", refresh: "refresh-0" });
+			// The detached hand-back still lands once the store frees up.
+			storeBusy = false;
+			for (let poll = 0; poll < 100; poll++) {
+				if (store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner === "stalled-peer") break;
+				await Bun.sleep(50);
+			}
+			expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+		} finally {
+			storeBusy = false;
+			await refresh.catch(() => undefined);
+		}
+	});
+
 	/** Refresh options for a 401 on access-0 whose refresh token the provider already rejects as spent. */
 	function refreshSpentToken(
 		credentialId: number,
