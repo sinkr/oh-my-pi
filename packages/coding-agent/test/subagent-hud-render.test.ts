@@ -26,6 +26,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import { type TodoPhase, todoToolRenderer } from "@oh-my-pi/pi-tui/tools/todo";
 import {
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -37,6 +38,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgDisplayPinnedAgents, cfgDisplaySubagentLivePreview } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgTaskShowResolvedModelBadge } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function makeSession(overrides: Partial<ObservableSession> & { id: string }): ObservableSession {
 	return {
@@ -1070,6 +1072,67 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		vi.advanceTimersByTime(100);
 		expect(mode.todoContainer.render(120)).toEqual(terminalRows);
 		expect(paintedStatus).toBe("active");
+	});
+
+	it("repaints the transcript todo card after the sticky HUD auto-clears", async () => {
+		cfgDisplayPinnedAgents.override(Settings.instance, "off");
+		cfgTasksTodoClearDelay.override(session.settings, 0);
+		await mode.init({ suppressWelcomeIntro: true });
+		vi.useFakeTimers();
+		const target = "Verify transcript repaint";
+		const transcriptPhases: TodoPhase[] = [
+			{
+				name: "Review",
+				tasks: [...Array.from({ length: 10 }, (_, index) => `Inspect module ${index}`), target].map(content => ({
+					content,
+					status: "pending",
+				})),
+			},
+		];
+		const closedPhases: TodoPhase[] = transcriptPhases.map(phase => ({
+			...phase,
+			tasks: phase.tasks.map(task => ({ ...task, status: "completed" })),
+		}));
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases: closedPhases });
+		session.setTodoPhases(closedPhases);
+		mode.setTodos(closedPhases);
+		vi.advanceTimersByTime(0);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
+		expect(mode.todoContainer.render(120)).toEqual([]);
+		const card = todoToolRenderer.renderResult(
+			{ content: [], details: { op: "init", phases: transcriptPhases, storage: "session" } },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		mode.chatContainer.addChild(card);
+		const readTranscript = () => Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
+		let painted = readTranscript();
+		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {
+			painted = readTranscript();
+		});
+		expect(painted).not.toContain(target);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, "Unrelated work", true));
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Reviewer", 0, target, true));
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(painted).toContain(target);
+		expect(mode.todoContainer.render(120)).toEqual([]);
+		expect(mode.subagentContainer.render(120)).toEqual([]);
+
+		const unrelated = makeProgressPayload("Reviewer", 0, "Unrelated work", true);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, unrelated);
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(painted).not.toContain(target);
+		requestRender.mockClear();
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, unrelated);
+		await Promise.resolve();
+		vi.advanceTimersByTime(100);
+		expect(requestRender).not.toHaveBeenCalled();
 	});
 
 	it("applies the setting over a clicked expand override", async () => {

@@ -1851,7 +1851,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
-	#subagentBadgeKey = "";
 	#subagentHudKey = "";
 	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
 	#subagentCostHydratedRoot?: string;
@@ -3961,11 +3960,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
-		this.statusLine.setRunningSubagents(agentIds);
+		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
 		let treeCost = 0;
-		if (this.collabGuest) {
-			this.statusLine.setSubagentTreeCost(0);
-		} else {
+		if (!this.collabGuest) {
 			const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
 			this.#hydratePersistedSubagentCosts(rootSessionFile);
 			treeCost = sumSubagentTreeCost({
@@ -3974,11 +3971,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				rootSessionFile,
 				sessionCosts: this.#subagentSessionCosts,
 			});
-			this.statusLine.setSubagentTreeCost(treeCost);
 		}
-		const key = JSON.stringify([agentIds, treeCost]);
-		const changed = key !== this.#subagentBadgeKey;
-		this.#subagentBadgeKey = key;
+		const costChanged = this.statusLine.setSubagentTreeCost(treeCost);
+		const changed = agentsChanged || costChanged;
 		if (changed && options.requestRender !== false) this.ui.requestRender();
 		return changed;
 	}
@@ -4398,10 +4393,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#observerUiSyncNeedsTodoReconcile ||
 			this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey
 		) {
-			const previousTodo = JSON.stringify([
-				this.todoContainer.render(this.ui.terminal.columns),
-				this.#todoHudNative,
-			]);
 			if (this.#observerUiSyncNeedsTodoReconcile) {
 				this.#observerUiSyncNeedsTodoReconcile = false;
 				this.#reconcileTodosWithSubagents();
@@ -4409,12 +4400,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			// Progress-only ticks (10 Hz while subagents run) cannot change the
 			// todo phases or their persisted visibility — re-syncing would also
-			// re-arm the auto-clear timer so it could never fire. Only the HUD's
-			// subagent highlight depends on them, so repaint just when the active
-			// descriptions change.
+			// re-arm the auto-clear timer so it could never fire. The HUD and
+			// transcript todo cards still need repainting when the active
+			// descriptions change, even if the HUD itself is hidden.
 			this.#renderTodoList();
-			todoChanged =
-				previousTodo !== JSON.stringify([this.todoContainer.render(this.ui.terminal.columns), this.#todoHudNative]);
+			todoChanged = true;
 		}
 		const hudChanged = this.#renderSubagentList();
 		if (badgeChanged || todoChanged || hudChanged) this.ui.requestRender();
