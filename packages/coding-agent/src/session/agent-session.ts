@@ -9521,6 +9521,41 @@ export class AgentSession implements SettingsScope {
 		return this.takeQueuedMessage(text, queue) !== undefined;
 	}
 
+	/** The messages queued right now, as an opaque mark for {@link dropUserInputQueuedSince}. */
+	queuedMessageMark(): ReadonlySet<AgentMessage> {
+		return new Set([...this.agent.peekSteeringQueue(), ...this.agent.peekFollowUpQueue()]);
+	}
+
+	/**
+	 * Remove the user input queued after `mark` (from {@link queuedMessageMark}) and, when given,
+	 * still present in `until` (a later mark), together with the hidden companions right before
+	 * it. Everything else stays queued: messages already queued at `mark`, messages queued after
+	 * `until`, and agent or extension work that is not user input (with an agent-attributed
+	 * prompt's companions). A caller takes back a batch whose delivery failed by marking before
+	 * delivery and after it; user input another source queued between the two marks cannot be
+	 * told apart from the batch: it is removed with the batch and is not restored.
+	 */
+	dropUserInputQueuedSince(mark: ReadonlySet<AgentMessage>, until?: ReadonlySet<AgentMessage>): void {
+		const callers = (message: AgentMessage): boolean =>
+			!mark.has(message) && (until === undefined || until.has(message));
+		const keepFrom = (queue: readonly AgentMessage[]): AgentMessage[] => {
+			const kept: AgentMessage[] = [];
+			let companions: AgentMessage[] = [];
+			for (const message of queue) {
+				if (callers(message) && isHiddenUserCompanion(message)) {
+					companions.push(message);
+					continue;
+				}
+				// Companions go with the message they precede.
+				if (!callers(message) || !isUserAuthoredQueuedMessage(message)) kept.push(...companions, message);
+				companions = [];
+			}
+			return kept;
+		};
+		this.agent.replaceQueues(keepFrom(this.agent.peekSteeringQueue()), keepFrom(this.agent.peekFollowUpQueue()));
+		this.#reconcileQueuedMessageDrain();
+	}
+
 	/**
 	 * {@link removeQueuedMessage}, returning the removed message as editor-restorable
 	 * content (its chip text and images); undefined when nothing matched.

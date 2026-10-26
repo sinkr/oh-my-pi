@@ -1,0 +1,196 @@
+/**
+ * Contract: when delivering the messages typed during compaction fails, the batch goes back to
+ * the compaction queue and the input that flush queued leaves the session queue. Messages that
+ * were queued in the session before the flush (an extension's prompt, for example), and messages
+ * queued after the flush finished delivering, stay queued; they are never discarded with the
+ * failed batch.
+ */
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CompactionQueuedMessage } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+
+describe("flushCompactionQueue failure", () => {
+	let tempDir: TempDir;
+	let session: AgentSession | undefined;
+	const authStorages: AuthStorage[] = [];
+
+	beforeAll(() => {
+		tempDir = TempDir.createSync("@pi-compaction-flush-failure-");
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		try {
+			await session?.dispose();
+		} finally {
+			session = undefined;
+			for (const authStorage of authStorages.splice(0)) authStorage.close();
+		}
+	});
+
+	afterAll(async () => {
+		await tempDir?.remove();
+	});
+
+	/** A session whose first turn is still streaming (a 60 s mock delay the abort cancels). */
+	async function startStreamingSession(): Promise<{ live: AgentSession; running: Promise<boolean> }> {
+		const started = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				() => {
+					started.resolve();
+					return { content: ["working"], delayMs: 60_000 };
+				},
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			convertToLlm,
+			initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const live = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
+		});
+		session = live;
+		const running = live.prompt("first task");
+		await started.promise;
+		return { live, running };
+	}
+
+	function flushContext(live: AgentSession, typed: CompactionQueuedMessage[], showError: (message: string) => void) {
+		return createInteractiveModeContext({
+			session: live,
+			compactionQueuedMessages: [...typed],
+			skillCommands: new Map(),
+			fileSlashCommands: new Set<string>(),
+			isKnownSlashCommand: () => false,
+			recordLocalSubmission: () => () => {},
+			withLocalSubmission: async <T>(_text: string, fn: () => Promise<T>) => fn(),
+			showError,
+		});
+	}
+
+	it("keeps messages queued before the flush when delivering the compaction queue fails", async () => {
+		const { live, running } = await startStreamingSession();
+
+		// Queued in the session before the flush runs: an extension's prompt.
+		await live.sendUserMessage("from the extension", { deliverAs: "followUp" });
+
+		// The second typed message fails to deliver.
+		const steer = live.steer.bind(live);
+		let steers = 0;
+		vi.spyOn(live, "steer").mockImplementation(async (text, images) => {
+			if (++steers === 2) throw new Error("delivery failed");
+			return steer(text, images);
+		});
+		const typed: CompactionQueuedMessage[] = [
+			{ text: "typed one", mode: "steer" },
+			{ text: "typed two", mode: "steer" },
+		];
+		const ctx = flushContext(live, typed, () => {});
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: true });
+
+		// The failed batch is held for retry, and the input it queued left the session queue ...
+		expect(ctx.compactionQueuedMessages).toEqual(typed);
+		expect(live.getQueuedMessages().steering).toEqual([]);
+		// ... but the extension's prompt queued before the flush is still there.
+		expect(live.getQueuedMessages().followUp).toEqual(["from the extension"]);
+
+		await live.abort();
+		await running.catch(() => {});
+	});
+
+	it("keeps messages queued after the flush returned when its first prompt fails later", async () => {
+		const { live, running } = await startStreamingSession();
+
+		// The first typed prompt is fire-and-forget; its setup fails only after the flush returns.
+		const setupFails = Promise.withResolvers<void>();
+		const prompted = Promise.withResolvers<void>();
+		vi.spyOn(live, "prompt").mockImplementation(async () => {
+			prompted.resolve();
+			await setupFails.promise;
+			throw new Error("No API key found");
+		});
+		const typed: CompactionQueuedMessage[] = [
+			{ text: "typed first", mode: "steer" },
+			{ text: "typed second", mode: "steer" },
+		];
+		// The restore reports the failure last, once the queues are settled.
+		const reported = Promise.withResolvers<void>();
+		const ctx = flushContext(live, typed, () => reported.resolve());
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+		await prompted.promise;
+		expect(live.getQueuedMessages().steering).toEqual(["typed second"]);
+
+		// Something else queues a prompt while the first prompt is still being set up.
+		await live.sendUserMessage("queued afterwards", { deliverAs: "followUp" });
+		setupFails.resolve();
+		await reported.promise;
+		expect(ctx.compactionQueuedMessages).toEqual(typed);
+
+		// The flush took back its own delivered message, not the one queued after it.
+		expect(live.getQueuedMessages().steering).toEqual([]);
+		expect(live.getQueuedMessages().followUp).toEqual(["queued afterwards"]);
+
+		await live.abort();
+		await running.catch(() => {});
+	});
+
+	it("stops delivering and takes back the rest when the first prompt fails mid-delivery", async () => {
+		const { live, running } = await startStreamingSession();
+
+		// The first typed prompt fails while the second typed message is still being delivered.
+		vi.spyOn(live, "prompt").mockImplementation(async () => {
+			throw new Error("No API key found");
+		});
+		const steer = live.steer.bind(live);
+		const steerStarted = Promise.withResolvers<void>();
+		const steerRelease = Promise.withResolvers<void>();
+		vi.spyOn(live, "steer").mockImplementation(async (text, images) => {
+			steerStarted.resolve();
+			await steerRelease.promise;
+			return steer(text, images);
+		});
+		const typed: CompactionQueuedMessage[] = [
+			{ text: "typed first", mode: "steer" },
+			{ text: "typed second", mode: "steer" },
+			{ text: "typed third", mode: "steer" },
+		];
+		const reported = Promise.withResolvers<void>();
+		const ctx = flushContext(live, typed, () => reported.resolve());
+
+		const flushing = new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+		await steerStarted.promise;
+		await reported.promise;
+		steerRelease.resolve();
+		await flushing;
+
+		// The batch is back in the compaction queue once, and none of it stays in the session queue
+		// to be sent now and again on the next flush.
+		expect(ctx.compactionQueuedMessages).toEqual(typed);
+		expect(live.getQueuedMessages().steering).toEqual([]);
+
+		await live.abort();
+		await running.catch(() => {});
+	});
+});

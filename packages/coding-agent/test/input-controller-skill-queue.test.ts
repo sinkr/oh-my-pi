@@ -453,7 +453,8 @@ describe("compaction skill re-invocation", () => {
 				prompt,
 				steer,
 				followUp,
-				clearQueue: vi.fn(),
+				queuedMessageMark: vi.fn(() => new Set()),
+				dropUserInputQueuedSince: vi.fn(),
 			},
 		} as unknown as InteractiveModeContext;
 		return { ctx, promptCustomMessage, promptCustomMessageCalled, prompt, steer, followUp, armLoopAutoSubmit };
