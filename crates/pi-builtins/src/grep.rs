@@ -1112,8 +1112,9 @@ fn search_file_path<M: Matcher, W: Write>(
 					if !opts.no_messages {
 						let _ = writeln!(
 							host.stderr,
-							"grep: {}: {error}",
-							display_path.to_string_lossy()
+							"grep: {}: {}",
+							display_path.to_string_lossy(),
+							describe_search_error(&error, false)
 						);
 					}
 					Ok(false)
@@ -1264,10 +1265,9 @@ fn search_dir<M: Matcher, W: Write>(
 
 fn read_auxiliary_file(host: &mut Host, path: &OsStr) -> Result<Vec<u8>, String> {
 	let result = if path == OsStr::new("-") {
-		let mut bytes = Vec::new();
-		host.stdin.read_to_end(&mut bytes).map(|_| bytes)
+		read_pattern_source(&mut host.stdin)
 	} else {
-		host.fs().read(host.resolve(path))
+		host.fs().open(host.resolve(path)).and_then(read_pattern_source)
 	};
 	result.map_err(|error| format!("{}: {error}", path.to_string_lossy()))
 }
@@ -1362,6 +1362,56 @@ fn build_path_rules(host: &mut Host, cli: &GrepArgs, matches: &ArgMatches) -> Re
 	Ok(PathRules { files: compile_rules(files)?, dirs: compile_rules(dirs)? })
 }
 
+/// Largest line, in bytes, one search may buffer; `grep` and `rg` share it.
+/// Both run inside the host process, so their line buffer is the host's
+/// memory: without a bound, a file with no line terminator (a sparse file reads
+/// as one endless run of NUL bytes) grows it until the kernel kills the host. A
+/// longer line is reported as an error for that file and the search goes on.
+/// Pattern files (`-f`) are held to the same size.
+pub(crate) const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Says what happened when a search stopped at [`MAX_LINE_BYTES`]; any other
+/// error reads as reported. `whole_file` is set when the searcher buffers the
+/// whole file (multi-line search) rather than one line.
+pub(crate) fn describe_search_error(error: &io::Error, whole_file: bool) -> String {
+	let message = error.to_string();
+	// grep-searcher reports its heap limit only through this message.
+	if error.kind() == io::ErrorKind::Other
+		&& message == format!("configured allocation limit ({MAX_LINE_BYTES}) exceeded")
+	{
+		let what = if whole_file { "file larger than" } else { "line longer than" };
+		format!("{what} {} MiB, not searched", MAX_LINE_BYTES >> 20)
+	} else {
+		message
+	}
+}
+
+/// Reads a pattern file (`-f`), refusing one larger than [`MAX_LINE_BYTES`] so
+/// a huge file or an endless stdin cannot exhaust the host's memory.
+pub(crate) fn read_pattern_source(mut reader: impl Read) -> io::Result<Vec<u8>> {
+	let mut bytes = Vec::new();
+	// Read the limit exactly, then probe for one more byte: a `take(limit + 1)`
+	// would make the buffer double to twice the limit.
+	(&mut reader).take(MAX_LINE_BYTES as u64).read_to_end(&mut bytes)?;
+	if bytes.len() == MAX_LINE_BYTES {
+		let mut probe = [0u8; 1];
+		loop {
+			match reader.read(&mut probe) {
+				Ok(0) => break,
+				Ok(_) => {
+					return Err(io::Error::other(format!(
+						"pattern file larger than {} MiB",
+						MAX_LINE_BYTES >> 20
+					)));
+				},
+				Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+				Err(error) => return Err(error),
+			}
+		}
+	}
+	Ok(bytes)
+}
+
 fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Searcher {
 	let binary_detection = if cli.null_data || opts.binary_files == BinaryFiles::Text {
 		BinaryDetection::none()
@@ -1377,7 +1427,8 @@ fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Sea
 		.after_context(opts.after)
 		.invert_match(cli.invert)
 		.binary_detection(binary_detection)
-		.max_matches(max_count);
+		.max_matches(max_count)
+		.heap_limit(Some(MAX_LINE_BYTES));
 	if cli.null_data {
 		builder.line_terminator(LineTerminator::byte(b'\0'));
 	}
@@ -1434,7 +1485,11 @@ fn execute_search<M: Matcher>(
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
-						let _ = writeln!(host.stderr, "grep: (standard input): {error}");
+						let _ = writeln!(
+							host.stderr,
+							"grep: (standard input): {}",
+							describe_search_error(&error, false)
+						);
 					}
 				},
 			}
@@ -1645,7 +1700,7 @@ pub(crate) fn grep_builtin<SE: ShellExtensions>() -> Registration<SE> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use std::{
 		io::{self, Read, Write},
 		sync::Arc,
@@ -1778,6 +1833,50 @@ mod tests {
 		let (code, capture) = run_util::<Grep>(&["-f", "patterns", "haystack"], "", tree.path());
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "alpha\nbeta\n");
+	}
+
+	/// Writes `small` holding `needle` and a sparse `big` 64x the line limit
+	/// that holds no line terminator and takes no disk space.
+	#[cfg(unix)]
+	pub(crate) fn tree_with_sparse_file() -> tempfile::TempDir {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("small"), "needle\n").unwrap();
+		let big = std::fs::File::create(tree.path().join("big")).unwrap();
+		big.set_len(64 * MAX_LINE_BYTES as u64).unwrap();
+		tree
+	}
+
+	/// A file with no line terminator used to make grep buffer it whole: on a
+	/// sparse file that is an endless line of NUL bytes, and the host process
+	/// grew until the kernel killed it. Now that file is a per-file error and
+	/// the walk still reports matches in the other files.
+	#[cfg(unix)]
+	#[test]
+	fn line_longer_than_the_limit_is_a_file_error_not_unbounded_memory() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_util::<Grep>(&["-rl", "needle", "."], "", tree.path());
+
+		assert_eq!(code, 2, "an unreadable file makes the status 2, as in GNU grep");
+		assert_eq!(capture.out(), "./small\n");
+		let err = capture.err();
+		assert!(err.contains("grep: ./big: line longer than 256 MiB, not searched"), "{err}");
+	}
+
+	/// `-f` used to read the whole pattern file into memory, so pointing it at
+	/// a sparse file (or an endless stdin) killed the host. Now an over-size
+	/// pattern file is refused before anything is searched.
+	#[cfg(unix)]
+	#[test]
+	fn pattern_file_larger_than_the_limit_is_refused() {
+		let tree = tree_with_sparse_file();
+
+		let (code, capture) = run_util::<Grep>(&["-f", "big", "small"], "", tree.path());
+
+		assert_eq!(code, 2);
+		assert_eq!(capture.out(), "");
+		let err = capture.err();
+		assert!(err.contains("grep: big: pattern file larger than 256 MiB"), "{err}");
 	}
 
 	#[test]

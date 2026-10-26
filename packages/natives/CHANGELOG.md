@@ -6,6 +6,10 @@
 
 - Added a `hiddenContent` option to `htmlToMarkdown`: `"drop"` (default) omits hidden content, `"reachable"` keeps content the page can reveal such as collapsed sections and inactive tab panels, and `"all"` also keeps `<template>` and `<noscript>` content; other values throw ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
 
+### Fixed
+
+- Fixed the shell's built-in `grep` and `rg` running the whole agent out of memory on a file with no line breaks, such as a large sparse file: a line over 256 MiB (or a `-f` pattern file over 256 MiB) is now reported as an error naming the cause, and the search continues
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
