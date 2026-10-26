@@ -29,14 +29,20 @@ interface CleanupRegistration {
 	exitOnly: boolean;
 	/** How long a pass waits for this callback, when longer than {@link CLEANUP_DEADLINE_MS}. */
 	deadlineMs: number | undefined;
+	/** Printed to stderr when exit waits on this callback alone; see {@link CleanupRegistrationOptions.waitMessage}. */
+	waitMessage: string | undefined;
 	cancelled: boolean;
 	lastPass: number;
 }
 
 /** The deadline of one cleanup pass, which callbacks with their own `deadlineMs` hold open. */
 interface CleanupPassDeadline {
-	/** Keep the pass open until `pending` settles, for at most `deadlineMs`. */
-	extend(pending: Promise<unknown>, deadlineMs: number): void;
+	/**
+	 * Keep the pass open until `pending` settles, for at most `deadlineMs`. A
+	 * `waitMessage` is printed to stderr if the pass is still waiting on it once
+	 * every other callback has finished.
+	 */
+	extend(pending: Promise<unknown>, deadlineMs: number, waitMessage?: string): void;
 	/** Whether a callback with its own deadline still holds the pass open. */
 	extended(): boolean;
 }
@@ -210,8 +216,23 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 		settle();
 		deadline.resolve();
 	};
+	// Holds that still keep the pass open and have a message for the user. The
+	// message is printed once the pass waits on nothing else, so a terminal owner
+	// has already released the screen and the user sees why exit is slow.
+	const announced: { message: string; until: number; open: () => boolean }[] = [];
+	let othersSettled = false;
+	const announce = (): void => {
+		if (passDone || !othersSettled) return;
+		for (const hold of announced.splice(0)) {
+			if (!hold.open()) continue;
+			const seconds = Math.max(1, Math.ceil((hold.until - Date.now()) / 1000));
+			try {
+				fs.writeSync(2, `${hold.message} (up to ${seconds} s)…\n`);
+			} catch {}
+		}
+	};
 	const passDeadline: CleanupPassDeadline = {
-		extend(pending, deadlineMs) {
+		extend(pending, deadlineMs, waitMessage) {
 			if (passDone || deadlineMs <= 0) return;
 			openExtensions++;
 			let open = true;
@@ -225,6 +246,11 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 			};
 			deadlineTimers.push(setTimeout(close, deadlineMs));
 			pending.then(close, close);
+			if (waitMessage !== undefined) {
+				announced.push({ message: waitMessage, until: Date.now() + deadlineMs, open: () => open });
+				// On a later macrotask, so a callback that is already done closes first.
+				if (othersSettled) deadlineTimers.push(setTimeout(announce, 0));
+			}
 		},
 		extended: () => !passDone && openExtensions > 0,
 	};
@@ -232,12 +258,19 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 
 	// Snapshot the pass. Registrations added while a keep-alive cleanup runs are
 	// invoked by register() when appropriate and remain active for later passes.
-	const promises = callbackList.toReversed().map(registration => {
+	const snapshot = callbackList.toReversed();
+	const promises = snapshot.map(registration => {
 		return Promise.try(() => {
 			const pending = invokeCleanup(registration, reason, keepAlive, pass);
-			if (pending && registration.deadlineMs !== undefined) passDeadline.extend(pending, registration.deadlineMs);
+			if (pending && registration.deadlineMs !== undefined) {
+				passDeadline.extend(pending, registration.deadlineMs, registration.waitMessage);
+			}
 			return pending;
 		});
+	});
+	void Promise.allSettled(promises.filter((_, index) => snapshot[index]?.deadlineMs === undefined)).then(() => {
+		othersSettled = true;
+		deadlineTimers.push(setTimeout(announce, 0));
 	});
 
 	const cleanupSettled = Promise.allSettled(promises).then(async results => {
@@ -255,6 +288,10 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 	deadlineTimers.push(
 		setTimeout(() => {
 			baseDeadlineElapsed = true;
+			// The pass no longer waits on the other callbacks, so a hold still open is
+			// what exit waits on; terminal owners released the screen synchronously.
+			othersSettled = true;
+			announce();
 			expireIfDue();
 		}, CLEANUP_DEADLINE_MS),
 	);
@@ -731,6 +768,14 @@ export interface CleanupRegistrationOptions {
 	 * is still pending: one that settles early ends its hold at once.
 	 */
 	deadlineMs?: number;
+	/**
+	 * With `deadlineMs`: a line printed to stderr, with the remaining wait
+	 * appended, if exit is still waiting on this callback once every other
+	 * callback has finished (a terminal owner has then released the screen), or
+	 * at the default 10 s deadline when another callback is still running.
+	 * Nothing is printed when the callback finishes first.
+	 */
+	waitMessage?: string;
 }
 
 /**
@@ -758,6 +803,7 @@ export function register(
 		callback,
 		exitOnly: options.exitOnly ?? false,
 		deadlineMs: options.deadlineMs,
+		waitMessage: options.waitMessage,
 		cancelled: false,
 		lastPass: 0,
 	};
@@ -777,7 +823,9 @@ export function register(
 			// Join the active pass so cleanup()/signal exits await it; after a
 			// completed exit pass there is nothing left to join.
 			activeLatePromises?.push(tracked);
-			if (registration.deadlineMs !== undefined) activePassDeadline?.extend(tracked, registration.deadlineMs);
+			if (registration.deadlineMs !== undefined) {
+				activePassDeadline?.extend(tracked, registration.deadlineMs, registration.waitMessage);
+			}
 		} catch (error) {
 			const err = error instanceof Error ? error : new Error(String(error));
 			logger.error("Cleanup callback failed", { err, id, stack: err.stack });

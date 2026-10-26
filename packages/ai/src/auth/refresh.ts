@@ -383,6 +383,8 @@ export class OAuthRefresher {
 		this.#cancelRefreshCleanup ??= postmortem.register("oauth-refresh", () => this.#drainRefreshes(), {
 			exitOnly: true,
 			deadlineMs: OAUTH_REFRESH_SHUTDOWN_WAIT_MS,
+			// A quit that waits in silence looks hung, and killing it loses the token anyway.
+			waitMessage: "Waiting for the login refresh to finish saving",
 		});
 	}
 

@@ -1262,6 +1262,10 @@ describe("AuthStorage OAuth refresh race", () => {
 				await Bun.sleep(12_000);
 				writer.run("ROLLBACK");
 				expect(await child.exited).toBe(0);
+				// The quit waited on the save, so it said so where the user can see it.
+				expect(await new Response(child.stderr).text()).toContain(
+					"Waiting for the login refresh to finish saving (up to",
+				);
 				expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject({
 					type: "oauth",
 					access: "new",
@@ -1299,6 +1303,8 @@ describe("AuthStorage OAuth refresh race", () => {
 				);
 				try {
 					expect(await child.exited).toBe(0);
+					// Nothing was left to save, so the quit printed no wait line.
+					expect(await new Response(child.stderr).text()).not.toContain("Waiting for the login refresh");
 					expect(await Bun.file(`${marker}.started`).exists()).toBe(true);
 					// Either no exchange started, or the token it got was saved before exit.
 					const exchanged = await Bun.file(marker).exists();
