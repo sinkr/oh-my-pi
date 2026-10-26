@@ -220,10 +220,21 @@ const shellSessionsInUse = new Set<string>();
  * still running. A per-call `:async:` Shell is normally dropped at teardown,
  * which SIGKILLs its children via kill-on-drop. Keeping the reference alive lets
  * the process survive across turns; the Shell is dropped once its last
- * background job exits (reaped by the poll loop below). Children stay
- * kill-on-drop, so they still die when the harness tears the Shell down on exit.
+ * background job exits. Children stay kill-on-drop, so they still die when the
+ * harness tears the Shell down on exit.
  */
-const retainedShells = new Set<Shell>();
+interface RetainedShellState {
+	liveBackgroundJobs: number;
+	interval?: NodeJS.Timeout;
+}
+
+interface PersistentShellBackgroundState {
+	liveBackgroundJobs: number;
+	interval?: NodeJS.Timeout;
+}
+
+const retainedShells = new Map<Shell, RetainedShellState>();
+const persistentShellBackgroundCounts = new Map<string, PersistentShellBackgroundState>();
 const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
@@ -236,6 +247,77 @@ const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
 // (#10308). The backing timer is unref'd so it never keeps the process alive.
 const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
 
+/** Snapshot of children in persistent or explicitly retained background shells. */
+export function getRetainedBackgroundProcessCount(): number {
+	let count = 0;
+	for (const state of persistentShellBackgroundCounts.values()) count += state.liveBackgroundJobs;
+	for (const state of retainedShells.values()) count += state.liveBackgroundJobs;
+	return count;
+}
+
+function clearPersistentShellBackgroundCount(sessionKey: string): void {
+	const state = persistentShellBackgroundCounts.get(sessionKey);
+	if (!state) return;
+	clearInterval(state.interval);
+	persistentShellBackgroundCounts.delete(sessionKey);
+}
+
+function clearRetainedShell(shell: Shell): void {
+	const state = retainedShells.get(shell);
+	if (!state) return;
+	clearInterval(state.interval);
+	retainedShells.delete(shell);
+}
+
+async function trackPersistentShellBackgroundJobs(sessionKey: string, shell: Shell): Promise<void> {
+	if (shellSessions.get(sessionKey) !== shell) return;
+
+	let live: number;
+	try {
+		live = await shell.liveBackgroundJobCount();
+	} catch {
+		clearPersistentShellBackgroundCount(sessionKey);
+		return;
+	}
+	if (shellSessions.get(sessionKey) !== shell || shellSessionsInUse.has(sessionKey)) return;
+	if (live <= 0) {
+		clearPersistentShellBackgroundCount(sessionKey);
+		return;
+	}
+
+	const existingState = persistentShellBackgroundCounts.get(sessionKey);
+	if (existingState) {
+		existingState.liveBackgroundJobs = live;
+		return;
+	}
+
+	const state: PersistentShellBackgroundState = { liveBackgroundJobs: live };
+	state.interval = setInterval(() => {
+		if (shellSessionsInUse.has(sessionKey)) return;
+		const currentShell = shellSessions.get(sessionKey);
+		if (!currentShell) {
+			clearPersistentShellBackgroundCount(sessionKey);
+			return;
+		}
+		void currentShell
+			.liveBackgroundJobCount()
+			.then(remaining => {
+				if (
+					persistentShellBackgroundCounts.get(sessionKey) !== state ||
+					shellSessionsInUse.has(sessionKey) ||
+					shellSessions.get(sessionKey) !== currentShell
+				) {
+					return;
+				}
+				if (remaining > 0) state.liveBackgroundJobs = remaining;
+				else clearPersistentShellBackgroundCount(sessionKey);
+			})
+			.catch(() => clearPersistentShellBackgroundCount(sessionKey));
+	}, RETAIN_REAP_INTERVAL_MS);
+	state.interval.unref?.();
+	persistentShellBackgroundCounts.set(sessionKey, state);
+}
+
 async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
 	try {
@@ -243,22 +325,30 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	} catch {
 		return;
 	}
-	if (live <= 0) return;
-	retainedShells.add(shell);
-	const interval = setInterval(() => {
+	if (live <= 0) {
+		clearRetainedShell(shell);
+		return;
+	}
+
+	const existingState = retainedShells.get(shell);
+	if (existingState) {
+		existingState.liveBackgroundJobs = live;
+		return;
+	}
+
+	const state: RetainedShellState = { liveBackgroundJobs: live };
+	state.interval = setInterval(() => {
 		void shell
 			.liveBackgroundJobCount()
 			.then(remaining => {
-				if (remaining > 0) return;
-				clearInterval(interval);
-				retainedShells.delete(shell);
+				if (retainedShells.get(shell) !== state) return;
+				if (remaining > 0) state.liveBackgroundJobs = remaining;
+				else clearRetainedShell(shell);
 			})
-			.catch(() => {
-				clearInterval(interval);
-				retainedShells.delete(shell);
-			});
+			.catch(() => clearRetainedShell(shell));
 	}, RETAIN_REAP_INTERVAL_MS);
-	interval.unref?.();
+	state.interval.unref?.();
+	retainedShells.set(shell, state);
 }
 
 /**
@@ -310,6 +400,7 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
 	for (const [key, shell] of shellSessions) {
 		if (!key.startsWith(prefix)) continue;
 		shellSessions.delete(key);
+		clearPersistentShellBackgroundCount(key);
 		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
 	}
 }
@@ -676,6 +767,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
 		shellSessions.delete(sessionKey);
+		clearPersistentShellBackgroundCount(sessionKey);
 	}
 
 	// A persistent Shell runs one command at a time (the native session is a
@@ -883,6 +975,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				// never asked for again, so the Shell would otherwise stay in the
 				// process-global map forever after completion.
 				shellSessions.delete(sessionKey);
+				clearPersistentShellBackgroundCount(sessionKey);
 				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
 				// any `nohup`/`&` children (kill-on-drop). If the command left a live
 				// background job, retain the Shell so the process survives across
@@ -891,6 +984,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				if (!resetSession && shellSession) {
 					await retainShellWithLiveBackgroundJobs(shellSession);
 				}
+			} else if (shellSession) {
+				await trackPersistentShellBackgroundJobs(sessionKey, shellSession);
 			}
 		}
 	}

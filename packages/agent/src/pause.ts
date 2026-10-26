@@ -27,6 +27,7 @@ export class AgentPauseGate {
 	#gate: PromiseWithResolvers<void> | undefined;
 	#pausedAt = 0;
 	#listeners = new Set<AgentPauseListener>();
+	#turns = new Set<AgentPauseTurn>();
 
 	/** True while the gate is engaged. */
 	get paused(): boolean {
@@ -36,6 +37,32 @@ export class AgentPauseGate {
 	/** Epoch ms when the current pause began; undefined when running. */
 	get pausedAt(): number | undefined {
 		return this.#gate ? this.#pausedAt : undefined;
+	}
+
+	/**
+	 * Number of process-wide loops with work not yet parked at the pause gate.
+	 * While running, every registered loop is unsettled; while paused, only
+	 * loops with active provider, tool, or speculative work (including hooks
+	 * and preparation) are counted.
+	 */
+	get unsettledTurnCount(): number {
+		if (!this.#gate) return this.#turns.size;
+		let count = 0;
+		for (const turn of this.#turns) {
+			if (turn.hasActiveWork) count++;
+		}
+		return count;
+	}
+
+	/** @internal Register one full agent-loop lifecycle, including replay and error tails. */
+	beginTurn(): AgentPauseTurn {
+		const turn = new AgentPauseTurn(
+			signal => this.waitUntilResumed(signal),
+			() => this.paused,
+			() => this.#turns.delete(turn),
+		);
+		this.#turns.add(turn);
+		return turn;
 	}
 
 	/** Engage the gate. Returns false (and does nothing) when already paused. */
@@ -100,6 +127,121 @@ export class AgentPauseGate {
 				// Host UI listeners must never break the gate.
 			}
 		}
+	}
+}
+
+/** One loop's active provider/tool work plus its retained participant leases. */
+class AgentPauseTurn {
+	#activeParticipants = 1;
+	#participantCount = 1;
+	#rootActive = true;
+	#rootRegistered = true;
+	#finished = false;
+	#released = false;
+	#waitForGate: (signal?: AbortSignal) => Promise<void>;
+	#isPaused: () => boolean;
+	#onFinish: () => void;
+
+	constructor(waitForGate: (signal?: AbortSignal) => Promise<void>, isPaused: () => boolean, onFinish: () => void) {
+		this.#waitForGate = waitForGate;
+		this.#isPaused = isPaused;
+		this.#onFinish = onFinish;
+	}
+
+	get hasActiveWork(): boolean {
+		return this.#activeParticipants > 0;
+	}
+
+	/** Park the loop's orchestration participant at its next safe boundary. */
+	async waitUntilResumed(signal?: AbortSignal): Promise<void> {
+		await this.#waitAsParticipant(
+			() => this.#setRootActive(false),
+			() => this.#setRootActive(true),
+			signal,
+		);
+	}
+
+	/**
+	 * Mark the loop's orchestration participant as waiting while tool tasks run.
+	 * Its tool tasks have separate participants, so one parked tool cannot mask
+	 * a sibling that is still executing.
+	 */
+	suspendRoot(): () => void {
+		this.#setRootActive(false);
+		let resumed = false;
+		return () => {
+			if (resumed) return;
+			resumed = true;
+			this.#setRootActive(true);
+		};
+	}
+
+	/** Run tracked work as a participant in this turn. */
+	async withParticipant<T>(
+		work: (waitUntilResumed: (signal?: AbortSignal) => Promise<void>) => Promise<T>,
+	): Promise<T> {
+		if (this.#released) throw new Error("Cannot add work to a released agent pause turn");
+		this.#participantCount++;
+		this.#activeParticipants++;
+		let active = true;
+		const setActive = (value: boolean): void => {
+			if (active === value) return;
+			active = value;
+			this.#activeParticipants += value ? 1 : -1;
+		};
+		try {
+			return await work(signal =>
+				this.#waitAsParticipant(
+					() => setActive(false),
+					() => setActive(true),
+					signal,
+				),
+			);
+		} finally {
+			if (active) this.#activeParticipants--;
+			this.#participantCount--;
+			this.#releaseIfSettled();
+		}
+	}
+
+	/** End the loop root; outstanding physical work keeps its turn registered. */
+	finish(): void {
+		if (this.#finished) return;
+		this.#finished = true;
+		if (this.#rootRegistered) {
+			if (this.#rootActive) this.#activeParticipants--;
+			this.#rootActive = false;
+			this.#rootRegistered = false;
+			this.#participantCount--;
+		}
+		this.#releaseIfSettled();
+	}
+
+	async #waitAsParticipant(park: () => void, unpark: () => void, signal?: AbortSignal): Promise<void> {
+		while (this.#isPaused()) {
+			park();
+			try {
+				await this.#waitForGate(signal);
+			} finally {
+				// Abort releases the wait but not the gate. Reactivate briefly while
+				// the loop runs its abort/error cleanup; finish() releases the turn
+				// after every tracked participant has settled.
+				unpark();
+			}
+			if (signal?.aborted) return;
+		}
+	}
+
+	#setRootActive(active: boolean): void {
+		if (!this.#rootRegistered || this.#rootActive === active) return;
+		this.#rootActive = active;
+		this.#activeParticipants += active ? 1 : -1;
+	}
+
+	#releaseIfSettled(): void {
+		if (!this.#finished || this.#participantCount !== 0 || this.#released) return;
+		this.#released = true;
+		this.#onFinish();
 	}
 }
 

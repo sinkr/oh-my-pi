@@ -79,6 +79,7 @@ type CoordinatorEnvironment = {
 	context: AgentContext;
 	loopConfig: AgentLoopConfig;
 	signal?: AbortSignal;
+	trackPhysicalWork?: (work: () => Promise<void>) => Promise<void>;
 };
 
 const coordinatorByMessage = new WeakMap<AssistantMessage, SpeculativeOperationCoordinator>();
@@ -906,7 +907,7 @@ export class SpeculativeOperationCoordinator {
 			args: candidate.executionArgs,
 			effect: candidate.effect,
 		};
-		void (async () => {
+		const run = async (): Promise<void> => {
 			try {
 				// Content evidence is captured here — immediately before execution —
 				// rather than at admission: for hook-deferred candidates this runs
@@ -956,6 +957,7 @@ export class SpeculativeOperationCoordinator {
 				this.#running--;
 				this.#drain();
 			}
-		})();
+		};
+		void (this.environment?.trackPhysicalWork ? this.environment.trackPhysicalWork(run) : run());
 	}
 }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the synchronous `agentPauseGate.unsettledTurnCount` snapshot for how many process-wide agent loops still have work to drain before `/pause` is settled.
+
 ### Fixed
 
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))

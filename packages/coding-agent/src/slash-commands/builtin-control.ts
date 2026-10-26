@@ -1,4 +1,6 @@
 import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { getUnfinishedManagedJobCount } from "../async/job-manager";
+import { getRetainedBackgroundProcessCount } from "../exec/bash-executor";
 import { clearApprovalGrants } from "../tools/approval-cache";
 import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
@@ -80,7 +82,12 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Freeze all agents (main, subagents, advisor) until resumed",
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
-			await runPauseScreen(runtime.ctx);
+			await runPauseScreen(runtime.ctx, {
+				getWorkStatus: () => ({
+					unfinishedJobs: getUnfinishedManagedJobCount(),
+					backgroundProcesses: getRetainedBackgroundProcessCount(),
+				}),
+			});
 		},
 	},
 	{

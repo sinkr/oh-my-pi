@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
@@ -6,9 +6,11 @@ import { Settings } from "../../../src/config/settings";
 import {
 	PauseScreenComponent,
 	type PauseScreenHost,
+	type PauseWorkStatus,
 	renderPauseScreen,
 	runPauseScreen,
 } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 // Strip SGR colors so assertions see visible text only.
@@ -18,13 +20,14 @@ interface FakeHost {
 	host: PauseScreenHost;
 	shown: Component[];
 	statuses: string[];
+	requestCount(): number;
 	hiddenCount(): number;
 }
-
 function makeHost(rows = 24): FakeHost {
 	const shown: Component[] = [];
 	const statuses: string[] = [];
 	let hidden = 0;
+	let requests = 0;
 	const host: PauseScreenHost = {
 		ui: {
 			showOverlay(component) {
@@ -38,14 +41,16 @@ function makeHost(rows = 24): FakeHost {
 				};
 			},
 			setFocus() {},
-			requestRender() {},
+			requestRender() {
+				requests++;
+			},
 			terminal: { rows },
 		},
 		showStatus(message) {
 			statuses.push(message);
 		},
 	};
-	return { host, shown, statuses, hiddenCount: () => hidden };
+	return { host, shown, statuses, requestCount: () => requests, hiddenCount: () => hidden };
 }
 
 describe("pause screen", () => {
@@ -57,19 +62,29 @@ describe("pause screen", () => {
 	});
 
 	afterEach(() => {
-		// The gate is process-global: never leak an engaged pause into other files.
 		agentPauseGate.resume();
+		setNativeRendering(false);
+		vi.useRealTimers();
 	});
 
 	describe("renderPauseScreen", () => {
-		it("paints exactly the requested rows with title, explainer, clock, and hint", () => {
+		it("paints exactly the requested rows with title and clock", () => {
 			const lines = renderPauseScreen(80, 24, 65_000);
 			expect(lines.length).toBe(24);
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("P A U S E D");
-			expect(text).toContain("Main agent, subagents, and advisor");
 			expect(text).toContain("paused for 1:05");
 			expect(text).toContain("█".repeat(5));
+		});
+		it("keeps every work count visible within the compact ANSI layout", () => {
+			const lines = renderPauseScreen(48, 12, 3_000, undefined, { unfinishedJobs: 12, backgroundProcesses: 3 }, 4);
+			const text = lines.map(stripAnsi).join("\n");
+			expect(lines).toHaveLength(12);
+			expect(text).toContain("Draining — agent turns not parked");
+			expect(text).toContain("Unsettled turns: 4");
+			expect(text).toContain("Unfinished jobs: 12");
+			expect(text).toContain("Background processes: 3");
+			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(48);
 		});
 
 		it("drops to the compact card on small terminals", () => {
@@ -97,6 +112,8 @@ describe("pause screen", () => {
 			const lines = renderPauseScreen(40, 10, 3_000, "Compact Session Title");
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("Compact Session Title");
+			expect(text).toContain("Unsettled turns: 0");
+			expect(text).toContain("to resume");
 			expect(text).toContain("▌▌ P A U S E D");
 		});
 	});
@@ -115,25 +132,29 @@ describe("pause screen", () => {
 				})
 				.join("\n");
 
-		it("shows the live hold clock, the session it holds, what the hold means, and one Resume", () => {
+		it("shows the live settlement state and counts in semantic text nodes", () => {
 			const { host } = makeHost();
-			const sheet = new PauseScreenComponent({ ...host, sessionName: "Credit backpressure" });
+			const sheet = new PauseScreenComponent(
+				{ ...host, sessionName: "Credit backpressure" },
+				{ getWorkStatus: () => ({ unfinishedJobs: 2, backgroundProcesses: 1 }) },
+			);
 			const root = sheet.describe();
 			const all = nodes(root);
-
 			const clock = all.find(n => n.k === "elapsed");
 			expect(clock?.p).toMatchObject({ format: "clock" });
 			const shown = texts(root);
 			expect(shown).toContain("Credit backpressure");
-			expect(shown).toContain("Every agent holds");
-			expect(shown).toContain("The repo is yours");
+			expect(shown).toContain("Waiting — tracked work remains");
+			expect(shown).toContain("Unsettled turns: 0");
+			expect(shown).toContain("Unfinished jobs: 2");
+			expect(shown).toContain("Background processes: 1");
+			expect(shown).toContain("Counts cover tracked OMP work only.");
 
 			const buttons = all.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
 			expect(buttons.length).toBe(1);
 			const resume = buttons[0]!.p as { tone?: string; title?: string; actions?: { click?: string } };
 			expect(resume.tone).toBe("accent");
 			expect(resume.actions?.click).toBe("resume");
-			// The keys live in the tooltip: `Label  key` clauses.
 			expect(resume.title).toStartWith("Resume  esc");
 			expect(sheet.nativeOverlay).toMatchObject({ role: "omp.overlay.pause", head: "Paused" });
 		});
@@ -141,6 +162,65 @@ describe("pause screen", () => {
 		it("names the whole session when it has no name", () => {
 			const { host } = makeHost();
 			expect(texts(new PauseScreenComponent(host).describe())).toContain("Every agent in this session");
+		});
+		it("polls ANSI status while open, including settled and late work transitions", async () => {
+			vi.useFakeTimers();
+			setNativeRendering(false);
+			const work: PauseWorkStatus = { unfinishedJobs: 1, backgroundProcesses: 0 };
+			const { host, requestCount } = makeHost(12);
+			const sheet = new PauseScreenComponent(host, { getWorkStatus: () => work });
+			const initial = sheet.render(48).map(stripAnsi).join("\n");
+			expect(initial).toContain("Waiting — tracked work remains");
+			expect(initial).toContain("Unfinished jobs: 1");
+
+			const running = sheet.run();
+			try {
+				work.unfinishedJobs = 0;
+				vi.advanceTimersByTime(1_000);
+				const settled = sheet.render(48).map(stripAnsi).join("\n");
+				expect(settled).toContain("Settled — tracked work is paused or finished");
+				expect(settled).toContain("Unfinished jobs: 0");
+				const rendersAfterSettlement = requestCount();
+
+				work.backgroundProcesses = 2;
+				vi.advanceTimersByTime(1_000);
+				const lateWork = sheet.render(48).map(stripAnsi).join("\n");
+				expect(lateWork).toContain("Waiting — tracked work remains");
+				expect(lateWork).toContain("Background processes: 2");
+				expect(requestCount()).toBeGreaterThan(rendersAfterSettlement);
+			} finally {
+				sheet.handleInput("\r");
+				sheet.dispose();
+				await running;
+			}
+		});
+
+		it("invalidates the cached native tree only when the live status changes", async () => {
+			vi.useFakeTimers();
+			setNativeRendering(true);
+			const work: PauseWorkStatus = { unfinishedJobs: 1, backgroundProcesses: 0 };
+			const { host, requestCount } = makeHost();
+			const sheet = new PauseScreenComponent(host, { getWorkStatus: () => work });
+			const initial = sheet.describe();
+			expect(sheet.describe()).toBe(initial);
+
+			const running = sheet.run();
+			try {
+				work.unfinishedJobs = 0;
+				vi.advanceTimersByTime(1_000);
+				const settled = sheet.describe();
+				expect(settled).not.toBe(initial);
+				expect(texts(settled)).toContain("Settled — tracked work is paused or finished");
+				expect(requestCount()).toBe(2);
+
+				vi.advanceTimersByTime(1_000);
+				expect(sheet.describe()).toBe(settled);
+				expect(requestCount()).toBe(2);
+			} finally {
+				sheet.handleInput("\r");
+				sheet.dispose();
+				await running;
+			}
 		});
 
 		it("resumes from the Resume button", async () => {
