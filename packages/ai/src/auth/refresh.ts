@@ -237,6 +237,30 @@ export class OAuthRefresher {
 	}
 
 	/**
+	 * Give up a lease this refresher holds without having saved a token. A lease
+	 * taken over from a stalled refresher goes back to it, because that refresher
+	 * may still be saving: releasing it would leave the next refresher no owner,
+	 * and it would disable a login that may live. Any other lease is released.
+	 */
+	async #leaveLease(
+		leaseStore: CredentialRefreshLeaseStore,
+		credentialId: number,
+		owner: string,
+		takenOverFrom: CredentialRefreshLeaseHolder | undefined,
+	): Promise<void> {
+		if (!takenOverFrom) {
+			leaseStore.releaseCredentialRefreshLease(credentialId, owner);
+			return;
+		}
+		try {
+			await this.#handBackLease(leaseStore, credentialId, owner, takenOverFrom);
+		} catch (error) {
+			// The lease then expires still naming this refresher, a recent holder.
+			logger.warn("OAuth refresh could not hand a taken-over lease back", { credentialId, error: String(error) });
+		}
+	}
+
+	/**
 	 * Save a token this process already exchanged. The provider consumed the old
 	 * refresh token, so a busy store is retried (re-arming the lease each time:
 	 * a blocked event loop can outlive its TTL, and an expired lease no peer
@@ -516,7 +540,7 @@ export class OAuthRefresher {
 			return this.#refreshFailed(options, current, outcome.failure);
 		} finally {
 			if (leasedCredentialId !== undefined && leaseStore) {
-				leaseStore.releaseCredentialRefreshLease(leasedCredentialId, owner);
+				await this.#leaveLease(leaseStore, leasedCredentialId, owner, takenOverFrom);
 			}
 		}
 	}
@@ -567,6 +591,7 @@ export class OAuthRefresher {
 		takenOverFrom: CredentialRefreshLeaseHolder | undefined,
 	): Promise<LeasedExchangeOutcome<T>> {
 		let keepLease = false;
+		let saved = false;
 		try {
 			let stopLeaseRenewal = false;
 			let leaseRenewalError: unknown;
@@ -739,6 +764,7 @@ export class OAuthRefresher {
 			} else {
 				this.#deps.store.updateAuthCredential(row.id, merged);
 			}
+			saved = true;
 			if (this.#mintsLocally()) {
 				this.#rememberMint(provider, row.id, merged);
 			}
@@ -752,7 +778,8 @@ export class OAuthRefresher {
 			return { result: { credential: merged, refreshed: true, removed: false } };
 		} finally {
 			if (leasedCredentialId !== undefined && leaseStore && !keepLease) {
-				leaseStore.releaseCredentialRefreshLease(leasedCredentialId, owner);
+				if (saved) leaseStore.releaseCredentialRefreshLease(leasedCredentialId, owner);
+				else await this.#leaveLease(leaseStore, leasedCredentialId, owner, takenOverFrom);
 			}
 		}
 	}

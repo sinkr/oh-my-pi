@@ -1401,6 +1401,96 @@ describe("AuthStorage OAuth refresh race", () => {
 		}
 	});
 
+	/**
+	 * A refresher takes over the lapsed lease of one that spent refresh-0 and is
+	 * still saving, then leaves without saving; another process then has
+	 * refresh-0 rejected. The lease must have gone back to the stalled refresher,
+	 * so that rejection is not taken as proof the login is dead.
+	 */
+	async function expectTakeoverLeftForStalledOwner(
+		provider: string,
+		takeover: (peer: AuthStorage, peerStore: SqliteAuthCredentialStore, credentialId: number) => Promise<unknown>,
+	): Promise<void> {
+		if (!store || !tempDir) throw new Error("test setup failed");
+		const credentialId = await seedLogin(provider);
+		const peerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const peer = new AuthStorage(peerStore);
+		const laterStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const later = new AuthStorage(laterStore);
+		try {
+			expect(store.tryAcquireCredentialRefreshLease?.(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+			await takeover(peer, peerStore, credentialId);
+			expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+			const next = await later.oauth
+				.refreshStored(
+					provider,
+					refreshSpentToken(credentialId, () => {}),
+				)
+				.then(
+					() => "resolved",
+					(error: unknown) => String(error),
+				);
+			expect(next).toContain("stalled refresher");
+			expect(store.listAuthCredentials(provider)[0]?.credential).toMatchObject({ refresh: "refresh-0" });
+		} finally {
+			peer.close();
+			later.close();
+		}
+	}
+
+	test("hands a taken-over lease back when the caller's budget runs out while taking it", async () => {
+		await expectTakeoverLeftForStalledOwner("unit-oauth-takeover-budget", async (peer, peerStore, credentialId) => {
+			const acquire = peerStore.tryAcquireCredentialRefreshLease.bind(peerStore);
+			vi.spyOn(peerStore, "tryAcquireCredentialRefreshLease").mockImplementation((...args) => {
+				const acquired = acquire(...args);
+				// A write lock held the acquire past the caller's 10 s budget.
+				setSystemTime(new Date(Date.now() + 11_000));
+				return acquired;
+			});
+			let exchanges = 0;
+			await expect(
+				peer.oauth.refreshStored("unit-oauth-takeover-budget", {
+					...refreshSpentToken(credentialId, () => {
+						exchanges += 1;
+					}),
+				}),
+			).rejects.toThrow("timed out");
+			expect(exchanges).toBe(0);
+		});
+	});
+
+	test("hands a taken-over lease back when it leaves before the exchange", async () => {
+		await expectTakeoverLeftForStalledOwner("unit-oauth-takeover-cannot", async (peer, _peerStore, credentialId) => {
+			let checks = 0;
+			const result = await peer.oauth.refreshStored("unit-oauth-takeover-cannot", {
+				...refreshSpentToken(credentialId, () => {}),
+				// Refreshable when the lease is taken, no longer once the row is re-read under it.
+				canRefresh: () => {
+					checks += 1;
+					return checks === 1;
+				},
+			});
+			expect(result).toMatchObject({ refreshed: false });
+			expect(checks).toBe(2);
+		});
+	});
+
+	test("hands a taken-over lease back when the exchange fails transiently", async () => {
+		await expectTakeoverLeftForStalledOwner(
+			"unit-oauth-takeover-transient",
+			async (peer, _peerStore, credentialId) => {
+				await expect(
+					peer.oauth.refreshStored("unit-oauth-takeover-transient", {
+						...refreshSpentToken(credentialId, () => {}),
+						refresh: async () => {
+							throw new Error("HTTP 503 overloaded");
+						},
+					}),
+				).rejects.toThrow("503");
+			},
+		);
+	});
+
 	test("saves an exchanged token when a peer holds the lease handed back to the stalled refresher", async () => {
 		if (!authStorage || !store || !tempDir) throw new Error("test setup failed");
 		const provider = "unit-oauth-handback-save";
