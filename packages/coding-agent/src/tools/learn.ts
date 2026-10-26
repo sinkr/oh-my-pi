@@ -165,8 +165,15 @@ export class LearnTool implements AgentTool<LearnSchema> {
 				const reason = err instanceof Error ? err.message : String(err);
 				throw new Error(`${memoryMessage}, but the managed skill could not be written: ${reason}`);
 			}
-			await this.session.refreshSkills?.();
 			const verb = params.skill.action === "create" ? "Created" : "Updated";
+			try {
+				await this.session.refreshSkills?.();
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				throw new Error(
+					`${memoryMessage}. ${verb} managed skill "${params.skill.name}", but refreshing session skills failed: ${reason}`,
+				);
+			}
 			return {
 				content: [{ type: "text", text: `${memoryMessage}. ${verb} managed skill "${params.skill.name}".` }],
 				details: { skill: params.skill.name },

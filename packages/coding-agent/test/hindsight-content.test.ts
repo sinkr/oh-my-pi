@@ -98,17 +98,17 @@ describe("composeRecallQuery", () => {
 		expect(out).toContain("visible");
 	});
 
-	it("drops punctuation-only assistant placeholder turns from prior context (#1806)", () => {
+	it("drops punctuation-only assistant placeholder turns while preserving symbol-only user turns (#1806)", () => {
 		const withPlaceholders: HindsightMessage[] = [
-			{ role: "user", content: "Deploy the worker" },
+			{ role: "user", content: "Approve deploy?" },
 			{ role: "assistant", content: "." },
-			{ role: "user", content: "Check the logs" },
+			{ role: "user", content: "✅" },
 			{ role: "assistant", content: "..." },
-			{ role: "user", content: "What failed?" },
+			{ role: "user", content: "What did I approve?" },
 		];
-		const out = composeRecallQuery("What failed?", withPlaceholders, 3);
-		expect(out).toContain("user: Deploy the worker");
-		expect(out).toContain("user: Check the logs");
+		const out = composeRecallQuery("What did I approve?", withPlaceholders, 3);
+		expect(out).toContain("user: Approve deploy?");
+		expect(out).toContain("user: ✅");
 		expect(out).not.toContain("assistant: .");
 		expect(out).not.toContain("assistant: ...");
 	});

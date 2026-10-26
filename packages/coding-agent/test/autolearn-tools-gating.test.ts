@@ -232,21 +232,44 @@ describe("learn execute", () => {
 		expect(await fs.readdir(getManagedSkillsDir()).catch(() => [])).toHaveLength(0);
 	});
 
-	it("stores a lesson AND mints a managed skill (refreshing session skills) when a skill payload is given", async () => {
-		let refreshes = 0;
-		const session = {
-			...learnSession(),
-			refreshSkills: async () => {
-				refreshes += 1;
+	it("also mints a managed skill when skill payload is supplied", async () => {
+		const tool = LearnTool.createIf(learnSession())!;
+		await tool.execute("l2", {
+			memory: "To debug worker crashes, inspect stderr on the host.",
+			skill: {
+				action: "create",
+				name: "worker-host",
+				description: "Debug worker crashes via host stderr.",
+				body: "# Worker Host Debug\n\n1. Check stderr.",
 			},
-		};
-		await new LearnTool(session).execute("2", {
-			memory: "Use the worker host entry pattern.",
-			skill: { action: "create", name: "worker-host", description: "Spawn workers.", body: "# Worker host" },
 		});
 		expect(remembered).toHaveLength(1);
 		expect(await Bun.file(path.join(getManagedSkillsDir(), "worker-host", "SKILL.md")).exists()).toBe(true);
-		expect(refreshes).toBe(1);
+	});
+
+	it("reports both the committed memory and managed skill when refreshing session skills fails", async () => {
+		const session: ToolSession = {
+			...learnSession(),
+			refreshSkills: async () => {
+				throw new Error("prompt rebuild failed");
+			},
+		};
+		const tool = LearnTool.createIf(session)!;
+		await expect(
+			tool.execute("l-refresh-err", {
+				memory: "To debug worker crashes, inspect stderr on the host.",
+				skill: {
+					action: "create",
+					name: "worker-host",
+					description: "Debug worker crashes via host stderr.",
+					body: "# Worker Host Debug\n\n1. Check stderr.",
+				},
+			}),
+		).rejects.toThrow(
+			/Lesson stored\. Created managed skill "worker-host", but refreshing session skills failed: prompt rebuild failed/,
+		);
+		expect(remembered).toHaveLength(1);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "worker-host", "SKILL.md")).exists()).toBe(true);
 	});
 
 	it("surfaces a partial-outcome error when the skill name is invalid", async () => {

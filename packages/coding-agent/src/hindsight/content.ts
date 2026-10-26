@@ -136,7 +136,7 @@ export function composeRecallQuery(
 	for (let i = 0; i < contextual.length; i++) {
 		const msg = contextual[i];
 		const content = stripMemoryTags(msg.content).trim();
-		if (!hasSubstantiveContent(content)) continue;
+		if (!content || (msg.role === "assistant" && !hasSubstantiveContent(content))) continue;
 		if (i === trailingUserIndex && content === latest) continue;
 		const safeContent = content.replace(/\n(?=(?:user|assistant|system|tool): )/g, "\n  ");
 		contextLines.push(`${msg.role}: ${safeContent}`);
