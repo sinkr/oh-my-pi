@@ -143,6 +143,7 @@ describe("async speculative compaction", () => {
 			obfuscateTextForProvider: options.obfuscateTextForProvider ?? ((text: string | undefined) => text),
 			obfuscatePreparationForProvider:
 				options.obfuscatePreparationForProvider ?? (<T>(preparation: T) => preparation),
+			getPromptCacheKeyForModel: () => undefined,
 			closeCodexProviderSessionsForHistoryRewrite: () => {},
 			resetCodexProviderAfterCompaction: () => {},
 			resetPlanReference: () => {},
