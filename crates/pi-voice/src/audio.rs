@@ -137,7 +137,9 @@ impl PlaybackStream {
 	/// `jitter_buffer_ms` of audio is held back before playback starts and
 	/// again after every underrun, so a network-paced producer survives
 	/// arrival jitter as one short rebuffer instead of a hole in every late
-	/// period. Zero plays samples as soon as they are queued.
+	/// period. Partial bursts play after one reserve's worth of device
+	/// callbacks even while the producer remains connected. Zero plays
+	/// samples as soon as they are queued.
 	pub fn start(sample_rate: u32, jitter_buffer_ms: u32) -> VoiceResult<Self> {
 		let sample_rate = audio_sample_rate(sample_rate)?;
 		let state = Arc::new(PlaybackState::new());
@@ -220,15 +222,16 @@ fn audio_sample_rate(sample_rate: u32) -> VoiceResult<u32> {
 /// device loss, stop) marks the stream stopped so `wait_for_drain` waiters
 /// wake instead of outliving the render path.
 struct Renderer {
-	rx:              flume::Receiver<Vec<f32>>,
-	state:           Arc<PlaybackState>,
-	current:         Vec<f32>,
-	cursor:          usize,
-	empty_callbacks: usize,
-	drain_callbacks: usize,
+	rx:                  flume::Receiver<Vec<f32>>,
+	state:               Arc<PlaybackState>,
+	current:             Vec<f32>,
+	cursor:              usize,
+	empty_callbacks:     usize,
+	drain_callbacks:     usize,
 	/// Samples that must be queued before output (re)starts; zero disables.
-	reserve:         usize,
-	buffering:       bool,
+	reserve:             usize,
+	buffering:           bool,
+	buffering_callbacks: usize,
 }
 
 impl Renderer {
@@ -247,22 +250,35 @@ impl Renderer {
 			drain_callbacks,
 			reserve,
 			buffering: reserve > 0,
+			buffering_callbacks: 0,
 		}
 	}
 
 	/// Fill one device buffer, padding with silence when the queue runs dry.
 	fn fill(&mut self, output: &mut [f32]) {
 		output.fill(0.0);
-		if self.state.stopped.load(Ordering::Acquire) {
+		if output.is_empty() || self.state.stopped.load(Ordering::Acquire) {
 			return;
 		}
 		if self.buffering {
-			// A closed writer has nothing more coming: play the tail as-is.
 			let queued = self.state.queued.load(Ordering::Acquire);
-			if queued < self.reserve && !self.rx.is_disconnected() {
+			if queued == 0 {
+				// Silence before a burst must not consume its rebuffer window.
+				self.buffering_callbacks = 0;
+			} else {
+				self.buffering_callbacks += 1;
+			}
+			// A connected live writer stays open between turns. Once a burst
+			// has waited one reserve of callback periods, play even its short
+			// tail instead of holding it for the next turn.
+			if queued < self.reserve
+				&& !self.rx.is_disconnected()
+				&& (queued == 0 || self.buffering_callbacks < self.reserve.div_ceil(output.len()))
+			{
 				return;
 			}
 			self.buffering = false;
+			self.buffering_callbacks = 0;
 		}
 
 		let gain = self.state.gain();
@@ -280,6 +296,7 @@ impl Renderer {
 						// Underrun: rebuild the reserve before resuming.
 						self.empty_callbacks = 0;
 						self.buffering = self.reserve > 0;
+						self.buffering_callbacks = 0;
 						break;
 					},
 					Err(TryRecvError::Disconnected) => {
@@ -467,6 +484,36 @@ mod tests {
 		renderer.fill(&mut output);
 
 		assert_eq!(output, [1.0, 0.0]);
+	}
+
+	/// Live keeps its writer connected across turns. A short final frame
+	/// must reach the speaker without waiting for the next assistant turn.
+	#[test]
+	fn connected_live_writer_releases_short_turns() {
+		let (writer, mut renderer) = renderer(LOCAL_DRAIN_CALLBACKS, 6);
+		let mut output = [9.0; 2];
+
+		for _ in 0..5 {
+			renderer.fill(&mut output);
+		}
+		writer.write(&[1.0; 2]).expect("live writer is connected");
+		for _ in 0..2 {
+			renderer.fill(&mut output);
+			assert_eq!(output, [0.0; 2], "short turn waits for jitter reserve");
+		}
+		renderer.fill(&mut output);
+		assert_eq!(output, [1.0; 2], "short turn plays without closing the writer");
+
+		renderer.fill(&mut output);
+		writer
+			.write(&[2.0; 2])
+			.expect("next turn uses the same writer");
+		for _ in 0..2 {
+			renderer.fill(&mut output);
+			assert_eq!(output, [0.0; 2], "next turn waits for its own reserve");
+		}
+		renderer.fill(&mut output);
+		assert_eq!(output, [2.0; 2], "next turn does not inherit stale audio");
 	}
 
 	/// Regression guard for #17114: live speech arrives as 20 ms Opus frames
