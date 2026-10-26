@@ -15,6 +15,7 @@
 - Fixed an `ask` note added right after picking an answer landing on the next question's answer, in Tern and the TUI; Note now goes to the answer just picked until the next question gets other input ([#17126](https://github.com/can1357/oh-my-pi/pull/17126) by [@H4vC](https://github.com/H4vC))
 - Fixed Esc on a busy session (and RPC `abort_and_restore_queue`) silently discarding queued messages from extensions and agents, such as `pi.sendMessage` steer/follow-up cards and agent-attributed prompts; they now appear in the transcript without restarting the run and reach the model with your next prompt
 - Fixed a failed delivery of messages typed during compaction discarding other queued messages, such as an extension's prompt queued before compaction ended; messages queued before that delivery started or after it finished now stay queued
+- Fixed a failed delivery of messages typed during compaction sending the first of them twice: once now and again with the retried batch
 
 ### Changed
 

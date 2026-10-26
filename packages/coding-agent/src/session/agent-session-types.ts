@@ -461,6 +461,14 @@ export interface PromptOptions {
 	 * failed before admission still only settles through the returned promise.
 	 */
 	onPromptAdmitted?: () => void;
+	/**
+	 * Called synchronously when this prompt is pushed onto the steer or
+	 * follow-up queue, just before {@link onPromptAdmitted}, with the messages it
+	 * pushed (its hidden companions, then the prompt), so a caller can tell them
+	 * from other queued work. Not called when the prompt starts its own turn or
+	 * is queued as an aside.
+	 */
+	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
