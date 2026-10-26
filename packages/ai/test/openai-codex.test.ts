@@ -385,32 +385,33 @@ describe("openai-codex error parsing", () => {
 		expect(error.message).toContain("rate limit exceeded");
 	});
 
-	it("keeps a capacity 429's Retry-After instead of the plan window reset", async () => {
-		// `turn_rate_limit_exceeded` is a transient capacity throttle. Borrowing
-		// the 5h window's reset (3h out here) made retry hints wait hours.
-		const response = new Response(
-			JSON.stringify({
-				error: {
-					type: "rate_limit_error",
-					code: "turn_rate_limit_exceeded",
-					message: "Codex is at capacity, please try again later",
-				},
-			}),
-			{
-				status: 429,
-				headers: {
-					"retry-after": "152",
-					"x-codex-primary-used-percent": "14",
-					"x-codex-primary-reset-at": String(Math.floor(Date.now() / 1000) + 3 * 60 * 60),
-				},
-			},
-		);
+	it.each([
+		// `turn_rate_limit_exceeded` is a transient capacity throttle. Borrowing a
+		// window's reset while it still has headroom made retry hints wait hours.
+		[
+			"keeps a capacity 429's Retry-After over a window with headroom",
+			{ code: "turn_rate_limit_exceeded", message: "Codex is at capacity, please try again later" },
+			{ "retry-after": "152", "x-codex-primary-used-percent": "14" },
+			152_000,
+		],
+		// With no Retry-After, an exhausted window's reset is the only timing hint.
+		[
+			"keeps an exhausted window's reset when the 429 has no Retry-After",
+			{ code: "rate_limit_exceeded", message: "slow down" },
+			{ "x-codex-primary-used-percent": "100" },
+			3 * 60 * 60 * 1000,
+		],
+	] as const)("%s", async (_label, error, headers, expectedHintMs) => {
+		const response = new Response(JSON.stringify({ error: { type: "rate_limit_error", ...error } }), {
+			status: 429,
+			headers: { ...headers, "x-codex-primary-reset-at": String(Math.floor(Date.now() / 1000) + 3 * 60 * 60) },
+		});
 
 		const result = await AIError.finalize(await CodexApiError.fromResponse(response), {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			model: "gpt-5.6-sol",
 		});
-		expect(extractProviderRetryHint("openai-codex", result.message)).toBe(152_000);
+		expect(extractProviderRetryHint("openai-codex", result.message)).toBe(expectedHintMs);
 	});
 });
