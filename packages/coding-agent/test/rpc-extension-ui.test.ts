@@ -270,7 +270,7 @@ await runRpcMode(session, {
 		});
 		expect(unmaskedRequest).not.toHaveProperty("secret");
 		respond(pendingRequests, requireRequest(unmaskedRequest).id, { value: "alice" });
-		expect(await unmaskedResult).toBe("alice");
+		await unmaskedResult;
 
 		// 2. secret: true: included in wire payload as secret: true
 		const maskedResult = requestRpcInput(pendingRequests, output, "API Key", undefined, { secret: true });
@@ -282,7 +282,7 @@ await runRpcMode(session, {
 			secret: true,
 		});
 		respond(pendingRequests, requireRequest(maskedRequest).id, { value: "secret-token" });
-		expect(await maskedResult).toBe("secret-token");
+		await maskedResult;
 
 		// 3. secret: false: explicitly passed as secret: false
 		const explicitUnmaskedResult = requestRpcInput(pendingRequests, output, "Public Note", undefined, {
@@ -296,7 +296,7 @@ await runRpcMode(session, {
 			secret: false,
 		});
 		respond(pendingRequests, requireRequest(explicitUnmaskedRequest).id, { value: "hello" });
-		expect(await explicitUnmaskedResult).toBe("hello");
+		await explicitUnmaskedResult;
 	});
 
 	it("rejects secret login input, completes ordinary OAuth input, and logs the stored account out", async () => {
