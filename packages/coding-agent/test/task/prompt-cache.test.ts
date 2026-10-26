@@ -1216,4 +1216,106 @@ describe("task sibling prompt-cache routing", () => {
 			authStorage.close();
 		}
 	});
+
+	// Thread H: the workspace step after a completed move (setProjectDir /
+	// rescoping in builtin-lifecycle) can fail, so the caller undoes the move
+	// with rollbackMove(snapshot) rather than moveTo's own internal rollback.
+	// By then the successful forward move has already dropped the stash, and
+	// neither captureState() nor restoreState() snapshots it, so a logically
+	// rolled-back move lost the family candidate: the next eligible model
+	// would send a child-scoped key instead of the parent family.
+	it("keeps the stashed family key when a caller rolls back a completed moveTo", async () => {
+		using directory = TempDir.createSync("@omp-task-cache-move-rollback-");
+		const h = await createUnoptedTaskFixture(directory);
+		const { authStorage, initialModel, optedModel, requests, createParent, runTask, childFor } = h;
+		try {
+			const parent = await createParent("parent-lineage", initialModel);
+			const tool = parent.getToolByName("task") as TaskTool;
+			await runTask(tool, "SiblingA");
+			const child = childFor(requests[0]?.sessionId);
+			// Unopted start: the executor stashed the parent-derived family key
+			// without seeding the child's persisted header copy.
+			expect(child.sessionManager.getTaskSiblingCandidate()).toBe("parent-lineage:task");
+
+			const childFile = child.sessionManager.getSessionFile();
+			if (!childFile) throw new Error("Expected a persisted Task child");
+
+			// builtin-lifecycle captures the pre-move state, the move completes,
+			// and only then does the workspace step fail — so rollbackMove is the
+			// only thing that can undo it.
+			const previousState = child.sessionManager.captureState();
+			const movedCwd = directory.join("moved-cwd");
+			fs.mkdirSync(movedCwd, { recursive: true });
+			await child.sessionManager.moveTo(movedCwd, directory.join("moved-sessions"));
+			expect(child.sessionManager.getSessionFile()).not.toBe(childFile);
+			expect(child.sessionManager.getTaskSiblingCandidate()).toBeUndefined();
+
+			await child.sessionManager.rollbackMove(previousState);
+			expect(child.sessionManager.getSessionFile()).toBe(childFile);
+
+			// The conversation never moved: the stash must come back with the
+			// restored snapshot and still feed the first eligible request.
+			expect(child.sessionManager.getTaskSiblingCandidate()).toBe("parent-lineage:task");
+			child.agent.setModel(optedModel);
+			await child.prompt("Continue after the rolled-back move.");
+			expect(requests.at(-1)?.cacheKey).toBe("parent-lineage:task");
+			expect(requests.at(-1)?.wireKey).toBe("parent-lineage:task");
+		} finally {
+			await Promise.all(sessions.splice(0).map(session => session.dispose()));
+			authStorage.close();
+		}
+	});
+
+	// Warm revival: the family candidate for an unopted child exists only as
+	// the session-scoped stash — the persisted header copy is seeded at the
+	// first eligible request, which never happened before this park. The warm
+	// reviver reopens a fresh SessionManager from the spawn-time spec, so the
+	// pending candidate must be captured at park and restored on revive:
+	// otherwise a runtime/auth fallback to an opted Go model after revival
+	// finds neither header nor stash and falls back to the child's own wire
+	// identity instead of the family key.
+	it("carries the pending family key across park and revive before the first eligible request", async () => {
+		using directory = TempDir.createSync("@omp-task-cache-revive-");
+		const h = await createUnoptedTaskFixture(directory);
+		const { authStorage, initialModel, optedModel, requests, createParent, runTask, childFor } = h;
+		try {
+			const parent = await createParent("parent-lineage", initialModel);
+			await runTask(parent.getToolByName("task") as TaskTool, "SiblingA");
+			const child = childFor(requests[0]?.sessionId);
+
+			// Unopted start: one child-scoped request, stash only, no persisted
+			// header copy — the stash is the sole carrier of the family key.
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.cacheKey).toBeUndefined();
+			expect(requests[0]?.wireKey).toBe(requests[0]?.sessionId);
+			expect(child.sessionManager.getHeader()?.taskPromptCacheKey).toBeUndefined();
+			expect(child.sessionManager.getTaskSiblingCandidate()).toBe("parent-lineage:task");
+
+			const ref = AgentRegistry.global()
+				.list()
+				.find(candidate => candidate.session === child);
+			if (!ref) throw new Error("Expected a registered Task child");
+			const lifecycle = AgentLifecycleManager.global();
+			await lifecycle.park(ref.id);
+			const revived = await lifecycle.ensureLive(ref.id);
+
+			// The revival rebuilt the manager from disk: still no header copy,
+			// so only a captured-and-restored candidate can carry the family.
+			expect(revived.sessionManager.getHeader()?.taskPromptCacheKey).toBeUndefined();
+
+			// The runtime fallback walk onto the opted Go lane after revival:
+			// this first eligible request must find the pending candidate and
+			// promote it into the persisted header.
+			revived.agent.setModel(optedModel);
+			await revived.prompt("Continue on the fallback lane after revival.");
+			expect(requests).toHaveLength(2);
+			expect(requests[1]?.cacheKey).toBe("parent-lineage:task");
+			expect(requests[1]?.wireKey).toBe("parent-lineage:task");
+			expect(revived.sessionManager.getHeader()?.taskPromptCacheKey).toBe("parent-lineage:task");
+			expect(revived.sessionManager.getTaskSiblingCandidate()).toBe("parent-lineage:task");
+		} finally {
+			await Promise.all(sessions.splice(0).map(session => session.dispose()));
+			authStorage.close();
+		}
+	});
 });

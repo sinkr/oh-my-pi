@@ -4044,6 +4044,24 @@ interface WarmReviveCapture {
 	wake: IrcWakeTurnMonitorOptions;
 	/** Exact agent name the live `task.agentAccountPools` entry is looked up by on revive. */
 	agentName: string;
+	/**
+	 * Pending, never-promoted family candidate. The stash lives only on the live manager, so park
+	 * re-reads it (when the header still carries no task key) and the revive restores it onto the
+	 * fresh manager the reviver opens from disk.
+	 */
+	pendingCacheCandidate: string | undefined;
+}
+
+/** Keeps `capture.pendingCacheCandidate` current with `session`'s manager stash until it is disposed. */
+function trackSubagentPendingCandidate(session: AgentSession, capture: WarmReviveCapture): void {
+	session.addDisposer(() => {
+		const manager = session.sessionManager;
+		// An already-persisted header is the carrier a revive reconstitutes from —
+		// only an unpromoted stash must be carried, so a header stripped on disk
+		// (a deliberate drop of persisted affinity) cannot resurrect it.
+		capture.pendingCacheCandidate =
+			manager.getHeader()?.taskPromptCacheKey === undefined ? manager.getTaskSiblingCandidate() : undefined;
+	});
 }
 
 /** Keeps `capture.settings` current with `session`'s overlay writes until the session is disposed. */
@@ -4078,6 +4096,12 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		if (capture.parentArtifactManager) {
 			reopened.adoptArtifactManager(capture.parentArtifactManager);
 		}
+		// The stash died with the parked manager: hand the pending, never-promoted
+		// family candidate to the fresh one so the first eligible request after
+		// revival still finds and persists it.
+		if (capture.pendingCacheCandidate !== undefined) {
+			reopened.setTaskSiblingCandidate(capture.pendingCacheCandidate);
+		}
 		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile);
 		const mcpManager = capture.spec.options.mcpManager;
 		const mcpFollower = mcpManager ? followMCPTools(mcpManager, explicitSubagentToolNames(capture.spec)) : undefined;
@@ -4105,6 +4129,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 			}
 			mcpFollower?.bind(revived);
 			trackSubagentSettings(revived, capture);
+			trackSubagentPendingCandidate(revived, capture);
 			trackSubagentIrcRoster(revived, capture.spec.prompt);
 			const withoutParentOwnedTools = (toolNames: string[]): string[] =>
 				capture.keepTodo ? toolNames : toolNames.filter(name => name !== "todo");
@@ -4814,8 +4839,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					keepTodo: prewalk !== undefined,
 					wake: wakeOptions,
 					agentName: agent.name,
+					pendingCacheCandidate: undefined,
 				};
 				trackSubagentSettings(session, reviveCapture);
+				trackSubagentPendingCandidate(session, reviveCapture);
 				trackSubagentIrcRoster(session, sessionSpec.prompt);
 				reviveSession = createWarmSubagentReviver(reviveCapture);
 			}

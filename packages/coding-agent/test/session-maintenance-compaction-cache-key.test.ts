@@ -28,12 +28,16 @@ import { assistantMsg, userMsg } from "./utilities";
  * Explicit-key / empty-key / retention behavior stays covered by the existing
  * direct-helper suites (packages/agent/test/remote-compaction.test.ts,
  * packages/ai/test/opencode-session-header.test.ts); this file adds only the
- * caller-level provenance checks.
+ * caller-level provenance checks — including the mirror case of thread
+ * PRRT_kwDOQxs0bc6wG-Mm, where a Task child's family key exists only in the
+ * session header and MUST still reach the compaction request.
  */
 
 const OPENCODE_SESSION_HEADER = "x-opencode-session";
 /** Raw SDK session id over the 64-char cache-key wire limit (normalizes to pc_…). */
 const RAW_SESSION_ID = `ses_${"0123456789abcdef".repeat(6)}`;
+/** Task-family affinity key persisted in the session header; also over the 64-char wire limit. */
+const FAMILY_CACHE_KEY = `ses_${"fedcba9876543210".repeat(4)}`;
 
 interface CapturedCompactionRequest {
 	url: string;
@@ -175,7 +179,8 @@ describe("session-maintenance V2 compaction cache-key provenance", () => {
 		expectRawChildHeaderNormalizedBodyKey();
 	});
 
-	it("keeps the raw child session id on auto-compaction V2 requests without an explicit cache key", async () => {
+	/** Drive a threshold-crossing assistant turn so `runAutoCompaction` issues its V2 request. */
+	async function triggerAutoCompaction(): Promise<void> {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		session.subscribe(event => {
 			if (event.type === "auto_compaction_end") resolve();
@@ -200,6 +205,58 @@ describe("session-maintenance V2 compaction cache-key provenance", () => {
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistant] });
 		await promise;
 		await session.waitForIdle();
+	}
+
+	it("keeps the raw child session id on auto-compaction V2 requests without an explicit cache key", async () => {
+		await triggerAutoCompaction();
 		expectRawChildHeaderNormalizedBodyKey();
+	});
+
+	/**
+	 * PR16988 review thread PRRT_kwDOQxs0bc6wG-Mm: a Task child keeps its
+	 * affinity ONLY in the session header — `createAgentSession` persists
+	 * `taskPromptCacheKey` while leaving `agent.promptCacheKey` undefined — so a
+	 * compaction that reads the agent field alone sends no family key, and the Go
+	 * gateway warms its cache under the CHILD conversation id instead of the
+	 * family the child's normal turns share. Returns the normalized family cache
+	 * id both wire fields must carry.
+	 */
+	async function seedTaskFamilyAffinity(): Promise<string> {
+		// The same header write createAgentSession performs for a Task child.
+		await session.sessionManager.setTaskPromptCacheKey(FAMILY_CACHE_KEY);
+		expect(session.sessionManager.getHeader()?.taskPromptCacheKey).toBe(FAMILY_CACHE_KEY);
+		expect(session.agent.promptCacheKey).toBeUndefined();
+		const normalized = normalizeOpenAIPromptCacheKey(FAMILY_CACHE_KEY);
+		if (normalized === undefined || !normalized.startsWith("pc_")) {
+			throw new Error("Expected the family key to normalize to pc_…");
+		}
+		expect(normalized).not.toBe(RAW_SESSION_ID);
+		return normalized;
+	}
+
+	function expectFamilyKeyOnWire(familyKey: string): void {
+		expect(session.agent.promptCacheKey).toBeUndefined();
+		expect(compactionRequests).toHaveLength(1);
+		const request = compactionRequests[0];
+		if (!request) throw new Error("Expected a V2 compaction request");
+		// The gateway affinity header and the body cache key must both carry the
+		// family identity — never the child conversation id.
+		expect(request.sessionHeader).toBe(familyKey);
+		expect(request.body.prompt_cache_key).toBe(familyKey);
+		expect(request.url.endsWith("/responses")).toBe(true);
+	}
+
+	it("passes the session-header Task family cache key into manual compaction", async () => {
+		const familyKey = await seedTaskFamilyAffinity();
+		const result = await session.compact();
+		await session.waitForIdle();
+		expect(result?.shortSummary).toBe("Remote compaction");
+		expectFamilyKeyOnWire(familyKey);
+	});
+
+	it("passes the session-header Task family cache key into auto compaction", async () => {
+		const familyKey = await seedTaskFamilyAffinity();
+		await triggerAutoCompaction();
+		expectFamilyKeyOnWire(familyKey);
 	});
 });

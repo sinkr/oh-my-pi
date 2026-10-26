@@ -479,6 +479,8 @@ export interface SessionMaintenanceHost {
 	): Promise<Context>;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation;
+	/** Model-gated cache identity: the agent's explicit key, else the session-header Task family key. */
+	getPromptCacheKeyForModel(model: Model | undefined): string | undefined;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
@@ -3583,8 +3585,11 @@ export class SessionMaintenance {
 						// Only an EXPLICIT cache key may ride here: V2 treats any
 						// truthy value as provenance and flips x-opencode-session
 						// to the normalized cache id. The session id itself stays
-						// the header identity via `sessionId` above.
-						promptCacheKey: this.#host.agent.promptCacheKey,
+						// the header identity via `sessionId` above. The
+						// model-gated accessor resolves that explicit key: the
+						// agent's own key, else the session-header Task family
+						// key — never a sessionId fallback.
+						promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(),
 						// Route every summarization HTTP request through the
@@ -5405,9 +5410,10 @@ export class SessionMaintenance {
 									thinkingLevel: this.#host.thinkingLevel(),
 									tools: this.#host.agent.state.tools,
 									sessionId: this.#host.sessionId(),
-									// Explicit cache key only — see the manual
+									// Explicit cache key only, resolved through the
+									// model-gated accessor — see the manual
 									// callsite in #compactWithFallbackModel.
-									promptCacheKey: this.#host.agent.promptCacheKey,
+									promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets(),
 									codexCompaction,

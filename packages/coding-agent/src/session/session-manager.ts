@@ -758,6 +758,8 @@ interface SessionManagerStateSnapshot {
 	needsRewrite: boolean;
 	draftOnlySessionCleanupArmed: boolean;
 	fallbackRuntimeOnly: boolean;
+	/** Stashed sibling family candidate; moveTo drops it, so a rollback must restore it. */
+	taskSiblingCandidate: string | undefined;
 	header: SessionHeader;
 	entries: SessionEntry[];
 }
@@ -2233,6 +2235,7 @@ export class SessionManager {
 			needsRewrite: this.#rewriteRequired,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
 			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
+			taskSiblingCandidate: this.#taskSiblingCandidate,
 			// Entries are snapshotted by reference (switch/reload replaces the
 			// array wholesale). The header is cloned: moveTo mutates it in place
 			// (cwd, additionalDirectories), so a by-reference capture would let
@@ -2277,6 +2280,8 @@ export class SessionManager {
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
+		// A completed moveTo drops the stash, so a rollback restores it here.
+		this.#taskSiblingCandidate = snapshot.taskSiblingCandidate;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
@@ -2294,11 +2299,12 @@ export class SessionManager {
 	/**
 	 * Undo a {@link moveTo} using a {@link captureState} snapshot: rename the
 	 * session and artifacts back into the captured bucket, then restore the
-	 * captured metadata (cwd, header, additionalDirectories). The captured
-	 * header is persisted after relocation so a fresh open of the source
-	 * session sees the pre-move metadata, including workspace roots the move
-	 * filtered out. Rollbacks must not re-enter forward-move hooks, so this
-	 * bypasses AgentSession entirely. If the rename-back itself fails, the
+	 * captured metadata (cwd, header, additionalDirectories) and the stashed
+	 * sibling candidate the forward move dropped. The captured header is
+	 * persisted after relocation so a fresh open of the source session sees the
+	 * pre-move metadata, including workspace roots the move filtered out.
+	 * Rollbacks must not re-enter forward-move hooks, so this bypasses
+	 * AgentSession entirely. If the rename-back itself fails, the
 	 * manager stays pointed at the actual moved file (restoring the snapshot
 	 * would split the transcript across a recreated source and the stranded
 	 * target) and the error names where the session file actually lives.
@@ -2675,8 +2681,9 @@ export class SessionManager {
 			this.#header.cwd = resolvedCwd;
 			// The stash is scoped to the conversation's pre-move state: a completed
 			// move must not let a later opted-in request promote it. Refusals and
-			// rollbacks rethrow above, and the no-op early return never relocates,
-			// so both keep it.
+			// the internal rollback rethrow above, and the no-op early return never
+			// relocates, so all three keep it; a caller undoing this completed move
+			// through rollbackMove() re-derives it from the captureState() snapshot.
 			this.clearTaskSiblingCandidate();
 			// Clear only after the rename has landed. If the move threw,
 			// keep the flag so the next relocation retries.

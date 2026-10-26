@@ -2570,6 +2570,7 @@ export class AgentSession implements SettingsScope {
 			},
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
+			getPromptCacheKeyForModel: model => this.getPromptCacheKeyForModel(model),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
 			resetCodexProviderAfterCompaction: compaction => this.#resetCodexProviderAfterCompaction(compaction),
 			resetPlanReference: () => {
