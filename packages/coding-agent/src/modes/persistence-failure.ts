@@ -1,5 +1,6 @@
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import type { SessionContinuation } from "../session/session-listing";
 import type { SessionPersistenceNotice } from "../session/session-manager";
 
 /**
@@ -44,5 +45,20 @@ export function formatPersistenceNotice(notice: SessionPersistenceNotice): strin
 			message = `Another program kept writing to session ${from}; it is left to that writer and this session now saves to ${to}.`;
 			break;
 	}
+	return replaceTabs(sanitizeText(message)).replace(/[\r\n]+/g, " ");
+}
+
+/**
+ * Resume of a session file whose conversation went on in another file (see
+ * {@link SessionContinuation}). Names both files, so the user sees that the
+ * file they asked for was not the one opened.
+ */
+export function formatSessionContinuationNotice(continuation: SessionContinuation): string {
+	const from = shortenPath(continuation.from);
+	const to = shortenPath(continuation.session.path);
+	const message =
+		continuation.copies > 2
+			? `Session ${from} went on in ${continuation.copies - 1} other files while other omp processes held it; resuming the one with the newest entry, ${to}.`
+			: `Session ${from} went on in ${to} while another omp process held it; resuming ${to}.`;
 	return replaceTabs(sanitizeText(message)).replace(/[\r\n]+/g, " ");
 }

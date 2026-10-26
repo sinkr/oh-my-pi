@@ -1249,8 +1249,10 @@ export class SessionManager {
 	 * sibling file. It gets a new session id whose header points back through
 	 * `parentSession` and keeps the provider prompt-cache key, as {@link fork}
 	 * does, so resume-by-id, the title index, and the picker never see two
-	 * files for one id. Nothing durable exists there yet: the caller publishes
-	 * the whole transcript once and appends incrementally after that.
+	 * files for one id. Unlike a fork it also records `continuationOf`, so a
+	 * later resume of the old file follows the conversation here (see
+	 * `findSessionContinuation`). Nothing durable exists there yet: the caller
+	 * publishes the whole transcript once and appends incrementally after that.
 	 *
 	 * The artifact copy runs in the background so a move never blocks the turn
 	 * loop on a large artifacts directory; the sibling's artifact manager waits
@@ -1268,6 +1270,7 @@ export class SessionManager {
 			id: this.#sessionId,
 			timestamp,
 			parentSession: previousSessionId,
+			continuationOf: previousSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 		};
 		this.#closeWriterEventually();

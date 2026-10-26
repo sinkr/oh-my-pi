@@ -8,6 +8,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
+import { SESSION_EXIT_CUSTOM_TYPE } from "./exit-diagnostics";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
@@ -36,6 +37,8 @@ export interface SessionInfo {
 	title?: string;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
+	/** Id of the session whose conversation this one continues in a new file (header `continuationOf`). */
+	continuationOf?: string;
 	created: Date;
 	modified: Date;
 	messageCount: number;
@@ -317,6 +320,7 @@ interface SessionListHeader {
 	cwd?: string;
 	title?: string;
 	parentSession?: string;
+	continuationOf?: string;
 	timestamp?: string;
 }
 
@@ -339,6 +343,7 @@ function sessionListHeaderFromRecord(
 				? undefined
 				: (titleOverride ?? (typeof record.title === "string" ? record.title : undefined)),
 		parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
+		continuationOf: typeof record.continuationOf === "string" ? record.continuationOf : undefined,
 		timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
 	};
 }
@@ -353,6 +358,7 @@ function parseSessionListHeaderLine(line: string, titleOverride?: string | null)
 		cwd: extractStringProperty(line, "cwd"),
 		title: titleOverride === null ? undefined : (titleOverride ?? extractStringProperty(line, "title")),
 		parentSession: extractStringProperty(line, "parentSession"),
+		continuationOf: extractStringProperty(line, "continuationOf"),
 		timestamp: extractStringProperty(line, "timestamp"),
 	};
 }
@@ -486,6 +492,7 @@ async function scanSessionFile(
 			cwd: header.cwd ?? "",
 			title: header.title ?? shortSummary,
 			parentSessionPath: header.parentSession,
+			continuationOf: header.continuationOf,
 			created: new Date(header.timestamp ?? ""),
 			modified: mtime,
 			messageCount,
@@ -712,6 +719,129 @@ export async function findMostRecentSession(
 ): Promise<string | null> {
 	const sessions = await scanSessionDir(sessionDir, storage, false);
 	return sessions[0]?.path ?? null;
+}
+
+/** Where the conversation of a resumed session file went on (see {@link findSessionContinuation}). */
+export interface SessionContinuation {
+	/** The copy of the conversation to resume: the one with the newest entry. */
+	session: SessionInfo;
+	/** The session file that was asked for. */
+	from: string;
+	/** Copies of the conversation in the directory, `from` and `session` included. */
+	copies: number;
+}
+
+/** First tail window {@link lastActivityTime} reads; it grows when one large entry fills it. */
+const ACTIVITY_TAIL_BYTES = 65_536;
+
+/**
+ * Epoch milliseconds of the newest entry in `session` other than a
+ * `session_exit` record: every process appends one as it exits, so it says
+ * when a process stopped, not when the conversation last moved. Falls back to
+ * the header's creation time, and to `-Infinity` for an unreadable file.
+ */
+async function lastActivityTime(session: SessionInfo, storage: SessionStorage): Promise<number> {
+	for (let window = ACTIVITY_TAIL_BYTES; ; window *= 4) {
+		let suffix: string;
+		try {
+			[, suffix] = await storage.readTextSlices(session.path, 0, window);
+		} catch {
+			return Number.NEGATIVE_INFINITY;
+		}
+		const lines = suffix.split("\n");
+		for (let i = lines.length - 1; i >= 0; i--) {
+			const line = lines[i];
+			// Same cheap rejection as deriveSessionStatus: blank lines and the leading partial fragment.
+			if (line.charCodeAt(0) !== 123) continue;
+			let entry: { type?: unknown; customType?: unknown; timestamp?: unknown };
+			try {
+				entry = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			if (entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE) continue;
+			const time = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+			if (Number.isFinite(time)) return time;
+		}
+		if (window >= session.size) {
+			const created = session.created.getTime();
+			return Number.isFinite(created) ? created : Number.NEGATIVE_INFINITY;
+		}
+	}
+}
+
+/**
+ * Epoch milliseconds encoded in a `<file-safe timestamp>_<id>.jsonl` name
+ * (`2026-10-26T18-29-27-740Z_…`, the ISO time with `:` and `.` replaced);
+ * `NaN` for any other name.
+ */
+function sessionFileCreatedAt(file: string): number {
+	const match = /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z_/.exec(path.basename(file));
+	return match ? Date.parse(`${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`) : Number.NaN;
+}
+
+/**
+ * The copy of `sessionPath`'s conversation to resume, when that conversation
+ * went on in other files of the same directory; `undefined` when
+ * `sessionPath` itself is the copy to resume.
+ *
+ * A session that cannot keep writing its file (another live omp process
+ * holds it) continues in a sibling whose header names the old session in
+ * `continuationOf`, and that sibling can move on the same way. Resuming the
+ * old file again would revive the conversation as it was before the move,
+ * so resume follows those links and takes the copy with the newest entry,
+ * keeping `sessionPath` on a tie. Forks never set `continuationOf`, so a
+ * deliberate fork is never followed.
+ *
+ * A continuation is named `<move time>_<id>.jsonl` and moves only after the
+ * session it continues was created, so only files named after that creation
+ * time are read: resuming a recent session reads almost nothing.
+ */
+export async function findSessionContinuation(
+	sessionPath: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<SessionContinuation | undefined> {
+	const target = path.resolve(sessionPath);
+	const start = await scanSessionFile(target, storage, false);
+	if (!start) return undefined;
+	const createdAt = start.created.getTime();
+	const since = Number.isFinite(createdAt) ? createdAt : Number.NEGATIVE_INFINITY;
+	const later = storage
+		.listFilesSync(path.dirname(target), "*.jsonl")
+		.filter(file => path.resolve(file) !== target && sessionFileCreatedAt(file) >= since);
+	const continuations = new Map<string, SessionInfo[]>();
+	for (const session of await collectSessionsFromFiles(later, storage, false)) {
+		if (!session.continuationOf) continue;
+		const siblings = continuations.get(session.continuationOf);
+		if (siblings) siblings.push(session);
+		else continuations.set(session.continuationOf, [session]);
+	}
+	if (!continuations.has(start.id)) return undefined;
+	const copies = [start];
+	const seen = new Set([start.path]);
+	for (let i = 0; i < copies.length; i++) {
+		for (const next of continuations.get(copies[i].id) ?? []) {
+			if (seen.has(next.path)) continue;
+			seen.add(next.path);
+			copies.push(next);
+		}
+	}
+	let newest = start;
+	let newestActivity = await lastActivityTime(start, storage);
+	for (const copy of copies.slice(1)) {
+		const activity = await lastActivityTime(copy, storage);
+		if (activity > newestActivity) {
+			newest = copy;
+			newestActivity = activity;
+		}
+	}
+	if (newest === start) return undefined;
+	logger.info("Resuming the newest copy of a session that continued in another file", {
+		from: start.path,
+		to: newest.path,
+		copies: copies.length,
+	});
+	return { session: newest, from: start.path, copies: copies.length };
 }
 
 /** Session id embedded in a `<file-safe-timestamp>_<id>.jsonl` filename, if present. */

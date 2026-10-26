@@ -260,6 +260,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("id", [
 		"id",
 		"parentId",
+		"continuationOf",
 		"toolCallId",
 		"call_id",
 		"responseId",

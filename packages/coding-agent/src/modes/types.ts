@@ -98,6 +98,16 @@ export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions &
 
 export type SessionPickHandler = (session: SessionInfo) => void | Promise<void>;
 
+/** How {@link InteractiveModeContext.handleResumeSession} picks the file it opens. */
+export interface ResumeSessionOptions {
+	/**
+	 * The user chose this session to resume (picker, `/resume <id>`, welcome
+	 * card): when its conversation went on in another file, resume that copy.
+	 * Restoring a session the process itself left (collab) opens the path as given.
+	 */
+	followContinuation?: boolean;
+}
+
 export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
 	reuseSettledComponents?: boolean;
@@ -526,7 +536,7 @@ export interface InteractiveModeContext {
 	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void;
 	/** Settle side requests before replacing the session or deleting its artifacts. */
 	prepareSessionSwitch(): Promise<void>;
-	handleResumeSession(sessionPath: string): Promise<void>;
+	handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void>;
 	handleSessionDeleteCommand(): Promise<void>;
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
 	showSessionPinSelector(): Promise<void>;

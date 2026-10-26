@@ -56,6 +56,7 @@ import { getAvailableThemes, getSymbolTheme, previewTheme, theme } from "@oh-my-
 import type {
 	AgentHubOpenOptions,
 	InteractiveModeContext,
+	ResumeSessionOptions,
 	SelectOnlyModelSelectorOptions,
 	SessionPickHandler,
 } from "../../modes/types";
@@ -72,7 +73,7 @@ import { previewModelCompactionPoint, setModelCompactionPoint } from "../../sess
 import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-context";
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
-import { readSessionInfo, type SessionInfo } from "../../session/session-listing";
+import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
@@ -124,6 +125,7 @@ import type {
 	ModelRoleSelectionScope,
 } from "@oh-my-pi/pi-tui/overlays/model-hub";
 import { createModelBrowserSource } from "../model-browser-source";
+import { formatSessionContinuationNotice } from "../persistence-failure";
 import type { ModelPickerComponent as ModelPickerComponentType } from "@oh-my-pi/pi-tui/overlays/model-picker";
 import type { OAuthSelectorComponent as OAuthSelectorComponentType } from "@oh-my-pi/pi-tui/overlays/oauth-selector";
 import { PluginSelectorComponent } from "@oh-my-pi/pi-tui/overlays/plugin-selector";
@@ -1827,7 +1829,7 @@ export class SelectorController {
 			const historyMatcher = historyStorage
 				? (query: string) => historyStorage.matchingSessionIds(query)
 				: undefined;
-			onSelectSession = session => this.handleResumeSession(session.path);
+			onSelectSession = session => this.handleResumeSession(session.path, { followContinuation: true });
 			selectorOptions = {
 				...(!onSelect
 					? {
@@ -1957,7 +1959,10 @@ export class SelectorController {
 		return true;
 	}
 
-	async handleResumeSession(sessionPath: string, options?: { settingsFlushed?: boolean }): Promise<boolean> {
+	async handleResumeSession(
+		sessionPath: string,
+		options?: ResumeSessionOptions & { settingsFlushed?: boolean },
+	): Promise<boolean> {
 		const previousCwd = this.ctx.sessionManager.getCwd();
 		// Flush pending settings writes before switching sessions so a save
 		// failure leaves the session, process project dir, and Settings in the
@@ -1970,7 +1975,9 @@ export class SelectorController {
 				return false;
 			}
 		}
-		const target = await this.#relocateFromRemovedWorktree(sessionPath);
+		// The conversation may have gone on in a sibling file while another process held this one.
+		const continuation = options?.followContinuation ? await findSessionContinuation(sessionPath) : undefined;
+		const target = await this.#relocateFromRemovedWorktree(continuation?.session.path ?? sessionPath);
 		if (!target) return false;
 		await this.ctx.prepareSessionSwitch();
 		this.ctx.resetObserverRegistry();
@@ -2006,6 +2013,7 @@ export class SelectorController {
 					? `Resumed session in ${shortenPath(newCwd)}`
 					: "Resumed session",
 		);
+		if (continuation) this.ctx.showWarning(formatSessionContinuationNotice(continuation));
 		if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
 		return true;
 	}

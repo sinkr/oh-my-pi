@@ -78,6 +78,7 @@ import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketpla
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
+import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
@@ -115,7 +116,12 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { loadRuntimeIdentity } from "./session/runtime-identity";
-import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
+import {
+	findSessionContinuation,
+	resolveResumableSession,
+	type SessionContinuation,
+	type SessionInfo,
+} from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -1221,13 +1227,18 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
  *
  * `nativeFlagOwnership: "preliminary"` is reserved for the startup parse,
  * before extensions establish whether a built-in-named flag belongs to them.
+ * `onSessionContinuation` hears when `--resume`, `--continue` or auto-resume
+ * opens a newer copy of the chosen session's conversation instead of its file.
  */
 export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	activeSettings: Settings = settings,
 	askToMoveSession: SessionPrompt = promptMoveSession,
-	options: { nativeFlagOwnership?: "preliminary" | "resolved" } = {},
+	options: {
+		nativeFlagOwnership?: "preliminary" | "resolved";
+		onSessionContinuation?: (continuation: SessionContinuation) => void;
+	} = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
 		if (parsed.noSession) {
@@ -1274,9 +1285,19 @@ export async function createSessionManager(
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
+			// The conversation may have gone on in a sibling file while another process held this one.
+			const continuation = await findSessionContinuation(sessionArg);
+			if (continuation) options.onSessionContinuation?.(continuation);
 			let manager: SessionManager;
 			try {
-				manager = await SessionManager.open(sessionArg, parsed.sessionDir, undefined, { throwIfMissing: true });
+				manager = await SessionManager.open(
+					continuation?.session.path ?? sessionArg,
+					parsed.sessionDir,
+					undefined,
+					{
+						throwIfMissing: true,
+					},
+				);
 			} catch (err) {
 				if (isEnoent(err) || isEnotdir(err)) {
 					throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
@@ -1290,10 +1311,13 @@ export async function createSessionManager(
 		if (!match) {
 			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
 		}
+		const continuation = await findSessionContinuation(match.session.path);
+		if (continuation) options.onSessionContinuation?.(continuation);
+		const session = continuation?.session ?? match.session;
 		if (match.scope === "local") {
 			const moveResult = await moveMissingCwdSessionIfNeeded(
 				sessionArg,
-				match.session,
+				session,
 				cwd,
 				parsed.sessionDir,
 				askToMoveSession,
@@ -1308,7 +1332,7 @@ export async function createSessionManager(
 		if (match.scope === "global") {
 			const moveResult = await moveMissingCwdSessionIfNeeded(
 				sessionArg,
-				match.session,
+				session,
 				cwd,
 				parsed.sessionDir,
 				askToMoveSession,
@@ -1320,10 +1344,13 @@ export async function createSessionManager(
 				return undefined;
 			}
 		}
-		return await forkIfMovedAway(await SessionManager.open(match.session.path, parsed.sessionDir), parsed.sessionDir);
+		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
 	}
 	if (parsed.continue) {
-		return await forkIfMovedAway(await SessionManager.continueRecent(cwd, parsed.sessionDir), parsed.sessionDir);
+		return await forkIfMovedAway(
+			await continueRecentSession(cwd, parsed.sessionDir, options.onSessionContinuation),
+			parsed.sessionDir,
+		);
 	}
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there
@@ -1337,7 +1364,7 @@ export async function createSessionManager(
 	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
 	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
 		const manager = await forkIfMovedAway(
-			await SessionManager.continueRecent(cwd, parsed.sessionDir),
+			await continueRecentSession(cwd, parsed.sessionDir, options.onSessionContinuation),
 			parsed.sessionDir,
 		);
 		if (manager.getEntries().length > 0) {
@@ -1347,6 +1374,27 @@ export async function createSessionManager(
 	}
 	// Default case (new session) returns undefined, SDK will create one
 	return undefined;
+}
+
+/**
+ * {@link SessionManager.continueRecent}, then the newest copy of that session's
+ * conversation when it went on in another file. The recent pick goes by file
+ * time, and a process holding the old file writes its exit record there last,
+ * so the old file looks newest after a restart; the continuation lookup
+ * compares real entries instead.
+ */
+async function continueRecentSession(
+	cwd: string,
+	sessionDir: string | undefined,
+	onSessionContinuation: ((continuation: SessionContinuation) => void) | undefined,
+): Promise<SessionManager> {
+	const recent = await SessionManager.continueRecent(cwd, sessionDir);
+	const recentFile = recent.getSessionFile();
+	const continuation = recentFile ? await findSessionContinuation(recentFile) : undefined;
+	if (!continuation) return recent;
+	onSessionContinuation?.(continuation);
+	await recent.close();
+	return await SessionManager.open(continuation.session.path, sessionDir);
 }
 
 /** Discover APPEND_SYSTEM.md file if no CLI append system prompt was provided */
@@ -2052,6 +2100,8 @@ export async function runRootCommand(
 		// fresh persisted OMP session before constructing the AgentSession.
 		let sessionManager: SessionManager | undefined;
 		let foreignSource: ForeignSessionSource | undefined;
+		// A resumed session whose conversation went on in another file resumes that file; say so.
+		const resumedContinuations: SessionContinuation[] = [];
 		try {
 			foreignSource = resolveForeignSessionSource(parsedArgs);
 			if (foreignSource) {
@@ -2119,7 +2169,10 @@ export async function runRootCommand(
 					cwd,
 					settingsInstance,
 					promptMoveSession,
-					{ nativeFlagOwnership: "preliminary" },
+					{
+						nativeFlagOwnership: "preliminary",
+						onSessionContinuation: continuation => resumedContinuations.push(continuation),
+					},
 				);
 			}
 		} catch (error: unknown) {
@@ -2205,11 +2258,14 @@ export async function runRootCommand(
 				stopStartupWatchdog();
 				process.exit(0);
 			}
+			const continuation = await findSessionContinuation(selected.path);
+			if (continuation) resumedContinuations.push(continuation);
+			const chosen = continuation?.session ?? selected;
 			try {
 				sessionManager = await forkIfMovedAway(
-					(await SessionManager.isFromRemovedWorktree(selected, cwd, parsedArgs.sessionDir))
-						? await openRelocatedSession(selected, cwd, parsedArgs.sessionDir)
-						: await SessionManager.open(selected.path),
+					(await SessionManager.isFromRemovedWorktree(chosen, cwd, parsedArgs.sessionDir))
+						? await openRelocatedSession(chosen, cwd, parsedArgs.sessionDir)
+						: await SessionManager.open(chosen.path),
 					parsedArgs.sessionDir,
 				);
 			} catch (error: unknown) {
@@ -2217,8 +2273,8 @@ export async function runRootCommand(
 				throw error;
 			}
 			const previousCwd = cwd;
-			// A relocated session's `selected.cwd` is the removed worktree: missing, so the launch cwd stays.
-			const recordedCwd = selected.cwd || sessionManager.getRecordedCwd() || sessionManager.getCwd();
+			// A relocated session's `chosen.cwd` is the removed worktree: missing, so the launch cwd stays.
+			const recordedCwd = chosen.cwd || sessionManager.getRecordedCwd() || sessionManager.getCwd();
 			const resumedProject = await switchToResumedProject(
 				recordedCwd,
 				settingsInstance,
@@ -2233,6 +2289,11 @@ export async function runRootCommand(
 			}
 		}
 
+		for (const continuation of resumedContinuations) {
+			const notice = formatSessionContinuationNotice(continuation);
+			if (isInteractive) notifs.push({ kind: "warn", message: notice });
+			else process.stderr.write(`${chalk.yellow(notice)}\n`);
+		}
 		if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource)) {
 			const pendingToolWarning = describePendingToolCalls(sessionManager.getBranch());
 			if (pendingToolWarning) {

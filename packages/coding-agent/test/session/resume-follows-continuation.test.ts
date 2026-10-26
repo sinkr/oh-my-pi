@@ -1,0 +1,305 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
+import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createSessionManager } from "@oh-my-pi/pi-coding-agent/main";
+import type { SessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+
+const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../../src/session/session-manager.ts");
+const EXIT_DIAGNOSTICS_MODULE = path.join(import.meta.dir, "../../src/session/exit-diagnostics.ts");
+
+const stubSettings = { get: () => undefined } as unknown as Settings;
+
+// Resume writes breadcrumbs and the custom-session-file registry under the agent dir.
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+let agentDir: TempDir | undefined;
+
+beforeEach(() => {
+	agentDir = TempDir.createSync("@omp-resume-continuation-agent-");
+	setAgentDir(agentDir.join("agent"));
+});
+
+afterEach(() => {
+	if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+	__resetDirsFromEnvForTests();
+	agentDir?.removeSync();
+	agentDir = undefined;
+});
+
+/**
+ * Another live omp process that resumed `sessionFile`. Commands, one per line:
+ * `append <text>` writes a user turn (the first write makes it the file's
+ * owner); `exit` records the `session_exit` marker every omp process appends
+ * on its way out, then closes.
+ */
+class Holder {
+	readonly #child: Bun.Subprocess<"pipe", "pipe", "pipe">;
+	readonly #stdout: { read(): Promise<{ done: boolean; value?: Uint8Array }> };
+	#buffered = "";
+
+	private constructor(child: Bun.Subprocess<"pipe", "pipe", "pipe">) {
+		this.#child = child;
+		this.#stdout = child.stdout.getReader();
+	}
+
+	static async resume(tempDir: TempDir, sessionFile: string): Promise<Holder> {
+		const script = tempDir.join("holder-process.ts");
+		await Bun.write(
+			script,
+			[
+				`import { SessionManager } from ${JSON.stringify(SESSION_MANAGER_MODULE)};`,
+				`import { SESSION_EXIT_CUSTOM_TYPE } from ${JSON.stringify(EXIT_DIAGNOSTICS_MODULE)};`,
+				"const manager = await SessionManager.open(process.argv[2], undefined, undefined, { suppressBreadcrumb: true });",
+				'const report = () => process.stdout.write(manager.getSessionFile() + "\\n");',
+				"report();",
+				"for await (const line of console) {",
+				'	if (line === "exit") {',
+				'		manager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, { reason: "dispose", kind: "normal", recordedAt: new Date().toISOString() });',
+				"		await manager.flush();",
+				"		break;",
+				"	}",
+				'	manager.appendMessage({ role: "user", content: line.slice("append ".length), timestamp: Date.now() });',
+				"	await manager.flush();",
+				"	report();",
+				"}",
+				"await manager.close();",
+			].join("\n"),
+		);
+		// The live `process.env`, so the holder meets this process's session-owner leases.
+		const holder = new Holder(
+			Bun.spawn([process.execPath, script, sessionFile], {
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				env: process.env,
+			}),
+		);
+		await holder.#nextLine();
+		return holder;
+	}
+
+	async #nextLine(): Promise<string> {
+		let newline = this.#buffered.indexOf("\n");
+		while (newline === -1) {
+			const { done, value } = await this.#stdout.read();
+			if (done) throw new Error(`The holder exited early: ${await new Response(this.#child.stderr).text()}`);
+			this.#buffered += new TextDecoder().decode(value);
+			newline = this.#buffered.indexOf("\n");
+		}
+		const line = this.#buffered.slice(0, newline);
+		this.#buffered = this.#buffered.slice(newline + 1);
+		return line;
+	}
+
+	/** Append one user turn; returns the file it was saved to. */
+	async append(text: string): Promise<string> {
+		this.#child.stdin.write(`append ${text}\n`);
+		this.#child.stdin.flush();
+		return this.#nextLine();
+	}
+
+	async exit(): Promise<void> {
+		this.#child.stdin.write("exit\n");
+		this.#child.stdin.end();
+		await this.#child.exited;
+	}
+}
+
+function resumeArgs(resume: string, sessionDir?: string): Args {
+	return {
+		resume,
+		sessionDir,
+		messages: [],
+		fileArgs: [],
+		unknownFlags: new Map(),
+		unrecognizedFlags: [],
+		invalidFlagValues: [],
+	};
+}
+
+function continueArgs(sessionDir: string): Args {
+	return {
+		continue: true,
+		sessionDir,
+		messages: [],
+		fileArgs: [],
+		unknownFlags: new Map(),
+		unrecognizedFlags: [],
+		invalidFlagValues: [],
+	};
+}
+
+function userTurn(content: string) {
+	return { role: "user" as const, content, timestamp: Date.now() };
+}
+
+function open(sessionFile: string, sessionDir: string): Promise<SessionManager> {
+	return SessionManager.open(sessionFile, sessionDir, new FileSessionStorage(), { suppressBreadcrumb: true });
+}
+
+async function userTurnsIn(sessionFile: string, sessionDir: string): Promise<unknown[]> {
+	const reader = await open(sessionFile, sessionDir);
+	return reader
+		.getEntries()
+		.flatMap(entry => (entry.type === "message" && entry.message.role === "user" ? [entry.message.content] : []));
+}
+
+async function createSession(tempDir: TempDir): Promise<string> {
+	const creator = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+	await creator.ensureOnDisk();
+	creator.appendMessage(userTurn("before"));
+	const sessionFile = creator.getSessionFile();
+	if (!sessionFile) throw new Error("Expected session file");
+	await creator.close();
+	return sessionFile;
+}
+
+/** Resume `sessionFile` while another process owns it and write one turn: the session moves to a sibling. */
+async function continueElsewhere(sessionFile: string, sessionDir: string, text: string): Promise<string> {
+	const manager = await open(sessionFile, sessionDir);
+	const notices: SessionPersistenceNotice[] = [];
+	manager.onPersistenceNotice(notice => notices.push(notice));
+	manager.appendMessage(userTurn(text));
+	await manager.close();
+	const sibling = manager.getSessionFile();
+	if (!sibling) throw new Error("Expected the session to save somewhere");
+	expect(notices).toEqual([{ reason: "open-elsewhere", from: sessionFile, to: sibling }]);
+	return sibling;
+}
+
+/**
+ * The scenario resume must recover from: a holder owns `original`, this process
+ * resumes it and continues in a sibling, then the holder exits last (so the old
+ * file's last write is its exit marker, after all of the sibling's turns).
+ */
+async function movedOffSession(tempDir: TempDir): Promise<{ original: string; continuation: string }> {
+	const original = await createSession(tempDir);
+	const holder = await Holder.resume(tempDir, original);
+	let continuation: string;
+	try {
+		await holder.append("holder turn");
+		// Entries are stamped by two processes' wall clocks at millisecond
+		// resolution; fake timers cannot reach the holder, so the short sleeps
+		// keep "which copy is newer" from being a same-millisecond tie.
+		await Bun.sleep(5);
+		continuation = await continueElsewhere(original, tempDir.path(), "continued turn");
+		await Bun.sleep(5);
+	} finally {
+		await holder.exit();
+	}
+	return { original, continuation };
+}
+
+describe("--resume of a session that continued in a sibling file", () => {
+	// `continue`: the old file holds the holder's exit record, so it is the most recently written file.
+	for (const by of ["path", "id", "continue"] as const) {
+		it(`resumes the continuation, not the superseded file, when resumed by ${by}`, async () => {
+			using tempDir = TempDir.createSync("@omp-resume-continuation-");
+			const { original, continuation } = await movedOffSession(tempDir);
+			const sessionId = await readSessionHeaderId(original);
+			if (!sessionId) throw new Error("Expected a session id");
+			const args =
+				by === "path"
+					? resumeArgs(original)
+					: by === "id"
+						? resumeArgs(sessionId, tempDir.path())
+						: continueArgs(tempDir.path());
+
+			const followed: SessionContinuation[] = [];
+			const manager = await createSessionManager(args, tempDir.path(), stubSettings, async () => "unavailable", {
+				onSessionContinuation: c => followed.push(c),
+			});
+			if (!manager) throw new Error("Expected a resumed session");
+			try {
+				expect(manager.getSessionFile()).toBe(continuation);
+				expect(followed.map(c => ({ from: c.from, to: c.session.path, copies: c.copies }))).toEqual([
+					{ from: original, to: continuation, copies: 2 },
+				]);
+			} finally {
+				await manager.close();
+			}
+			expect(await userTurnsIn(continuation, tempDir.path())).toEqual(["before", "holder turn", "continued turn"]);
+		}, 30_000);
+	}
+
+	it("moves off again when the continuation is itself open in another live process", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const { original, continuation } = await movedOffSession(tempDir);
+		const continuationId = await readSessionHeaderId(continuation);
+		const holder = await Holder.resume(tempDir, continuation);
+		try {
+			await holder.append("holder on the continuation");
+			const manager = await createSessionManager(
+				resumeArgs(original),
+				tempDir.path(),
+				stubSettings,
+				async () => "unavailable",
+			);
+			if (!manager) throw new Error("Expected a resumed session");
+			const notices: SessionPersistenceNotice[] = [];
+			manager.onPersistenceNotice(notice => notices.push(notice));
+			manager.appendMessage(userTurn("after resume"));
+			await manager.flush();
+			const savedTo = manager.getSessionFile();
+			if (!savedTo) throw new Error("Expected the resumed session to save somewhere");
+			expect(notices).toEqual([{ reason: "open-elsewhere", from: continuation, to: savedTo }]);
+			expect(manager.getHeader()?.continuationOf).toBe(continuationId);
+			await manager.close();
+			expect(await userTurnsIn(savedTo, tempDir.path())).toEqual([
+				"before",
+				"holder turn",
+				"continued turn",
+				"holder on the continuation",
+				"after resume",
+			]);
+		} finally {
+			await holder.exit();
+		}
+		expect(await userTurnsIn(continuation, tempDir.path())).not.toContain("after resume");
+	}, 30_000);
+
+	it("keeps the asked-for file when its own conversation moved on after the continuation", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const holder = await Holder.resume(tempDir, original);
+		try {
+			await holder.append("holder turn");
+			await Bun.sleep(5);
+			await continueElsewhere(original, tempDir.path(), "continued turn");
+			await Bun.sleep(5);
+			await holder.append("holder kept going");
+		} finally {
+			await holder.exit();
+		}
+
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(original);
+		} finally {
+			await manager?.close();
+		}
+	}, 30_000);
+
+	it("does not follow a deliberate fork", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const forker = await open(original, tempDir.path());
+		const forked = await forker.fork();
+		forker.appendMessage(userTurn("on the fork"));
+		await forker.close();
+		if (!forked) throw new Error("Expected a fork");
+		expect(forked.newSessionFile).not.toBe(original);
+
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(original);
+		} finally {
+			await manager?.close();
+		}
+	}, 30_000);
+});
