@@ -548,10 +548,15 @@ mod tests {
 				})
 				.collect();
 			let (writer, mut renderer) = renderer(LOCAL_DRAIN_CALLBACKS, reserve);
+			let total = arrivals.len() * FRAME;
+			// Last packet arrives by ~5.04 s; one extra second of callbacks is
+			// ample for the reserve and any rebuffer, and keeps a renderer that
+			// strands the tail failing instead of spinning forever.
+			let deadline = arrivals[arrivals.len() - 1] / PERIOD_US + 50;
 			let mut delivered = 0;
 			let mut played = 0;
 			let mut output = [0.0; FRAME];
-			for callback in 0.. {
+			for callback in 0..=deadline {
 				let now = callback * PERIOD_US;
 				while delivered < arrivals.len() && arrivals[delivered] <= now {
 					writer.write(&[0.5; FRAME]).expect("stream is open");
@@ -559,14 +564,18 @@ mod tests {
 				}
 				renderer.fill(&mut output);
 				let audible = output.iter().filter(|sample| **sample != 0.0).count();
-				if played > 0 && played < arrivals.len() * FRAME {
+				if played > 0 && played < total {
 					assert_eq!(audible, FRAME, "dropout mid-utterance at phase {phase} µs, {now} µs");
 				}
 				played += audible;
-				if played == arrivals.len() * FRAME {
+				if played == total {
 					break;
 				}
 			}
+			assert_eq!(
+				played, total,
+				"utterance not fully played by callback {deadline} at phase {phase} µs"
+			);
 		}
 	}
 
