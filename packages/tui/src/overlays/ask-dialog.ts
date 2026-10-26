@@ -1030,7 +1030,7 @@ export class AskDialogComponent implements Component {
 	 * Pointer actions: a tab click switches to it; a click on an answer row is
 	 * Enter on it (Space for a multi-select option, so it toggles; its
 	 * double-click `activate` is Enter); the action bar's Submit, Note and Skip
-	 * run exactly what Enter, `n` and Esc run on the highlighted row; Hide/Show
+	 * run what Enter (see {@link #pressEnter} for Other), `n` and Esc run on the highlighted row; Hide/Show
 	 * collapse and restore the dialog.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
@@ -1079,7 +1079,13 @@ export class AskDialogComponent implements Component {
 		this.#requestRender();
 	}
 
-	/** Enter: submit on the Review tab, else commit the highlighted row. */
+	/**
+	 * The action bar's Submit/Next: submit on the Review tab, else commit the highlighted row —
+	 * except Other, whose row (click or Enter) already opens the editor. Reopening it here trapped a
+	 * cancelled Other: Next kept bringing the editor back instead of moving on. With a Review tab to
+	 * land on, Next keeps any custom answer and moves on; a lone single-select question has nowhere
+	 * to go but submitting nothing, so it still asks.
+	 */
 	#pressEnter(): void {
 		this.#countdown?.reset();
 		if (this.#isSubmitTab()) {
@@ -1089,6 +1095,10 @@ export class AskDialogComponent implements Component {
 		const active = this.#activeQuestionState();
 		const rowItem = active ? this.#questionRows(active.question)[active.state.cursorIndex] : undefined;
 		if (!active || !rowItem) return;
+		if (rowItem.kind === "other" && this.#hasSubmitTab()) {
+			this.#advanceAfterQuestion(active.state.customInput === undefined ? undefined : rowItem.key);
+			return;
+		}
 		this.#commitRow(active.question, active.state, rowItem, true);
 		this.#requestRender();
 	}
