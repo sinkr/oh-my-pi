@@ -512,7 +512,7 @@ async function runPrintModeCore(
 			clearTimeout(deadlineTimer);
 		}
 		if (asyncWaitExpired) {
-			writeStderrLine("Error: --max-time reached while waiting for background jobs; they were cancelled.");
+			writeStderrLine("Error: --max-time reached before background work settled; any running jobs were cancelled.");
 		}
 	}
 

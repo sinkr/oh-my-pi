@@ -6,10 +6,18 @@
  * start further jobs), and the text output is the answer of the last turn.
  */
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgAsyncPrintWake } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function assistant(text: string): AssistantMessage {
@@ -201,7 +209,7 @@ describe("print mode async-result wake", () => {
 		// no advisor catch-up: the jobs stay live until dispose cancels them
 		expect(events).toEqual(["prompt:go", "advisor-drain", "dispose(pending=1)"]);
 		expect(lines.join("")).toBe("");
-		expect(stderr.join("")).toContain("--max-time reached while waiting for background jobs");
+		expect(stderr.join("")).toContain("--max-time reached before background work settled");
 	});
 
 	test("with async.printWake, a deadline already past does not deliver work that finished meanwhile", async () => {
@@ -240,5 +248,91 @@ describe("print mode async-result wake", () => {
 
 		expect(code).toBe(1);
 		expect(events).toEqual(["prompt:go", "advisor-drain", "dispose(pending=1)"]);
+	});
+});
+
+/** A real AgentSession and AsyncJobManager: the first turn starts a background job and answers STARTED. */
+describe("print mode async-result wake with a real session", () => {
+	const authStorages: AuthStorage[] = [];
+
+	afterEach(() => {
+		for (const authStorage of authStorages.splice(0)) authStorage.close();
+		AsyncJobManager.resetForTests();
+	});
+
+	async function realSession(printWake: boolean) {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		// The job finishes only once the first run is idle, so only the print-mode wait can deliver it.
+		const firstRunIdle = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			handler: context => {
+				const resultDelivered = context.messages.some(message =>
+					typeof message.content === "string"
+						? message.content.includes("JOB_DONE_42")
+						: message.content.some(part => part.type === "text" && part.text.includes("JOB_DONE_42")),
+				);
+				if (resultDelivered) return { content: ["JOB_DONE_42"] };
+				manager.register(
+					"bash",
+					"echo JOB_DONE_42",
+					async () => {
+						await firstRunIdle.promise;
+						return "JOB_DONE_42";
+					},
+					{ id: "print-job", ownerId: "Main" },
+				);
+				return { content: ["STARTED"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const settings = Settings.isolated();
+		if (printWake) cfgAsyncPrintWake.override(settings, true);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			asyncJobManager: manager,
+		});
+		// Without the wake the job must still be running at dispose: keep its gate shut.
+		if (printWake) {
+			const waitForIdle = session.waitForIdle.bind(session);
+			vi.spyOn(session, "waitForIdle").mockImplementation(async () => {
+				await waitForIdle();
+				firstRunIdle.resolve();
+			});
+		}
+		return { session, mock, manager };
+	}
+
+	test("by default prints the first answer and cancels the job at dispose", async () => {
+		const { lines } = captureStdout();
+		const { session, mock, manager } = await realSession(false);
+
+		expect(await runPrintMode(session, { mode: "text", messages: ["go"] })).toBe(0);
+
+		expect(lines.join("")).toBe("STARTED\n");
+		expect(mock.calls).toHaveLength(1);
+		expect(manager.getJob("print-job")?.status).toBe("cancelled");
+	});
+
+	test("with async.printWake, the job result wakes the same session and its answer is printed", async () => {
+		const { lines } = captureStdout();
+		const { session, mock } = await realSession(true);
+
+		expect(await runPrintMode(session, { mode: "text", messages: ["go"] })).toBe(0);
+
+		expect(lines.join("")).toBe("JOB_DONE_42\n");
+		expect(mock.calls).toHaveLength(2);
 	});
 });
