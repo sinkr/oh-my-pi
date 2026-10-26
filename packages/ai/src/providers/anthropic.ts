@@ -2558,21 +2558,6 @@ const streamAnthropicOnce = (
 						if (!extraBetas.includes(beta)) extraBetas.push(beta);
 					}
 				}
-				// `context_management.clear_thinking_20251015` requires this beta. OAuth
-				// requests carry it in `claudeCodeAgentBetaDefaults`; API-key requests
-				// need it added explicitly so the field is honored instead of rejected
-				// (#3288). Provider deployment contracts that cannot deliver or accept
-				// context management disable it through model compatibility policy.
-				if (
-					model.reasoning &&
-					options?.thinkingEnabled &&
-					model.compat.supportsContextManagement !== false &&
-					!(compactionSupported && options?.anthropicCompaction) &&
-					!isVertexRawPredictUrl(baseUrl) &&
-					!extraBetas.includes(contextManagementBeta)
-				) {
-					extraBetas.push(contextManagementBeta);
-				}
 				// Vertex rawPredict takes betas in the body; other routes use the
 				// header. Legacy encrypted replay keeps its original beta.
 				if (compactionSupported && !isVertexRawPredictUrl(baseUrl)) {
@@ -3067,6 +3052,27 @@ const streamAnthropicOnce = (
 								? perRequestHeaders
 								: (clientDefaultHeaders ?? {}),
 							THINKING_BINDING_CONTROLS_BETA,
+						),
+					};
+				}
+				// `context_management.clear_thinking_20251015` requires its beta, so the
+				// beta rides exactly with the finalized body's edit (#3288). The edit
+				// follows the built `thinking`, which a thinking-off request still sends
+				// as adaptive when prefix binding re-adds it; `thinkingEnabled` is no
+				// proxy for it. OAuth defaults already carry the beta; the merge dedupes.
+				if (
+					!usingFallbackCredit &&
+					options?.client === undefined &&
+					!isVertexRawPredictUrl(baseUrl) &&
+					params.context_management?.edits.some(edit => edit.type === "clear_thinking_20251015")
+				) {
+					perRequestHeaders = {
+						...perRequestHeaders,
+						...mergeAnthropicBetaHeader(
+							perRequestHeaders?.["anthropic-beta"] !== undefined
+								? perRequestHeaders
+								: (clientDefaultHeaders ?? {}),
+							contextManagementBeta,
 						),
 					};
 				}
