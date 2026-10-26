@@ -571,6 +571,8 @@ export interface SessionStats {
 	};
 	/** Concrete provider-routed model ids with finalized turn counts. */
 	routedModels?: Record<string, number>;
+	/** Failed edits by the engine's `errorKind`. */
+	editRejections?: Record<string, number>;
 	contextUsage?: ContextUsage;
 }
 
