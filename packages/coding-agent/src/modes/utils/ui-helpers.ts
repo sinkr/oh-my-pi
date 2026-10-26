@@ -1364,9 +1364,19 @@ export class UiHelpers {
 		const queuedMessages = [...(this.ctx.compactionQueuedMessages as CompactionQueuedMessage[])];
 		this.ctx.compactionQueuedMessages = [] as CompactionQueuedMessage[];
 		this.ctx.updatePendingMessagesDisplay();
+		// On failure the batch goes back to the compaction queue, so the input this flush queued
+		// must leave the session queue; what was queued before it (an extension's message, input
+		// sent while compacting through other paths) stays queued, and so does input queued after
+		// the flush finished delivering (the first prompt can fail after that, asynchronously).
+		const queuedBeforeFlush = this.ctx.session.queuedMessageMark();
+		let queuedByFlush: ReadonlySet<AgentMessage> | undefined;
+		let restored = false;
 
 		const restoreQueue = (error: unknown) => {
-			this.ctx.session.clearQueue();
+			// A `rest` delivery and the fire-and-forget first prompt can both fail; restore once.
+			if (restored) return;
+			restored = true;
+			this.ctx.session.dropUserInputQueuedSince(queuedBeforeFlush, queuedByFlush);
 			this.ctx.compactionQueuedMessages = queuedMessages;
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showError(
@@ -1444,7 +1454,14 @@ export class UiHelpers {
 
 			for (const message of rest) {
 				await this.#deliverQueuedMessage(message);
+				// The first prompt failed while the rest was still being delivered: the whole batch is
+				// back in the compaction queue, so take back what was delivered since and stop.
+				if (restored) {
+					this.ctx.session.dropUserInputQueuedSince(queuedBeforeFlush);
+					return;
+				}
 			}
+			queuedByFlush = this.ctx.session.queuedMessageMark();
 			this.ctx.updatePendingMessagesDisplay();
 			// The dispatch above bypasses `getUserInput`, so nothing would schedule
 			// the next loop iteration for a prompt queued during compaction.
