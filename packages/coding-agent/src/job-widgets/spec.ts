@@ -406,7 +406,12 @@ function dryRun(
 	const unprovenPercentages = new Map<string, Set<number>>();
 	spec.rules.forEach((rule, index) => {
 		for (const { field, text, count } of ruleFields(rule)) {
-			if (text || count) continue;
+			if (text) continue;
+			// A match count is never a percentage, whether or not the samples hit it.
+			if (count) {
+				percentages.set(field, false);
+				continue;
+			}
 			const feeds = unprovenPercentages.get(field) ?? new Set<number>();
 			feeds.add(index);
 			unprovenPercentages.set(field, feeds);
@@ -427,7 +432,6 @@ function dryRun(
 			if (ruleReadsSource(rule.from, sample.id)) {
 				matches += 1;
 				if (sample.id === TOOLS_SOURCE_ID && line.startsWith(TOOL_CALL_MARK)) marked.add(index);
-				if (rule.count !== undefined) percentages.set(rule.count, false);
 				names.forEach((field, position) => {
 					const at = offset + position * 2;
 					if (field === rule.key || field === rule.text || hits.spans[at] < 0) return;

@@ -776,6 +776,8 @@ describe("job widget spec validation", () => {
 					blocks: [{ ...percent.blocks[0], field: "items" }],
 				},
 				{ ...percent, rules: [{ ...percent.rules[0], count: "pct" }] },
+				// A count feed the samples never hit still disqualifies the field.
+				{ ...percent, rules: [...percent.rules, { from: "out", match: "tick", count: "pct" }] },
 				{ ...percent, blocks: [{ ...percent.blocks[0], total: 200 }] },
 				{ ...percent, blocks: [{ kind: "spark", field: "pct", label: "progress", target: 100 }] },
 			]) {
