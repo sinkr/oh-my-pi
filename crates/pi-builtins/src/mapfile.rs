@@ -2,6 +2,7 @@ use std::io::Write;
 
 use brush_core::{ErrorKind, ExecutionExitCode, ExecutionResult, builtins, env, escape, variables};
 use clap::Parser;
+use tokio_util::sync::CancellationToken;
 
 use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
 
@@ -217,9 +218,9 @@ impl MapFileCommand {
 }
 
 /// Yields to the runtime, then fails with `Interrupted` if `cancel` fired.
-async fn yield_then_check(cancel: Option<&tokio_util::sync::CancellationToken>) -> Result<(), brush_core::Error> {
+async fn yield_then_check(cancel: Option<&CancellationToken>) -> Result<(), brush_core::Error> {
 	tokio::task::yield_now().await;
-	if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+	if cancel.is_some_and(CancellationToken::is_cancelled) {
 		return Err(ErrorKind::Interrupted.into());
 	}
 	Ok(())

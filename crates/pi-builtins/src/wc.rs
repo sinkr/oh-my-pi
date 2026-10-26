@@ -51,7 +51,7 @@ mod count_fast {
 		// improve throughput from pipe
 		let _ = rustix::pipe::fcntl_setpipe_size(fd, MAX_ROOTLESS_PIPE_SIZE);
 		loop {
-			if !wait_readable(fd, is_cancelled) {
+			if pi_vfs::wait_readable(fd.as_fd(), is_cancelled).is_err() {
 				return Err(byte_count);
 			}
 			match splice(fd, &pipe_wr, MAX_ROOTLESS_PIPE_SIZE) {
@@ -70,24 +70,6 @@ mod count_fast {
 		Ok(byte_count)
 	}
 
-	/// Waits until `fd` has data or reached EOF; `false` once `is_cancelled`.
-	#[cfg(any(target_os = "linux", target_os = "android"))]
-	fn wait_readable(fd: &impl AsFd, is_cancelled: &dyn Fn() -> bool) -> bool {
-		let fd = fd.as_fd().as_raw_fd();
-		loop {
-			if is_cancelled() {
-				return false;
-			}
-			let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-			// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from the
-			// caller's live handle.
-			let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
-			if ready != 0 && !(ready < 0 && io::Error::last_os_error().kind() == ErrorKind::Interrupted) {
-				return true;
-			}
-		}
-	}
-	
 	/// In the special case where we only need to count the number of bytes. There
 	/// are several optimizations we can do:
 	///   1. On Unix,  we can simply `stat` the file if it is regular.

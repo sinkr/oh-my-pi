@@ -625,18 +625,17 @@ fn fifo_opens_through_a_cancellable_view_wait_for_a_writer_and_observe_the_token
 
 /// A cancel releases a waiting FIFO open by opening the FIFO for writing,
 /// which this process may not do to a FIFO it can only read. Such an open
-/// must still wait for a writer and hand back a blocking descriptor that
-/// reads all of its data, and on cancel it must return without leaving a
-/// reader that would swallow a later writer's data.
-#[cfg(target_os = "linux")]
+/// must still return as a blocking open does: as soon as a writer connects,
+/// before it writes (a producer may wait for the consumer to act first). It
+/// hands back a blocking descriptor that reads all of the writer's data, and
+/// a cancel still ends the open.
+#[cfg(unix)]
 #[test]
-fn fifo_this_process_cannot_write_still_waits_and_observes_the_token() {
+fn fifo_this_process_cannot_write_still_opens_on_connect_and_observes_the_token() {
 	use std::{
 		io::Write,
-		os::unix::{
-			ffi::OsStrExt,
-			fs::{OpenOptionsExt, PermissionsExt},
-		},
+		os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+		sync::mpsc,
 	};
 	let set_mode = |path: &std::path::Path, mode: u32| {
 		std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -659,8 +658,10 @@ fn fifo_this_process_cannot_write_still_waits_and_observes_the_token() {
 	let token = CancellationToken::new();
 	let scoped = BlockingFs::native().with_cancellation(token.clone());
 
-	// The writer pauses between two writes, so a descriptor left
+	// The writer connects, then writes only once the reader's open has
+	// returned, and pauses between two writes, so a descriptor left
 	// non-blocking fails the second read with `WouldBlock`.
+	let (opened_tx, opened_rx) = mpsc::channel::<()>();
 	let writer_path = fifo.clone();
 	let writer = std::thread::spawn(move || {
 		std::thread::sleep(Duration::from_millis(150));
@@ -670,15 +671,19 @@ fn fifo_this_process_cannot_write_still_waits_and_observes_the_token() {
 			.open(&writer_path)
 			.unwrap();
 		set_mode(&writer_path, 0o400);
+		let waited = opened_rx.recv_timeout(Duration::from_secs(2));
 		file.write_all(b"h").unwrap();
 		std::thread::sleep(Duration::from_millis(200));
 		file.write_all(b"i").unwrap();
+		waited
 	});
 	let opened = scoped.open(&fifo).unwrap();
+	let _ = opened_tx.send(());
 	let mut descriptor = opened.native().unwrap();
 	let mut text = String::new();
 	descriptor.read_to_string(&mut text).unwrap();
-	writer.join().unwrap();
+	let waited = writer.join().unwrap();
+	assert!(waited.is_ok(), "the open waited for the writer's first byte, not its connection");
 	assert_eq!(text, "hi");
 	drop(opened);
 
@@ -691,21 +696,44 @@ fn fifo_this_process_cannot_write_still_waits_and_observes_the_token() {
 	canceller.join().unwrap();
 	assert!(is_cancelled(&err), "{err}");
 	assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
-	set_mode(&fifo, 0o600);
-	let late_writer = std::fs::OpenOptions::new()
-		.write(true)
-		.custom_flags(libc::O_NONBLOCK)
-		.open(&fifo)
-		.unwrap_err();
-	assert_eq!(late_writer.raw_os_error(), Some(libc::ENXIO), "a reader was left open");
+}
+
+/// A FIFO opened non-blocking (`dd iflag=nonblock`) must read without
+/// waiting. On Linux such a FIFO with no writer reports no readiness, so a
+/// read that first waited for readiness blocked until the token fired
+/// instead of returning EOF at once.
+#[cfg(unix)]
+#[test]
+fn fifo_opened_non_blocking_reads_without_waiting() {
+	let dir = TempDir::new("fifo-nonblock");
+	let fifo = dir.0.join("fifo");
+	BlockingFs::native()
+		.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+		.unwrap();
+	let token = CancellationToken::new();
+	let scoped = BlockingFs::native().with_cancellation(token.clone());
+	let mut options = OpenOptions::new();
+	options.read(true).custom_flags(libc::O_NONBLOCK);
+	let mut file = scoped.open_with(&fifo, &options).unwrap();
+
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_secs(2));
+		token.cancel();
+	});
+	let started = std::time::Instant::now();
+	let read = file.read(&mut [0; 8]);
+	let elapsed = started.elapsed();
+	assert_eq!(read.ok(), Some(0), "EOF at once");
+	assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+	canceller.join().unwrap();
 }
 
 /// A write-only open of a FIFO (`echo hi > f`) waits for a reader. Through a
 /// cancellable view it still hands the reader its data, and with no reader it
-/// fails once the token fires, leaving no writer behind: a later reader reads
-/// EOF at once instead of waiting. Mode 0600 takes the release path (a
-/// non-blocking read open releases the wait); mode 0200, which this process
-/// may not read, retries a non-blocking write open instead.
+/// fails once the token fires. With mode 0600 a non-blocking read open
+/// releases the wait, so no writer is left behind: a later reader reads EOF at
+/// once instead of waiting. Mode 0200, which this process may not read,
+/// cannot be released, and the open still ends.
 #[cfg(unix)]
 #[test]
 fn fifo_write_opens_through_a_cancellable_view_wait_for_a_reader_and_observe_the_token() {
@@ -761,13 +789,14 @@ fn fifo_write_opens_through_a_cancellable_view_wait_for_a_reader_and_observe_the
 		canceller.join().unwrap();
 		assert!(is_cancelled(&err), "mode {mode:o}: {err}");
 		assert!(started.elapsed() < Duration::from_secs(2), "mode {mode:o}: {:?}", started.elapsed());
-		std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o600)).unwrap();
-		let mut late_reader = std::fs::OpenOptions::new()
-			.read(true)
-			.custom_flags(libc::O_NONBLOCK)
-			.open(&fifo)
-			.unwrap();
-		let read = late_reader.read(&mut [0; 8]);
-		assert_eq!(read.ok(), Some(0), "mode {mode:o}: a writer was left open");
+		if mode == 0o600 {
+			let mut late_reader = std::fs::OpenOptions::new()
+				.read(true)
+				.custom_flags(libc::O_NONBLOCK)
+				.open(&fifo)
+				.unwrap();
+			let read = late_reader.read(&mut [0; 8]);
+			assert_eq!(read.ok(), Some(0), "a writer was left open");
+		}
 	}
 }

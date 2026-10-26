@@ -116,9 +116,38 @@ impl HostCancel {
 	}
 }
 
-/// How long one readiness wait lasts before the token is checked again.
+/// How long one readiness wait lasts before cancellation is checked again.
 #[cfg(unix)]
-pub(crate) const POLL_SLICE_MS: i32 = 100;
+pub const POLL_SLICE_MS: i32 = 100;
+
+/// Waits until a read of `fd` would not block, checking `is_cancelled` every
+/// [`POLL_SLICE_MS`]; fails with [`crate::cancelled`] once it is.
+#[cfg(unix)]
+pub fn wait_readable(
+	fd: std::os::fd::BorrowedFd<'_>,
+	is_cancelled: impl Fn() -> bool,
+) -> io::Result<()> {
+	use std::os::fd::AsRawFd;
+	let fd = fd.as_raw_fd();
+	loop {
+		if is_cancelled() {
+			return Err(crate::cancelled());
+		}
+		let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+		// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from a live
+		// descriptor for the whole call.
+		let ready = unsafe { libc::poll(&mut pfd, 1, POLL_SLICE_MS) };
+		if ready > 0 {
+			return Ok(());
+		}
+		if ready < 0 {
+			let error = io::Error::last_os_error();
+			if error.kind() != io::ErrorKind::Interrupted {
+				return Err(error);
+			}
+		}
+	}
+}
 
 /// Bytes one [`HostReader::read_to_end`] step reads into, at most; the
 /// buffer's spare capacity is zeroed one step at a time, never all at once.
@@ -141,26 +170,18 @@ impl HostReader<'_> {
 	}
 
 	/// Waits until a read would not block, checking the token between slices.
+	/// A descriptor in non-blocking mode (`dd iflag=nonblock`) does not wait:
+	/// its read must return at once, and on Linux a FIFO with no writer
+	/// reports no readiness although such a read returns EOF.
 	#[cfg(unix)]
 	fn wait_readable(&self) -> io::Result<()> {
-		use std::os::fd::AsRawFd;
-		let fd = self.file.as_raw_fd();
-		loop {
-			self.check()?;
-			let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-			// SAFETY: one `pollfd` valid for the call; `fd` belongs to the
-			// file borrowed for this reader's lifetime.
-			let ready = unsafe { libc::poll(&mut pfd, 1, POLL_SLICE_MS) };
-			if ready > 0 {
-				return Ok(());
-			}
-			if ready < 0 {
-				let error = io::Error::last_os_error();
-				if error.kind() != io::ErrorKind::Interrupted {
-					return Err(error);
-				}
-			}
+		use std::os::fd::{AsFd, AsRawFd};
+		// SAFETY: the descriptor belongs to the file borrowed for this call.
+		let flags = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_GETFL) };
+		if flags >= 0 && flags & libc::O_NONBLOCK != 0 {
+			return Ok(());
 		}
+		wait_readable(self.file.as_fd(), || self.cancel.token.is_cancelled())
 	}
 
 	/// Bytes left between the file position and the end, when the file has a

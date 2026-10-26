@@ -313,10 +313,10 @@ fn poll_slice() -> std::time::Duration {
 
 /// One end of a FIFO being opened on a helper thread, so that the wait for
 /// the other end observes a token and, for async callers, holds no runtime
-/// worker.
+/// worker. The helper runs the ordinary blocking open, so the open returns
+/// exactly when it would without a token: once the other end connects.
 ///
-/// When this process may open the other end, the helper runs the ordinary
-/// blocking open, exactly as without a token. Once the token fires, a
+/// Once the token fires, when this process may open the other end, a
 /// non-blocking open of the other end connects to the waiting open and closes
 /// at once; it is tried again while the helper has not reached `open` yet
 /// (`ENXIO`). The helper's descriptor is closed, and the open fails with
@@ -324,8 +324,12 @@ fn poll_slice() -> std::time::Duration {
 /// are released too: a reader reads EOF, a writer's first write fails with
 /// `EPIPE`.
 ///
-/// Otherwise no release is possible, and the helper runs
-/// [`open_fifo_unreleasable`], which checks the token itself.
+/// When it may not (a FIFO this process can read but not write, or the
+/// reverse), or the release fails, the open still fails with
+/// [`crate::cancelled`], but the helper stays blocked in `open` until the
+/// other end arrives. It then takes that connection and closes it: the next
+/// writer's first write fails with `EPIPE`, the next reader reads EOF. Without
+/// a token the whole command would have stayed blocked there instead.
 #[cfg(unix)]
 struct FifoOpening {
 	path:       PathBuf,
@@ -348,24 +352,24 @@ impl FifoOpening {
 		if token.is_cancelled() {
 			return Err(crate::cancelled());
 		}
-		let releasable = may_access(path, end.release_access());
 		let (sender, opened) = std::sync::mpsc::sync_channel(1);
 		let done = Arc::new(tokio::sync::Notify::new());
-		let (scope, owned_path, options, token, notify) =
-			(scope.clone(), path.to_path_buf(), options.clone(), token.clone(), done.clone());
+		let (scope, owned_path, options, notify) =
+			(scope.clone(), path.to_path_buf(), options.clone(), done.clone());
 		std::thread::Builder::new()
 			.name("pi-vfs-fifo-open".to_owned())
 			.spawn(move || {
-				let result = if releasable {
-					native_open(&scope, &owned_path, &options)
-				} else {
-					open_fifo_unreleasable(&scope, &owned_path, &options, end, &token)
-				};
 				// After a cancellation nobody receives; the file then closes here.
-				let _ = sender.send(result);
+				let _ = sender.send(native_open(&scope, &owned_path, &options));
 				notify.notify_one();
 			})?;
-		Ok(Self { path: path.to_path_buf(), end, releasable, opened, done })
+		Ok(Self {
+			path: path.to_path_buf(),
+			end,
+			releasable: may_access(path, end.release_access()),
+			opened,
+			done,
+		})
 	}
 
 	/// Waits for the open on this thread, in poll slices, checking `token`.
@@ -391,48 +395,27 @@ impl FifoOpening {
 		match self.opened.try_recv() {
 			Ok(result) => result,
 			Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(helper_exited()),
-			Err(std::sync::mpsc::TryRecvError::Empty)
-				if self.releasable || !self.helper_sees_token() =>
-			{
-				self.cancel()
-			},
-			Err(std::sync::mpsc::TryRecvError::Empty) => {
-				// The helper checks the token itself and ends within a slice.
-				self.done.notified().await;
-				Err(crate::cancelled())
-			},
+			Err(std::sync::mpsc::TryRecvError::Empty) => self.cancel(),
 		}
 	}
 
-	/// Whether an unreleasable helper checks the token itself; see
-	/// [`open_fifo_unreleasable`].
-	const fn helper_sees_token(&self) -> bool {
-		matches!(self.end, FifoEnd::Write) || cfg!(target_os = "linux")
-	}
-
-	/// Ends a cancelled open: releases the helper's open; when that is not
-	/// possible, waits for the helper, which sees the token within a slice, or
-	/// leaves a helper that cannot see it blocked in `open`, as an open
-	/// without a token would be. The release takes microseconds unless the
-	/// helper has not reached `open` yet, and is bounded by
-	/// [`FIFO_RELEASE_ATTEMPTS`] slices.
+	/// Ends a cancelled open: releases the helper's open when this process may
+	/// open the other end. The release takes microseconds unless the helper
+	/// has not reached `open` yet, and is bounded by [`FIFO_RELEASE_ATTEMPTS`]
+	/// slices.
 	fn cancel(self) -> io::Result<File> {
 		use std::sync::mpsc::RecvTimeoutError;
-		if !self.releasable {
-			if self.helper_sees_token() {
-				let _ = self.opened.recv();
-			}
-			return Err(crate::cancelled());
-		}
-		let release = self.end.release_options();
-		for _ in 0..FIFO_RELEASE_ATTEMPTS {
-			if let Err(err) = native::open(&self.path, &release)
-				&& err.raw_os_error() != Some(libc::ENXIO)
-			{
-				break;
-			}
-			if !matches!(self.opened.recv_timeout(poll_slice()), Err(RecvTimeoutError::Timeout)) {
-				break;
+		if self.releasable {
+			let release = self.end.release_options();
+			for _ in 0..FIFO_RELEASE_ATTEMPTS {
+				if let Err(err) = native::open(&self.path, &release)
+					&& err.raw_os_error() != Some(libc::ENXIO)
+				{
+					break;
+				}
+				if !matches!(self.opened.recv_timeout(poll_slice()), Err(RecvTimeoutError::Timeout)) {
+					break;
+				}
 			}
 		}
 		Err(crate::cancelled())
@@ -454,95 +437,6 @@ fn may_access(path: &Path, mode: libc::c_int) -> bool {
 	};
 	// SAFETY: `path` is a NUL-terminated string alive for the call.
 	unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), mode, libc::AT_EACCESS) == 0 }
-}
-
-/// Opens one end of a FIFO when this process may not open the other end, so
-/// no release is possible and the open must not block for good. It checks
-/// `token` every poll slice:
-/// - A writer opens non-blocking, which fails with `ENXIO` while no reader is
-///   there, and tries again every slice.
-/// - A reader opens non-blocking and, on Linux, polls until a writer has
-///   written or closed: Linux reports nothing to such a reader until a writer
-///   has connected. Elsewhere a reader opens blocking, as without a token.
-///
-/// The descriptor is then made blocking again.
-#[cfg(unix)]
-fn open_fifo_unreleasable(
-	scope: &Scope,
-	path: &Path,
-	options: &OpenOptions,
-	end: FifoEnd,
-	token: &CancellationToken,
-) -> io::Result<File> {
-	let mut nonblocking = options.clone();
-	nonblocking.custom_flags(options.get_custom_flags() | libc::O_NONBLOCK);
-	match end {
-		FifoEnd::Write => loop {
-			if token.is_cancelled() {
-				return Err(crate::cancelled());
-			}
-			match native_open(scope, path, &nonblocking) {
-				Ok(file) => {
-					clear_nonblocking(&file)?;
-					return Ok(file);
-				},
-				Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {
-					std::thread::sleep(poll_slice());
-				},
-				Err(err) => return Err(err),
-			}
-		},
-		#[cfg(not(target_os = "linux"))]
-		FifoEnd::Read => {
-			let _ = (nonblocking, token);
-			native_open(scope, path, options)
-		},
-		#[cfg(target_os = "linux")]
-		FifoEnd::Read => {
-			use std::os::fd::AsRawFd;
-			let file = native_open(scope, path, &nonblocking)?;
-			let fd = file
-				.native()
-				.map(AsRawFd::as_raw_fd)
-				.ok_or_else(|| unsupported("FIFO descriptor"))?;
-			loop {
-				if token.is_cancelled() {
-					return Err(crate::cancelled());
-				}
-				let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-				// SAFETY: one `pollfd` valid for the call; `fd` belongs to `file`.
-				let ready = unsafe { libc::poll(&mut pfd, 1, crate::file::POLL_SLICE_MS) };
-				if ready > 0 {
-					break;
-				}
-				if ready < 0 {
-					let err = io::Error::last_os_error();
-					if err.kind() != io::ErrorKind::Interrupted {
-						return Err(err);
-					}
-				}
-			}
-			clear_nonblocking(&file)?;
-			Ok(file)
-		},
-	}
-}
-
-/// Clears `O_NONBLOCK` on a host file's descriptor.
-#[cfg(unix)]
-fn clear_nonblocking(file: &File) -> io::Result<()> {
-	use std::os::fd::AsRawFd;
-	let fd = file
-		.native()
-		.map(AsRawFd::as_raw_fd)
-		.ok_or_else(|| unsupported("FIFO descriptor"))?;
-	// SAFETY: `fd` belongs to `file`, which is alive for both calls.
-	let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-	// SAFETY: as above.
-	if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
-		return Err(io::Error::last_os_error());
-	}
-	Ok(())
 }
 
 /// Reads a whole host file. Under a cancellable scope the read goes through

@@ -11,6 +11,10 @@ use std::{
 	ops::RangeInclusive,
 	path::{Path, PathBuf},
 	rc::Rc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -3929,7 +3933,7 @@ struct LsRuntime {
 	paths:  ShellPaths,
 	stderr: RefCell<OpenFile>,
 	status: Cell<i32>,
-	cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	cancel: Arc<AtomicBool>,
 }
 
 impl LsRuntime {
@@ -3946,7 +3950,7 @@ impl LsRuntime {
 	/// Whether the shell cancelled this `ls` (abort, `timeout`): a `-R` walk
 	/// of `/` would otherwise run to the end first.
 	fn is_cancelled(&self) -> bool {
-		self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+		self.cancel.load(Ordering::Relaxed)
 	}
 }
 

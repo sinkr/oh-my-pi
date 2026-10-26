@@ -1491,25 +1491,9 @@ impl Read for Stdin {
 		}
 		#[cfg(unix)]
 		if let Some(fd) = self.fd {
-			loop {
-				if self.cancel.load(Ordering::Relaxed) {
-					return Err(pi_vfs::cancelled());
-				}
-				let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-				// SAFETY: one `pollfd` valid for the call; `fd` is owned by the
-				// live `OpenFile` held in this struct.
-				let ready = unsafe { libc::poll(&mut pfd, 1, 200) };
-				if ready < 0 {
-					let err = io::Error::last_os_error();
-					if err.kind() == io::ErrorKind::Interrupted {
-						continue;
-					}
-					return Err(err);
-				}
-				if ready > 0 {
-					break;
-				}
-			}
+			// SAFETY: `fd` is owned by the live `OpenFile` held in this struct.
+			let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+			pi_vfs::wait_readable(fd, || self.cancel.load(Ordering::Relaxed))?;
 		}
 		self.file.read(buf)
 	}
