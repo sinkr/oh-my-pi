@@ -117,10 +117,10 @@ describe("RpcSessionEventForwarder", () => {
 
 		expect(events).toEqual([
 			{ type: "start", message },
-			{ type: "text_start", contentIndex: 0, block: text },
+			{ type: "text_start", contentIndex: 0, block: { ...text, text: "" } },
 			{ type: "text_delta", contentIndex: 0, delta: "hello" },
 			{ type: "text_end", contentIndex: 0, content: "hello", block: { type: "text", textSignature: "sig-1" } },
-			{ type: "thinking_start", contentIndex: 1, block: thinking },
+			{ type: "thinking_start", contentIndex: 1, block: { ...thinking, thinking: "" } },
 			{ type: "thinking_delta", contentIndex: 1, delta: "hmm" },
 			{
 				type: "thinking_end",
@@ -129,7 +129,7 @@ describe("RpcSessionEventForwarder", () => {
 				block: { type: "thinking", thinkingSignature: "sig-2" },
 			},
 			{ type: "image_end", contentIndex: 2, content: image },
-			{ type: "toolcall_start", contentIndex: 3, block: toolCall },
+			{ type: "toolcall_start", contentIndex: 3, block: { ...toolCall, arguments: {} } },
 			{ type: "toolcall_delta", contentIndex: 3, delta: "{}" },
 			{ type: "toolcall_end", contentIndex: 3, toolCall },
 		]);
@@ -154,6 +154,32 @@ describe("RpcSessionEventForwarder", () => {
 		const update = (frames[0] as RpcDeltaMessageUpdateFrame).assistantMessageEvent;
 		if (update.type !== "text_end") throw new Error("expected text_end");
 		expect({ ...update.block, text: update.content }).toEqual(message.content[0]);
+	});
+
+	test("a start whose snapshot is ahead of the stream still opens an empty block", () => {
+		const message = makeAssistantMessage();
+		message.content = [
+			{ type: "thinking", thinking: "already streamed" },
+			{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "file" } },
+		] as unknown as typeof message.content;
+		const frames: RpcProjectedSessionEventFrame[] = [];
+		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		forwarder.setFilter(null, "delta");
+		for (const assistantMessageEvent of [
+			{ type: "thinking_start", contentIndex: 0, partial: message },
+			{ type: "toolcall_start", contentIndex: 1, partial: message },
+		] satisfies AssistantMessageEvent[])
+			forwarder.forward({ type: "message_update", message, assistantMessageEvent });
+		expect(frames.map(frame => (frame as RpcDeltaMessageUpdateFrame).assistantMessageEvent)).toEqual([
+			{ type: "thinking_start", contentIndex: 0, block: { type: "thinking", thinking: "" } },
+			{
+				type: "toolcall_start",
+				contentIndex: 1,
+				block: { type: "toolCall", id: "call-1", name: "read", arguments: {} },
+			},
+		]);
+		// The shared snapshot is not mutated by the projection.
+		expect(message.content[0]).toMatchObject({ thinking: "already streamed" });
 	});
 
 	test("a contentIndex pointing at no block omits `block` instead of sending undefined", () => {
@@ -320,120 +346,141 @@ describe("delta message updates over a real session run", () => {
 		if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	test("every streamed message rebuilds from delta frames alone and matches the full-mode message", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		let turn = 0;
-		// Mutates one partial message in place and yields between events, like a provider reading a socket.
-		const streamFn = (streamModel: Model, _context: Context) => {
-			const stream = new AssistantMessageEventStream();
-			const first = turn++ === 0;
-			void (async () => {
-				const push = async (event: AssistantMessageEvent) => {
-					stream.push(event);
-					await Bun.sleep(0);
-				};
-				const partial: AssistantMessage = {
-					role: "assistant",
-					content: [],
-					api: streamModel.api,
-					provider: streamModel.provider,
-					model: streamModel.id,
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop",
-					timestamp: Date.now(),
-				};
-				await push({ type: "start", partial });
-				if (first) {
-					partial.content.push({ type: "thinking", thinking: "" });
-					await push({ type: "thinking_start", contentIndex: 0, partial });
-					for (const delta of ["let me ", "think"]) {
-						(partial.content[0] as { thinking: string }).thinking += delta;
-						await push({ type: "thinking_delta", contentIndex: 0, delta, partial });
+	// `burst`: the provider queues every event before the agent loop reads one, so each snapshot is far ahead of its event.
+	test.each([
+		["paced", true],
+		["burst", false],
+	])(
+		"every streamed message rebuilds from delta frames alone and matches the full-mode message (%s)",
+		async (_name, paced) => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			let turn = 0;
+			// Mutates one partial message in place and yields between events, like a provider reading a socket.
+			const streamFn = (streamModel: Model, _context: Context) => {
+				const stream = new AssistantMessageEventStream();
+				const first = turn++ === 0;
+				void (async () => {
+					const push = async (event: AssistantMessageEvent) => {
+						stream.push(event);
+						if (paced) await Bun.sleep(0);
+					};
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: [],
+						api: streamModel.api,
+						provider: streamModel.provider,
+						model: streamModel.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					await push({ type: "start", partial });
+					if (first) {
+						partial.content.push({ type: "thinking", thinking: "" });
+						await push({ type: "thinking_start", contentIndex: 0, partial });
+						for (const delta of ["let me ", "think"]) {
+							(partial.content[0] as { thinking: string }).thinking += delta;
+							await push({ type: "thinking_delta", contentIndex: 0, delta, partial });
+						}
+						(partial.content[0] as { thinkingSignature?: string }).thinkingSignature = "sig-think";
+						await push({ type: "thinking_end", contentIndex: 0, content: "let me think", partial });
 					}
-					(partial.content[0] as { thinkingSignature?: string }).thinkingSignature = "sig-think";
-					await push({ type: "thinking_end", contentIndex: 0, content: "let me think", partial });
+					partial.content.push({ type: "text", text: "" });
+					const textIndex = partial.content.length - 1;
+					await push({ type: "text_start", contentIndex: textIndex, partial });
+					for (const delta of ["hel", "lo ", "there"]) {
+						(partial.content[textIndex] as { text: string }).text += delta;
+						await push({ type: "text_delta", contentIndex: textIndex, delta, partial });
+					}
+					(partial.content[textIndex] as { textSignature?: string }).textSignature = "sig-text";
+					await push({ type: "text_end", contentIndex: textIndex, content: "hello there", partial });
+					if (first) {
+						const toolCall = { type: "toolCall" as const, id: "call-1", name: "missing_tool", arguments: {} };
+						partial.content.push(toolCall);
+						await push({ type: "toolcall_start", contentIndex: 2, partial });
+						await push({ type: "toolcall_delta", contentIndex: 2, delta: '{"path":', partial });
+						await push({ type: "toolcall_delta", contentIndex: 2, delta: '"file"}', partial });
+						toolCall.arguments = { path: "file" };
+						await push({ type: "toolcall_end", contentIndex: 2, toolCall, partial });
+						partial.stopReason = "toolUse";
+					}
+					await push({ type: "done", reason: first ? "toolUse" : "stop", message: partial });
+				})();
+				return stream;
+			};
+
+			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "rpc-delta-rebuild-"));
+			const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+			authStorage.keys.setRuntime("anthropic", "test-key");
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn,
+				convertToLlm,
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated(),
+				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+			});
+
+			// Frames are serialized when emitted, as on the wire: the provider keeps mutating its partial afterwards.
+			const full: string[] = [];
+			const delta: string[] = [];
+			const fullForwarder = new RpcSessionEventForwarder(frame => full.push(JSON.stringify(frame)));
+			const deltaForwarder = new RpcSessionEventForwarder(frame => delta.push(JSON.stringify(frame)));
+			deltaForwarder.setFilter(null, "delta");
+			session.subscribe(event => {
+				fullForwarder.forward(event);
+				deltaForwarder.forward(event);
+			});
+			await session.prompt("go");
+
+			const fullFrames = full.map(line => JSON.parse(line) as RpcProjectedSessionEventFrame);
+			const deltaFrames = delta.map(line => JSON.parse(line) as RpcProjectedSessionEventFrame);
+			expect(deltaFrames.map(frame => frame.type)).toEqual(fullFrames.map(frame => frame.type));
+
+			// Block by block: a start's shell plus deltas must equal the full-mode block at its end, and the message's
+			// content must equal message_end's. Intermediate frames are not compared: a snapshot can be ahead of its event.
+			let rebuilt: AssistantMessage | undefined;
+			let streamed = 0;
+			let blocksCompared = 0;
+			for (const [index, fullFrame] of fullFrames.entries()) {
+				const deltaFrame = deltaFrames[index]!;
+				if (deltaFrame.type === "message_start" && deltaFrame.message.role === "assistant") {
+					rebuilt = structuredClone(deltaFrame.message);
+					streamed++;
 				}
-				partial.content.push({ type: "text", text: "" });
-				const textIndex = partial.content.length - 1;
-				await push({ type: "text_start", contentIndex: textIndex, partial });
-				for (const delta of ["hel", "lo ", "there"]) {
-					(partial.content[textIndex] as { text: string }).text += delta;
-					await push({ type: "text_delta", contentIndex: textIndex, delta, partial });
+				if (deltaFrame.type === "message_end" && deltaFrame.message.role === "assistant") {
+					expect(rebuilt!.content).toEqual(deltaFrame.message.content);
 				}
-				(partial.content[textIndex] as { textSignature?: string }).textSignature = "sig-text";
-				await push({ type: "text_end", contentIndex: textIndex, content: "hello there", partial });
-				if (first) {
-					const toolCall = { type: "toolCall" as const, id: "call-1", name: "missing_tool", arguments: {} };
-					partial.content.push(toolCall);
-					await push({ type: "toolcall_start", contentIndex: 2, partial });
-					await push({ type: "toolcall_delta", contentIndex: 2, delta: '{"path":', partial });
-					await push({ type: "toolcall_delta", contentIndex: 2, delta: '"file"}', partial });
-					toolCall.arguments = { path: "file" };
-					await push({ type: "toolcall_end", contentIndex: 2, toolCall, partial });
-					partial.stopReason = "toolUse";
+				if (fullFrame.type !== "message_update" || deltaFrame.type !== "message_update") continue;
+				expect(deltaFrame.messageId).toBe(fullFrame.messageId);
+				const delta = deltaFrame as RpcDeltaMessageUpdateFrame;
+				rebuilt = applyDelta(rebuilt!, delta);
+				const type = delta.assistantMessageEvent.type;
+				if (delta.assistantMessageEvent.type === "text_start")
+					expect(delta.assistantMessageEvent.block).toMatchObject({ type: "text", text: "" });
+				if (delta.assistantMessageEvent.type === "thinking_start")
+					expect(delta.assistantMessageEvent.block).toMatchObject({ type: "thinking", thinking: "" });
+				if (delta.assistantMessageEvent.type === "toolcall_start")
+					expect(delta.assistantMessageEvent.block).toMatchObject({ type: "toolCall", arguments: {} });
+				if (type === "text_end" || type === "thinking_end" || type === "toolcall_end") {
+					const at = delta.assistantMessageEvent.contentIndex!;
+					expect(rebuilt.content[at]).toEqual((fullFrame.message as AssistantMessage).content[at]);
+					blocksCompared++;
 				}
-				await push({ type: "done", reason: first ? "toolUse" : "stop", message: partial });
-			})();
-			return stream;
-		};
-
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "rpc-delta-rebuild-"));
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
-			streamFn,
-			convertToLlm,
-		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
-		});
-
-		// Frames are serialized when emitted, as on the wire: the provider keeps mutating its partial afterwards.
-		const full: string[] = [];
-		const delta: string[] = [];
-		const fullForwarder = new RpcSessionEventForwarder(frame => full.push(JSON.stringify(frame)));
-		const deltaForwarder = new RpcSessionEventForwarder(frame => delta.push(JSON.stringify(frame)));
-		deltaForwarder.setFilter(null, "delta");
-		session.subscribe(event => {
-			fullForwarder.forward(event);
-			deltaForwarder.forward(event);
-		});
-		await session.prompt("go");
-
-		const fullFrames = full.map(line => JSON.parse(line) as RpcProjectedSessionEventFrame);
-		const deltaFrames = delta.map(line => JSON.parse(line) as RpcProjectedSessionEventFrame);
-		expect(deltaFrames.map(frame => frame.type)).toEqual(fullFrames.map(frame => frame.type));
-
-		let rebuilt: AssistantMessage | undefined;
-		let streamed = 0;
-		let compared = 0;
-		for (const [index, fullFrame] of fullFrames.entries()) {
-			const deltaFrame = deltaFrames[index]!;
-			if (deltaFrame.type === "message_start" && deltaFrame.message.role === "assistant") {
-				rebuilt = structuredClone(deltaFrame.message);
-				streamed++;
 			}
-			if (fullFrame.type !== "message_update" || deltaFrame.type !== "message_update") continue;
-			expect(deltaFrame.messageId).toBe(fullFrame.messageId);
-			rebuilt = applyDelta(rebuilt!, deltaFrame as RpcDeltaMessageUpdateFrame);
-			// A tool call's arguments are only complete at toolcall_end.
-			if (fullFrame.assistantMessageEvent.type === "toolcall_delta") continue;
-			expect(rebuilt.content).toEqual((fullFrame.message as AssistantMessage).content);
-			compared++;
-		}
-		expect(streamed).toBe(2);
-		expect(compared).toBeGreaterThan(10);
-	});
+			expect(streamed).toBe(2);
+			expect(blocksCompared).toBe(4);
+		},
+	);
 });

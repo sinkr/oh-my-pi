@@ -677,10 +677,11 @@ type DeltaOf<Type extends AssistantMessageEvent["type"]> = WithoutPartial<
 
 /**
  * `assistantMessageEvent` of a delta `message_update`: `*_delta` carries only the increment; a `*_start` carries the
- * block it opened (`partial.content[contentIndex]`); `text_end`/`thinking_end` carry the rest of the block (everything
- * but the text their `content` already holds); `image_end` and `toolcall_end` carry the whole block as `content` /
- * `toolCall`; a re-`start` carries the whole message it restarts from. `block` is absent only if the provider's
- * `contentIndex` points at no block.
+ * shell of the block it opened (`partial.content[contentIndex]` with its text, thinking, or tool arguments emptied, so
+ * the deltas that follow apply cleanly); `text_end`/`thinking_end` carry the rest of the block (everything but the text
+ * their `content` already holds); `image_end` and `toolcall_end` carry the whole block as `content` / `toolCall`. A
+ * re-`start` carries the whole message it restarts from; that snapshot may already be ahead of the stream, so each
+ * block's `*_end` is authoritative. `block` is absent only if the provider's `contentIndex` points at no block.
  */
 export type RpcDeltaAssistantMessageEvent =
 	| DeltaOf<"text_delta" | "thinking_delta" | "toolcall_delta" | "image_end" | "toolcall_end">

@@ -2,7 +2,7 @@
  * Session-event forwarding for RPC mode: stamps message lifecycle frames with a
  * `messageId` and applies the host's `set_event_filter` selection.
  */
-import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type {
 	RpcAgentSessionEventFrame,
@@ -10,6 +10,24 @@ import type {
 	RpcMessageUpdates,
 	RpcProjectedSessionEventFrame,
 } from "./rpc-types";
+
+/**
+ * The shell of a block a `*_start` opens. The snapshot behind a start event is cloned when the agent loop consumes the
+ * event, after the provider may have streamed more into the same partial, so its streamed content is not trustworthy:
+ * empty it, and every following delta applies cleanly. The matching `*_end` carries the final content.
+ */
+function openedBlock(block: AssistantMessage["content"][number] | undefined) {
+	switch (block?.type) {
+		case "text":
+			return { ...block, text: "" };
+		case "thinking":
+			return { ...block, thinking: "" };
+		case "toolCall":
+			return { ...block, arguments: {} };
+		default:
+			return block;
+	}
+}
 
 /** Drops the accumulated snapshot a streaming event carries, keeping what a client needs to rebuild it; `done` and `error` have none. */
 function toDelta(event: AssistantMessageEvent): RpcDeltaAssistantMessageEvent {
@@ -50,7 +68,7 @@ function toDelta(event: AssistantMessageEvent): RpcDeltaAssistantMessageEvent {
 		}
 		default: {
 			const { partial, ...rest } = event;
-			const block = partial.content[event.contentIndex];
+			const block = openedBlock(partial.content[event.contentIndex]);
 			return block === undefined ? rest : { ...rest, block };
 		}
 	}
