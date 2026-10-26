@@ -3405,6 +3405,45 @@ describe("compact() remote compaction failure handling", () => {
 		expect(v1PromptCacheKey).toBe("parent:task");
 	});
 
+	test("an explicit undefined remote key keeps the family key off the remote compaction request", async () => {
+		// The active lane is opted in (promptCacheKey carries the family key) but
+		// the caller gated the remote target and found no key; compact() must not
+		// substitute the active-lane key for that explicit "no key" decision.
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const model = makeOpenAiModel({
+			provider: "opencode-go",
+			id: "muse-spark-1.2-contributor",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		const sessionHeaders: (string | null)[] = [];
+		const bodyKeys: unknown[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-opencode-session"));
+			const parsed: unknown = JSON.parse(String(init?.body));
+			bodyKeys.push(
+				parsed && typeof parsed === "object" && "prompt_cache_key" in parsed ? parsed.prompt_cache_key : undefined,
+			);
+			if (String(input).endsWith("/responses/compact")) {
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "enc-v1" }] });
+			}
+			return new Response("V2 unavailable", { status: 502, statusText: "Bad Gateway" });
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			sessionId: "child-1",
+			promptCacheKey: "parent:task",
+			remotePromptCacheKey: undefined,
+		});
+
+		// V2 (with its transient retries) and the V1 fallback all stay child-scoped.
+		expect(new Set(sessionHeaders)).toEqual(new Set(["child-1"]));
+		expect(bodyKeys).not.toContain("parent:task");
+	});
+
 	test("user abort during the remote compact request rejects without falling back to local summarization", async () => {
 		// Contract: Esc is a cancellation, not a remote failure. Before the fix
 		// the AbortError was swallowed by the fallback catch and compaction kept

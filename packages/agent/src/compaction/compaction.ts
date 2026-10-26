@@ -733,7 +733,8 @@ export interface SummaryOptions {
 	/**
 	 * Prompt-cache key for remote compaction requests, gated against the request
 	 * they send (`remoteCompaction.api`/`model` override, see
-	 * `remoteCompactionPolicyModel`). Defaults to {@link promptCacheKey}.
+	 * `remoteCompactionPolicyModel`). Defaults to {@link promptCacheKey} only when
+	 * omitted; an explicit `undefined` means the remote target gets no key.
 	 */
 	remotePromptCacheKey?: string;
 	/** Mutable provider state used to keep Codex compaction on the live session identity. */
@@ -1683,7 +1684,10 @@ export async function compact(
 		thinkingLevel: options?.thinkingLevel,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
-		remotePromptCacheKey: options?.remotePromptCacheKey ?? options?.promptCacheKey,
+		remotePromptCacheKey:
+			options && Object.hasOwn(options, "remotePromptCacheKey")
+				? options.remotePromptCacheKey
+				: options?.promptCacheKey,
 		providerSessionState: options?.providerSessionState,
 		preferWebsockets: options?.preferWebsockets,
 		codexCompaction: options?.codexCompaction,
