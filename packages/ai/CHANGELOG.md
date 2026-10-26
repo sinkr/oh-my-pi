@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Reduced the CPU spent preparing tool schemas on every model call, so requests with many tools start faster ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed tool schema normalization modifying the caller's schema in place, which added the folded `const` value to a tool's own `enum` array ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Breaking Changes
 
