@@ -1879,7 +1879,6 @@ fn is_symlink_dir(metadata: &Metadata) -> bool {
 #[cfg(test)]
 mod tests {
 	use std::{
-		ffi::OsStr,
 		path::Path,
 		sync::atomic::{AtomicBool, Ordering},
 	};
@@ -2155,6 +2154,8 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn removes_a_directory_chain_deeper_than_the_stack() {
+		use std::ffi::OsStr;
+
 		use uucore::safe_traversal::{DirFd, SymlinkBehavior};
 
 		const DEPTH: usize = 5_000;
