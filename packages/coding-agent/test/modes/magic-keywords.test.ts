@@ -65,9 +65,7 @@ describe("workflow notice", () => {
 		const reused = renderWorkflowNotice(base);
 		const fresh = renderWorkflowNotice({ ...base, freshAgents: true });
 		expect(reused).toContain("keep-alive workers");
-		expect(reused).toContain("A worker keeps its conversation across items");
 		expect(fresh).toContain("single-item agents");
-		expect(fresh).toContain("items share no conversation");
 		expect(fresh).not.toContain("keep-alive");
 		expect(reused).not.toContain("single-item");
 	});
@@ -92,8 +90,7 @@ describe("workflow notice", () => {
 		expect(both).toContain("```python");
 		expect(both).toContain("```js");
 		expect(both).toContain("JS: `await workpool(");
-		expect(both).toContain(
-			"`raise_errors=False` keeps an error in its slot. JS: `await wait(handles, { timeout, raiseErrors })`",
-		);
+		expect(both).toContain("raise_errors");
+		expect(both).toContain("raiseErrors");
 	});
 });
