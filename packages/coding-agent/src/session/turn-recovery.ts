@@ -2225,7 +2225,7 @@ export class TurnRecovery {
 			wrapAround?: boolean;
 			/** This hop is a classifier-refusal walk, which visits each model at most once per turn. */
 			refusalWalk?: boolean;
-			/** Another attempt on the failed model is still allowed after this hop. */
+			/** The retry policy retries the failed model if this hop does not switch. */
 			sameModelRetryAvailable?: boolean;
 		},
 	): Promise<boolean> {
@@ -2242,11 +2242,12 @@ export class TurnRecovery {
 			: undefined;
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		// Deferring a sibling Anthropic candidate below is only worth it while
-		// another attempt on the model that signed the replayed thinking is still
-		// an option: the active model is that model, and the retry budget allows
-		// one. Any other failure — another provider's outage, or the signer's own
-		// budget spent — has no source model to go back to, so deferring left the
-		// whole chain untried and ended the turn on an error.
+		// another attempt on the model that signed the replayed thinking follows:
+		// the active model is that model, and the retry policy will retry it. Any
+		// other failure — on a model that did not sign the thinking, or one the
+		// policy does not retry (a refusal, a policy denial, a non-retryable error,
+		// a wait past the delay cap, a spent budget) — has no source model to go
+		// back to, so deferring left the whole chain untried and ended the turn.
 		const sourceModel = this.#host.model();
 		const signerRetryRemains =
 			options?.sameModelRetryAvailable === true &&
