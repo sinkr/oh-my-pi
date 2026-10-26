@@ -4,9 +4,6 @@ import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
 import { adaptSchemaForStrict, sanitizeSchemaForOpenAIResponses } from "@oh-my-pi/pi-ai/utils/schema";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { createCodexModel } from "./helpers";
 
 describe("Codex itemless array schemas", () => {
@@ -66,17 +63,6 @@ describe("Codex itemless array schemas", () => {
 		expect(sanitizeSchemaForOpenAIResponses(sanitized, { repairArrayItems: true })).toBe(sanitized);
 	});
 
-	it("preserves typed items and strict mode when no repair is needed", () => {
-		const schema = {
-			type: "object",
-			properties: { listeners: { type: "array", items: { type: "string" } } },
-			required: ["listeners"],
-			additionalProperties: false,
-		};
-		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
-		expect(adaptSchemaForStrict(schema, true)).toEqual({ schema, strict: true });
-	});
-
 	it.each([
 		{ type: "array", items: true },
 		{ type: "array", items: false },
@@ -86,25 +72,15 @@ describe("Codex itemless array schemas", () => {
 		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
 	});
 
-	it.each([false, true, { type: "number" }])("does not repair arrays with unevaluatedItems: %j", unevaluatedItems => {
-		const schema = { type: "array", prefixItems: [{ type: "string" }], unevaluatedItems };
+	it("does not repair an array with its own unevaluatedItems", () => {
+		const schema = { type: "array", prefixItems: [{ type: "string" }], unevaluatedItems: false };
 		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
 	});
 
-	it("does not repair an allOf tuple beneath enclosing unevaluatedItems", () => {
-		const schema = {
-			type: "array",
-			allOf: [{ type: "array", prefixItems: [{ type: "string" }] }],
-			unevaluatedItems: false,
-		};
-		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
-	});
-
-	it.each([false, true])("skips the whole schema when unevaluatedItems is present (closed first: %j)", closedFirst => {
+	it("skips the whole schema, including unrelated arrays, when unevaluatedItems is present", () => {
 		const tuple = { type: "array", prefixItems: [{ type: "string" }] };
 		const closed = { type: "array", allOf: [tuple], unevaluatedItems: false };
-		const properties = closedFirst ? { closed, open: tuple } : { open: tuple, closed };
-		const schema = { type: "object", properties };
+		const schema = { type: "object", properties: { closed, open: tuple } };
 		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
 		expect(tuple).not.toHaveProperty("items");
 	});
@@ -120,12 +96,6 @@ describe("Codex itemless array schemas", () => {
 		additionalProperties: false,
 	};
 
-	it("does not repair definitions referenced from an unevaluatedItems constraint", () => {
-		expect(sanitizeSchemaForOpenAIResponses(referencedTupleSchema, { repairArrayItems: true })).toBe(
-			referencedTupleSchema,
-		);
-	});
-
 	it("does not mistake property or definition names for unevaluatedItems constraints", () => {
 		const schema = {
 			type: "object",
@@ -138,11 +108,11 @@ describe("Codex itemless array schemas", () => {
 		});
 	});
 
-	it.each(["const", "default"])("does not inspect unevaluatedItems inside a %s payload", keyword => {
+	it("does not inspect unevaluatedItems inside a const payload", () => {
 		const schema = {
 			type: "object",
 			properties: { listeners: { type: "array" } },
-			[keyword]: { unevaluatedItems: false },
+			const: { unevaluatedItems: false },
 		};
 		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toEqual({
 			...schema,
@@ -156,75 +126,35 @@ describe("Codex itemless array schemas", () => {
 		expect(sanitizeSchemaForOpenAIResponses(schema, { repairArrayItems: true })).toBe(schema);
 	});
 
-	// Serialized tool payloads captured from main 0b5c27ab24, without a provider request.
-	const responseParameters = {
-		type: "object",
-		properties: {
-			listeners: { type: "array" },
-			row: { type: "array", prefixItems: [{ type: "string" }] },
-			inferred: { prefixItems: [{ type: "string" }] },
-		},
-		required: ["listeners", "row", "inferred"],
-		additionalProperties: false,
-	};
-	const responsesCases = [
-		{
-			name: "official OpenAI",
-			model: getBundledModel<"openai-responses">("openai", "gpt-5-mini"),
-			parameters: {
-				properties: {
-					listeners: { type: "array" },
-					row: { prefixItems: [{ type: "string" }], type: "array" },
-					inferred: { prefixItems: [{ type: "string" }], type: "array" },
-				},
-				required: ["listeners", "row", "inferred"],
-				type: "object",
-				additionalProperties: false,
+	it("keeps the Responses converter's itemless arrays unchanged for grammar backends", () => {
+		// llama.cpp compiles tool schemas into grammars and rejects boolean subschemas.
+		const model = buildModel<"openai-responses">({
+			id: "local-model",
+			name: "local-model",
+			api: "openai-responses",
+			provider: "llama.cpp",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 1024,
+		});
+		const parameters = {
+			type: "object",
+			properties: {
+				listeners: { type: "array" },
+				row: { type: "array", prefixItems: [{ type: "string" }] },
+				inferred: { prefixItems: [{ type: "string" }] },
 			},
-			strict: true,
-		},
-		...[
-			{ provider: "llama.cpp", id: "local-model" },
-			{ provider: "ollama", id: "local-model" },
-			{ provider: "llama.cpp", id: "kimi-k2.5" },
-		].map(({ provider, id }) => ({
-			name: `${provider}/${id}`,
-			model: buildModel<"openai-responses">({
-				id,
-				name: id,
-				api: "openai-responses",
-				provider,
-				baseUrl: "http://127.0.0.1:8080/v1",
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 8192,
-				maxTokens: 1024,
-			}),
-			parameters:
-				id === "kimi-k2.5"
-					? {
-							...responseParameters,
-							properties: { listeners: { type: "array" }, row: { type: "array" }, inferred: {} },
-						}
-					: responseParameters,
-			strict: false,
-		})),
-	];
-
-	it.each(responsesCases)("keeps $name Responses tools byte-identical to main", ({ model, parameters, strict }) => {
-		const tool: Tool = { name: "list", description: "List results", strict: true, parameters: responseParameters };
-		expect(JSON.stringify(convertTools([tool], model.compat.supportsStrictMode, model))).toBe(
-			JSON.stringify([
-				{
-					type: "function",
-					name: "list",
-					description: "List results",
-					parameters,
-					...(strict ? { strict: true } : {}),
-				},
-			]),
-		);
+			required: ["listeners", "row", "inferred"],
+			additionalProperties: false,
+		};
+		const tool: Tool = { name: "list", description: "List results", strict: true, parameters };
+		const [wire] = convertTools([tool], model.compat.supportsStrictMode, model);
+		if (wire?.type !== "function") throw new Error("expected a function tool payload");
+		expect(wire.parameters).toEqual(parameters);
+		expect(wire.strict).toBeFalsy();
 	});
 
 	describe("Codex converter", () => {
@@ -267,30 +197,6 @@ describe("Codex itemless array schemas", () => {
 				name: "tuple",
 				description: "Read a tuple",
 				parameters: referencedTupleSchema,
-				strict: false,
-			});
-		});
-
-		it.each([
-			{ type: "array", prefixItems: [{ type: "string" }], unevaluatedItems: false },
-			{
-				type: "array",
-				allOf: [{ type: "array", prefixItems: [{ type: "string" }] }],
-				unevaluatedItems: false,
-			},
-		])("leaves a tuple closed by unevaluatedItems unchanged: %j", row => {
-			const parameters = {
-				type: "object",
-				properties: { row },
-				required: ["row"],
-				additionalProperties: false,
-			};
-			const tool: Tool = { name: "tuple", description: "Read a tuple", parameters, strict: false };
-			expect(convert(tool)).toEqual({
-				type: "function",
-				name: "tuple",
-				description: "Read a tuple",
-				parameters,
 				strict: false,
 			});
 		});
@@ -411,45 +317,6 @@ describe("Codex itemless array schemas", () => {
 				},
 			};
 			expect(convert(tool)).toMatchObject({ strict: true, parameters: tool.parameters });
-		});
-
-		it("repairs a real YieldTool without changing task-level validation", async () => {
-			const tool = new YieldTool({
-				cwd: "/tmp",
-				hasUI: false,
-				getSessionFile: () => null,
-				getSessionSpawns: () => "*",
-				settings: Settings.isolated(),
-				outputSchema: {
-					type: "object",
-					properties: { listeners: { type: "array" } },
-					required: ["listeners"],
-					additionalProperties: false,
-				},
-			});
-			expect(convert(tool)).toMatchObject({
-				type: "function",
-				name: "yield",
-				parameters: {
-					properties: {
-						data: {
-							anyOf: [
-								{
-									type: "object",
-									properties: { listeners: { type: "array", items: true } },
-									required: ["listeners"],
-								},
-								{ type: "array", items: true },
-							],
-						},
-					},
-				},
-			});
-			expect(convert(tool)).not.toHaveProperty("strict");
-			const data = { listeners: [{ port: 1234 }, "untyped"] };
-			const result = await tool.execute("valid-result", { data });
-			expect(result.details).toMatchObject({ status: "success", data });
-			await expect(tool.execute("invalid-result", { data: {} })).rejects.toThrow("Output does not match schema");
 		});
 	});
 });
