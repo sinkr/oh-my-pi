@@ -187,12 +187,66 @@ describe("RPC fork and tree navigation", () => {
 		expect((await client.getState()).messageCount).toBe(6);
 	}, 30_000);
 
+	test("navigate_tree refuses when a run starts while the summary is generated, moving nothing", async () => {
+		const [, firstReply] = await seedTwoTurns();
+		const started = nextEvent(type => type === "notice");
+
+		const navigated = client.navigateTree(firstReply!, { summarize: true, customInstructions: "slow-summary" });
+		await withTimeout(started, 10_000, "Branch summary never started");
+		// `bash` skips the command queue, so it runs while the summary is still being generated.
+		const bash = client.bash("sleep 3");
+
+		expect(await rejectionOf(navigated)).toMatchObject({ command: "navigate_tree", code: "session_busy" });
+		await bash;
+		const roles = (await client.getMessages()).map(message => message.role);
+		expect(roles.slice(0, 4)).toEqual(["user", "assistant", "user", "assistant"]);
+		expect(roles).not.toContain("branchSummary");
+	}, 30_000);
+
+	test("navigate_tree rejects an unknown or malformed entry id", async () => {
+		await seedTwoTurns();
+
+		expect(await rejectionOf(client.navigateTree("no-such-entry"))).toMatchObject({
+			command: "navigate_tree",
+			code: "entry_not_found",
+		});
+		expect(await rejectionOf(client.navigateTree(42 as never))).toMatchObject({
+			message: expect.stringContaining("entryId must be a string"),
+		});
+		expect((await client.getState()).messageCount).toBe(4);
+	}, 30_000);
+
+	test("navigate_tree refuses an ask answer it could reopen, and moves onto one it could not", async () => {
+		await client.start();
+		await client.promptAndWait("seed-ask");
+		await client.promptAndWait("seed-bad-ask");
+		const { entries } = await client.getEntries();
+		const askResults = entries.flatMap(entry =>
+			entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "ask"
+				? [entry.id]
+				: [],
+		);
+		expect(askResults).toHaveLength(2);
+		const [reopenable, unusable] = askResults;
+
+		expect(await rejectionOf(client.navigateTree(reopenable!))).toMatchObject({
+			command: "navigate_tree",
+			code: "ask_reanswer_unsupported",
+		});
+		expect((await client.getState()).messageCount).toBe(8);
+
+		expect(await client.navigateTree(unusable!)).toEqual({ cancelled: false });
+		expect((await client.getMessages()).at(-1)).toMatchObject({ role: "toolResult", toolName: "ask" });
+	}, 30_000);
+
 	test("holds a waiting goal continuation through the navigation, then runs it in the new branch", async () => {
 		const [, firstReply] = await seedTwoTurns();
 		// The fixture holds this goal's first continuation until the branch summary starts: decided, not started.
 		await client.goal("create", { objective: "keep going" });
 		const continued = nextEvent(type => type === "agent_end");
 
+		// A refused navigation leaves the waiting continuation alone: it neither starts nor is dropped.
+		expect(await rejectionOf(client.navigateTree("no-such-entry"))).toMatchObject({ code: "entry_not_found" });
 		expect(await client.navigateTree(firstReply!, { summarize: true })).toEqual({ cancelled: false });
 		await withTimeout(continued, 10_000, "Goal continuation never ran");
 		const kinds = (await client.getMessages()).map(message =>
@@ -203,12 +257,26 @@ describe("RPC fork and tree navigation", () => {
 		expect(kinds).toContain("goal-continuation");
 	}, 30_000);
 
-	test("set_label appends a label entry, and rejects an unknown entry", async () => {
+	test("set_label sets and clears an entry's label, and rejects bad input", async () => {
 		const [firstUser] = await seedTwoTurns();
 
 		await client.setLabel(firstUser!, "start");
-		const { entries } = await client.getEntries();
-		expect(entries.at(-1)).toMatchObject({ type: "label", targetId: firstUser, label: "start" });
-		expect(await rejectionOf(client.setLabel("no-such-entry", "x"))).toMatchObject({ command: "set_label" });
+		expect((await client.getEntries()).entries.at(-1)).toMatchObject({
+			type: "label",
+			targetId: firstUser,
+			label: "start",
+		});
+		await client.setLabel(firstUser!, undefined);
+		const cleared = (await client.getEntries()).entries.at(-1);
+		expect(cleared).toMatchObject({ type: "label", targetId: firstUser });
+		expect(cleared).not.toHaveProperty("label");
+
+		expect(await rejectionOf(client.setLabel("no-such-entry", "x"))).toMatchObject({
+			command: "set_label",
+			message: expect.stringContaining("not found"),
+		});
+		expect(await rejectionOf(client.setLabel(firstUser!, 123 as never))).toMatchObject({
+			message: expect.stringContaining("label must be a string"),
+		});
 	}, 30_000);
 });

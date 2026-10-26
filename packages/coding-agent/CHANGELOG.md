@@ -27,7 +27,7 @@
 
 ### Added
 
-- RPC: `navigate_tree` moves the leaf within the session file (optionally summarizing the abandoned branch), `abort_branch_summary` stops that summary, and `set_label` sets or clears an entry's label; `RpcClient` adds `navigateTree`, `abortBranchSummary` and `setLabel`
+- RPC: `navigate_tree` (move the leaf in the same session file, optionally summarizing the abandoned branch), `abort_branch_summary` and `set_label`, with matching `RpcClient` methods
 - Added `omp -p --wait-async` (setting `async.printWake`): print mode waits for the background jobs it started and wakes the same session with each result before exiting, instead of cancelling them ([#10363](https://github.com/can1357/oh-my-pi/issues/10363), [#16690](https://github.com/can1357/oh-my-pi/pull/16690) by [@trukhinyuri](https://github.com/trukhinyuri))
 - File slash commands with `side: true` frontmatter (including Codex and OpenCode command directories) run as `/btw` side questions in the TUI, with or without arguments: they answer off the transcript and never steer a running turn. The panel and `/btw` history title them by the typed command (`/sitrep`); the title is kept in an `entry-<id>.title` sidecar so older builds can still read the history. Other modes expand them as ordinary prompts ([#16815](https://github.com/can1357/oh-my-pi/pull/16815) by [@wolfiesch](https://github.com/wolfiesch))
 - Added `compat.requiresThinkingPresence` to `models.yml` overrides, so a gateway model group whose strict member validates thinking replay can pad a turn a lax member answered without reasoning ([#16739](https://github.com/can1357/oh-my-pi/pull/16739) by [@lz37](https://github.com/lz37))

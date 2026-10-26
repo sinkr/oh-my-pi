@@ -48,7 +48,7 @@ import {
 	wordCompletionQuery,
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
-import { type AgentSession, SessionBusyError } from "../../session/agent-session";
+import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
 import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -2040,6 +2040,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "navigate_tree": {
 				if (typeof command.entryId !== "string") return error(id, "navigate_tree", "entryId must be a string");
+				// Validation first: a refused navigation must not cancel the running side question or touch the goal.
+				if (!session.sessionManager.getEntry(command.entryId)) {
+					return error(id, "navigate_tree", `Entry ${command.entryId} not found`, "entry_not_found");
+				}
 				// As `fork`: a run would keep writing into the branch the leaf just left.
 				if (session.isBusyForSnapshot) {
 					const busy = new SessionBusyError("navigate the session tree");
@@ -2048,25 +2052,32 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				await btw.close();
 				// A goal continuation waiting to start is held until the navigation ends, then resumes (same session).
 				await goalController.beginSessionChange();
-				const result = await session
-					.navigateTree(command.entryId, {
+				let result: NavigateTreeResult;
+				try {
+					result = await session.navigateTree(command.entryId, {
 						summarize: command.summarize === true,
 						customInstructions:
 							typeof command.customInstructions === "string" ? command.customInstructions : undefined,
 						// Only to detect a re-answer, which moves nothing yet: refused below, since it needs a picker here.
 						allowAskReopen: true,
-					})
-					.finally(async () => {
-						await goalController.endSessionChange();
-						// Respond only once a resumed continuation is scheduled.
-						await goalController.settled();
+						// Rechecked after the summary: work may have started while it ran.
+						requireIdle: true,
 					});
-				if (result.reopenAsk) {
-					return error(id, "navigate_tree", "Re-answering an ask is not available over RPC; select another entry");
+				} catch (err) {
+					if (err instanceof SessionBusyError) return error(id, "navigate_tree", err.message, "session_busy");
+					throw err;
+				} finally {
+					await goalController.endSessionChange();
+					// Respond only once a resumed continuation is scheduled.
+					await goalController.settled();
 				}
-				if (!result.cancelled) {
-					inputGate.commitSessionChange(command);
-					void settleWatcher.check();
+				if (result.reopenAsk) {
+					return error(
+						id,
+						"navigate_tree",
+						"Re-answering an ask is not available over RPC; select another entry",
+						"ask_reanswer_unsupported",
+					);
 				}
 				return success(id, "navigate_tree", {
 					cancelled: result.cancelled,
