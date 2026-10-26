@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { completeSimple, stream } from "@oh-my-pi/pi-ai";
 import { buildAnthropicClientOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { applyInferenceHeaders, resolveOpenCodeGoCacheAffinity } from "@oh-my-pi/pi-ai/providers/inference-headers";
 import {
 	normalizeOpenAIPromptCacheKey,
 	resolveOpenAIRequestSetup,
@@ -806,6 +807,34 @@ describe("Go sibling prompt-cache wire affinity", () => {
 		expect(setup.headers.session_id).toBe("conversation");
 		expect(setup.headers["x-opencode-session"]).toBeUndefined();
 	});
+
+	it("emits the family key on the Go header when no conversation session exists", () => {
+		// Regression (PR #16988): `sessionId` and the explicit cache key are
+		// independently optional — the V1 compaction path and direct
+		// client-options builds compute a valid family affinity with no
+		// conversation id in hand. The Go header must still carry that key;
+		// applyInferenceHeaders used to return before the assignment.
+		const affinity = resolveOpenCodeGoCacheAffinity(
+			makeOpenCodeGoMuseModel("muse-spark-1.3-contributor"),
+			"parent:task",
+			"short",
+		);
+		expect(affinity).toBe("parent:task");
+		const headers: Record<string, string> = {};
+		applyInferenceHeaders(headers, {
+			provider: "opencode-go",
+			protocol: "openai",
+			cacheAffinity: affinity,
+		});
+		expect(headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+		expect(headers["User-Agent"]).toBe(USER_AGENT);
+	});
+
+	it("keeps the Go header absent when there is neither a conversation session nor a family key", () => {
+		const headers: Record<string, string> = {};
+		applyInferenceHeaders(headers, { provider: "opencode-go", protocol: "openai" });
+		expect(headers[OPENCODE_SESSION_HEADER]).toBeUndefined();
+	});
 });
 
 describe("opencode session header on the Google transport", () => {
@@ -856,6 +885,20 @@ describe("session header on the Anthropic transport", () => {
 		});
 		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("parent:task");
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("child-1");
+	});
+
+	it("sends the family key as x-opencode-session when no conversation session exists", () => {
+		// Regression (PR #16988): a direct client-options build may carry the
+		// explicit family key with no independently-optional `sessionId`. The
+		// Go affinity header must still be set; only the protocol-native Claude
+		// session header stays absent.
+		const options = buildAnthropicClientOptions({
+			model: makeOpenCodeGoHaikuModel(),
+			apiKey: "opencode_test_key",
+			promptCacheKey: "parent:task",
+		});
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBeUndefined();
 	});
 
 	it("keeps the child session headers when cache retention is disabled", () => {

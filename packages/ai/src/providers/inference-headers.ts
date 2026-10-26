@@ -112,13 +112,19 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 
 	const isOpenCode = backend === "opencode-go" || backend === "opencode-zen";
 	const sessionId = options.sessionId;
-	if (!sessionId) return;
+	// The conversation id and the explicit cache key are independently
+	// optional: a Go sibling lane can carry its family affinity with no
+	// conversation session in hand (V1 compaction, direct client-options
+	// builds), while every other lane still needs the conversation id.
+	if (!sessionId && !options.cacheAffinity) return;
 
-	if (options.protocol === "anthropic") {
-		setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
-	} else if (options.protocol === "openai" && backend === "openai") {
-		setHeader(headers, "session_id", sessionId);
-		setHeader(headers, "x-client-request-id", sessionId);
+	if (sessionId) {
+		if (options.protocol === "anthropic") {
+			setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
+		} else if (options.protocol === "openai" && backend === "openai") {
+			setHeader(headers, "session_id", sessionId);
+			setHeader(headers, "x-client-request-id", sessionId);
+		}
 	}
 
 	if (isOpenCode) {
@@ -126,11 +132,8 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 		// Go's session header doubles as the gateway's cache-affinity handle:
 		// opted-in sibling lanes (see resolveOpenCodeGoCacheAffinity) share one
 		// task cache key there; every other lane keeps the conversation id.
-		setHeader(
-			headers,
-			"x-opencode-session",
-			backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId,
-		);
+		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId;
+		if (goSession) setHeader(headers, "x-opencode-session", goSession);
 	}
 }
 
