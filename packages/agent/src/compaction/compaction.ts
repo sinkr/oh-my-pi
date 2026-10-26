@@ -728,8 +728,15 @@ export interface SummaryOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Session routing key for remote compaction transports with sticky provider sessions. */
 	sessionId?: string;
-	/** Prompt-cache key for remote compaction transports that support provider prefix caching. */
+	/** Prompt-cache key for conventional summary requests, gated against the summarizing model. */
 	promptCacheKey?: string;
+	/**
+	 * Prompt-cache key for remote compaction requests, gated against the request
+	 * they send (`remoteCompaction.api`/`model` override, see
+	 * `remoteCompactionPolicyModel`). Defaults to {@link promptCacheKey} only when
+	 * omitted; an explicit `undefined` means the remote target gets no key.
+	 */
+	remotePromptCacheKey?: string;
 	/** Mutable provider state used to keep Codex compaction on the live session identity. */
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/** Whether Codex remote compaction should prefer the provider WebSocket transport. */
@@ -1677,6 +1684,10 @@ export async function compact(
 		thinkingLevel: options?.thinkingLevel,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
+		remotePromptCacheKey:
+			options && Object.hasOwn(options, "remotePromptCacheKey")
+				? options.remotePromptCacheKey
+				: options?.promptCacheKey,
 		providerSessionState: options?.providerSessionState,
 		preferWebsockets: options?.preferWebsockets,
 		codexCompaction: options?.codexCompaction,
@@ -1815,7 +1826,7 @@ export async function compact(
 						forceReasoningOff: summaryOptions.thinkingLevel === ThinkingLevel.Off,
 						responsesLite: model.useResponsesLite,
 						sessionId: summaryOptions.sessionId,
-						promptCacheKey: summaryOptions.promptCacheKey,
+						promptCacheKey: summaryOptions.remotePromptCacheKey,
 						providerSessionState: summaryOptions.providerSessionState,
 						codexCompaction: createOpenAICodexCompactionRequestContext({
 							context: summaryOptions.codexCompaction,
@@ -1888,7 +1899,7 @@ export async function compact(
 			assertRemoteCompactionInputFits(trimmed, model);
 			const requestOptions = {
 				sessionId: summaryOptions.sessionId,
-				promptCacheKey: summaryOptions.promptCacheKey,
+				promptCacheKey: summaryOptions.remotePromptCacheKey,
 				retainedMessageBudget: settings.v2RetainedMessageBudget,
 				retainedUserItems,
 			};
@@ -1970,6 +1981,7 @@ export async function compact(
 						{
 							fetch: summaryOptions.fetch,
 							sessionId: summaryOptions.sessionId,
+							promptCacheKey: summaryOptions.remotePromptCacheKey,
 							providerSessionState: summaryOptions.providerSessionState,
 							codexCompaction: summaryOptions.codexCompaction,
 							rewriteOutputs,
@@ -2024,6 +2036,7 @@ export async function compact(
 	let nativeFirstKeptEntryId = firstKeptEntryId;
 	let nativeUsedTokens: number | undefined;
 	let nativeRetainedFiles: AnthropicCompactionFiles[] | undefined;
+	let nativeToolChanges: Record<string, unknown>[] | undefined;
 	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model)) {
 		const previousNative = getPreservedAnthropicCompactionData(previousPreserveData);
 		// Lead with the previous summary as the live context renders it:
@@ -2052,6 +2065,7 @@ export async function compact(
 											: {}),
 										...(previousNative.filesText ? { filesText: previousNative.filesText } : {}),
 										...(previousNative.retainedFiles ? { retainedFiles: previousNative.retainedFiles } : {}),
+										...(previousNative.toolChanges ? { toolChanges: previousNative.toolChanges } : {}),
 										...(previousNative.exactTail ? { exactTail: true as const } : {}),
 									}
 								: undefined,
@@ -2148,6 +2162,7 @@ export async function compact(
 			);
 			nativeSummary = remote.content;
 			nativeSignature = remote.signature;
+			nativeToolChanges = remote.toolChanges;
 			nativeUsedTokens = calculatePromptTokens(remote.usage);
 			usedRemoteCompaction = true;
 		} catch (err) {
@@ -2235,16 +2250,18 @@ export async function compact(
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 	if (nativeSummary !== undefined) {
-		// The replayed block stays byte-identical to the API's summary so it
-		// matches its signature. The harness file lists above travel
-		// separately: the converter replaces the summary message with the
-		// block and skips its text, so they would otherwise be invisible to
-		// this provider. Every other provider keeps reading the entry text.
+		// The replayed block (summary and any `tool_changes`) stays
+		// byte-identical to the API's output so it matches its signature. The
+		// harness file lists above travel separately: the converter replaces the
+		// summary message with the block and skips its text, so they would
+		// otherwise be invisible to this provider. Every other provider keeps
+		// reading the entry text.
 		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
 		preserveData = withAnthropicCompactionPreserveData(preserveData, {
 			provider: model.provider,
 			content: nativeSummary,
 			...(nativeSignature ? { signature: nativeSignature } : {}),
+			...(nativeToolChanges ? { toolChanges: nativeToolChanges } : {}),
 			...(filesText ? { filesText } : {}),
 			...(nativeRetainedFiles ? { retainedFiles: nativeRetainedFiles } : {}),
 			exactTail: true,
@@ -2295,7 +2312,7 @@ async function generateTurnPrefixSummary(
 		preferredDialect(model.id),
 		resolveCatalogPolicy(model).classifierCotExtraction === true,
 	);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${formatAdditionalContext(options?.extraContext)}${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages = [
 		{
 			role: "user" as const,

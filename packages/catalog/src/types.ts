@@ -94,6 +94,7 @@ export const IMAGE_GENERATION_APIS = [
 	"google-gemini-cli",
 	"openai-responses",
 	"openai-codex-responses",
+	"factory-droid-agent",
 ] as const;
 export type ImageGenerationApi = (typeof IMAGE_GENERATION_APIS)[number];
 
@@ -103,7 +104,7 @@ const IMAGE_CHAT_TRANSPORT_KINDS: readonly ModelKind[] = ["chat", "tiny", "image
 /**
  * Kinds a model on `api` may declare: a runner api serves its own kind; a chat
  * transport serves `chat` and `tiny`, plus `image` when `generate_image` runs it
- * (hosted Responses image tool, Gemini image models). `undefined` for
+ * (hosted Responses image tool, Gemini and Factory Droid image models). `undefined` for
  * `local-inference`, which hosts several kinds chosen by the model itself.
  */
 export function servedKinds(api: Api): readonly ModelKind[] | undefined {
@@ -671,6 +672,8 @@ export interface AnthropicCompat {
 	supportsEagerToolInputStreaming?: boolean;
 	/** Whether long prompt-cache retention (`ttl: "1h"`) is supported. Default: true for canonical Anthropic API. */
 	supportsLongCacheRetention?: boolean;
+	/** Whether a `ttl: "1h"` breakpoint on API-key requests adds the `extended-cache-ttl-2025-04-11` beta. Unset: true (Vertex rawPredict URLs never send it). */
+	extendedCacheTtlBeta?: boolean;
 	/**
 	 * Whether mid-conversation `role: "system"` messages are accepted in the
 	 * `messages` array. When unset, auto-detected from model and deployment policy.
@@ -810,8 +813,8 @@ export interface AnthropicCompat {
 }
 
 /**
- * Compatibility settings for Bedrock Converse prompt caching. Cache pricing is
- * deliberately not used to infer these request-shape capabilities.
+ * Compatibility settings for Bedrock Converse requests and native streaming
+ * side-compaction. Cache pricing does not imply these capabilities.
  */
 export interface BedrockCompat {
 	/** Explicit disabled-thinking wire form; unset preserves the provider's existing behavior. */
@@ -859,9 +862,14 @@ export interface BedrockCompat {
 	 * local prefix-binding safeguards. Default: true.
 	 */
 	supportsThinkingBindingControls?: boolean;
+	/**
+	 * Whether the model supports a compaction-only Bedrock Runtime
+	 * InvokeModelWithResponseStream request. Ordinary turns still use Converse.
+	 */
+	supportsServerCompaction?: boolean;
 }
 
-/** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
+/** Fully-resolved Bedrock Converse and side-compaction capabilities, materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
 	/** See {@link BedrockCompat.disabledThinking}. */
 	disabledThinking?: BedrockCompat["disabledThinking"];
@@ -876,6 +884,8 @@ export interface ResolvedBedrockCompat {
 	supportsForcedToolChoice: boolean;
 	/** See {@link BedrockCompat.supportsThinkingBindingControls}. */
 	supportsThinkingBindingControls: boolean;
+	/** See {@link BedrockCompat.supportsServerCompaction}; false unless the Bedrock model-card policy opts in. */
+	supportsServerCompaction: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
 	 * events; 0 disables the idle watchdog. Undefined defers to
@@ -1179,6 +1189,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "thinkingLoopGuard"
 		| "bedrockMessagesApi"
 		| "effortBeta"
+		| "extendedCacheTtlBeta"
 		| "disabledThinking"
 		| "betweenToolsEffort"
 		| "stripThinkingHistory"
@@ -1189,6 +1200,8 @@ export type ResolvedAnthropicCompat = Required<
 > & {
 	/** Effort-beta override; undefined keeps the transport's legacy heuristic. */
 	effortBeta?: AnthropicCompat["effortBeta"];
+	/** Extended-cache-ttl beta opt-out; undefined sends it where a 1h breakpoint needs it. */
+	extendedCacheTtlBeta?: AnthropicCompat["extendedCacheTtlBeta"];
 	/** Disabled-thinking wire form; undefined keeps the direct-provider behavior. */
 	disabledThinking?: AnthropicCompat["disabledThinking"];
 	/** Effort pinned on `between_tools` turns; undefined leaves effort untouched. */
@@ -1823,3 +1836,15 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }
+
+/**
+ * The model facts the catalog policy cascade reads: the resolve-target inputs
+ * (`providerType ?? provider`, the request adapter, the wire model id, the
+ * reasoning flag) plus the unverified-thinking correction applied before the
+ * cascade. Callers holding a reduced model view — request adapters that only
+ * need policy — supply exactly these instead of asserting a full `Model`.
+ */
+export type CatalogPolicyInputs = Pick<
+	ModelSpec<Api>,
+	"provider" | "providerType" | "api" | "id" | "reasoning" | "requestModelId" | "thinking"
+>;
