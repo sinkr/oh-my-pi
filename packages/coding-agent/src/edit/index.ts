@@ -33,6 +33,7 @@ import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
+import { approvalTargetKey } from "../tools/approval-targets";
 import { strictestApproval, truncateForPrompt } from "../tools/approval";
 import {
 	deleteFileWithFallback,
@@ -444,6 +445,22 @@ export class EditTool implements AgentTool<TInput> {
 		return lines.length === 0 ? ["File: (unknown)"] : lines;
 	};
 
+	/**
+	 * `always-ask-cached` keys: every file the payload writes — section targets
+	 * plus move/rename destinations, mirroring {@link approval}.
+	 */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const { paths, fileOps } = this.#inspect(args);
+		const targets = [...paths];
+		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		const keys: string[] = [];
+		for (const target of targets) {
+			const key = approvalTargetKey(this.session.cwd, target);
+			if (key !== undefined) keys.push(key);
+		}
+		return keys.length > 0 ? keys : undefined;
+	};
+
 	matcherDigest(args: unknown): string | undefined {
 		const digest = this.#inspect(args)
 			.entries.map(entry => entry.digest)
@@ -548,7 +565,11 @@ export class EditTool implements AgentTool<TInput> {
 		}
 
 		if (outcome.isError) {
-			return { content: [{ type: "text", text: outcome.text }], isError: true };
+			return {
+				content: [{ type: "text", text: outcome.text }],
+				details: { diff: "", errorKind: outcome.errorKind },
+				isError: true,
+			};
 		}
 
 		const details = aggregateDetails(outcome.files, this.mode);
