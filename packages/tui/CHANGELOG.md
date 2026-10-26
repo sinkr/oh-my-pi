@@ -1,17 +1,36 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Command and eval output panes no longer re-style and re-join their whole output on every frame, so a long command's output stops costing frame time while it sits in the transcript ([#16779](https://github.com/can1357/oh-my-pi/pull/16779) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
+- Added an optional `title` to `BtwHistoryRecord` and a `title` option to `BtwPanelComponent`: the `/btw` panel, history list and thread show it as the topic heading in place of the question, so a side command reads as `/sitrep` instead of its expanded template ([#16815](https://github.com/can1357/oh-my-pi/pull/16815) by [@wolfiesch](https://github.com/wolfiesch))
+- Vim mode now supports `.` to repeat the last change, including the text typed in Insert or Replace mode, with Vim's count rules; `u` undoes a whole Insert session or `.` in one step ([#16872](https://github.com/can1357/oh-my-pi/pull/16872) by [@Shadorain](https://github.com/Shadorain))
+- Added the `app.local.open` keybinding (default `Alt+G`) and its keyboard shortcuts row ([#16873](https://github.com/can1357/oh-my-pi/pull/16873) by [@Shadorain](https://github.com/Shadorain))
+- Added `errorKind` to `EditToolDetails`, set on a failed edit ([#16608](https://github.com/can1357/oh-my-pi/pull/16608) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
+- Fixed typo underlines changing when the cursor or selection splits a word ([#16821](https://github.com/can1357/oh-my-pi/issues/16821))
+- Fixed completed `vibe_wait` and `vibe_list` worker cards repeatedly entering scrollback as elapsed time advanced after partial retirement; completed walls now retain a static snapshot while in-flight waits continue updating.
+- Fixed resuming a session with a recorded tool-call path that cannot be turned into a link, which crashed the TUI while it rebuilt the context ([#16806](https://github.com/can1357/oh-my-pi/pull/16806) by [@laviRZ](https://github.com/laviRZ))
+- Fixed the Agent Hub reordering its rows on every heartbeat while the session's saved subagents loaded, so no row could be selected until the load ended: a row's place is now fixed when the hub first shows it, an agent the load finds takes its place in the status/recency ranking, and every other new generation goes on top ([#10524](https://github.com/can1357/oh-my-pi/issues/10524), [#16952](https://github.com/can1357/oh-my-pi/pull/16952) by [@lemonleks](https://github.com/lemonleks))
+- Fixed the BTW history follow-up composer refusing pasted images; it now attaches them as `[Image #N]` markers and sends the ones whose marker stays in the draft ([#16805](https://github.com/can1357/oh-my-pi/pull/16805) by [@lemonleks](https://github.com/lemonleks))
 - Fixed long URLs in fenced code blocks opening only their first visual line on ctrl/cmd-click; each wrapped fragment now carries the full OSC 8 hyperlink when the terminal supports it ([#16740](https://github.com/can1357/oh-my-pi/pull/16740) by [@OriginalByteMe](https://github.com/OriginalByteMe))
 - Fixed the newest inline charts and images at the bottom of the screen showing as text placeholders while older ones stayed rendered once a session (or a resumed one) holds more than `tui.maxInlineImages` images ([#16660](https://github.com/can1357/oh-my-pi/issues/16660))
 - Fixed Markdown tables in the terminal ignoring their column alignment, so right-aligned and centered columns rendered flush left ([#16658](https://github.com/can1357/oh-my-pi/pull/16658) by [@adi-IL](https://github.com/adi-IL))
 - Grep, Glob, Find, and AST Grep result headers wrap a long pattern instead of cutting it off, so the match/file counts and `truncated` warning stay visible ([#16635](https://github.com/can1357/oh-my-pi/issues/16635))
+### Breaking Changes
+
+- `CoordinationOp` no longer includes `"jobs"`, which no tool has produced since `wait` and `proc://` replaced the `hub` tool ([#16763](https://github.com/can1357/oh-my-pi/pull/16763) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a table's last rows (such as its bottom border) going blank in scrollback when its SIXEL chart was drawn while the reply kept streaming, with the chart painted over them ([#16870](https://github.com/can1357/oh-my-pi/issues/16870))
+- Fixed Tern MCP tool cards showing only a clipped one-line summary of the arguments; the call and result cards now include a folded `Args` section with the full arguments ([#16765](https://github.com/can1357/oh-my-pi/issues/16765))
+- Fixed pasting an API key or redirect URL into the setup wizard's provider sign-in prompt silently doing nothing ([#16898](https://github.com/can1357/oh-my-pi/pull/16898) by [@camiloeferrera](https://github.com/camiloeferrera))
+- Fixed the usage dashboard averaging distinct quota buckets that share a label and window (Google Antigravity's Gemini and Gemini 4 Argon weeklies) into one row, which masked a drained bucket as "50% left"; buckets now group by quota identity, and shared Claude/GPT copies still merge ([#16790](https://github.com/can1357/oh-my-pi/issues/16790))
 
 ## [18.12.6] - 2026-10-21
 

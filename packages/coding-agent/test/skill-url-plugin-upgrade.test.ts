@@ -6,9 +6,13 @@ import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as discoveryHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import { dispatchRpcSkillPrompt } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import {
+	RpcExtensionUserMessageTracker,
+	RpcPromptResults,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -294,7 +298,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 
 		installPluginVersion("2.0.0");
 
-		const built = await buildSkillPromptMessage(skill, { args: "" }, "user", session);
+		const built = await session.buildUserSkillPrompt(skill, { args: "" });
 		expect(built.message).toContain("Body of version 2.0.0.");
 		expect(built.details.path.startsWith(pluginDir("2.0.0"))).toBe(true);
 	});
@@ -363,7 +367,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
 		installPluginVersion("3.0.0", "2.0.0");
 
-		const built = await buildSkillPromptMessage(original, { args: "" }, "user", session);
+		const built = await session.buildUserSkillPrompt(original, { args: "" });
 		expect(built.message).toContain("Body of version 3.0.0.");
 		expect(built.details.path.startsWith(pluginDir("3.0.0"))).toBe(true);
 	});
@@ -374,9 +378,44 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 
 		installPluginVersion("2.0.0", "1.0.0");
 
-		const built = await buildSkillPromptMessage(skill, { args: "" }, "user", session);
+		const built = await session.buildUserSkillPrompt(skill, { args: "" });
 		expect(built.message).toContain("Body of version 2.0.0.");
 		expect(built.details.path.startsWith(pluginDir("2.0.0"))).toBe(true);
+	});
+
+	it("an RPC prompt command with /skill: after the upgrade sends the new version", async () => {
+		const session = await startSession();
+		installPluginVersion("2.0.0", "1.0.0");
+
+		// Only the turn is stubbed (there is no model to run): it records the message and admits it.
+		const sent: Array<{ content: unknown; path: unknown }> = [];
+		vi.spyOn(session, "promptCustomMessage").mockImplementation(async (message, options) => {
+			const details = message.details;
+			const readPath = details && typeof details === "object" && "path" in details ? details.path : undefined;
+			sent.push({ content: message.content, path: readPath });
+			options?.onPromptAdmitted?.();
+			return true;
+		});
+		const results = new RpcPromptResults(
+			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+			() => {},
+		);
+		const result = await dispatchRpcSkillPrompt({
+			ticket: results.begin("cmd-upgrade"),
+			results,
+			session,
+			message: `/skill:${SKILL}`,
+			streamingBehavior: undefined,
+			onError: error => {
+				throw error;
+			},
+			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
+		});
+
+		expect(result).toEqual({ agentInvoked: true });
+		expect(sent).toHaveLength(1);
+		expect(sent[0].content).toContain("Body of version 2.0.0.");
+		expect(String(sent[0].path).startsWith(pluginDir("2.0.0"))).toBe(true);
 	});
 
 	it("a subagent spawned with an autoload skill after the upgrade receives the new version", async () => {

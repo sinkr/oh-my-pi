@@ -787,36 +787,55 @@ export type SkillInvocationKind = "user" | "autoload";
 /** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
 export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
 
+/** Read a skill's instruction body before rendering user-provided arguments. */
+export async function loadSkillPromptBody(skill: Pick<Skill, "filePath">): Promise<string> {
+	const content = await Bun.file(skill.filePath).text();
+	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
+	// diagnostics to the loader, which already parsed this frontmatter.
+	return parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
+}
+
+/** A skill's instruction body and the skill it was read from. */
+export interface LoadedSkillPrompt {
+	skill: Pick<Skill, "name" | "filePath" | "baseDir">;
+	body: string;
+}
+
 /**
- * Builds the prompt message for a skill invocation. With `source`, a stale skill (its instruction
- * file is gone, or for a session that rediscovers its own skills, its plugin install was replaced;
- * see {@link rediscoverSkills}) is replaced by the same-named skill from a rediscovery;
- * `details.path` names the file actually read.
+ * Reads a skill's instruction body. With `source`, a stale skill (its instruction file is gone, or
+ * for a session that rediscovers its own skills, its plugin install was replaced; see
+ * {@link rediscoverSkills}) is replaced by the same-named skill from a rediscovery; the returned
+ * `skill` names the file actually read, so render with it.
  */
-export async function buildSkillPromptMessage(
+export async function loadSkillPrompt(
 	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
-	input: SkillPromptInput,
-	invocation: SkillInvocationKind = "user",
 	source?: SkillRediscoverySource,
-): Promise<BuiltSkillPromptMessage> {
+): Promise<LoadedSkillPrompt> {
 	const host = source?.skillRediscoveryHost?.();
 	if (host && (await isSkillSuperseded(skill, host))) {
 		skill = (await findRediscoveredSkill(skill, host)) ?? skill;
 	}
-	let content: string;
 	try {
-		content = await Bun.file(skill.filePath).text();
+		return { skill, body: await loadSkillPromptBody(skill) };
 	} catch (error) {
 		if (!host || !isEnoent(error)) throw error;
 		const fresh = await findRediscoveredSkill(skill, host);
 		if (!fresh) throw error;
-		skill = fresh;
-		content = await Bun.file(skill.filePath).text();
+		return { skill: fresh, body: await loadSkillPromptBody(fresh) };
 	}
-	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
-	// diagnostics to the loader, which already parsed this frontmatter.
-	const body = parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
+}
+
+/** Render a loaded skill with user arguments substituted by its static template. */
+export function renderSkillPromptMessage(
+	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+	input: SkillPromptInput,
+	body: string,
+	invocation: SkillInvocationKind = "user",
+	options?: { expandUserArgs?: (args: string) => string },
+): BuiltSkillPromptMessage {
 	const trimmedArgs = input.args.trim();
+	const renderedArgs =
+		invocation === "user" && trimmedArgs ? (options?.expandUserArgs?.(trimmedArgs) ?? trimmedArgs) : trimmedArgs;
 	let message: string;
 	if (invocation === "user") {
 		// User-invoked skills announce themselves and expose their skill directory
@@ -826,7 +845,7 @@ export async function buildSkillPromptMessage(
 				name: skill.name,
 				body,
 				baseDir: skill.baseDir,
-				userArgs: trimmedArgs || undefined,
+				userArgs: renderedArgs || undefined,
 			})
 			.trim();
 	} else {
@@ -850,4 +869,19 @@ export async function buildSkillPromptMessage(
 			lineCount: body ? body.split("\n").length : 0,
 		},
 	};
+}
+
+/**
+ * Load and render a skill prompt without authorizing session-specific model mentions. With
+ * `source`, a stale skill is read from its rediscovered replacement ({@link loadSkillPrompt});
+ * `details.path` names the file actually read.
+ */
+export async function buildSkillPromptMessage(
+	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+	input: SkillPromptInput,
+	invocation: SkillInvocationKind = "user",
+	source?: SkillRediscoverySource,
+): Promise<BuiltSkillPromptMessage> {
+	const loaded = await loadSkillPrompt(skill, source);
+	return renderSkillPromptMessage(loaded.skill, input, loaded.body, invocation);
 }
