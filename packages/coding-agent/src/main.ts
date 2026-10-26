@@ -1722,6 +1722,11 @@ export async function buildSessionOptions(
 		options.rules = [];
 	}
 
+	// Context files
+	if (parsed.noContextFiles) {
+		options.noContextFiles = true;
+	}
+
 	// Trusted extension paths are an exact allowlist for extension modules.
 	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
 		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
