@@ -195,6 +195,77 @@ describe("date-cwd-reminder", () => {
 			);
 			expect(next.messages).toHaveLength(rolled.messages.length + 2);
 		});
+
+		it("gives the newest of two identical same-millisecond turns the changed reminder", () => {
+			// Programmatic steering can append a user turn byte-identical to an earlier one
+			// within the same millisecond; the two must not share one reminder.
+			const injector = new DateCwdReminderInjector();
+			const user: Message = { role: "user", content: "ok", timestamp: 1 };
+			const assistant = createAssistantMessage("a");
+			injector.transform({ systemPrompt: ["system"], messages: [user] }, "2026-08-14", "/work");
+			const rolled = injector.transform(
+				{ systemPrompt: ["system"], messages: structuredClone([user, assistant, user]) },
+				"2026-08-15",
+				"/work",
+			);
+
+			expect(rolled.messages.map(message => message.content)).toEqual([
+				`${renderDateCwdReminder("2026-08-14", "/work")}\n\nok`,
+				assistant.content,
+				`${renderDateCwdReminder("2026-08-15", "/work")}\n\nok`,
+			]);
+		});
+
+		it("keeps the first reminder when the first turn's content is rewritten in place", () => {
+			// Secret obfuscation re-renders an earlier turn once it learns a new secret.
+			const injector = new DateCwdReminderInjector();
+			const first: Message = { role: "user", content: "token abc", timestamp: 1 };
+			injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+			const redacted: Message = { role: "user", content: "token [redacted]", timestamp: 1 };
+			const next: Message = { role: "user", content: "second", timestamp: 4 };
+			const out = injector.transform(
+				{ systemPrompt: ["system"], messages: [redacted, createAssistantMessage("a"), next] },
+				"2026-08-15",
+				"/work",
+			);
+
+			expect(out.messages[0]?.content).toBe(`${renderDateCwdReminder("2026-08-14", "/work")}\n\ntoken [redacted]`);
+			expect(out.messages[2]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nsecond`);
+		});
+
+		it("keeps a mid-loop reminder when its anchoring tool result is re-rendered", () => {
+			// Image clamps and inline-snapshot transforms rewrite a tool result's content
+			// between requests; the reminder already sent must stay where it was.
+			const injector = new DateCwdReminderInjector();
+			const user: Message = { role: "user", content: "first", timestamp: 1 };
+			const toolResult: Message = {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "FULL OUTPUT" }],
+				isError: false,
+				timestamp: 2,
+			};
+			injector.transform({ systemPrompt: ["system"], messages: [user] }, "2026-08-14", "/work");
+			const rolled = injector.transform(
+				{ systemPrompt: ["system"], messages: [user, createAssistantMessage("call"), toolResult] },
+				"2026-08-15",
+				"/work",
+			);
+			const truncated: Message = { ...toolResult, content: [{ type: "text", text: "TRUNCATED" }] };
+			const next = injector.transform(
+				{
+					systemPrompt: ["system"],
+					messages: [user, createAssistantMessage("call"), truncated, createAssistantMessage("call 2")],
+				},
+				"2026-08-15",
+				"/work",
+			);
+
+			const control = rolled.messages.at(-1)!;
+			expect(control.content).toBe(renderDateCwdReminder("2026-08-15", "/work"));
+			expect(next.messages[3]).toBe(control);
+		});
 	});
 });
 
@@ -202,6 +273,9 @@ describe("date-cwd reminder on the provider wire", () => {
 	const sessions: Array<{ dispose(): Promise<void> }> = [];
 
 	afterEach(async () => {
+		// Restore the clock here, not only in each test's `finally`: an aborted test would
+		// otherwise leave every later test file running at the faked date.
+		setSystemTime();
 		clearCustomApis();
 		for (const session of sessions.splice(0)) {
 			await session.dispose();
