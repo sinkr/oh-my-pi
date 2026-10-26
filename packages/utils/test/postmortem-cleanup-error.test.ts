@@ -238,6 +238,97 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stderr).not.toContain("cleanup stayed pending after the deadline");
 	});
 
+	it("holds cleanup open past the default deadline for a pending callback with a longer deadlineMs", async () => {
+		const result = await runPostmortemProbe(`
+			import { vi } from "bun:test";
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			vi.useFakeTimers();
+			// Give a pass whose deadline fired the microtasks it needs to settle.
+			const flush = async () => {
+				for (let i = 0; i < 20; i++) await Promise.resolve();
+			};
+			const save = Promise.withResolvers<void>();
+			let saved = false;
+			postmortem.register("slow-save", async () => {
+				await save.promise;
+				saved = true;
+			}, { deadlineMs: 30_000 });
+
+			let settled = false;
+			const cleanup = postmortem.cleanup().then(() => {
+				settled = true;
+			});
+			vi.advanceTimersByTime(20_000);
+			await flush();
+			if (settled) {
+				console.error("cleanup gave up on a pending save at the default deadline");
+				process.exit(2);
+			}
+			save.resolve();
+			await cleanup;
+			if (!saved) {
+				console.error("cleanup settled before the save finished");
+				process.exit(3);
+			}
+
+			const hung = Promise.withResolvers<void>();
+			postmortem.register("hung-save", () => hung.promise, { deadlineMs: 30_000 });
+			settled = false;
+			const bounded = postmortem.cleanup().then(() => {
+				settled = true;
+			});
+			vi.advanceTimersByTime(29_000);
+			await flush();
+			if (settled) {
+				console.error("cleanup settled before the callback's own deadline");
+				process.exit(4);
+			}
+			vi.advanceTimersByTime(2_000);
+			// The expiry check runs on a timer the hold's own deadline schedules.
+			await flush();
+			vi.advanceTimersByTime(1_000);
+			await bounded;
+			console.log("cleanup waited for the save and stayed bounded");
+		`);
+
+		expect(result.stderr).not.toContain("cleanup gave up on a pending save");
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("cleanup waited for the save and stayed bounded");
+	});
+
+	it("keeps the default deadline once a callback with a longer deadlineMs has settled", async () => {
+		const result = await runPostmortemProbe(`
+			import { vi } from "bun:test";
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			vi.useFakeTimers();
+			const flush = async () => {
+				for (let i = 0; i < 20; i++) await Promise.resolve();
+			};
+			postmortem.register("finished-save", async () => {}, { deadlineMs: 30_000 });
+			postmortem.register("never-settles", () => Promise.withResolvers<void>().promise);
+
+			let settled = false;
+			const cleanup = postmortem.cleanup().then(() => {
+				settled = true;
+			});
+			await flush();
+			vi.advanceTimersByTime(9_000);
+			await flush();
+			if (settled) {
+				console.error("cleanup settled before the default deadline");
+				process.exit(2);
+			}
+			vi.advanceTimersByTime(2_000);
+			await cleanup;
+			console.log("cleanup ended at the default deadline");
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("cleanup ended at the default deadline");
+	});
+
 	it("re-arms registrations after a manual cleanup keeps the process alive", async () => {
 		const result = await runPostmortemProbe(`
 			import { postmortem } from "${postmortemModuleUrl}";

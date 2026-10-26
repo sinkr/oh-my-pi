@@ -73,6 +73,13 @@ const OAUTH_REFRESH_PERSIST_RETRY_MAX_MS = 1_000;
  * saving a token it exchanged: its exchange backstop plus its save window.
  */
 const OAUTH_REFRESH_STALLED_OWNER_MS = OAUTH_REFRESH_EXCHANGE_BACKSTOP_MS + OAUTH_REFRESH_PERSIST_TIMEOUT_MS;
+/**
+ * How long process exit waits for refreshes still in flight: an exchange up to
+ * its backstop, then the save window, plus slack for the last save attempt. A
+ * shorter wait drops a token the provider already rotated, which leaves the
+ * shared store with a spent refresh token.
+ */
+const OAUTH_REFRESH_SHUTDOWN_WAIT_MS = OAUTH_REFRESH_STALLED_OWNER_MS + 5_000;
 
 /** Short non-secret fingerprint so logs can tell which process minted which token. */
 function tokenFingerprint(token: unknown): string {
@@ -355,6 +362,7 @@ export class OAuthRefresher {
 	#track<R>(pending: Promise<R>): Promise<R> {
 		this.#cancelRefreshCleanup ??= postmortem.register("oauth-refresh", () => this.#drainRefreshes(), {
 			exitOnly: true,
+			deadlineMs: OAUTH_REFRESH_SHUTDOWN_WAIT_MS,
 		});
 		this.#pendingRefreshes.add(pending);
 		const settled = () => {

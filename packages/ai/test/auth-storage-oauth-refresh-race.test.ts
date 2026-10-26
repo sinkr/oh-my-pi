@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -1227,6 +1228,53 @@ describe("AuthStorage OAuth refresh race", () => {
 			await child.exited;
 		}
 	});
+
+	test.skipIf(process.platform === "win32")(
+		"quitting while an exchanged token waits on a long write lock still saves it",
+		async () => {
+			if (!store || !tempDir) throw new Error("test setup failed");
+			const dbPath = path.join(tempDir, "agent.db");
+			await authStorage!.credentials.set("anthropic", [
+				{ type: "oauth", access: "old", refresh: "old-refresh", expires: 0 },
+			]);
+			const release = path.join(tempDir, "release-response");
+			const child = Bun.spawn(
+				[process.execPath, path.join(import.meta.dir, "fixtures/oauth-quit-child.ts"), dbPath, release],
+				{ stdout: "pipe", stderr: "pipe" },
+			);
+			const writer = new Database(dbPath);
+			// The child's lease renewal writes too; wait for it rather than fail the lock.
+			writer.run("PRAGMA busy_timeout = 5000");
+			try {
+				const first = await Promise.race([
+					child.stdout.getReader().read(),
+					child.exited.then(() => {
+						throw new Error("OAuth child exited before the provider rotated its token");
+					}),
+				]);
+				expect(new TextDecoder().decode(first.value)).toContain("rotated");
+				// Another process holds the write lock for longer than the default 10 s
+				// cleanup deadline; the child quits while its save waits on that lock.
+				// Real time on purpose: that deadline runs in the child process, which
+				// fake timers here cannot advance.
+				writer.run("BEGIN IMMEDIATE");
+				await Bun.write(release, "complete");
+				await Bun.sleep(12_000);
+				writer.run("ROLLBACK");
+				expect(await child.exited).toBe(0);
+				expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject({
+					type: "oauth",
+					access: "new",
+					refresh: "new-refresh",
+				});
+			} finally {
+				writer.close();
+				if (child.exitCode === null) child.kill();
+				await child.exited;
+			}
+		},
+		30_000,
+	);
 
 	test("a 401 names the token of the request that failed, not of the last request started", async () => {
 		if (!authStorage) throw new Error("test setup failed");

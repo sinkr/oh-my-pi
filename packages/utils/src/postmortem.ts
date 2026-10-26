@@ -27,8 +27,18 @@ interface CleanupRegistration {
 	id: string;
 	callback: (reason: Reason) => Promise<void> | void;
 	exitOnly: boolean;
+	/** How long a pass waits for this callback, when longer than {@link CLEANUP_DEADLINE_MS}. */
+	deadlineMs: number | undefined;
 	cancelled: boolean;
 	lastPass: number;
+}
+
+/** The deadline of one cleanup pass, which callbacks with their own `deadlineMs` hold open. */
+interface CleanupPassDeadline {
+	/** Keep the pass open until `pending` settles, for at most `deadlineMs`. */
+	extend(pending: Promise<unknown>, deadlineMs: number): void;
+	/** Whether a callback with its own deadline still holds the pass open. */
+	extended(): boolean;
 }
 
 // Active cleanup callbacks in registration order. Registrations survive
@@ -42,6 +52,8 @@ let activeCleanupKeepAlive = false;
 // Promises of callbacks invoked late (registered while a pass runs), joined by
 // the active pass before it settles so `cleanup()`/signal exits await them.
 let activeLatePromises: Promise<void>[] | undefined;
+// Deadline of the running pass, so callbacks invoked late can extend it too.
+let activePassDeadline: CleanupPassDeadline | undefined;
 const CLEANUP_DEADLINE_MS = 10_000;
 /**
  * Symbol stamped by the extension-load guard onto the throwing replacement it
@@ -184,10 +196,48 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 		}
 	};
 
+	// The pass ends once every callback settles, or at the deadline: CLEANUP_DEADLINE_MS,
+	// held open while a callback with a longer `deadlineMs` is still pending.
+	const deadline = Promise.withResolvers<void>();
+	const deadlineTimers: NodeJS.Timeout[] = [];
+	let baseDeadlineElapsed = false;
+	let openExtensions = 0;
+	let passDone = false;
+	const expireIfDue = (): void => {
+		if (passDone || !baseDeadlineElapsed || openExtensions > 0) return;
+		passDone = true;
+		logger.error("Cleanup deadline exceeded; proceeding with exit", { reason });
+		settle();
+		deadline.resolve();
+	};
+	const passDeadline: CleanupPassDeadline = {
+		extend(pending, deadlineMs) {
+			if (passDone || deadlineMs <= 0) return;
+			openExtensions++;
+			let open = true;
+			const close = (): void => {
+				if (!open) return;
+				open = false;
+				openExtensions--;
+				// Check on a later macrotask: when this was the last pending callback, the
+				// pass completes first and no deadline is reported.
+				deadlineTimers.push(setTimeout(expireIfDue, 0));
+			};
+			deadlineTimers.push(setTimeout(close, deadlineMs));
+			pending.then(close, close);
+		},
+		extended: () => !passDone && openExtensions > 0,
+	};
+	activePassDeadline = passDeadline;
+
 	// Snapshot the pass. Registrations added while a keep-alive cleanup runs are
 	// invoked by register() when appropriate and remain active for later passes.
 	const promises = callbackList.toReversed().map(registration => {
-		return Promise.try(() => invokeCleanup(registration, reason, keepAlive, pass));
+		return Promise.try(() => {
+			const pending = invokeCleanup(registration, reason, keepAlive, pass);
+			if (pending && registration.deadlineMs !== undefined) passDeadline.extend(pending, registration.deadlineMs);
+			return pending;
+		});
 	});
 
 	const cleanupSettled = Promise.allSettled(promises).then(async results => {
@@ -202,14 +252,16 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 		while (late.length > 0) await Promise.allSettled(late.splice(0));
 		settle();
 	});
-	const deadline = Promise.withResolvers<void>();
-	const deadlineTimer = setTimeout(() => {
-		logger.error("Cleanup deadline exceeded; proceeding with exit", { reason });
-		settle();
-		deadline.resolve();
-	}, CLEANUP_DEADLINE_MS);
+	deadlineTimers.push(
+		setTimeout(() => {
+			baseDeadlineElapsed = true;
+			expireIfDue();
+		}, CLEANUP_DEADLINE_MS),
+	);
 	const passPromise = Promise.race([cleanupSettled, deadline.promise]).finally(() => {
-		clearTimeout(deadlineTimer);
+		passDone = true;
+		for (const timer of deadlineTimers) clearTimeout(timer);
+		if (activePassDeadline === passDeadline) activePassDeadline = undefined;
 		// A re-armed pass must drop only its own settled promise; an older
 		// deadline-limited pass may finish after a newer one has already started.
 		if (keepAlive && cleanupPass === pass && cleanupPromise === passPromise) cleanupPromise = undefined;
@@ -520,7 +572,16 @@ function formatFatalError(label: string, err: Error): string {
 }
 
 async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
-	const forcedExit = setTimeout(() => exitProcess(1), CLEANUP_DEADLINE_MS);
+	// The forced exit backs up the pass deadline, so it waits while a callback with
+	// its own `deadlineMs` holds the pass open; that pass still ends at its deadline.
+	const forceExit = (): void => {
+		if (activePassDeadline?.extended()) {
+			forcedExit = setTimeout(forceExit, CLEANUP_DEADLINE_MS);
+			return;
+		}
+		exitProcess(1);
+	};
+	let forcedExit = setTimeout(forceExit, CLEANUP_DEADLINE_MS);
 	try {
 		// Cleanup callbacks are invoked synchronously before runCleanup returns its
 		// completion promise. TUI owners therefore hand the cursor back before the
@@ -664,6 +725,12 @@ export interface CleanupRegistrationOptions {
 	 * The registration remains armed when a keep-alive pass skips it.
 	 */
 	exitOnly?: boolean;
+	/**
+	 * How long a pass waits for this callback, when that is longer than the
+	 * default 10 s cleanup deadline. It extends the pass only while the callback
+	 * is still pending: one that settles early ends its hold at once.
+	 */
+	deadlineMs?: number;
 }
 
 /**
@@ -690,6 +757,7 @@ export function register(
 		id,
 		callback,
 		exitOnly: options.exitOnly ?? false,
+		deadlineMs: options.deadlineMs,
 		cancelled: false,
 		lastPass: 0,
 	};
@@ -709,6 +777,7 @@ export function register(
 			// Join the active pass so cleanup()/signal exits await it; after a
 			// completed exit pass there is nothing left to join.
 			activeLatePromises?.push(tracked);
+			if (registration.deadlineMs !== undefined) activePassDeadline?.extend(tracked, registration.deadlineMs);
 		} catch (error) {
 			const err = error instanceof Error ? error : new Error(String(error));
 			logger.error("Cleanup callback failed", { err, id, stack: err.stack });
