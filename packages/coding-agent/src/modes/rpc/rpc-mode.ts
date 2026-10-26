@@ -1651,8 +1651,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		}
 	};
 	// A transport error during startup must not be an unhandled rejection; the final await below still throws it.
+	// Input ending while startup still runs means no client is left to answer a dialog it awaits: reject them.
 	const inputRead = readRpcInputFrames(input, receiveFrame, message => output(error(undefined, "parse", message)));
-	inputRead.catch(() => {});
+	const rejectStartupDialogs = (): void => {
+		if (heldFrames) pendingExtensionRequests.rejectAll("RPC client disconnected during startup");
+	};
+	inputRead.then(rejectStartupDialogs, rejectStartupDialogs);
 
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
