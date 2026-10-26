@@ -499,6 +499,10 @@ fn parse_ps_args(argv: &[String], paths: &ShellPaths) -> std::result::Result<Par
 				let value = take_ps_value(argv, &mut index, arg.strip_prefix("--sort="), "--sort")?;
 				parse_ps_sort(&value, &mut options.sort)?;
 			},
+			_ if let Some(long) = arg.strip_prefix("--") => {
+				let name = long.split_once('=').map_or(long, |(name, _)| name);
+				return Err(unsupported_option(&format!("unrecognized option '--{name}'")));
+			},
 			_ if let Some(group) = arg.strip_prefix('-') => {
 				if group.is_empty() {
 					return Err((1, "invalid option '-'".to_string()));
@@ -647,10 +651,20 @@ fn parse_ps_flag_group(
 				parse_group_list(&value, &mut options.real_groups)?;
 				return Ok(());
 			},
-			_ => return Err((1, format!("unsupported option '-{option}'"))),
+			_ => return Err(unsupported_option(&format!("unsupported option '-{option}'"))),
 		}
 	}
 	Ok(())
+}
+
+/// Appended to every unsupported-option error: this `ps` covers a subset of
+/// procps. In the embedded shell `command ps` and `env ps` still run this
+/// builtin, so only a full path reaches a host `ps`, and not every host has one.
+const SYSTEM_PS_HINT: &str = "this ps supports a subset of procps options (see 'ps --help'); a \
+                              system ps, if installed, may support more when run by its full path";
+
+fn unsupported_option(message: &str) -> (u8, String) {
+	(1, format!("{message}; {SYSTEM_PS_HINT}"))
 }
 
 fn parse_ps_format(
@@ -1403,6 +1417,28 @@ mod tests {
 		};
 		assert!(options.running_only);
 		assert!(options.sort.is_empty());
+	}
+
+	#[test]
+	fn unknown_options_name_themselves_and_point_at_system_ps() {
+		for (args, named) in [
+			(&["-eo", "pid,args", "--forest"][..], "unrecognized option '--forest'"),
+			(&["--cols=200", "-e"][..], "unrecognized option '--cols'"),
+			(&["-eH"][..], "unsupported option '-H'"),
+		] {
+			let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+			let Err((code, message)) = parse_ps_args(&argv, &ShellPaths::default()) else {
+				panic!("{args:?} must be rejected");
+			};
+			assert_eq!(code, 1, "{args:?}");
+			let hint = message
+				.strip_prefix(named)
+				.and_then(|rest| rest.strip_prefix("; "))
+				.unwrap_or_else(|| panic!("{args:?}: {message:?} must start with {named:?}"));
+			assert!(hint.contains("'ps --help'"), "{args:?}: {message:?}");
+			assert!(hint.contains("system ps"), "{args:?}: {message:?}");
+			assert!(hint.contains("full path"), "{args:?}: {message:?}");
+		}
 	}
 
 	#[test]
