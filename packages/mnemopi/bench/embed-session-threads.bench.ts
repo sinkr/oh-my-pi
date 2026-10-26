@@ -37,7 +37,6 @@ const PARITY_COSINE_FLOOR = 0.999999;
 
 interface Measurement {
 	label: string;
-	threads: number;
 	wallMsPerQuery: number;
 	cpuSecondsPerQuery: number;
 	coresBusy: number;
@@ -67,7 +66,6 @@ async function measure(label: string, model: Fastembed.FlagEmbedding): Promise<M
 	const cpuSeconds = (cpu.user + cpu.system) / 1e6;
 	return {
 		label,
-		threads: Number(/Threads:\s+(\d+)/.exec(await Bun.file("/proc/self/status").text())?.[1] ?? 0),
 		wallMsPerQuery: (wallSeconds / ITERATIONS) * 1000,
 		cpuSecondsPerQuery: cpuSeconds / ITERATIONS,
 		coresBusy: cpuSeconds / wallSeconds,
@@ -116,7 +114,6 @@ console.log(`model ${modelName} · ${os.availableParallelism()} available cores 
 console.table(
 	[baseline, budgeted].map(row => ({
 		session: row.label,
-		"process threads": row.threads,
 		"wall ms/query": row.wallMsPerQuery.toFixed(1),
 		"CPU s/query": row.cpuSecondsPerQuery.toFixed(3),
 		"cores busy": row.coresBusy.toFixed(1),

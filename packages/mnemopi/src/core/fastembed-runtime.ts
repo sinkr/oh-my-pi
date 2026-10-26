@@ -139,11 +139,12 @@ export async function prepareWindowsFastembedRuntime({
  *
  * fastembed creates its ONNX session without any thread option, so
  * onnxruntime applies its own defaults: one intra-op thread per physical core,
- * with those threads spinning between operators. Embedding a recall query is a
- * few hundred microseconds of work per core, so on a many-core host nearly all
- * of that CPU is spin and scheduling. Measured on a 32-core host, one short
- * query cost 3.85 CPU-seconds and kept 31 cores busy for 124 ms; with the
- * budget below it costs 0.56 CPU-seconds and finishes in 178 ms, and its
+ * with those threads spinning between operators. The real work of embedding a
+ * recall query is about half a CPU-second (fastembed pads every text to the
+ * model's maximum length), so on a many-core host most of what the default
+ * pool burns beyond that is spin and scheduling. Measured on a 32-core host,
+ * one short query cost 3.85 CPU-seconds and kept 31 cores busy for 124 ms;
+ * with the budget below it costs 0.56 CPU-seconds and finishes in 178 ms, and its
  * vector points the same way (cosine 0.9999997 against the unbudgeted one;
  * `bench/embed-session-threads.bench.ts` measures and checks both).
  */
