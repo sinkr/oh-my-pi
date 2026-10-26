@@ -68,7 +68,10 @@ export interface NewSessionOptions {
 	/** Provider prompt-cache identity to seed on the new session header. */
 	providerPromptCacheKey?: string;
 	taskPromptCacheKey?: string;
-	/** Skip flushing the current session and delete it instead of saving. */
+	/**
+	 * Skip flushing the current session and delete it instead of saving. The
+	 * successor starts lazy: no empty header is written until it has content.
+	 */
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
@@ -86,6 +89,14 @@ export interface SessionEntryBase {
 	 * (forks, branches, collab replicas) keep the original writer. Absent on older entries.
 	 */
 	runtime?: RuntimeIdentity;
+	/**
+	 * Active leaf at append time, for an entry written off the active branch (late usage,
+	 * a background bash result routed back to the branch it started on). The loader replays
+	 * it instead of treating this entry as the leaf, so resume keeps the branch the live
+	 * session was on. Absence keeps the ordinary last-entry semantics; null records a
+	 * cleared leaf.
+	 */
+	activeLeafId?: string | null;
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
@@ -105,8 +116,6 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
-	/** Active leaf at append time for late usage; absence keeps ordinary last-entry semantics. */
-	activeLeafId?: string | null;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -337,9 +346,9 @@ export type SessionEntry =
 	| CredentialPinEntry
 	| ResetBoundaryEntry;
 
-/** Leaf selected when replaying one entry; late usage restores its captured active leaf. */
+/** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
 export function sessionEntryLeafId(entry: SessionEntry): string | null {
-	return entry.type === "model_usage" && entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
+	return entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
 }
 
 /** Newest entry that selects itself on replay; skips late-usage markers. */
