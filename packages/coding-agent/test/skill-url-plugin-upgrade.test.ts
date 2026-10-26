@@ -243,6 +243,26 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(await readText(child, "skill://kept-skill")).toContain("Parent's copy.");
 	});
 
+	it("a fixed list re-points a skill whose file is gone only to an install of the same plugin", async () => {
+		// The plugin is installed for the parent's project only; the worktree subagent's own discovery
+		// cannot see it, but finds a same-named project skill with other instructions.
+		fs.writeFileSync(userRegistryPath(), JSON.stringify({ version: 2, plugins: {} }));
+		writeRegistry(projectRegistryPath(), "1.0.0", "project");
+		const worktreeDir = makeExtraDir("pi-skill-upgrade-worktree-");
+		writeProjectSkill(worktreeDir, SKILL, "Worktree's copy.");
+		const parent = await startSession();
+		const child = await startSession({ skills: parent.skills, cwd: worktreeDir });
+
+		writePluginVersion("2.0.0");
+		writeRegistry(projectRegistryPath(), "2.0.0", "project");
+		removeSyncWithRetries(pluginDir("1.0.0"));
+
+		const text = await readText(child, `skill://${SKILL}`);
+		expect(text).not.toContain("Worktree's copy.");
+		expect(text).toContain(`Unknown skill: ${SKILL}`);
+		expect(child.skills.some(entry => entry.name === SKILL)).toBe(false);
+	});
+
 	it("a fixed list keeps a skill whose file cannot be checked: only a missing file counts as gone", async () => {
 		// Every stat of a path below a regular file fails with ENOTDIR, not ENOENT.
 		const notADirectory = path.join(tempDir, "not-a-directory");

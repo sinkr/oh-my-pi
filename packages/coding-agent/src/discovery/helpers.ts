@@ -1273,6 +1273,15 @@ async function recordRegisteredPluginRoots(roots: readonly ClaudePluginRoot[]): 
 	);
 }
 
+/** Plugin id of the registered plugin root (see {@link isSupersededPluginPath}) that holds `filePath`, if any. */
+export function registeredPluginIdOf(filePath: string): string | undefined {
+	let pluginId: string | undefined;
+	for (const [root, id] of registeredPluginRootIds) {
+		if (pathIsWithin(root, filePath)) pluginId = id;
+	}
+	return pluginId;
+}
+
 /**
  * Whether `filePath` lies in a plugin install that the registries, as read for `cwd`, have replaced
  * with another install of the same plugin: an upgrade that kept the old version's directory, or a
@@ -1281,10 +1290,7 @@ async function recordRegisteredPluginRoots(roots: readonly ClaudePluginRoot[]): 
  * root, or in a plugin the registries no longer install at all, is not superseded.
  */
 export async function isSupersededPluginPath(filePath: string, home: string, cwd?: string): Promise<boolean> {
-	let pluginId: string | undefined;
-	for (const [root, id] of registeredPluginRootIds) {
-		if (pathIsWithin(root, filePath)) pluginId = id;
-	}
+	const pluginId = registeredPluginIdOf(filePath);
 	if (pluginId === undefined) return false;
 	const installs = (await readPluginRoots(home, cwd, true)).roots.filter(root => root.id === pluginId);
 	if (installs.length === 0) return false;

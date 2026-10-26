@@ -21,6 +21,7 @@ import {
 	clearPluginRootsAndCaches,
 	compareSkillOrder,
 	isSupersededPluginPath,
+	registeredPluginIdOf,
 	scanSkillsFromDir,
 } from "../discovery/helpers";
 import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
@@ -639,8 +640,9 @@ export interface SkillRediscoverySource {
  * and the discovery file cache still name the old directory, so both are dropped first. A holder
  * that rediscovers its own skills refreshes in place, so its list, its prompt and the process
  * snapshot follow. A fixed list (a subagent given its parent's) keeps every entry whose file still
- * exists; an entry whose file is gone is re-pointed at a fresh discovery's same-named skill, or
- * dropped when there is none. The holder stores the result, so the next lookup needs no new pass.
+ * exists; an entry whose file is gone is re-pointed at a fresh discovery's same-named skill from
+ * the same plugin (or, for a skill outside any plugin, from outside any plugin), or dropped when
+ * there is none. The holder stores the result, so the next lookup needs no new pass.
  */
 export function rediscoverSkills(host: SkillRediscoveryHost): Promise<readonly Skill[]> {
 	const rediscover = () => rediscoverHostSkills(host);
@@ -676,7 +678,9 @@ async function rediscoverHostSkills(host: SkillRediscoveryHost): Promise<readonl
 			continue;
 		}
 		const fresh = byName.get(skill.name);
-		if (fresh) repointed.push(fresh);
+		// The fresh discovery runs in the holder's cwd, which can differ from the creator's (a worktree
+		// subagent): a same-named skill there from another source has other instructions.
+		if (fresh && registeredPluginIdOf(fresh.filePath) === registeredPluginIdOf(skill.filePath)) repointed.push(fresh);
 	}
 	await host.replaceSkills?.(repointed);
 	return repointed;
