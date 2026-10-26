@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Sessions that load several provider-registering extensions into a shared model registry (subagents, `/tan`, SDK hosts) start faster: the model catalog is rebuilt once instead of once per extension ([#17088](https://github.com/can1357/oh-my-pi/pull/17088) by [@Delije4](https://github.com/Delije4))
+
 ## [18.13.0] - 2026-10-26
 
 ### Breaking Changes
