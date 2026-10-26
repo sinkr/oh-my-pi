@@ -1060,6 +1060,7 @@ export class AgentSession implements SettingsScope {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
+	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
 	#skillDescriptions: SkillDescriptionCatalog;
 	#promptSkillsSource: readonly Skill[] | undefined;
 	#promptSkills: readonly Skill[] = [];
@@ -1993,6 +1994,7 @@ export class AgentSession implements SettingsScope {
 		}
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
+		this.#setMcpServerInstructionsSource = config.setMcpServerInstructionsSource;
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -6997,6 +6999,16 @@ export class AgentSession implements SettingsScope {
 	/** Replaces connected MCP tools and enables them immediately. */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		return this.#tools.refreshMCPTools(mcpTools);
+	}
+
+	/**
+	 * Feeds instructions from MCP servers the host connects outside the session's
+	 * own manager (ACP `session/new.mcpServers`) into the "## MCP Server
+	 * Instructions" prompt section. Takes effect on the next prompt rebuild, which
+	 * {@link refreshMCPTools} triggers when the instructions changed.
+	 */
+	setMcpServerInstructionsSource(source: (() => Map<string, string> | undefined) | undefined): void {
+		this.#setMcpServerInstructionsSource?.(source);
 	}
 
 	/** Makes turns wait, bounded, for in-flight MCP discovery before building their system prompt. */
