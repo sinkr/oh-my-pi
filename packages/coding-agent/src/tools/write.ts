@@ -19,6 +19,7 @@ import {
 	isRecord,
 	prompt,
 	untilAborted,
+	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveMemberContent,
@@ -664,13 +665,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		contentBytes: number,
 		rawContent: string,
 		resolvedArchivePath: ResolvedArchiveWritePath,
+		signal?: AbortSignal,
 	): Promise<AgentToolResult<WriteToolDetails>> {
-		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
-		// replaces the link itself with a regular file instead of writing
-		// through to its target.
-		const finalPath = resolvedArchivePath.exists
-			? await fs.realpath(resolvedArchivePath.absolutePath).catch(() => resolvedArchivePath.absolutePath)
-			: resolvedArchivePath.absolutePath;
+		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
+		if (parentDir && parentDir !== ".") {
+			await fs.mkdir(parentDir, { recursive: true });
+		}
+		// Canonicalize the parent when the archive is not yet present. Existing
+		// archive symlinks resolve to their target, so every spelling locks the
+		// same resource before reading any members.
+		const finalPath = await fs.realpath(resolvedArchivePath.absolutePath).catch(async error => {
+			if (!isEnoent(error)) throw error;
+			return path.join(await fs.realpath(parentDir), path.basename(resolvedArchivePath.absolutePath));
+		});
 		// A realpath swap can land on a name without an archive extension; a
 		// whole-archive rewrite then defaults to an uncompressed tar.
 		const inferredFormat = archiveFormatFromPath(finalPath);
@@ -678,56 +685,70 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (!isWritableArchiveFormat(format)) {
 			throw new ToolError(`Writing entries inside ${format} archives is not supported (read-only format).`);
 		}
-		// Rewrites are whole-archive: write to a temp file and rename so a
-		// crash/disk-full mid-write can't destroy the original archive.
-		const tmpPath = `${finalPath}.tmp-${process.pid}`;
 
-		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
-		if (parentDir && parentDir !== ".") {
-			await fs.mkdir(parentDir, { recursive: true });
-		}
-
-		const entries = new Map<string, ArchiveMemberContent>();
-		if (resolvedArchivePath.exists) {
-			try {
-				const existing = await readArchiveEntries({ path: finalPath, format });
-				for (const [entryPath, data] of existing) {
-					entries.set(entryPath, data);
+		return withFileLock(
+			finalPath,
+			async () => {
+				signal?.throwIfAborted();
+				// A second writer may have created the archive while this one waited.
+				let exists = resolvedArchivePath.exists;
+				if (!exists) {
+					try {
+						await fs.stat(finalPath);
+						exists = true;
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+					}
 				}
-			} catch (error) {
-				throw new ToolError(error instanceof Error ? error.message : String(error));
-			}
-		}
-		const writeTarget = `${resolvedArchivePath.archivePath}:${resolvedArchivePath.archiveSubPath}`;
-		const sel = readSelectorForEmptyWrite(writeTarget, content);
-		if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
-			throwReadSelectorMisfire(writeTarget, sel);
-		}
-		const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
-		if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
-			const existingBytes =
-				existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
-			const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
-			assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
-		}
-		entries.set(resolvedArchivePath.archiveSubPath, content);
 
-		try {
-			await writeArchive(tmpPath, format, entries);
-			await fs.rename(tmpPath, finalPath);
-		} catch (error) {
-			await fs.rm(tmpPath, { force: true }).catch(() => {});
-			throw new ToolError(error instanceof Error ? error.message : String(error));
-		}
+				const entries = new Map<string, ArchiveMemberContent>();
+				if (exists) {
+					try {
+						const existing = await readArchiveEntries({ path: finalPath, format });
+						for (const [entryPath, data] of existing) {
+							entries.set(entryPath, data);
+						}
+					} catch (error) {
+						throw new ToolError(error instanceof Error ? error.message : String(error));
+					}
+				}
+				const writeTarget = `${resolvedArchivePath.archivePath}:${resolvedArchivePath.archiveSubPath}`;
+				const sel = readSelectorForEmptyWrite(writeTarget, content);
+				if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
+					throwReadSelectorMisfire(writeTarget, sel);
+				}
+				const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
+				if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
+					const existingBytes =
+						existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
+					const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
+					assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
+				}
+				entries.set(resolvedArchivePath.archiveSubPath, content);
 
-		invalidateFsScanAfterWrite(resolvedArchivePath.absolutePath);
-		const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
-			resolvedArchivePath.archiveSubPath
-		}`;
-		return {
-			content: [{ type: "text", text: `Successfully wrote ${contentBytes} bytes to ${outputPath}` }],
-			details: { resolvedPath: resolvedArchivePath.absolutePath },
-		};
+				// Publish atomically while holding the lock; a distinct temporary
+				// path also avoids collisions with stale files left by prior runs.
+				const tmpPath = `${finalPath}.tmp-${process.pid}-${Bun.randomUUIDv7()}`;
+				try {
+					await writeArchive(tmpPath, format, entries);
+					signal?.throwIfAborted();
+					await fs.rename(tmpPath, finalPath);
+				} catch (error) {
+					await fs.rm(tmpPath, { force: true }).catch(() => {});
+					throw new ToolError(error instanceof Error ? error.message : String(error));
+				}
+
+				invalidateFsScanAfterWrite(resolvedArchivePath.absolutePath);
+				const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
+					resolvedArchivePath.archiveSubPath
+				}`;
+				return {
+					content: [{ type: "text", text: `Successfully wrote ${contentBytes} bytes to ${outputPath}` }],
+					details: { resolvedPath: resolvedArchivePath.absolutePath },
+				};
+			},
+			{ signal },
+		);
 	}
 
 	async #resolveSqliteWritePath(writePath: string, signal?: AbortSignal): Promise<ResolvedSqliteWritePath | null> {
@@ -997,7 +1018,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, cleanBytes, content, resolvedArchivePath);
+				const archiveResult = await this.#writeArchiveEntry(
+					cleanContent,
+					cleanBytes,
+					content,
+					resolvedArchivePath,
+					signal,
+				);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>
