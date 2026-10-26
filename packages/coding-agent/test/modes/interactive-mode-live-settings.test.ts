@@ -81,19 +81,21 @@ describe("InteractiveMode live settings", () => {
 		const badge = vi.spyOn(mode.statusLine, "setRunningSubagents");
 		const registry = AgentRegistry.global();
 		const ids = Array.from({ length: 100 }, (_, index) => `restore-burst-${index}`);
+		vi.useFakeTimers();
 		try {
 			for (const id of ids) {
 				registry.register({ id, displayName: id, kind: "sub", session: null, status: "running" });
 			}
 			expect(sync).not.toHaveBeenCalled();
-			await new Promise(resolve => setTimeout(resolve, 150));
+			vi.advanceTimersByTime(100);
 			expect(sync).toHaveBeenCalledTimes(1);
 			expect(badge.mock.calls.at(-1)?.[0]).toEqual(expect.arrayContaining(ids));
 			for (const id of ids) registry.unregister(id);
-			await new Promise(resolve => setTimeout(resolve, 150));
+			vi.advanceTimersByTime(100);
 			expect(sync).toHaveBeenCalledTimes(2);
 			expect(badge.mock.calls.at(-1)?.[0].some(id => ids.includes(id))).toBe(false);
 		} finally {
+			vi.useRealTimers();
 			for (const id of ids) registry.unregister(id);
 		}
 	});
