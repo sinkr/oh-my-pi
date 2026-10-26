@@ -62,6 +62,8 @@ export interface AuthAccountPolicy {
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
+	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
+	readonly reclaimAbovePct?: number;
 }
 
 /** Read-only set of per-account routing policies. */
@@ -628,6 +630,7 @@ export interface StoredOAuthRefreshOptions<T extends OAuthCredential = OAuthCred
 	signal?: AbortSignal;
 	keepCredentialOnRefreshFailure?: boolean | ((error: unknown) => boolean);
 	onRefreshFailure?: (error: unknown) => void;
+	/** How long the caller waits (for the lease and the exchange); the exchange itself runs on until its backstop. */
 	refreshTimeoutMs?: number;
 	refresh: (credential: T, signal?: AbortSignal) => Promise<OAuthCredentials>;
 	mergeRefreshedCredential?: (credential: T, refreshed: OAuthCredentials) => T;
