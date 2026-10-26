@@ -6,7 +6,12 @@ import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
-import { type AuthCredentialStore, type CredentialRefreshLeaseStore, hasRefreshLeases } from "./store";
+import {
+	type AuthCredentialStore,
+	type CredentialRefreshLeaseHolder,
+	type CredentialRefreshLeaseStore,
+	hasRefreshLeases,
+} from "./store";
 import {
 	REMOTE_REFRESH_SENTINEL,
 	type AuthCredentialSnapshotEntry,
@@ -51,6 +56,11 @@ const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 10_000;
  */
 const OAUTH_REFRESH_PERSIST_TIMEOUT_MS = 60_000;
 const OAUTH_REFRESH_PERSIST_RETRY_MAX_MS = 1_000;
+/**
+ * How long after another refresher's lease lapsed that refresher may still be
+ * saving a token it exchanged: its exchange timeout plus its save window.
+ */
+const OAUTH_REFRESH_STALLED_OWNER_MS = OAUTH_REFRESH_OPERATION_TIMEOUT_MS + OAUTH_REFRESH_PERSIST_TIMEOUT_MS;
 
 /** Short non-secret fingerprint so logs can tell which process minted which token. */
 function tokenFingerprint(token: unknown): string {
@@ -275,6 +285,7 @@ export class OAuthRefresher {
 		const leaseStore = hasRefreshLeases(this.#deps.store) ? this.#deps.store : undefined;
 		const owner = crypto.randomUUID();
 		let leasedCredentialId: number | undefined;
+		let takenOverFrom: CredentialRefreshLeaseHolder | undefined;
 
 		while (leaseStore) {
 			if (this.#shuttingDown) throw new AIError.AbortError("OAuth refresh stopped during shutdown");
@@ -310,8 +321,20 @@ export class OAuthRefresher {
 			if (options.canRefresh && !options.canRefresh(current)) {
 				return { credential: current, refreshed: false, removed: false };
 			}
+			// A lease row still naming another owner means that owner stalled or died
+			// holding it. It may have spent the stored refresh token already and still
+			// be retrying the save of its successor, so remember it: a rejection of
+			// that token is then not proof the login is dead.
+			const priorHolder = leaseStore.getCredentialRefreshLeaseHolder?.(row.id);
 			if (leaseStore.tryAcquireCredentialRefreshLease(row.id, owner, Date.now() + OAUTH_REFRESH_LEASE_TTL_MS)) {
 				leasedCredentialId = row.id;
+				if (
+					priorHolder &&
+					priorHolder.owner !== owner &&
+					Date.now() - priorHolder.expiresAtMs < OAUTH_REFRESH_STALLED_OWNER_MS
+				) {
+					takenOverFrom = priorHolder;
+				}
 				break;
 			}
 			const leaseExpiresAt = leaseStore.getCredentialRefreshLeaseExpiresAt(row.id);
@@ -364,8 +387,11 @@ export class OAuthRefresher {
 			const leaseRenewal =
 				leasedCredentialId !== undefined && leaseStore
 					? (async () => {
+							// Renew every interval; after a busy store, retry almost at once,
+							// since another full interval would outlive the lease.
+							let delayMs = OAUTH_REFRESH_LEASE_RENEW_MS;
 							while (!stopLeaseRenewal) {
-								await Promise.race([Bun.sleep(OAUTH_REFRESH_LEASE_RENEW_MS), leaseRenewalStopped.promise]);
+								await Promise.race([Bun.sleep(delayMs), leaseRenewalStopped.promise]);
 								if (stopLeaseRenewal) return;
 								let renewed: boolean;
 								try {
@@ -384,12 +410,12 @@ export class OAuthRefresher {
 									}
 								} catch (error) {
 									// A busy store only delays this renewal; ownership is lost
-									// only once another owner holds the lease row. Retry soon:
-									// another full renew interval would outlive the lease.
+									// only once another owner holds the lease row.
 									if (!isSqliteBusyError(error)) throw error;
-									await Bun.sleep(OAUTH_REFRESH_LEASE_POLL_MS);
+									delayMs = OAUTH_REFRESH_LEASE_POLL_MS;
 									continue;
 								}
+								delayMs = OAUTH_REFRESH_LEASE_RENEW_MS;
 								if (!renewed) {
 									throw new AIError.ConfigurationError("OAuth refresh ownership was lost before persistence");
 								}
@@ -414,6 +440,21 @@ export class OAuthRefresher {
 					refreshed = await options.refresh(current, refreshAbort.signal);
 				} catch (error) {
 					if (options.isDefinitiveFailure?.(error)) {
+						if (takenOverFrom && leaseStore && leasedCredentialId !== undefined) {
+							// The owner whose lease lapsed may have spent this token and still be
+							// saving its successor. Give the lease back so it can, and fail this
+							// refresh as transient instead of disabling a login that may live.
+							leaseStore.handBackCredentialRefreshLease?.(leasedCredentialId, owner, takenOverFrom);
+							logger.warn("OAuth refresh token rejected after taking over a stalled refresher; not disabling", {
+								provider,
+								credentialId: row.id,
+								spentRefresh: tokenFingerprint(current.refresh),
+							});
+							throw new AIError.OAuthError(
+								`OAuth refresh for ${provider} waits for a stalled refresher that may still save its token`,
+								{ kind: "token-refresh", provider },
+							);
+						}
 						const disabledCause = options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`;
 						const disabled = this.#deps.store.tryDisableAuthCredentialIfMatches(
 							row.id,

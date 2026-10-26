@@ -81,6 +81,41 @@ export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResoluti
 		: { ...resolved, apiKey, afterSiblingWait: true };
 }
 
+/** Bearers a resolver served recently, each with the OAuth access token behind it. */
+const OAUTH_PROVENANCE_LIMIT = 8;
+
+/**
+ * Remembers which OAuth access token produced each bearer a resolver served,
+ * so a 401 recovery can name the token of the request that actually failed.
+ * A resolver serves many requests, and they fail out of order: the last
+ * resolution is not that request's identity. Used by every resolver that
+ * serves more than one request ({@link KeyCascade.resolver}, the coding
+ * agent's `createApiKeyResolver`, the auth gateway's resolver).
+ */
+export function createOAuthProvenance(): {
+	record: (resolved: ApiKeyResolution) => void;
+	accessFor: (bearer: string | undefined) => string | undefined;
+} {
+	const byBearer = new Map<string, string>();
+	return {
+		record(resolved) {
+			if (typeof resolved !== "object" || resolved === undefined) return;
+			const access = resolved.oauthAccess;
+			if (access === undefined) return;
+			byBearer.delete(resolved.apiKey);
+			byBearer.set(resolved.apiKey, access);
+			while (byBearer.size > OAUTH_PROVENANCE_LIMIT) {
+				const oldest = byBearer.keys().next();
+				if (oldest.done) break;
+				byBearer.delete(oldest.value);
+			}
+		},
+		accessFor(bearer) {
+			return bearer === undefined ? undefined : byBearer.get(bearer);
+		},
+	};
+}
+
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
 

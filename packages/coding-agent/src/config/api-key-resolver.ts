@@ -1,4 +1,9 @@
-import { type ApiKeyResolution, type ApiKeyResolver, markAfterSiblingWait } from "@oh-my-pi/pi-ai/auth-retry";
+import {
+	type ApiKeyResolution,
+	type ApiKeyResolver,
+	createOAuthProvenance,
+	markAfterSiblingWait,
+} from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -55,9 +60,9 @@ export function createApiKeyResolver(
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId } = options;
-	// The access token behind the last bearer this resolver served: a 401 names
-	// it so the refresh can tell a peer's rotation from a dead token.
-	let lastOAuthAccess: string | undefined;
+	// One resolver serves many requests, and they fail out of order, so the
+	// token a 401 rejected is looked up from the bearer that request sent.
+	const provenance = createOAuthProvenance();
 	const resolveKey = async (
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
@@ -72,11 +77,11 @@ export function createApiKeyResolver(
 			refreshReason,
 			rejectedAccessToken,
 		});
-		lastOAuthAccess = typeof resolved === "object" ? resolved?.oauthAccess : undefined;
+		provenance.record(resolved);
 		return resolved;
 	};
 	return async ({ lastChance, error, signal, previousKey }) => {
-		const rejectedAccessToken = lastOAuthAccess;
+		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined);
 		}

@@ -1,6 +1,6 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $env, $envExact, logger } from "@oh-my-pi/pi-utils";
-import { type ApiKeyResolver, markAfterSiblingWait, type ResolvedApiKey } from "../auth-retry";
+import { type ApiKeyResolver, createOAuthProvenance, markAfterSiblingWait, type ResolvedApiKey } from "../auth-retry";
 import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -485,16 +485,16 @@ export class KeyCascade implements KeysApi {
 	 */
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {
 		const { sessionId, baseUrl, modelId } = options ?? {};
-		// The access token behind the last bearer this resolver served: a 401 names
-		// it so the refresh can tell a peer's rotation from a dead token.
-		let lastOAuthAccess: string | undefined;
+		// One resolver serves many requests, and they fail out of order, so the
+		// token a 401 rejected is looked up from the bearer that request sent.
+		const provenance = createOAuthProvenance();
 		const resolve = async (extra: AuthApiKeyOptions): Promise<ResolvedApiKey | undefined> => {
 			const resolved = await this.getWithCredential(provider, sessionId, { baseUrl, modelId, ...extra });
-			lastOAuthAccess = resolved?.oauthAccess;
+			provenance.record(resolved);
 			return resolved;
 		};
 		return async ({ lastChance, error, signal, previousKey }) => {
-			const rejectedAccessToken = lastOAuthAccess;
+			const rejectedAccessToken = provenance.accessFor(previousKey);
 			if (error === undefined) {
 				return resolve({ signal });
 			}

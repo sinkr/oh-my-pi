@@ -1209,4 +1209,72 @@ describe("AuthStorage OAuth refresh race", () => {
 			await child.exited;
 		}
 	});
+
+	test("a 401 names the token of the request that failed, not of the last request started", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		const provider = "unit-oauth-interleaved-401";
+		const interleaved = registerSingleUseProvider(provider);
+		await seedLogin(provider);
+		const resolver = authStorage.keys.resolver(provider, { sessionId: "shared" });
+
+		// Two requests share the resolver and both send access-0.
+		const first = await resolver({ lastChance: false, error: undefined });
+		const second = await resolver({ lastChance: false, error: undefined });
+		expect(first).toMatchObject({ apiKey: "access-0" });
+		expect(second).toMatchObject({ apiKey: "access-0" });
+
+		// The first 401 exchanges once; the resolver has now served access-1.
+		const unauthorized = Object.assign(new Error("401 revoked"), { status: 401 });
+		const recovered = await resolver({ lastChance: false, error: unauthorized, previousKey: "access-0" });
+		expect(recovered).toMatchObject({ apiKey: "access-1" });
+		expect(interleaved.exchanges()).toBe(1);
+
+		// The second request's 401 arrives late and still names access-0: it adopts
+		// the peer's access-1 rather than exchanging the refresh token again.
+		const late = await resolver({ lastChance: false, error: unauthorized, previousKey: "access-0" });
+		expect(late).toMatchObject({ apiKey: "access-1" });
+		expect(interleaved.exchanges()).toBe(1);
+
+		// A 401 on the token the resolver now serves does exchange again.
+		const current = await resolver({ lastChance: false, error: unauthorized, previousKey: "access-1" });
+		expect(current).toMatchObject({ apiKey: "access-2" });
+		expect(interleaved.exchanges()).toBe(2);
+	});
+
+	test("does not disable a login when its refresh token is rejected after taking over a stalled refresher", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-stalled-owner";
+		await seedLogin(provider);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const takeLease = store.tryAcquireCredentialRefreshLease?.bind(store);
+		if (!takeLease) throw new Error("test store does not support refresh leases");
+		// A peer took the lease, spent refresh-0 at the provider, and is still
+		// retrying its save; its lease has just lapsed.
+		expect(takeLease(credentialId, "stalled-peer", Date.now() - 1_000)).toBe(true);
+
+		const result = await authStorage.oauth
+			.refreshStored(provider, {
+				credentialId,
+				credentialFromRow: row => row,
+				forceRefresh: true,
+				refresh: async () => {
+					throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+				},
+				isDefinitiveFailure: error => error instanceof Error && error.message.includes("invalid_grant"),
+				disabledCause: () => "oauth refresh failed",
+			})
+			.then(
+				value => ({ value }),
+				(error: unknown) => ({ error }),
+			);
+
+		expect(String("error" in result ? result.error : "")).toContain("stalled refresher");
+		expect(events).toHaveLength(0);
+		const stored = store.listAuthCredentials(provider);
+		expect(stored).toHaveLength(1);
+		expect(stored[0]?.credential).toMatchObject({ type: "oauth", refresh: "refresh-0" });
+		// The lease went back to the stalled owner so it can still save its token.
+		expect(store.getCredentialRefreshLeaseHolder?.(credentialId)?.owner).toBe("stalled-peer");
+	});
 });
