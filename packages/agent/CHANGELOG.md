@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SummaryOptions.remotePromptCacheKey` and `remoteCompactionPolicyModel()` so remote compaction can carry a cache key gated against the request it actually sends ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+
+### Changed
+
+- Remote compaction now sends cache and session headers for the endpoint and model the request actually uses, so a configured compaction override no longer inherits the live turn's routing ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
+
 ### Fixed
 
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))

@@ -91,6 +91,7 @@ import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { type EditStore, type PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
 	$env,
@@ -2570,6 +2571,7 @@ export class AgentSession implements SettingsScope {
 			},
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
+			getPromptCacheKeyForModel: model => this.getPromptCacheKeyForModel(model),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
 			resetCodexProviderAfterCompaction: compaction => this.#resetCodexProviderAfterCompaction(compaction),
 			resetPlanReference: () => {
@@ -7120,15 +7122,30 @@ export class AgentSession implements SettingsScope {
 		return this.#providerBoundary.prepareSimpleStreamOptions(options, provider);
 	}
 
-	/** Cache identity for the main loop and side requests that reuse its context. */
-	getPromptCacheKeyForModel(model: Model | undefined): string | undefined {
-		const candidate = this.sessionManager.getHeader()?.taskPromptCacheKey;
-		return (
-			this.agent.promptCacheKey ??
-			(candidate !== undefined && model !== undefined && resolveCatalogPolicy(model).taskSiblingPromptCache === true
-				? candidate
-				: undefined)
-		);
+	/**
+	 * Cache identity for the main loop and side requests that reuse its context:
+	 * the agent's explicit key, else the Task family key (persisted header copy,
+	 * then the session stash) when `model` opts into shared prompt caching.
+	 */
+	getPromptCacheKeyForModel(model: CatalogPolicyInputs | undefined): string | undefined {
+		if (this.agent.promptCacheKey !== undefined) return this.agent.promptCacheKey;
+		if (model === undefined || resolveCatalogPolicy(model).sharedPromptCache !== true) return undefined;
+		return this.sessionManager.getHeader()?.taskPromptCacheKey ?? this.sessionManager.getTaskSiblingCandidate();
+	}
+
+	/**
+	 * Persist the stashed Task family candidate once a primary request on an
+	 * opted-in model consumes it, so fork and reopen — which read only the
+	 * header — keep the key. No-op under an explicit key, which wins on the wire.
+	 */
+	promoteTaskSiblingCandidate(model: CatalogPolicyInputs): void {
+		if (this.agent.promptCacheKey !== undefined) return;
+		if (this.sessionManager.getHeader()?.taskPromptCacheKey !== undefined) return;
+		const candidate = this.sessionManager.getTaskSiblingCandidate();
+		if (candidate === undefined || resolveCatalogPolicy(model).sharedPromptCache !== true) return;
+		void this.sessionManager
+			.setTaskPromptCacheKey(candidate)
+			.catch(error => logger.warn("Failed to persist task prompt cache key", { error: String(error) }));
 	}
 
 	/** Current steering mode */
@@ -12400,6 +12417,7 @@ export class AgentSession implements SettingsScope {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		const previousTaskSiblingCandidate = this.sessionManager.getTaskSiblingCandidate();
 
 		// Snapshot the full checkpoint runtime state: the success path calls
 		// #rehydrateCheckpointRewindState(), which clears and rebuilds all four
@@ -12463,6 +12481,9 @@ export class AgentSession implements SettingsScope {
 				this.#freshProviderSessionId = undefined;
 				this.#clearInheritedProviderPromptCacheKey();
 				this.#adoptInheritedProviderPromptCacheKey();
+				// The outgoing session's parent-derived family candidate is scoped
+				// to it; the resumed session's own header decides affinity from here.
+				this.sessionManager.clearTaskSiblingCandidate();
 			}
 			this.#syncAgentSessionId(undefined, false);
 			this.#memory.rekeyForCurrentSessionId();
@@ -12664,6 +12685,9 @@ export class AgentSession implements SettingsScope {
 			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
 			this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
 			this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
+			if (previousTaskSiblingCandidate !== undefined) {
+				this.sessionManager.setTaskSiblingCandidate(previousTaskSiblingCandidate);
+			}
 			this.#checkpointState = previousCheckpointState;
 			this.#pendingRewindReport = previousPendingRewindReport;
 			this.#lastCompletedRewind = previousLastCompletedRewind;
