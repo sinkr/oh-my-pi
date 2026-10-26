@@ -4006,12 +4006,16 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
-	it.each([{ swapRebuildsPrompt: false }, { swapRebuildsPrompt: true }])(
+	it.each([
+		// Fable → Opus 4.8 and Opus 5.5 → Opus 5 are catalog-permitted fallback-credit target pairs.
+		{ primaryId: "claude-fable-5", fallbackId: "claude-opus-4-8", swapRebuildsPrompt: false },
+		{ primaryId: "claude-fable-5", fallbackId: "claude-opus-4-8", swapRebuildsPrompt: true },
+		{ primaryId: "claude-opus-5-5", fallbackId: "claude-opus-5", swapRebuildsPrompt: false },
+	])(
 		"redeems Anthropic fallback credit across a same-provider refusal fallback with signed thinking unless the swap rebuilt the prompt (%o)",
-		async ({ swapRebuildsPrompt }) => {
-			// Fable → Opus 4.8 is a catalog-permitted fallback-credit target pair.
-			const primaryModel = getBundledModel("anthropic", "claude-fable-5");
-			const fallbackModel = getBundledModel("anthropic", "claude-opus-4-8");
+		async ({ primaryId, fallbackId, swapRebuildsPrompt }) => {
+			const primaryModel = getBundledModel("anthropic", primaryId);
+			const fallbackModel = getBundledModel("anthropic", fallbackId);
 			if (!primaryModel || !fallbackModel) {
 				throw new Error("Expected bundled test models to exist");
 			}
