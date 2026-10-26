@@ -41,7 +41,7 @@ function googleRpc429(reason: string, retryDelay?: string, message = "Resource e
 	})}`;
 }
 function googleRpcQuotaFailure429(
-	violations: Array<{ quotaId?: string; quotaMetric?: string; description?: string }>,
+	violations: Array<{ quotaId?: string; quotaMetric?: string; quotaValue?: string | number; description?: string }>,
 	retryDelay?: string,
 	message = "Resource has been exhausted (e.g. check quota).",
 ): string {
@@ -391,16 +391,49 @@ describe("parseRateLimitReason", () => {
 		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(false);
 	});
 
-	it("classifies structured QuotaFailure per-day requests as QUOTA_EXHAUSTED", () => {
-		const body = googleRpcQuotaFailure429([
+	it("classifies structured QuotaFailure per-day requests as QUOTA_EXHAUSTED even when paired with per-minute violations", () => {
+		const singleDaily = googleRpcQuotaFailure429([
 			{
 				quotaId: "GenerateContentRequestsPerDayPerProject",
 				quotaMetric: "Generate Content API requests",
 			},
 		]);
-		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
-		expect(isUsageLimitOutcome(429, body)).toBe(true);
-		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(true);
+		expect(parseRateLimitReason(singleDaily)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, singleDaily)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(singleDaily), { status: 429 }))).toBe(true);
+
+		const minuteBeforeDaily = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+				},
+				{
+					quotaId: "GenerateContentRequestsPerDayPerProject",
+					quotaMetric: "Generate Content API requests",
+				},
+			],
+			"20s",
+		);
+		expect(parseRateLimitReason(minuteBeforeDaily)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, minuteBeforeDaily)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(minuteBeforeDaily), { status: 429 }))).toBe(true);
+	});
+
+	it("classifies structured QuotaFailure with quotaValue 0 as QUOTA_EXHAUSTED even on per-minute metrics", () => {
+		const zeroQuota = googleRpcQuotaFailure429(
+			[
+				{
+					quotaId: "GenerateContentRequestsPerMinutePerProjectPerModel",
+					quotaMetric: "Generate Content API requests",
+					quotaValue: "0",
+				},
+			],
+			"15s",
+		);
+		expect(parseRateLimitReason(zeroQuota)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, zeroQuota)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(zeroQuota), { status: 429 }))).toBe(true);
 	});
 
 	it("classifies standalone RetryInfo on generic resource exhaustion according to delay threshold", () => {

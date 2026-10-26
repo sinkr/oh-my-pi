@@ -195,12 +195,22 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 		}
 	}
 
-	// 2. QuotaFailure details take second precedence
+	// 2. QuotaFailure details take second precedence.
+	// Inspect all violations before returning a short-window transient verdict so
+	// any daily cap or zero-entitlement quotaValue ("0") dominates.
+	let sawShortWindowViolation = false;
 	for (const value of error.details) {
 		const detail = asRecord(value);
 		if (detail?.["@type"] !== GOOGLE_RPC_QUOTA_FAILURE_TYPE || !Array.isArray(detail.violations)) continue;
 		for (const v of detail.violations) {
 			const violation = asRecord(v);
+			const quotaValue = violation?.quotaValue;
+			if (
+				(typeof quotaValue === "string" || typeof quotaValue === "number") &&
+				/^\s*0+(?:\.0+)?\s*$/.test(String(quotaValue))
+			) {
+				return "QUOTA_EXHAUSTED";
+			}
 			const quotaId = typeof violation?.quotaId === "string" ? violation.quotaId.toLowerCase() : "";
 			const quotaMetric = typeof violation?.quotaMetric === "string" ? violation.quotaMetric.toLowerCase() : "";
 			const combined = `${quotaId} ${quotaMetric}`;
@@ -211,14 +221,19 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 				combined.includes("perminute") ||
 				combined.includes("per_minute") ||
 				combined.includes("persecond") ||
-				combined.includes("per_second")
+				combined.includes("per_second") ||
+				combined.includes("per100seconds") ||
+				combined.includes("per_100_seconds")
 			) {
-				const retryDelayMs = extractRetryHint(undefined, errorMessage);
-				return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
-					? "QUOTA_EXHAUSTED"
-					: "RATE_LIMIT_EXCEEDED";
+				sawShortWindowViolation = true;
 			}
 		}
+	}
+	if (sawShortWindowViolation) {
+		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
+			? "QUOTA_EXHAUSTED"
+			: "RATE_LIMIT_EXCEEDED";
 	}
 
 	// 3. Standalone RetryInfo when neither ErrorInfo nor QuotaFailure returned a verdict
