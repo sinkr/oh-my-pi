@@ -33,7 +33,7 @@ describe("TTSR incremental stream matching", () => {
 		expect(names(manager.checkDelta("(1);\nnext", TEXT))).toEqual(["forbidden"]);
 		// A match on a completed line stays reported as the stream grows.
 		expect(names(manager.checkDelta(" line\n", TEXT))).toEqual(["forbidden"]);
-		expect(manager.matchExcerpt("forbidden")).toContain("call FORBIDDEN_api(1); next line");
+		expect(manager.matchExcerpt("forbidden", TEXT)).toContain("call FORBIDDEN_api(1); next");
 	});
 
 	it("finds a condition spanning lines on the final check of a long stream", () => {
@@ -65,7 +65,7 @@ describe("TTSR incremental stream matching", () => {
 		manager.addRule(rule("begin-end", "BEGIN\\s+END"));
 		const snapshot = `${"before ".repeat(100)}BEGIN\n\tEND${" after".repeat(100)}`;
 		expect(names(manager.checkSnapshot(snapshot, TEXT))).toEqual(["begin-end"]);
-		const excerpt = manager.matchExcerpt("begin-end");
+		const excerpt = manager.matchExcerpt("begin-end", TEXT);
 		expect(excerpt).toContain("BEGIN END");
 		expect(excerpt).toMatch(/^….*…$/);
 		expect(excerpt).not.toMatch(/[\n\t]/);
@@ -76,10 +76,56 @@ describe("TTSR incremental stream matching", () => {
 		const manager = new TtsrManager({ enabled: true });
 		manager.addRule(rule("long", "TOKEN_\\w+"));
 		expect(names(manager.checkSnapshot(`TOKEN_${"x".repeat(1_000)}`, TEXT))).toEqual(["long"]);
-		expect(manager.matchExcerpt("long")!.length).toBeLessThanOrEqual(241);
-		expect(manager.matchExcerpt("long")).toEndWith("…");
+		expect(manager.matchExcerpt("long", TEXT)!.length).toBeLessThanOrEqual(241);
+		expect(manager.matchExcerpt("long", TEXT)).toEndWith("…");
 		expect(names(manager.checkSnapshot("new TOKEN_short context", TEXT))).toEqual(["long"]);
-		expect(manager.matchExcerpt("long")).toBe("new TOKEN_short context");
+		expect(manager.matchExcerpt("long", TEXT)).toBe("new TOKEN_short context");
+	});
+
+	it("keeps settled matches cheap while a non-interrupting rule stays pending", () => {
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule({
+			...rule("early", "EARLY_HIT"),
+			condition: ["NEVER_\\d{3}", "EARLY_HIT"],
+			interruptMode: "never",
+		});
+		manager.checkDelta("EARLY_HIT\n", TEXT);
+		const exec = RegExp.prototype.exec;
+		let scanned = 0;
+		const spy = vi.spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, input: string) {
+			if (this.source.includes("EARLY_HIT") || this.source.includes("NEVER_")) scanned += input.length;
+			return exec.call(this, input);
+		});
+		try {
+			for (let index = 0; index < 2_000; index++) manager.checkDelta("const value = compute(input);\n", TEXT);
+			expect(scanned).toBeLessThan(2 * FILLER.length);
+			expect(manager.matchExcerpt("early", TEXT)).toBe("EARLY_HIT");
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("omits zero-width excerpts without losing the rule match", () => {
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(rule("assertion", "(?=[\\s\\S]*FORBIDDEN)"));
+		expect(names(manager.checkSnapshot(`${FILLER}FORBIDDEN`, TEXT))).toEqual(["assertion"]);
+		expect(manager.matchExcerpt("assertion", TEXT)).toBeUndefined();
+	});
+
+	it("isolates excerpts between streams and discards them at stream boundaries", () => {
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule({ ...rule("token", "TOKEN_\\w+"), scope: ["tool"] });
+		const first: TtsrMatchContext = { source: "tool", streamKey: "toolcall:first" };
+		const second: TtsrMatchContext = { source: "tool", streamKey: "toolcall:second" };
+		manager.checkSnapshot("TOKEN_first", first);
+		manager.checkSnapshot("TOKEN_second", second);
+		expect(manager.matchExcerpt("token", first)).toBe("TOKEN_first");
+		expect(manager.matchExcerpt("token", second)).toBe("TOKEN_second");
+		manager.clearStream(first.streamKey!);
+		expect(manager.matchExcerpt("token", first)).toBeUndefined();
+		expect(manager.matchExcerpt("token", second)).toBe("TOKEN_second");
+		manager.resetBuffer();
+		expect(manager.matchExcerpt("token", second)).toBeUndefined();
 	});
 
 	it("matches a condition that arrives late in a snapshot growing in small chunks, scanning each chunk once", () => {

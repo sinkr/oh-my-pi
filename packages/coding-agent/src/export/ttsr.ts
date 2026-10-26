@@ -414,6 +414,7 @@ function matchExcerpt(text: string, index: number, length: number): string {
  */
 class StreamBuffer {
 	readonly #scans = new Map<RegExp, ConditionScan>();
+	readonly excerpts = new Map<string, string | undefined>();
 	#parts: string[] = [];
 	#joined = "";
 	#length = 0;
@@ -441,6 +442,7 @@ class StreamBuffer {
 			this.#joined = snapshot;
 			return;
 		}
+		this.excerpts.clear();
 		for (const scan of this.#scans.values()) {
 			scan.scannedTo = -1;
 			scan.lineStart = 0;
@@ -484,14 +486,20 @@ class StreamBuffer {
 	}
 
 	/** Bounded one-line excerpt around the first matching condition. */
-	excerpt(conditions: readonly RegExp[]): string | undefined {
+	excerpt(ruleName: string, conditions: readonly RegExp[]): string | undefined {
+		if (this.excerpts.has(ruleName)) return this.excerpts.get(ruleName);
 		const text = this.#text();
+		let excerpt: string | undefined;
 		for (const condition of conditions) {
 			condition.lastIndex = 0;
 			const match = condition.exec(text);
-			if (match) return matchExcerpt(text, match.index, match[0].length);
+			if (match && match[0].length > 0) {
+				excerpt = matchExcerpt(text, match.index, match[0].length);
+				break;
+			}
 		}
-		return undefined;
+		this.excerpts.set(ruleName, excerpt);
+		return excerpt;
 	}
 
 	/** Whether a non-final check should rescan the region from the condition's last line start. */
@@ -555,7 +563,6 @@ export class TtsrManager {
 	readonly #buffers = new Map<string, StreamBuffer>();
 	/** Last snapshot evaluated for AST conditions, keyed by stream key, to dedupe matcher runs. */
 	readonly #lastAstSnapshots = new Map<string, string>();
-	readonly #matchExcerpts = new Map<string, string>();
 	#messageCount = 0;
 	#canMatchText = false;
 	#canMatchThinking = false;
@@ -940,7 +947,6 @@ export class TtsrManager {
 		const matches: Rule[] = [];
 		for (const entry of candidates) {
 			if (await this.#astConditionsMatch(entry.astConditions, snapshot, lang)) {
-				this.#matchExcerpts.delete(entry.rule.name);
 				matches.push(entry.rule);
 				logger.debug("TTSR ast condition matched", {
 					ruleName: entry.rule.name,
@@ -1062,9 +1068,7 @@ export class TtsrManager {
 				continue;
 			}
 
-			const excerpt = buffer.excerpt(entry.conditions);
-			if (excerpt === undefined) this.#matchExcerpts.delete(name);
-			else this.#matchExcerpts.set(name, excerpt);
+			const excerpt = buffer.excerpt(name, entry.conditions);
 			matches.push(entry.rule);
 			logger.debug("TTSR condition matched", {
 				ruleName: name,
@@ -1079,9 +1083,15 @@ export class TtsrManager {
 		return matches;
 	}
 
-	/** Text that last matched a rule; absent when an AST condition matched instead. */
-	matchExcerpt(ruleName: string): string | undefined {
-		return this.#matchExcerpts.get(ruleName);
+	/** Text that matched this rule in this stream; AST-only and zero-width matches have no excerpt. */
+	matchExcerpt(ruleName: string, context: TtsrMatchContext): string | undefined {
+		const key = this.#bufferKey(context);
+		for (const [bufferKey, buffer] of this.#buffers) {
+			if (bufferKey !== key && !bufferKey.startsWith(`${key}#`)) continue;
+			const excerpt = buffer.excerpts.get(ruleName);
+			if (excerpt !== undefined) return excerpt;
+		}
+		return undefined;
 	}
 
 	/** Mark rules as injected (won't trigger again until conditions allow). */
