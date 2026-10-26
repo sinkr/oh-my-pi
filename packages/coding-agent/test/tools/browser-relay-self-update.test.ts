@@ -494,10 +494,19 @@ describe("relay extension self-update on a real relay", () => {
 	it("writes background.js last, so an update that fails midway leaves the old version reported", async () => {
 		const dir = home.join("extension");
 		await writeRelayExtension(dir, OLD);
-		// A non-empty directory where a file belongs: renaming the new file over it fails.
-		await fs.rm(home.join("extension/options.js"));
-		await fs.mkdir(home.join("extension/options.js/blocker"), { recursive: true });
-		await expect(writeRelayExtension(dir, VERSION)).rejects.toThrow();
+		// Publishing the new manifest fails (a full disk, an I/O error); background.js has not been written yet.
+		const rename = nodeFs.promises.rename.bind(nodeFs.promises);
+		const spy = spyOn(nodeFs.promises, "rename").mockImplementation(async (from, to) => {
+			if (String(to).endsWith("manifest.json")) {
+				throw Object.assign(new Error("EIO: i/o error, rename"), { code: "EIO" });
+			}
+			return rename(from, to);
+		});
+		try {
+			await expect(writeRelayExtension(dir, VERSION)).rejects.toThrow("EIO");
+		} finally {
+			spy.mockRestore();
+		}
 		expect(await Bun.file(home.join("extension/background.js")).text()).toBe(
 			relayExtensionFiles(OLD)["background.js"]!,
 		);
