@@ -6,7 +6,7 @@ import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { JobWidgetEntry, JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { AsyncJobSnapshotItem } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AsyncJobSnapshotItem, AsyncJobTree } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import { StatusLineTestComponents } from "./helpers/status-line";
 
@@ -40,6 +40,7 @@ function runningJob(type: AsyncJobType, index: number): AsyncJobSnapshotItem {
 function makeComponent(
 	running: AsyncJobSnapshotItem[],
 	widgets: () => readonly JobWidgetEntry[] = () => [],
+	tree?: AsyncJobTree,
 ): StatusLineComponent {
 	const messages: unknown[] = [];
 	const model = { id: "test-model", name: "Test Model", contextWindow: 100_000 };
@@ -58,6 +59,7 @@ function makeComponent(
 		isAdvisorActive: () => false,
 		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
 		getAsyncJobSnapshot: () => ({ running }),
+		getAsyncJobTree: () => tree ?? null,
 		getRunningJobWidgets: widgets,
 		settings: { get: () => false },
 		modelRegistry: { isUsingOAuth: () => false },
@@ -111,6 +113,31 @@ describe("status-line background-job badge", () => {
 
 		expect(component.runningBackgroundJobCount()).toBe(1);
 		expect(component.runningBackgroundJobCount(root)).toBe(2);
+	});
+
+	it("counts a root job tree for pause while keeping the default badge owner-scoped", () => {
+		const childOwned = (type: "bash" | "eval", index: number): AsyncJobSnapshotItem => ({
+			...runningJob(type, index),
+			ownerId: "task-0",
+		});
+		const tree: AsyncJobTree = {
+			running: [runningJob("task", 0), childOwned("bash", 1), childOwned("eval", 2), runningJob("task", 3)],
+			recent: [],
+			rootId: "root",
+			agents: [{ id: "task-0", parentId: "root" }],
+		};
+		const component = makeComponent([runningJob("eval", 9)], undefined, tree);
+		component.setRunningSubagents(["task-0"]);
+		const root = {
+			getAsyncJobSnapshot: () => ({
+				running: [runningJob("task", 0), runningJob("bash", 1), runningJob("task", 3)],
+			}),
+			getAsyncJobTree: () => tree,
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+
+		expect(component.runningBackgroundJobCount()).toBe(1);
+		expect(component.runningBackgroundJobCount(root)).toBe(2);
+		expect(component.runningBackgroundJobCount(root, { includeDescendants: true })).toBe(3);
 	});
 
 	it("appends the freshest widget's headline and spark, and redraws when its data moves", () => {

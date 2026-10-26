@@ -94,9 +94,10 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						getRunningSubagentBadgeAgentRefs(
 							getRunningSubagentBadgeRegistry(ctx.collabGuest, AgentRegistry.global()),
 						).filter(ref => !ref.session?.agent?.isPaused).length +
-						root.getAdvisorStatusOverview().advisors.filter(advisor => advisor.backlog > 0 && !advisor.isPaused)
-							.length,
-					unfinishedJobs: ctx.statusLine.runningBackgroundJobCount(root),
+						root
+							.getAdvisorStatusOverview()
+							.advisors.filter(advisor => advisor.backlog > 0 && !advisor.isPaused && !advisor.yielded).length,
+					unfinishedJobs: ctx.statusLine.runningBackgroundJobCount(root, { includeDescendants: true }),
 				}),
 			});
 		},

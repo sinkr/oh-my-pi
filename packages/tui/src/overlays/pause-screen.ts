@@ -112,18 +112,50 @@ export function renderPauseScreen(
 	const esc = interruptKey();
 
 	if (compact) {
-		if (sessionName) {
-			content.push(centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd());
+		const sessionLine = sessionName
+			? centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd()
+			: undefined;
+		const titleLine = centerLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), screenWidth).trimEnd();
+		const clockLine = centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth).trimEnd();
+		const statusLine = centerLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth).trimEnd();
+		const resumeLine = centerLine(theme.fg("dim", `${esc} to resume`), screenWidth).trimEnd();
+		const fullContent: string[] = [];
+		if (sessionLine) fullContent.push(sessionLine);
+		fullContent.push(titleLine, "", clockLine, statusLine);
+		if (outstanding)
+			fullContent.push(...workCounts.map(line => centerLine(theme.fg("muted", line), screenWidth).trimEnd()));
+		fullContent.push(resumeLine);
+
+		if (screenHeight >= fullContent.length) {
+			content.push(...fullContent);
+		} else {
+			// Keep the live state and a way out on screen before the decorative card details.
+			if (screenHeight === 1) {
+				const counts = `T:${workStatus.unsettledTurns} J:${workStatus.unfinishedJobs}`;
+				const summary = outstanding ? `${counts} · ${esc} to resume` : `Paused · ${esc} to resume`;
+				content.push(centerLine(theme.fg(outstanding ? "warning" : "success", summary), screenWidth).trimEnd());
+			} else if (screenHeight === 2 && outstanding) {
+				const counts = `Pausing · T:${workStatus.unsettledTurns} J:${workStatus.unfinishedJobs}`;
+				content.push(centerLine(theme.fg("warning", counts), screenWidth).trimEnd(), resumeLine);
+			} else {
+				content.push(statusLine);
+				if (outstanding && screenHeight === 3) {
+					content.push(
+						centerLine(
+							theme.fg("muted", `Turns: ${workStatus.unsettledTurns} · Jobs: ${workStatus.unfinishedJobs}`),
+							screenWidth,
+						).trimEnd(),
+					);
+				} else if (outstanding) {
+					content.push(...workCounts.map(line => centerLine(theme.fg("muted", line), screenWidth).trimEnd()));
+				}
+				content.push(resumeLine);
+			}
+
+			if (content.length < screenHeight && sessionLine) content.push(sessionLine);
+			if (content.length < screenHeight) content.push(titleLine);
+			if (content.length < screenHeight) content.push(clockLine);
 		}
-		content.push(centerLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), screenWidth).trimEnd());
-		content.push("");
-		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth).trimEnd());
-		content.push(centerLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth).trimEnd());
-		if (outstanding) {
-			content.push(centerLine(theme.fg("muted", workCounts[0]!), screenWidth).trimEnd());
-			content.push(centerLine(theme.fg("muted", workCounts[1]!), screenWidth).trimEnd());
-		}
-		content.push(centerLine(theme.fg("dim", `${esc} to resume`), screenWidth).trimEnd());
 	} else {
 		if (sessionName) {
 			content.push(centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd());

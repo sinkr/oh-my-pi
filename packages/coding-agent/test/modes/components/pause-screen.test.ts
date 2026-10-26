@@ -96,6 +96,48 @@ describe("pause screen", () => {
 			expect(text).toContain("Unfinished jobs: 12");
 			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(48);
 		});
+		it("keeps active work counts and resume visible on a five-row compact screen with a session name", () => {
+			const lines = renderPauseScreen(48, 5, 3_000, "Long compact session name", {
+				unsettledTurns: 1,
+				unfinishedJobs: 1,
+			});
+			const text = lines.map(stripAnsi).join("\n");
+			expect(lines).toHaveLength(5);
+			expect(text).toContain("Pausing — waiting for work to settle");
+			expect(text).toContain("Unsettled turns: 1");
+			expect(text).toContain("Unfinished jobs: 1");
+			expect(text).toContain("Long compact session name");
+			expect(text).toContain("to resume");
+			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(48);
+		});
+
+		it("combines both active counters into one labeled row at three rows", () => {
+			const lines = renderPauseScreen(48, 3, 3_000, undefined, {
+				unsettledTurns: 1,
+				unfinishedJobs: 1,
+			});
+			const visibleLines = lines.map(stripAnsi);
+			expect(lines).toHaveLength(3);
+			expect(visibleLines[0]).toContain("Pausing — waiting for work to settle");
+			expect(visibleLines[1]).toContain("Turns: 1 · Jobs: 1");
+			expect(visibleLines[2]).toContain("to resume");
+			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(48);
+		});
+
+		it("retains active counts and a resume hint in one- and two-row fallbacks", () => {
+			for (const height of [1, 2]) {
+				const lines = renderPauseScreen(48, height, 3_000, undefined, {
+					unsettledTurns: 1,
+					unfinishedJobs: 2,
+				});
+				const text = lines.map(stripAnsi).join("\n");
+				expect(lines).toHaveLength(height);
+				expect(text).toContain("T:1");
+				expect(text).toContain("J:2");
+				expect(text).toContain("to resume");
+				for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(48);
+			}
+		});
 
 		it("drops to the compact card on small terminals", () => {
 			const lines = renderPauseScreen(40, 10, 3_000);
@@ -128,13 +170,19 @@ describe("pause screen", () => {
 			expect(text).toContain("▌▌ P A U S E D");
 		});
 	});
-	it("excludes parked agents and advisors from unsettled work", async () => {
+	it("stops waiting on parked or quota-yielded advisor work", async () => {
 		vi.useFakeTimers();
 		setNativeRendering(false);
 		AgentRegistry.resetGlobalForTests();
 		const rootAgent = { isPaused: false };
 		const subagentAgent = { isPaused: false };
-		let advisorPaused = false;
+		const advisorStatus = {
+			name: "Review",
+			status: "running",
+			yielded: false,
+			backlog: 1,
+			isPaused: false,
+		};
 		AgentRegistry.global().register({
 			id: "Main/worker",
 			displayName: "worker",
@@ -150,7 +198,7 @@ describe("pause screen", () => {
 				agent: rootAgent,
 				getAdvisorStatusOverview: () => ({
 					configured: true,
-					advisors: [{ name: "Review", status: "running", yielded: false, backlog: 1, isPaused: advisorPaused }],
+					advisors: [advisorStatus],
 				}),
 			},
 			statusLine: {
@@ -172,7 +220,24 @@ describe("pause screen", () => {
 
 			rootAgent.isPaused = true;
 			subagentAgent.isPaused = true;
-			advisorPaused = true;
+			advisorStatus.yielded = true;
+			vi.advanceTimersByTime(1_000);
+			const quotaHalted = component.render(80).map(stripAnsi).join("\n");
+			expect(quotaHalted).toContain("Paused — ready to suspend");
+			expect(quotaHalted).not.toContain("Unsettled turns:");
+			expect(quotaHalted).not.toContain("Unfinished jobs:");
+			expect(advisorStatus.isPaused).toBe(false);
+			expect(advisorStatus.backlog).toBe(1);
+
+			advisorStatus.yielded = false;
+			vi.advanceTimersByTime(1_000);
+			const eligible = component.render(80).map(stripAnsi).join("\n");
+			expect(eligible).toContain("Pausing — waiting for work to settle");
+			expect(eligible).toContain("Unsettled turns: 1");
+			expect(eligible).toContain("Unfinished jobs: 0");
+			expect(advisorStatus.backlog).toBe(1);
+
+			advisorStatus.isPaused = true;
 			vi.advanceTimersByTime(1_000);
 			const parked = component.render(80).map(stripAnsi).join("\n");
 			expect(parked).toContain("Paused — ready to suspend");
