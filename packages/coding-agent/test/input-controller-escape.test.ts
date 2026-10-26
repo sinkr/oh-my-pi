@@ -30,6 +30,7 @@ type FakeEditor = {
 	onDequeue?: () => void;
 	onChange?: (text: string) => void;
 	setText(text: string): void;
+	setCollapsedText(text: string): void;
 	getText(): string;
 	getExpandedText(): string;
 	clearDraft(historyText?: string): void;
@@ -120,6 +121,9 @@ function createContext(): {
 	);
 	const editor: FakeEditor = {
 		setText(text: string) {
+			editorText = text;
+		},
+		setCollapsedText(text: string) {
 			editorText = text;
 		},
 		getText() {
@@ -457,6 +461,55 @@ describe("InputController escape behavior", () => {
 
 			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
 			expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
+		});
+
+		it("leaves a non-side command with a malformed template to the main session", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [{ ...plain, content: "Report {{#if focus}} unclosed" }]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/plain");
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
+		});
+
+		it("reports a malformed side template and hands the submission back on Enter and Ctrl+Enter", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [{ ...sitrep, content: "Report {{#if focus}} unclosed" }]);
+			const showError = vi.fn();
+			Object.assign(ctx, { showError });
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep the migration");
+			expect(editor.getText()).toBe("/sitrep the migration");
+
+			editor.setText("/sitrep again");
+			await controller.handleFollowUp();
+			expect(editor.getText()).toBe("/sitrep again");
+
+			expect(showError).toHaveBeenCalledTimes(2);
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.onInputCallback).not.toHaveBeenCalled();
+			expect(editor.addToHistory).not.toHaveBeenCalled();
+		});
+
+		it("lets a skill win over a side file command registered under its /skill: name", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [{ ...sitrep, name: "skill:foo" }]);
+			(ctx.skillCommands as Map<string, unknown>).set("skill:foo", {});
+			const queueCompactionMessage = compacting(ctx);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/skill:foo");
+			editor.setText("/skill:foo");
+			await controller.handleFollowUp();
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(queueCompactionMessage.mock.calls.map(call => call[0])).toEqual(["/skill:foo", "/skill:foo"]);
 		});
 
 		it("lets an extension command of the same name win over a side file command", async () => {

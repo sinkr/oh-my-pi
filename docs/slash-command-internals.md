@@ -261,7 +261,7 @@ side: true
 Situation report. Focus on $ARGUMENTS if given, else the whole session.
 ```
 
-This routing applies to Enter, Ctrl+Enter, and focused subagent views; a focused view answers about the agent being viewed. An extension or TypeScript custom command of the same name still takes precedence. Other modes (RPC, ACP, print) have no `/btw` surface, so they expand a side command as an ordinary prompt.
+This routing applies to Enter, Ctrl+Enter, and focused subagent views; a focused view answers about the agent being viewed. An extension command, TypeScript custom command, or `/skill:` command of the same name still takes precedence. If the template fails to render, the error is shown and the typed command goes back into the editor. Other modes (RPC, ACP, print) have no `/btw` surface, so they expand a side command as an ordinary prompt.
 
 ## 7) Unknown `/...` behavior
 

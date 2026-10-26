@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { type BtwHistoryRecord, type BtwHistoryTurn, getBtwLatestTurn } from "@oh-my-pi/pi-tui/overlays/btw-history";
 import { acquireFileLock, type FileLockHandle, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { writeFileAtomically } from "../utils/atomic-file";
 
 export {
 	type BtwHistoryRecord,
@@ -60,16 +60,6 @@ function recordFileName(id: string): string {
 /** Older builds only read `.json` names, so the title sidecar never breaks their history. */
 function titleFileName(id: string): string {
 	return `entry-${id}.title`;
-}
-
-async function writeFileAtomically(filePath: string, content: string): Promise<void> {
-	const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-	try {
-		await fs.writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
-		await replaceFileAtomically(temporaryPath, filePath);
-	} finally {
-		await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
-	}
 }
 
 interface StoredRecord {
@@ -152,11 +142,14 @@ export class BtwHistoryStore {
 			if (isEnoent(error)) return store;
 			throw error;
 		}
+		// Only titled topics have a sidecar; skip the lookup for the rest.
+		const titleNames = new Set(names.filter(name => name.endsWith(".title")));
 		for (const name of names.sort()) {
 			if (!name.endsWith(".json")) continue;
 			const stored = await readRecord(path.join(store.#directory, name));
 			if (!stored) continue;
-			const title = await readTitle(path.join(store.#directory, titleFileName(stored.record.id)));
+			const titleName = titleFileName(stored.record.id);
+			const title = titleNames.has(titleName) ? await readTitle(path.join(store.#directory, titleName)) : undefined;
 			// Recovery is only a view. CAS must compare the original disk bytes,
 			// and the live writer's lease prevents a recovered view stealing a turn.
 			store.#records.set(

@@ -39,7 +39,7 @@ import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-
 import { createModelBrowserSource } from "../model-browser-source";
 import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
-import { resolveFileSlashCommand } from "../../extensibility/slash-commands";
+import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentRegistry } from "../../registry/agent-registry";
@@ -1140,9 +1140,10 @@ export class InputController {
 			// transcript and runnable mid-turn, so they never steer the running work.
 			// The side question carries text only, so the submitted attachments drop.
 			if (
-				await this.#runSideFileCommand(text, () =>
-					this.#detachSideSubmission(draftText, submittedImages, submittedImageLinks),
-				)
+				await this.#runSideFileCommand(text, {
+					detach: () => this.#detachSideSubmission(draftText, submittedImages, submittedImageLinks),
+					restore: () => this.#restoreResetSubmission(submittedText),
+				})
 			) {
 				return;
 			}
@@ -1438,28 +1439,37 @@ export class InputController {
 
 	/**
 	 * Answer `text` as a /btw side question when it invokes a `side: true` file command.
-	 * Extension and custom commands keep precedence over a file command of the same name.
-	 * `detachDraft` releases the submission's remaining editor state before the side question runs.
+	 * Extension, custom and skill commands keep precedence over a file command of the same name.
+	 * `draft.detach` releases the submission's remaining editor state before the side question
+	 * runs; `draft.restore` hands the submission back when its template fails to render.
 	 */
-	async #runSideFileCommand(text: string, detachDraft?: () => void): Promise<boolean> {
-		if (!text.startsWith("/")) return false;
-		// Match the whole token the way resolveFileSlashCommand() does: namespaced
-		// file commands (`/plugin:cmd`) are registered by their full name, while
-		// parseSlashCommand() stops at the colon.
-		const spaceIndex = text.indexOf(" ");
-		const token = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		if (!this.ctx.fileSlashCommands.has(token)) return false;
+	async #runSideFileCommand(text: string, draft: { detach?: () => void; restore: () => void }): Promise<boolean> {
+		const invocation = parseFileSlashInvocation(text);
+		if (!invocation || !this.ctx.fileSlashCommands.has(invocation.name)) return false;
 		const session = this.ctx.session;
-		if (session.extensionRunner?.getCommand(token) !== undefined) return false;
-		if (session.customCommands.some(loaded => loaded.command.name === token)) return false;
-		const resolved = resolveFileSlashCommand(text, session.slashCommands);
-		if (!resolved?.command.side) return false;
-		const name = resolved.command.name;
+		if (session.extensionRunner?.getCommand(invocation.name) !== undefined) return false;
+		if (session.customCommands.some(loaded => loaded.command.name === invocation.name)) return false;
+		if (isKnownSkillCommand(this.ctx, text)) return false;
+		const command = session.slashCommands.find(cmd => cmd.name === invocation.name);
+		if (!command?.side) return false;
+		let question: string;
+		try {
+			question = renderFileSlashCommand(command, invocation.args);
+		} catch (error) {
+			draft.restore();
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return true;
+		}
 		this.ctx.editor.addToHistory(text);
-		detachDraft?.();
-		const args = text.slice(name.length + 1).trim();
-		await this.ctx.handleBtwCommand(resolved.text, args ? `/${name} ${args}` : `/${name}`);
+		draft.detach?.();
+		const args = invocation.args.trim();
+		await this.ctx.handleBtwCommand(question, args ? `/${command.name} ${args}` : `/${command.name}`);
 		return true;
+	}
+
+	/** Put back a submission the editor reset on Enter, unless a newer draft took its place. */
+	#restoreResetSubmission(submittedText: string): void {
+		if (!this.ctx.editor.getText()) this.ctx.editor.setText(submittedText);
 	}
 
 	/**
@@ -1529,7 +1539,10 @@ export class InputController {
 		}
 		if (
 			text &&
-			(await this.#runSideFileCommand(text, () => this.#detachSideSubmission(draftText, images, imageLinks)))
+			(await this.#runSideFileCommand(text, {
+				detach: () => this.#detachSideSubmission(draftText, images, imageLinks),
+				restore: () => this.#restoreResetSubmission(text),
+			}))
 		) {
 			return;
 		}
@@ -1979,6 +1992,10 @@ export class InputController {
 			}
 		}
 
+		// Ctrl+Enter detached the draft before the first await, so a side command
+		// has no editor state left to release; a render failure hands it back.
+		const restoreSideDraft = { restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks) };
+
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
 		// skill typed during compaction is not lost or short-circuited through
@@ -1987,7 +2004,13 @@ export class InputController {
 		// Side commands answer now instead: the queue would deliver them as a
 		// main-turn prompt. Builtins keep precedence, as in the dispatch below.
 		if (this.ctx.session.isCompacting) {
-			if (text && !this.#matchesBuiltinSlashCommand(text) && (await this.#runSideFileCommand(text))) return;
+			if (
+				text &&
+				!this.#matchesBuiltinSlashCommand(text) &&
+				(await this.#runSideFileCommand(text, restoreSideDraft))
+			) {
+				return;
+			}
 			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true });
 			return;
 		}
@@ -2014,8 +2037,7 @@ export class InputController {
 			}
 		}
 
-		// The draft is already detached, so there is no editor state to release.
-		if (text && (await this.#runSideFileCommand(text))) return;
+		if (text && (await this.#runSideFileCommand(text, restoreSideDraft))) return;
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;

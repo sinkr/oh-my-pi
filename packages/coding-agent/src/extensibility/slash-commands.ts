@@ -125,27 +125,24 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 }
 
 /**
- * Resolve `text` to the file-based slash command it invokes, rendered with its arguments.
- * Returns undefined when `text` is not an invocation of one of `fileCommands`.
+ * Split a `/name args` invocation into the file-command name (the whole first token,
+ * so namespaced `/plugin:cmd` stays intact) and its raw argument string.
  */
-export function resolveFileSlashCommand(
-	text: string,
-	fileCommands: readonly FileSlashCommand[],
-): { command: FileSlashCommand; text: string } | undefined {
+export function parseFileSlashInvocation(text: string): { name: string; args: string } | undefined {
 	if (!text.startsWith("/")) return undefined;
-
 	const spaceIndex = text.indexOf(" ");
-	const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-	const argsString = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
+	if (spaceIndex === -1) return { name: text.slice(1), args: "" };
+	return { name: text.slice(1, spaceIndex), args: text.slice(spaceIndex + 1) };
+}
 
-	const command = fileCommands.find(cmd => cmd.name === commandName);
-	if (!command) return undefined;
+/** Render a file command's template with `argsString`. Throws on a malformed template. */
+export function renderFileSlashCommand(command: FileSlashCommand, argsString: string): string {
 	const args = parseCommandArgs(argsString);
 	const argsText = args.join(" ");
 	const usesInlineArgPlaceholders = templateUsesInlineArgPlaceholders(command.content);
 	const substituted = substituteArgs(command.content, args);
 	const rendered = prompt.render(substituted, { args, ARGUMENTS: argsText, arguments: argsText });
-	return { command, text: appendInlineArgsFallback(rendered, argsText, usesInlineArgPlaceholders) };
+	return appendInlineArgsFallback(rendered, argsText, usesInlineArgPlaceholders);
 }
 
 /**
@@ -153,5 +150,8 @@ export function resolveFileSlashCommand(
  * Returns the expanded content or the original text if not a slash command.
  */
 export function expandSlashCommand(text: string, fileCommands: readonly FileSlashCommand[]): string {
-	return resolveFileSlashCommand(text, fileCommands)?.text ?? text;
+	const invocation = parseFileSlashInvocation(text);
+	if (!invocation) return text;
+	const command = fileCommands.find(cmd => cmd.name === invocation.name);
+	return command ? renderFileSlashCommand(command, invocation.args) : text;
 }
