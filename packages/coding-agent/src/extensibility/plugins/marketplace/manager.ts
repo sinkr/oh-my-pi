@@ -766,8 +766,35 @@ export class MarketplaceManager {
 	// (see #resolveCatalogVersion). Returns one entry per (pluginId, scope) pair that is outdated.
 	// Plugins whose catalog side declares no version are skipped.
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
-		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
+		for (const row of await this.listCatalogVersions()) {
+			const { to } = row;
+			if (!to || to === row.from) continue;
+
+			// Treat newer semver as an update; fall back to inequality for non-semver tags.
+			let isNewer: boolean;
+			try {
+				isNewer = Bun.semver.order(to, row.from) > 0;
+			} catch {
+				isNewer = true;
+			}
+
+			if (isNewer) {
+				updates.push({ pluginId: row.pluginId, scope: row.scope, from: row.from, to });
+			}
+		}
+		return updates;
+	}
+
+	// Every installed (pluginId, scope) pair whose marketplace catalog still lists the plugin, with the
+	// installed version and the version the catalog publishes now (`to` is undefined when the catalog
+	// declares none, e.g. a remote source readable only after cloning). Same, older and newer versions
+	// all appear; reads only the registries, cached catalogs and local manifests.
+	async listCatalogVersions(): Promise<
+		Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string | undefined }>
+	> {
+		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
+		const rows: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string | undefined }> = [];
 
 		// Keyed by (path, scope) so each scope is checked independently.
 		// A plugin current in user scope but stale in project scope must still appear.
@@ -803,23 +830,11 @@ export class MarketplaceManager {
 					continue;
 				}
 
-				if (!catalogVersion || catalogVersion === installed.version) continue;
-
-				// Treat newer semver as an update; fall back to inequality for non-semver tags.
-				let isNewer: boolean;
-				try {
-					isNewer = Bun.semver.order(catalogVersion, installed.version) > 0;
-				} catch {
-					isNewer = catalogVersion !== installed.version;
-				}
-
-				if (isNewer) {
-					updates.push({ pluginId, scope, from: installed.version, to: catalogVersion });
-				}
+				rows.push({ pluginId, scope, from: installed.version, to: catalogVersion });
 			}
 		}
 
-		return updates;
+		return rows;
 	}
 
 	// Re-install a specific plugin at the latest catalog version (force-overwrites).
