@@ -420,8 +420,12 @@ pub struct Job {
 	/// PIDs of children removed from the task queue by polling.
 	completed_process_ids: Vec<sys::process::ProcessId>,
 
-	/// Original representative PID, including after its task has completed.
+	/// First external stage's PID (the process-group leader), retained after
+	/// that stage has been reaped. Used by `jobs -p`, job display and `wait`.
 	representative_process_id: Option<sys::process::ProcessId>,
+
+	/// Last external stage's PID, retained after reaping; becomes `$!`.
+	last_process_id: Option<sys::process::ProcessId>,
 
 	/// If available, the process group ID of the job's processes.
 	pgid: Option<sys::process::ProcessId>,
@@ -474,12 +478,16 @@ impl Job {
 		I: IntoIterator<Item = JobTask>,
 	{
 		let tasks: VecDeque<_> = tasks.into_iter().collect();
-		// `$!` names the last external stage, but job control targets the
-		// process group established by the first stage.
-		let representative_process_id = tasks.iter().rev().find_map(|task| match task {
-			JobTask::External(process) => process.pid(),
-			JobTask::Internal(_) => None,
-		});
+		// `jobs -p` and job display name the process-group leader (first
+		// stage); `$!` names the last stage, as in bash.
+		let external_pids = || {
+			tasks.iter().filter_map(|task| match task {
+				JobTask::External(process) => process.pid(),
+				JobTask::Internal(_) => None,
+			})
+		};
+		let representative_process_id = external_pids().next();
+		let last_process_id = external_pids().last();
 		let pgid = tasks.iter().find_map(|task| match task {
 			JobTask::External(process) => process.pgid().or_else(|| process.pid()),
 			JobTask::Internal(_) => None,
@@ -490,6 +498,7 @@ impl Job {
 			completed_result: None,
 			completed_process_ids: Vec::new(),
 			representative_process_id,
+			last_process_id,
 			pgid,
 			annotation: JobAnnotation::None,
 			command_line,
@@ -736,10 +745,16 @@ impl Job {
 		})
 	}
 
-	/// Returns the last external stage's PID for `$!` and job display, even
-	/// after that stage has been reaped.
+	/// Returns the first external stage's PID (the process-group leader) for
+	/// `jobs -p` and job display, even after that stage has been reaped.
 	pub fn representative_pid(&self) -> Option<sys::process::ProcessId> {
 		self.representative_process_id
+	}
+
+	/// Returns the last external stage's PID, the value `$!` takes after this
+	/// job is started, even after that stage has been reaped.
+	pub fn last_pid(&self) -> Option<sys::process::ProcessId> {
+		self.last_process_id
 	}
 
 	/// Tries to retrieve the process group ID (PGID) of the job.
@@ -843,7 +858,9 @@ mod tests {
 		let job = shell.jobs().current_job().expect("background pipeline");
 		let pids: Vec<_> = job.process_ids().collect();
 		assert_eq!(pids.len(), 2);
+		// `$!` is the last stage; `jobs -p` stays on the group leader.
 		assert_eq!(shell.last_background_pid(), Some(pids[1]));
+		assert_eq!(job.representative_pid(), Some(pids[0]));
 
 		tokio::time::timeout(Duration::from_secs(5), async {
 			loop {
