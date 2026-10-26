@@ -250,6 +250,13 @@ export function buildJobResult(
 	});
 	const jobResults = snapshotJobs(session, uniqueJobs);
 	const alreadyConsumed = new Set(jobResults.filter(job => manager.isJobResultConsumed(job.id)).map(job => job.id));
+	const watchedByWait = new Set(
+		op === "wait"
+			? jobResults
+					.filter(job => !alreadyConsumed.has(job.id) && manager.isDeliverySuppressed(job.id))
+					.map(job => job.id)
+			: [],
+	);
 
 	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
 
@@ -273,7 +280,9 @@ export function buildJobResult(
 				lines.push(
 					alreadyConsumed.has(j.id)
 						? "Delivery: already delivered or recovered."
-						: "Delivery: not auto-delivered; recovered by this snapshot.",
+						: watchedByWait.has(j.id)
+							? "Delivery: delivered directly to wait."
+							: "Delivery: not auto-delivered; recovered by this snapshot.",
 				);
 			}
 			if (j.resultText) {

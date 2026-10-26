@@ -141,4 +141,40 @@ describe("wait structured output rendering", () => {
 
 		expect(text).toContain(`full payload at agent://Foo,`);
 	});
+
+	test("distinguishes jobs watched by wait from un-watched snapshot recoveries", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const watchedJobId = registerSettledJob(
+			manager,
+			"WatchedJob",
+			"<task-result>watched</task-result>",
+			{ source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
+			"WatchedJob",
+		);
+		manager.watchJobs([watchedJobId]);
+		await manager.getJob(watchedJobId)!.promise;
+
+		const watchedResult = buildJobResult(makeSession(manager), manager, "wait", [manager.getJob(watchedJobId)!], []);
+		manager.unwatchJobs([watchedJobId]);
+		const watchedText = watchedResult.content[0]?.type === "text" ? watchedResult.content[0].text : "";
+		expect(watchedText).toContain("Delivery: delivered directly to wait.");
+
+		const unwatchedJobId = registerSettledJob(
+			manager,
+			"UnwatchedJob",
+			"<task-result>unwatched</task-result>",
+			{ source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
+			"UnwatchedJob",
+		);
+		await manager.getJob(unwatchedJobId)!.promise;
+		const unwatchedResult = buildJobResult(
+			makeSession(manager),
+			manager,
+			"wait",
+			[manager.getJob(unwatchedJobId)!],
+			[],
+		);
+		const unwatchedText = unwatchedResult.content[0]?.type === "text" ? unwatchedResult.content[0].text : "";
+		expect(unwatchedText).toContain("Delivery: not auto-delivered; recovered by this snapshot.");
+	});
 });
