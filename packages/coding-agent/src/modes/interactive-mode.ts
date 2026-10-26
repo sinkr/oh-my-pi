@@ -1639,7 +1639,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
-	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
+	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	// True from `/guided-goal` kickoff until the interview ends: a goal record
 	// appears, a turn makes tool calls (the interview itself is tool-free, so
@@ -4991,6 +4991,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					await this.session.restoreNonMCPToolPresentation(
 						previousPresentation.enabled,
 						previousPresentation.mounted,
+						previousPresentation.registered,
 					);
 				}
 			} finally {
@@ -5198,6 +5199,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planModePreviousToolPresentation = {
 			enabled: previousTools.filter(name => !isMCPToolName(name)),
 			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+			registered: this.session.getAllToolNames(),
 		};
 		this.planModePlanFilePath = planFilePath;
 		this.planModeEnabled = true;
@@ -5319,6 +5321,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				await this.session.restoreNonMCPToolPresentation(
 					previousPresentation.enabled,
 					previousPresentation.mounted,
+					previousPresentation.registered,
 				);
 			}
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
@@ -5908,6 +5911,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
 			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
 			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+			registered: this.session.getAllToolNames(),
 		};
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
@@ -5978,7 +5982,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const executionTools = previousPresentation.enabled.includes("read")
 			? previousPresentation.enabled
 			: [...previousPresentation.enabled, "read"];
-		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted);
+		await this.session.restoreNonMCPToolPresentation(
+			executionTools,
+			previousPresentation.mounted,
+			previousPresentation.registered,
+		);
 		this.session.setPlanReferencePath(options.planFilePath);
 		try {
 			const autosaved = await autosaveApprovedPlan({

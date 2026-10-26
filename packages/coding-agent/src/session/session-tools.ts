@@ -1997,14 +1997,30 @@ export class SessionTools {
 		}, signal);
 	}
 
-	/** Restores a non-MCP presentation snapshot while retaining the current MCP selection. */
-	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void> {
+	/**
+	 * Restores a non-MCP presentation snapshot while retaining the current MCP selection.
+	 * Non-built-in tools registered after the snapshot, such as those of startup-deferred
+	 * extensions, are absent from `registeredToolNames` and keep their current presentation.
+	 * Built-ins registered meanwhile, such as the plan-mode `write` transport, follow the snapshot.
+	 */
+	restoreNonMCPToolPresentation(
+		nonMCPToolNames: string[],
+		nonMCPMountedToolNames: string[],
+		registeredToolNames: readonly string[],
+	): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
+			const registered = new Set(registeredToolNames);
+			const isLateNonBuiltIn = (name: string) =>
+				!isMCPToolName(name) && !this.hasBuiltInTool(name) && !registered.has(name);
 			const currentMCPToolNames = this.getSelectedMCPToolNames();
 			const currentMountedMCPToolNames = this.getMountedXdevToolNames().filter(isMCPToolName);
 			await this.setActiveToolPresentation(
-				[...nonMCPToolNames, ...currentMCPToolNames],
-				[...nonMCPMountedToolNames, ...currentMountedMCPToolNames],
+				[...nonMCPToolNames, ...currentMCPToolNames, ...this.getEnabledToolNames().filter(isLateNonBuiltIn)],
+				[
+					...nonMCPMountedToolNames,
+					...currentMountedMCPToolNames,
+					...this.getMountedXdevToolNames().filter(isLateNonBuiltIn),
+				],
 			);
 		});
 	}

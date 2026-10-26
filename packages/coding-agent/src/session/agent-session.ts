@@ -1911,8 +1911,9 @@ export class AgentSession implements SettingsScope {
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
-			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames) =>
-				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames),
+			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames) =>
+				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames),
+			getAllToolNames: () => this.getAllToolNames(),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			getMountedXdevToolNames: () => this.getMountedXdevToolNames(),
@@ -6948,9 +6949,16 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.setActiveToolPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
 	}
 
-	/** Restores a non-MCP presentation snapshot while retaining the current MCP selection. */
-	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void> {
-		return this.#tools.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames);
+	/**
+	 * Restores a non-MCP presentation snapshot while retaining the current MCP selection
+	 * and the tools registered after the snapshot.
+	 */
+	restoreNonMCPToolPresentation(
+		nonMCPToolNames: string[],
+		nonMCPMountedToolNames: string[],
+		registeredToolNames: readonly string[],
+	): Promise<void> {
+		return this.#tools.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames);
 	}
 
 	/** Current enabled eval prelude definitions. */
