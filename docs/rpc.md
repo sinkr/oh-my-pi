@@ -228,6 +228,9 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 - `{ id?, type: "switch_session", sessionPath: string, provider?: string, modelId?: string }`
 - `{ id?, type: "branch", entryId: string }`
 - `{ id?, type: "fork", entryId?: string }`
+- `{ id?, type: "navigate_tree", entryId: string, summarize?: boolean, customInstructions?: string }` → `data: { cancelled: boolean, aborted?: true, editorText?: string }`
+- `{ id?, type: "abort_branch_summary" }`
+- `{ id?, type: "set_label", entryId: string, label?: string }`
 - `{ id?, type: "get_branch_messages" }`
 - `{ id?, type: "get_last_assistant_text" }`
 - `{ id?, type: "set_session_name", name: string }`
@@ -236,6 +239,10 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 `handoff` fails while a response is streaming. On success, its payload is `{ savedPath? }` or `null` when no handoff was produced. Session transitions (`new_session`, `switch_session`, `branch`, `fork`, `open_session`) report cancellation when an extension prevents the transition.
 
 `fork` moves the process onto a new session file and returns `{ cancelled }`; read the new `sessionFile`/`sessionId` with `get_state`. With `entryId` (any `message` entry from `get_entries`, such as a user or assistant message), the new file holds the root-to-entry path including that entry plus the session's artifacts, so kept `artifact://` references still resolve, and its header's `parentSession` is the old session file. When `entryId` sits inside an assistant tool-call batch (the assistant message itself, or one of its tool results), the cut extends through the batch's recorded tool results so the fork never ends on tool calls whose results were dropped. This runs `session_before_branch`/`session_branch` hooks with reason `"fork"`, and the hook's `entryId` is the last kept entry. Without `entryId` it copies the whole session and its artifacts (`/fork`), records the old session id as `parentSession`, runs `session_before_switch`/`session_switch` with reason `"fork"`, and reports `cancelled: true` when the session is not persisted. A non-message `entryId` fails. Both variants fail with `code: "session_busy"` while a response is streaming or bash, eval, compaction, handoff, or retry work is running, including work that starts while the fork's hooks or flushes are awaited; a refused fork keeps the current session, its transcript, and its queued next-turn messages and background jobs. The Python client exposes `fork(entry_id=None) -> CancellationResult`.
+
+`navigate_tree` moves the session's leaf to `entryId` in the same session file, as the interactive `/tree` selector does: a user message rewinds past itself (the leaf moves to its parent and `editorText` carries its text), any other entry becomes the leaf. With `summarize`, the abandoned branch is summarized by the session's model (with `customInstructions`, if given) and the summary entry lands at the target. It is refused with `code: "session_busy"` while the session is busy, as `fork` is, and refused when `entryId` is an `ask` tool result (re-answering an ask needs the interactive picker). A goal continuation waiting to start is held until the navigation ends and then runs on the new leaf. Read the new transcript with `get_messages`. `abort_branch_summary` stops a running summary: that `navigate_tree` answers `{ cancelled: true, aborted: true }` and nothing moves; it skips the command queue, which would otherwise hold it behind the `navigate_tree` it stops.
+
+`set_label` sets an entry's label, or clears it when `label` is omitted; it fails for an unknown `entryId`.
 
 ### Messages
 

@@ -25,6 +25,19 @@ const mock = createMockModel({
 		delayMs: JSON.stringify(context.messages.at(-1)?.content).includes("slow") ? 1500 : 0,
 	}),
 });
+// The first goal continuation waits here until a branch summary starts, so it is decided but not yet started.
+const summaryStarted = Promise.withResolvers<void>();
+// Branch summaries: one whose instructions say "hang-summary" announces itself with a notice and runs
+// until aborted; any other releases the held continuation and answers shortly after.
+const side = createMockModel({
+	handler: context => {
+		summaryStarted.resolve();
+		if (!JSON.stringify(context.messages).includes("hang-summary"))
+			return { content: ["Branch summary"], delayMs: 200 };
+		session.emitNotice("info", "summary started", "fork-rpc-agent");
+		return { content: ["unreachable"], delayMs: 600_000 };
+	},
+});
 const agent = new Agent({
 	getApiKey: () => "test-key",
 	initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
@@ -33,7 +46,16 @@ const agent = new Agent({
 const session = new AgentSession({
 	agent,
 	sessionManager: SessionManager.create(cwd, path.join(cwd, "sessions")),
-	settings: Settings.isolated({ "compaction.enabled": false }),
+	settings: Settings.isolated({ "compaction.enabled": false, "goal.continuationModes": ["rpc"] }),
 	modelRegistry,
+	sideStreamFn: side.stream,
 });
+const waitForIdle = session.waitForIdle.bind(session);
+let heldGoalIdle = false;
+session.waitForIdle = async () => {
+	await waitForIdle();
+	if (heldGoalIdle || !session.getGoalModeState()?.enabled) return;
+	heldGoalIdle = true;
+	await summaryStarted.promise;
+};
 await runRpcMode(session);

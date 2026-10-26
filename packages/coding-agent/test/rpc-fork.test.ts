@@ -16,7 +16,7 @@ async function readSessionFile(sessionFile: string): Promise<{ header: SessionHe
 	};
 }
 
-describe("RPC fork", () => {
+describe("RPC fork and tree navigation", () => {
 	let client: RpcClient;
 	let directory: string;
 
@@ -126,5 +126,89 @@ describe("RPC fork", () => {
 			unsubscribe();
 		}
 		expect((await client.getState()).sessionFile).toBe(source.sessionFile);
+	}, 30_000);
+
+	/** Resolves on the first session event `match` accepts; register before the action that causes it. */
+	function nextEvent(match: (type: string) => boolean): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const unsubscribe = client.onSessionEvent(event => {
+			if (!match(event.type)) return;
+			unsubscribe();
+			resolve();
+		});
+		return promise;
+	}
+
+	test("navigate_tree moves the leaf within the same session file", async () => {
+		const [firstUser, firstReply, secondUser] = await seedTwoTurns();
+		const source = await client.getState();
+
+		expect(await client.navigateTree(firstReply!)).toEqual({ cancelled: false });
+		const navigated = await client.getState();
+		expect(navigated.sessionFile).toBe(source.sessionFile);
+		expect(navigated.sessionId).toBe(source.sessionId);
+		expect((await client.getMessages()).map(message => message.role)).toEqual(["user", "assistant"]);
+
+		// A user message rewinds past itself and hands its text back for the editor.
+		expect(await client.navigateTree(secondUser!)).toMatchObject({ cancelled: false, editorText: "second" });
+		expect((await client.getState()).messageCount).toBe(2);
+		expect((await readSessionFile(source.sessionFile!)).messageIds.slice(0, 2)).toEqual([firstUser, firstReply]);
+	}, 30_000);
+
+	test("navigate_tree with summarize lands a branch summary at the target", async () => {
+		const [, firstReply] = await seedTwoTurns();
+
+		expect(await client.navigateTree(firstReply!, { summarize: true })).toEqual({ cancelled: false });
+		expect((await client.getMessages()).map(message => message.role)).toEqual(["user", "assistant", "branchSummary"]);
+	}, 30_000);
+
+	test("abort_branch_summary stops a running summary and nothing moves", async () => {
+		const [, firstReply] = await seedTwoTurns();
+		const started = nextEvent(type => type === "notice");
+
+		const navigated = client.navigateTree(firstReply!, { summarize: true, customInstructions: "hang-summary" });
+		await withTimeout(started, 10_000, "Branch summary never started");
+		await client.abortBranchSummary();
+
+		expect(await navigated).toEqual({ cancelled: true, aborted: true });
+		expect((await client.getState()).messageCount).toBe(4);
+	}, 30_000);
+
+	test("navigate_tree refuses while a turn is streaming", async () => {
+		const [, firstReply] = await seedTwoTurns();
+		const idle = nextEvent(type => type === "agent_end");
+		await client.prompt("slow");
+
+		expect(await rejectionOf(client.navigateTree(firstReply!))).toMatchObject({
+			command: "navigate_tree",
+			code: "session_busy",
+		});
+		await withTimeout(idle, 10_000, "Streaming turn did not finish");
+		expect((await client.getState()).messageCount).toBe(6);
+	}, 30_000);
+
+	test("holds a waiting goal continuation through the navigation, then runs it in the new branch", async () => {
+		const [, firstReply] = await seedTwoTurns();
+		// The fixture holds this goal's first continuation until the branch summary starts: decided, not started.
+		await client.goal("create", { objective: "keep going" });
+		const continued = nextEvent(type => type === "agent_end");
+
+		expect(await client.navigateTree(firstReply!, { summarize: true })).toEqual({ cancelled: false });
+		await withTimeout(continued, 10_000, "Goal continuation never ran");
+		const kinds = (await client.getMessages()).map(message =>
+			message.role === "custom" ? message.customType : message.role,
+		);
+		// Run mid-navigation, the continuation would have landed in the branch the leaf left.
+		expect(kinds.slice(0, 3)).toEqual(["user", "assistant", "branchSummary"]);
+		expect(kinds).toContain("goal-continuation");
+	}, 30_000);
+
+	test("set_label appends a label entry, and rejects an unknown entry", async () => {
+		const [firstUser] = await seedTwoTurns();
+
+		await client.setLabel(firstUser!, "start");
+		const { entries } = await client.getEntries();
+		expect(entries.at(-1)).toMatchObject({ type: "label", targetId: firstUser, label: "start" });
+		expect(await rejectionOf(client.setLabel("no-such-entry", "x"))).toMatchObject({ command: "set_label" });
 	}, 30_000);
 });

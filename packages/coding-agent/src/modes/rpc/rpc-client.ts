@@ -41,6 +41,7 @@ import type {
 	RpcHostToolResult,
 	RpcHostToolUpdate,
 	RpcLiveFrame,
+	RpcNavigateTreeResult,
 	RpcOpenSessionResult,
 	RpcPromptResultFrame,
 	RpcRemoveQueuedMessageResult,
@@ -1146,6 +1147,25 @@ export class RpcClient {
 	async fork(entryId?: string): Promise<{ cancelled: boolean }> {
 		const response = await this.#send({ type: "fork", entryId });
 		return this.#getData(response);
+	}
+
+	/** Move the leaf to `entryId` in the same session file, optionally summarizing the branch it leaves. */
+	async navigateTree(
+		entryId: string,
+		options: { summarize?: boolean; customInstructions?: string } = {},
+	): Promise<RpcNavigateTreeResult> {
+		// A branch summary is a model call; it ends early only through `abortBranchSummary`.
+		return this.#getData(await this.#send({ type: "navigate_tree", entryId, ...options }, 600_000));
+	}
+
+	/** Stop a running `navigateTree` summary; that navigation resolves `{ cancelled: true, aborted: true }`. */
+	async abortBranchSummary(): Promise<void> {
+		this.#getData(await this.#send({ type: "abort_branch_summary" }));
+	}
+
+	/** Set an entry's label, or clear it with `undefined`. */
+	async setLabel(entryId: string, label: string | undefined): Promise<void> {
+		this.#getData(await this.#send({ type: "set_label", entryId, label }));
 	}
 
 	/**
