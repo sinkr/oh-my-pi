@@ -13,6 +13,7 @@
 - Faster native memory reranking when selecting many results ([#16921](https://github.com/can1357/oh-my-pi/pull/16921) by [@GTanger](https://github.com/GTanger))
 - Faster structural code summaries on large files ([#16993](https://github.com/can1357/oh-my-pi/pull/16993) by [@GTanger](https://github.com/GTanger))
 - Faster native edit diff formatting and fuzzy line matching on large files ([#16926](https://github.com/can1357/oh-my-pi/pull/16926) by [@GTanger](https://github.com/GTanger))
+- Reduced native word-diff allocation overhead when joining tokens and deduplicating boundary whitespace ([#16922](https://github.com/can1357/oh-my-pi/pull/16922) by [@GTanger](https://github.com/GTanger))
 
 ### Fixed
 
