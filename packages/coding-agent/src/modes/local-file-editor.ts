@@ -1,10 +1,9 @@
 import * as fs from "node:fs/promises";
 import { disambiguateDisplayLabels, replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, type LocalFileEntry, type LocalProtocolOptions, listLocalFiles } from "../internal-urls";
 import type { SessionManager } from "../session/session-manager";
 import { getEditorCommand, openEditorOnPath } from "../utils/external-editor";
-import { formatByteSize } from "../utils/video";
 import type { InteractiveModeContext } from "./types";
 
 const PICKER_TITLE = "Open local:// file in external editor";
@@ -99,7 +98,7 @@ async function pickLocalFile(
 	);
 	const choice = await ctx.showHookSelector(
 		PICKER_TITLE,
-		files.map((file, i) => ({ label: displayLabels[i]!, description: formatByteSize(file.size) })),
+		files.map((file, i) => ({ label: displayLabels[i]!, description: formatBytes(file.size) })),
 	);
 	if (!choice) return undefined;
 	const chosenIndex = displayLabels.indexOf(choice);

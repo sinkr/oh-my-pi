@@ -53,7 +53,8 @@ describe("resolveLocalEditorTarget", () => {
 	it("opens bare names containing %, #, and ? without double-decoding an encoded local:// URL", async () => {
 		using tmp = TempDir.createSync("@omp-local-editor-");
 		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
-		const names = ["100%.md", "a#b.md", "a?b.md", "sub/a#b.md"];
+		// Windows filenames cannot contain `?`.
+		const names = ["100%.md", "a#b.md", "sub/a#b.md", ...(process.platform === "win32" ? [] : ["a?b.md"])];
 		for (const name of names) {
 			await Bun.write(path.join(tmp.path(), "local", name), name);
 		}
@@ -68,14 +69,18 @@ describe("resolveLocalEditorTarget", () => {
 		);
 	});
 
-	it("treats a literal `local:`-prefixed filename as a name, not a URL", async () => {
-		using tmp = TempDir.createSync("@omp-local-editor-");
-		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
-		await Bun.write(path.join(tmp.path(), "local", "local:notes.md"), "colon");
+	// Windows reserves `:` in filenames (it names an NTFS stream instead).
+	it.skipIf(process.platform === "win32")(
+		"treats a literal `local:`-prefixed filename as a name, not a URL",
+		async () => {
+			using tmp = TempDir.createSync("@omp-local-editor-");
+			const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+			await Bun.write(path.join(tmp.path(), "local", "local:notes.md"), "colon");
 
-		const resolved = await resolveLocalEditorTarget("local:notes.md", options);
-		expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", "local:notes.md")));
-	});
+			const resolved = await resolveLocalEditorTarget("local:notes.md", options);
+			expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", "local:notes.md")));
+		},
+	);
 
 	it("strips control bytes from errors shown for missing control-byte names", async () => {
 		using tmp = TempDir.createSync("@omp-local-editor-");
@@ -197,15 +202,19 @@ describe("buildLocalFileArgumentCompletions", () => {
 		expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", " plan.md")));
 	});
 
-	it("strips ANSI/control bytes from completion labels but keeps the exact value", async () => {
-		using tmp = TempDir.createSync("@omp-local-editor-");
-		const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
-		const evilName = "evil\x1b[31m.md";
-		await Bun.write(path.join(tmp.path(), "local", evilName), "x");
+	// Windows filenames cannot contain control bytes.
+	it.skipIf(process.platform === "win32")(
+		"strips ANSI/control bytes from completion labels but keeps the exact value",
+		async () => {
+			using tmp = TempDir.createSync("@omp-local-editor-");
+			const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
+			const evilName = "evil\x1b[31m.md";
+			await Bun.write(path.join(tmp.path(), "local", evilName), "x");
 
-		const items = await completerFor(options)("");
-		const item = items!.find(i => i.value === `local://${encodeURIComponent(evilName)}`);
-		expect(item).toBeDefined();
-		expect(item!.label).not.toContain("\x1b");
-	});
+			const items = await completerFor(options)("");
+			const item = items!.find(i => i.value === `local://${encodeURIComponent(evilName)}`);
+			expect(item).toBeDefined();
+			expect(item!.label).not.toContain("\x1b");
+		},
+	);
 });
