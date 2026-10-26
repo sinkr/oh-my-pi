@@ -800,6 +800,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			db = new Database(resolvedSqlitePath.absolutePath, { create: false, strict: true });
 			db.run("PRAGMA busy_timeout = 3000");
+			// FK enforcement is per-connection and off by default; enable it so edits
+			// honor the schema's REFERENCES constraints and ON DELETE/UPDATE actions.
+			db.run("PRAGMA foreign_keys = ON");
 
 			const trimmedContent = content.trim();
 			let resultText: string;
