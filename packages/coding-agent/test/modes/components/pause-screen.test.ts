@@ -162,11 +162,16 @@ describe("pause screen", () => {
 			expect(text).not.toContain("█".repeat(5)); // no room for the big glyph
 		});
 
-		it("rolls the clock into hours and keeps the full viewport bounded", () => {
+		it("paints the full scene with glyph, title, explainer, hours clock, and resume hint", () => {
 			const lines = renderPauseScreen(80, 24, 3_725_000).map(stripAnsi);
 			const text = lines.join("\n");
 			expect(lines).toHaveLength(24);
+			expect(text).toContain("█".repeat(5));
+			expect(text).toContain("P A U S E D");
+			expect(text).toContain("Main agent, subagents, and advisor");
+			expect(text).toContain("Paused — ready to suspend");
 			expect(text).toContain("paused for 1:02:05");
+			expect(text).toContain("— resume");
 			for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(80);
 		});
 
@@ -200,19 +205,28 @@ describe("pause screen", () => {
 			backlog: 1,
 			isPaused: false,
 		};
+		const noAdvisors = () => ({ configured: false, advisors: [] });
 		AgentRegistry.global().register({
 			id: "Main/worker",
 			displayName: "worker",
 			kind: "sub",
 			status: "running",
-			session: { isStreaming: true, agent: subagentAgent } as unknown as AgentSession,
+			session: {
+				isStreaming: true,
+				agent: subagentAgent,
+				getAdvisorStatusOverview: noAdvisors,
+			} as unknown as AgentSession,
 		});
 		AgentRegistry.global().register({
 			id: "Main/stale-worker",
 			displayName: "stale worker",
 			kind: "sub",
 			status: "running",
-			session: { isStreaming: false, agent: { isPaused: false } } as unknown as AgentSession,
+			session: {
+				isStreaming: false,
+				agent: { isPaused: false },
+				getAdvisorStatusOverview: noAdvisors,
+			} as unknown as AgentSession,
 		});
 		const { host, shown } = makeHost();
 		const ctx = {
@@ -224,9 +238,7 @@ describe("pause screen", () => {
 					configured: true,
 					advisors: [advisorStatus],
 				}),
-			},
-			statusLine: {
-				runningBackgroundJobCount: () => 0,
+				getAsyncJobTree: () => null,
 			},
 		};
 		const runtime = { draftDetached: true, ctx } as unknown as TuiSlashCommandRuntime;
@@ -273,6 +285,67 @@ describe("pause screen", () => {
 		} finally {
 			component.handleInput("\r");
 			await running;
+		}
+	});
+
+	it("keeps waiting on a parked subagent's advisor and on task jobs whose subagent is not live", async () => {
+		vi.useFakeTimers();
+		setNativeRendering(false);
+		AgentRegistry.resetGlobalForTests();
+		const childAdvisor = { name: "Review", status: "running", yielded: false, backlog: 1, isPaused: false };
+		AgentRegistry.global().register({
+			id: "Main/parked",
+			displayName: "parked",
+			kind: "sub",
+			status: "running",
+			session: {
+				isStreaming: true,
+				agent: { isPaused: true },
+				getAdvisorStatusOverview: () => ({ configured: true, advisors: [childAdvisor] }),
+			} as unknown as AgentSession,
+		});
+		// Pre-live: registered `running` before its session exists.
+		AgentRegistry.global().register({
+			id: "Main/starting",
+			displayName: "starting",
+			kind: "sub",
+			status: "running",
+			session: null,
+		});
+		const taskJob = (agentId: string) => ({ type: "task", agentId });
+		const running = [taskJob("Main/parked"), taskJob("Main/starting"), { type: "bash", agentId: undefined }];
+		const { host, shown } = makeHost();
+		const ctx = {
+			...host,
+			session: {
+				isStreaming: false,
+				agent: { isPaused: false },
+				getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+				getAsyncJobTree: () => ({ running }),
+			},
+		};
+		const runtime = { draftDetached: true, ctx } as unknown as TuiSlashCommandRuntime;
+		const pause = BUILTIN_CONTROL_SLASH_COMMANDS.find(command => command.name === "pause");
+		if (!pause?.handleTui) throw new Error("expected /pause TUI handler");
+		const done = pause.handleTui({ name: "pause", args: "", text: "/pause" }, runtime);
+		const component = shown[0];
+		if (!(component instanceof PauseScreenComponent)) throw new Error("expected /pause screen");
+
+		try {
+			// Parked child's advisor still reviewing → 1 turn; the parked child's task job is
+			// represented by its live ref, the pre-live child's task job and the bash job are not.
+			const active = component.render(80).map(stripAnsi).join("\n");
+			expect(active).toContain("Unsettled turns: 1");
+			expect(active).toContain("Unfinished jobs: 2");
+
+			childAdvisor.isPaused = true;
+			running.splice(1);
+			vi.advanceTimersByTime(1_000);
+			const settled = component.render(80).map(stripAnsi).join("\n");
+			expect(settled).toContain("Paused — ready to suspend");
+		} finally {
+			component.handleInput("\r");
+			await done;
 		}
 	});
 

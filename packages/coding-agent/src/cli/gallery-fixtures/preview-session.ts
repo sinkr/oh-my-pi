@@ -30,7 +30,7 @@ export function createGallerySession(options: GallerySessionOptions = {}): Agent
 	return {
 		messages,
 		systemPrompt: [],
-		agent: { isPaused: false, state: { tools: [] } },
+		agent: { state: { tools: [] } },
 		skills: [],
 		model,
 		state: { messages, model, thinkingLevel: "high" },

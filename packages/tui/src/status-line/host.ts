@@ -20,10 +20,6 @@ export interface ActiveRepoContext {
 	source: "single-direct-child-repo";
 }
 
-interface StatusLineRunningJobs {
-	running: readonly { type: string; agentId?: string }[];
-}
-
 export interface StatusLineSession {
 	state: { model?: Model; thinkingLevel?: ThinkingLevel; messages: readonly AgentMessage[] };
 	model?: Model;
@@ -63,8 +59,7 @@ export interface StatusLineSession {
 	/** Anthropic usage-limit label (`limit reached · wrapping up · resets 14:30`, `low priority until 14:30 · 62% left`). */
 	getAnthropicSlowModeLabel?(): string | undefined;
 	getPrewalkState?(): unknown;
-	getAsyncJobSnapshot(): StatusLineRunningJobs | null | undefined;
-	getAsyncJobTree?(options?: { recentLimit?: number }): StatusLineRunningJobs | null;
+	getAsyncJobSnapshot(): { running: readonly { type: string; agentId?: string }[] } | null | undefined;
 	/** Widgets of the running background jobs, in job order; the jobs segment appends the freshest one's glance. */
 	getRunningJobWidgets?(): readonly JobWidgetEntry[];
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;

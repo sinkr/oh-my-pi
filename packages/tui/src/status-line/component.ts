@@ -1022,24 +1022,17 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	/**
-	 * Running background jobs outside the subagent badge for the given session
-	 * (the attached session by default). With `includeDescendants`, use its
-	 * running job tree instead. Task jobs count only until their AgentRegistry
-	 * ref appears; once it is running, the subagent badge represents that same
-	 * agent. Bash and eval jobs always count.
+	 * Running background jobs outside the subagent badge. Task jobs count only
+	 * until their AgentRegistry ref appears; once it is running, the subagent
+	 * badge represents that same agent. Bash and eval jobs always count.
 	 */
-	runningBackgroundJobCount(
-		session: StatusLineSession = this.session,
-		options?: { includeDescendants?: boolean },
-	): number {
-		const running =
-			options?.includeDescendants === true
-				? session.getAsyncJobTree?.({ recentLimit: 0 })?.running
-				: session.getAsyncJobSnapshot()?.running;
+	runningBackgroundJobCount(): number {
 		return (
-			running?.filter(
-				job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
-			).length ?? 0
+			this.session
+				.getAsyncJobSnapshot()
+				?.running.filter(
+					job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
+				).length ?? 0
 		);
 	}
 
