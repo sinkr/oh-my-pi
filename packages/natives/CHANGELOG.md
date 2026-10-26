@@ -6,6 +6,12 @@
 
 - Added a `hiddenContent` option to `htmlToMarkdown`: `"drop"` (default) omits hidden content, `"reachable"` keeps content the page can reveal such as collapsed sections and inactive tab panels, and `"all"` also keeps `<template>` and `<noscript>` content; other values throw ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
 
+### Fixed
+
+- Fixed the built-in `sort` using many times its memory budget on inputs of short lines (`sort -S 100M` held 4 GiB, `sort -z /dev/zero` 25 GiB) and sizing its buffer from the machine's memory inside a smaller cgroup limit; `-S` now counts each line's bookkeeping, not only its bytes, and `timeout` or a cancel stops it at any stage
+- Fixed the built-in `sort -m` and `sort -c` splitting lines longer than their read buffer, and `sort` joining a file's unterminated last line to the next file's first line
+- Fixed the built-in `sort -S N%` using the wrong buffer size: `-S 50%` gave 0 bytes and `-S 100%` a thousand times the machine's memory; it is now N percent of physical memory as in GNU sort
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
