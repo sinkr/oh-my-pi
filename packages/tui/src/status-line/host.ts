@@ -1,5 +1,4 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AsyncJobTree } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { JobWidgetEntry } from "../tools/job-widget";
@@ -19,6 +18,10 @@ export interface ActiveRepoContext {
 	repoRoot: string;
 	relativeRepoRoot: string;
 	source: "single-direct-child-repo";
+}
+
+interface StatusLineRunningJobs {
+	running: readonly { type: string; agentId?: string }[];
 }
 
 export interface StatusLineSession {
@@ -60,8 +63,8 @@ export interface StatusLineSession {
 	/** Anthropic usage-limit label (`limit reached · wrapping up · resets 14:30`, `low priority until 14:30 · 62% left`). */
 	getAnthropicSlowModeLabel?(): string | undefined;
 	getPrewalkState?(): unknown;
-	getAsyncJobSnapshot(): { running: readonly { type: string; agentId?: string }[] } | null | undefined;
-	getAsyncJobTree?(options?: { recentLimit?: number }): AsyncJobTree | null;
+	getAsyncJobSnapshot(): StatusLineRunningJobs | null | undefined;
+	getAsyncJobTree?(options?: { recentLimit?: number }): StatusLineRunningJobs | null;
 	/** Widgets of the running background jobs, in job order; the jobs segment appends the freshest one's glance. */
 	getRunningJobWidgets?(): readonly JobWidgetEntry[];
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;
