@@ -147,6 +147,12 @@ export async function prepareWindowsFastembedRuntime({
  * with the budget below it costs 0.56 CPU-seconds and finishes in 178 ms, and its
  * vector points the same way (cosine 0.9999997 against the unbudgeted one;
  * `bench/embed-session-threads.bench.ts` measures and checks both).
+ *
+ * The cap is a trade, not a free win: on an otherwise idle many-core host a
+ * single embedding finishes later (124 ms to 178 ms above, about 40% slower)
+ * for about 7x less CPU. It is fixed because the default pool's cost
+ * multiplies with every process embedding at the same time, while the extra
+ * latency is tens of milliseconds per retain or recall.
  */
 const EMBED_INTRA_OP_THREAD_CAP = 4;
 
