@@ -33,6 +33,7 @@
 - Added the `extended-cache-ttl-beta` compat axis so a route can opt out of the `extended-cache-ttl-2025-04-11` beta (Factory Droid does), and prompt-cache lifetimes and long-retention support for Factory Droid's Claude models ([#16296](https://github.com/can1357/oh-my-pi/pull/16296) by [@will-bogusz](https://github.com/will-bogusz))
 - Added Factory Droid's image models (GPT Image 2.5, GPT Image 2.5 Flare, Gemini 3 Pro Image) to the `image` role's choices, listed only while your Factory organization allows image generation and that model ([#16316](https://github.com/can1357/oh-my-pi/pull/16316) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed LiteLLM model groups with `mode: decisions` being listed as chat models; they now route to `openai-decisions` as judge models ([#16939](https://github.com/can1357/oh-my-pi/issues/16939))
+- Removed retired Anthropic models (Claude 3.x, Opus 4/4.1, Sonnet 4) from the bundled catalog and discovery ([#16755](https://github.com/can1357/oh-my-pi/issues/16755))
 
 ## [18.12.6] - 2026-10-21
 
