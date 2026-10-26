@@ -338,3 +338,15 @@ describe("skill description failure caching and shutdown", () => {
 		expect(storedDescriptions(store.path)).toEqual([]);
 	}, 6_000);
 });
+
+describe("previewSkillDescription", () => {
+	it("keeps the budget for CJK text whose only space comes early (#17070)", () => {
+		const description = `用户点名 ASD-STE100、${"简化技术英语或讲人话时使用；".repeat(10)}`;
+		expect(previewSkillDescription(description)).toBe(`${description.slice(0, 99)}…`);
+	});
+
+	it("cuts English text at the last word boundary within the budget", () => {
+		const description = `Use this skill ${"when editing files ".repeat(10)}`;
+		expect(previewSkillDescription(description)).toBe(`Use this skill ${"when editing files ".repeat(4)}when…`);
+	});
+});

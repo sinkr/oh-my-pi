@@ -21,6 +21,8 @@ import { Semaphore } from "../task/parallel";
 import type { Skill } from "./skills";
 
 const MAX_PREVIEW_CHARS = 100;
+// A sentence or word cut shorter than this discards too much; cut at the budget instead.
+const MIN_PREVIEW_CUT = 40;
 const MAX_COMPRESSED_CHARS = 160;
 const MAX_COMPRESSED_WORDS = 12;
 // Leave ample room for other cleanup under postmortem's 10-second deadline.
@@ -115,9 +117,11 @@ export function previewSkillDescription(description: string): string {
 	if (text.length <= MAX_PREVIEW_CHARS) return text;
 	const boundary = text.slice(0, MAX_PREVIEW_CHARS - 1);
 	const sentence = boundary.match(/^.*?[.!?](?=\s|$)/)?.[0];
-	if (sentence && sentence.length >= 40) return sentence;
-	const word = boundary.slice(0, boundary.lastIndexOf(" ")).trimEnd();
-	return `${word || boundary}…`;
+	if (sentence && sentence.length >= MIN_PREVIEW_CUT) return sentence;
+	// Space-free scripts (CJK) may hold only an early space before a Latin term.
+	const space = boundary.lastIndexOf(" ");
+	const cut = space >= MIN_PREVIEW_CUT ? boundary.slice(0, space).trimEnd() : boundary;
+	return `${cut}…`;
 }
 
 function validCompression(text: string): string | null {
