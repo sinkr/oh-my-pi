@@ -54,6 +54,16 @@ export class CostGate {
 		return this.#spent;
 	}
 
+	/** Whether `session.maxCost` is set, so requests can be refused at all. */
+	get capped(): boolean {
+		return cfgSessionMaxCost.get(this.#settings) !== undefined;
+	}
+
+	/** Calls `onChange` after `session.maxCost` changes in the gate's settings; returns the unsubscribe. */
+	onCapChange(onChange: () => void): () => void {
+		return cfgSessionMaxCost.listen(this.#settings, () => onChange());
+	}
+
 	/** The refusal for the next model request, or `undefined` to send it. */
 	check(): CostCapRefusal | undefined {
 		const cap = cfgSessionMaxCost.get(this.#settings);

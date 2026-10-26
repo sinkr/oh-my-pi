@@ -2639,7 +2639,20 @@ export class AgentSession implements SettingsScope {
 			),
 		);
 		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
-		this.addDisposer(this.agent.addBeforeModelCall(() => this.#refuseOverCostCap()));
+		// The gate is registered only while a cap is set: any before-model-call gate also turns a user abort
+		// before the next request into a clean stop, which leaves no interrupted turn for `/retry`.
+		let removeCostCapGate: (() => void) | undefined;
+		const syncCostCapGate = () => {
+			if (this.#costGate.capped) {
+				removeCostCapGate ??= this.agent.addBeforeModelCall(() => this.#refuseOverCostCap());
+			} else if (removeCostCapGate) {
+				removeCostCapGate();
+				removeCostCapGate = undefined;
+			}
+		};
+		syncCostCapGate();
+		this.addDisposer(this.#costGate.onCapChange(syncCostCapGate));
+		this.addDisposer(() => removeCostCapGate?.());
 
 		const handoffHost: SessionHandoffHost = {
 			agent: this.agent,
