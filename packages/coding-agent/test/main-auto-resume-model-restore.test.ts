@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { Terminal as VirtualTerminal } from "@oh-my-pi/pi-utils/vterm";
 
 type Scenario =
 	| "auto"
@@ -225,4 +226,158 @@ describe("implicit auto-resume model restoration", () => {
 		expect(result.error).toEqual({ name: "Error", message: "UNRELATED_STARTUP_FAILURE" });
 		expect(result.session).toBeUndefined();
 	}, 30_000);
+
+	test.skipIf(process.platform === "win32")(
+		"keeps saved model controls and oversized names out of the startup terminal",
+		async () => {
+			using temp = TempDir.createSync("@omp-auto-resume-warning-");
+			const home = temp.join("home");
+			const agentDir = path.join(home, ".omp", "agent");
+			const sourceDir = path.resolve(import.meta.dir, "../src");
+			const env = {
+				PATH: process.env.PATH,
+				HOME: home,
+				USERPROFILE: home,
+				PI_CODING_AGENT_DIR: agentDir,
+				TZ: "Asia/Tokyo",
+				TERM: "xterm-256color",
+				OMP_TUI_NATIVE: "0",
+				PI_TUI_NATIVE: "0",
+				AWS_EC2_METADATA_DISABLED: "true",
+			};
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				JSON.stringify({
+					autoResume: true,
+					modelRoles: { default: "warning-fixture/fresh" },
+					retry: { enabled: false, modelFallback: false },
+					compaction: { enabled: false },
+					startup: { showSplash: false, setupWizard: false, changelogMode: "hidden", checkUpdate: false },
+					marketplace: { autoUpdate: "off" },
+					telemetry: { otlpExportEnabled: false },
+				}),
+			);
+			await Bun.write(
+				path.join(agentDir, "models.yml"),
+				JSON.stringify({
+					providers: {
+						"warning-fixture": {
+							baseUrl: "http://127.0.0.1:1/v1",
+							api: "openai-completions",
+							auth: "none",
+							models: [
+								{
+									id: "fresh",
+									name: "Fresh",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 131072,
+									maxTokens: 1024,
+								},
+							],
+						},
+					},
+				}),
+			);
+			const selector =
+				"lost/visible-\x1b[2J\x1b]0;UNTRUSTED_MODEL_TITLE\x07\x1bPUNTRUSTED_MODEL_DCS\x1b\\\r\n\t\x85\x9b2J" +
+				"long-model-".repeat(50) +
+				"UNTRUSTED_MODEL_TAIL";
+			const prepare = Bun.spawn(
+				[
+					process.execPath,
+					"--eval",
+					`
+						import { SessionManager } from ${JSON.stringify(path.join(sourceDir, "session/session-manager.ts"))};
+						const cwd = process.cwd();
+						const timestamp = "2026-10-27T00:00:00+09:00";
+						const rows = [
+							{ type: "session", version: 3, id: "saved-warning", timestamp, cwd },
+							{ type: "model_change", id: "model", parentId: null, timestamp, model: ${JSON.stringify(selector)} },
+							{ type: "message", id: "user", parentId: "model", timestamp,
+								message: { role: "user", content: "OLD_WARNING_HISTORY", timestamp: Date.parse(timestamp) } }
+						];
+						await Bun.write(SessionManager.getDefaultSessionDir(cwd) + "/saved.jsonl",
+							rows.map(row => JSON.stringify(row)).join("\\n") + "\\n");
+					`,
+				],
+				{ cwd: temp.path(), env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(10_000) },
+			);
+			const [prepared, preparationError] = await Promise.all([prepare.exited, new Response(prepare.stderr).text()]);
+			if (prepared !== 0) throw new Error(`Could not seed the saved session: ${preparationError}`);
+
+			const screen = new VirtualTerminal({ cols: 160, rows: 50, scrollback: 100 });
+			const warningSeen = Promise.withResolvers<void>();
+			const closed = Promise.withResolvers<void>();
+			const decoder = new TextDecoder();
+			let output = "";
+			let warningScreen = "";
+			let screenWritten = Promise.resolve();
+			await using terminal = new Bun.Terminal({
+				cols: 160,
+				rows: 50,
+				data(_terminal, data) {
+					output += decoder.decode(data, { stream: true });
+					const written = Promise.withResolvers<void>();
+					screenWritten = written.promise;
+					screen.write(data, () => {
+						const buffer = screen.buffer.active;
+						const visible = Array.from({ length: buffer.length }, (_, row) =>
+							buffer.getLine(row)?.translateToString(true).trim(),
+						).join(" ");
+						if (visible.includes("Started a new session without the saved history.")) {
+							warningScreen = visible;
+							warningSeen.resolve();
+						}
+						written.resolve();
+					});
+				},
+				exit() {
+					closed.resolve();
+				},
+			});
+			const proc = Bun.spawn(
+				[
+					process.execPath,
+					path.join(sourceDir, "cli.ts"),
+					"--no-title",
+					"--no-extensions",
+					"--no-skills",
+					"--no-rules",
+					"--no-tools",
+					"--no-lsp",
+					"--no-prewalk",
+				],
+				{ cwd: temp.path(), env, terminal, signal: AbortSignal.timeout(20_000) },
+			);
+			try {
+				await Promise.race([
+					warningSeen.promise,
+					proc.exited.then(code => {
+						throw new Error(`CLI exited before painting the warning (exit ${code}): ${output}`);
+					}),
+				]);
+				terminal.write("\x04");
+				expect(await proc.exited).toBe(0);
+				terminal.close();
+				await closed.promise;
+				await screenWritten;
+				expect(output).not.toContain("\x1b]0;UNTRUSTED_MODEL_TITLE\x07");
+				expect(output).not.toContain("\x1bPUNTRUSTED_MODEL_DCS\x1b\\");
+				expect(output).not.toContain("\x9b");
+				expect(output).not.toContain("UNTRUSTED_MODEL_TAIL");
+				expect(warningScreen).toContain("Could not restore model lost/visible-");
+				expect(warningScreen).not.toContain("OLD_WARNING_HISTORY");
+			} finally {
+				if (proc.exitCode === null) proc.kill();
+				await proc.exited;
+				terminal.close();
+				await closed.promise;
+				await screenWritten;
+				screen.dispose();
+			}
+		},
+		30_000,
+	);
 });

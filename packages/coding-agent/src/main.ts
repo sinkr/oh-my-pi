@@ -2569,7 +2569,7 @@ export async function runRootCommand(
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 				notifs.push({
 					kind: "warn",
-					message: `Auto resume skipped: ${error.message}. Started a new session without the saved history.`,
+					message: `Auto resume skipped: ${sanitizeDisplayWarnings([error.message])[0]}. Started a new session without the saved history.`,
 				});
 			}
 			const {
