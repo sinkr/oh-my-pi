@@ -88,7 +88,7 @@ _decode_cache_warming_mode = cast("Decoder[CacheWarmingMode]", literal(_CACHE_WA
 
 
 MessageUpdates: TypeAlias = Literal["full", "delta"]
-"""`set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`."""
+"""`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches."""
 _MESSAGE_UPDATES_VALUES: Final[frozenset[str]] = frozenset({"full", "delta"})
 _decode_message_updates = cast("Decoder[MessageUpdates]", literal(_MESSAGE_UPDATES_VALUES))
 
@@ -1452,6 +1452,7 @@ class InputUiRequest:
     title: str
     placeholder: str | None = None
     timeout: int | None = None
+    secret: bool | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1550,6 +1551,7 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
     timeout: int | None = None
     message: str | None = None
     placeholder: str | None = None
+    secret: bool | None = None
     prefill: str | None = None
     prompt_style: bool | None = None
     questions: tuple[AskQuestion, ...] | None = None
@@ -2854,6 +2856,7 @@ def parse_input_ui_request(value: object, path: str = "InputUiRequest") -> Input
         title=required(payload, "title", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
         timeout=optional(payload, "timeout", decode_int, path),
+        secret=optional(payload, "secret", decode_bool, path),
     )
 
 
@@ -2968,6 +2971,7 @@ def parse_extension_ui_request(value: object, path: str = "ExtensionUiRequest") 
         timeout=optional(payload, "timeout", decode_int, path),
         message=optional(payload, "message", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
+        secret=optional(payload, "secret", decode_bool, path),
         prefill=optional(payload, "prefill", decode_str, path),
         prompt_style=optional(payload, "promptStyle", decode_bool, path),
         questions=optional(payload, "questions", array(parse_ask_question), path),

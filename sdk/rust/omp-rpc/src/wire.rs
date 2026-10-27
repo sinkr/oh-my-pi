@@ -2680,7 +2680,7 @@ impl CacheWarmingMode {
 	}
 }
 
-/// `set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`.
+/// `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MessageUpdates {
 	#[serde(rename = "full")]
@@ -4415,6 +4415,8 @@ pub struct InputUiRequest {
 	pub placeholder: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub secret: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

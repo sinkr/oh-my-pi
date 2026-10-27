@@ -30,6 +30,7 @@ Behavior notes:
 - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
+- Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog) and `set_ask_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
 - When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
 
@@ -263,7 +264,9 @@ The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messa
 Login forwards ordinary OAuth input prompts only after the provider emits an
 authorization URL. Prompts marked `secret: true` are always rejected with a
 failed `login` response directing the user to the terminal UI; no ordinary
-`input` request is emitted. RPC does not negotiate secret-input support.
+`input` request is emitted because RPC does not negotiate whether a host masks
+`secret` inputs. (Extension and tool `input` dialogs may still attach an
+unnegotiated `secret?: boolean` hint on `extension_ui_request`; see below.)
 
 Logout works per stored credential, as `/logout` does in the TUI, because one
 provider can hold several accounts. `get_logout_accounts` lists them (`credentialId`,
@@ -907,7 +910,7 @@ Extension runner errors are emitted separately as:
 
 `set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, side-question frames, builtin slash-command side channels, and session-persistence and `btw-history` `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
 
-The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message. Block-ending events such as `text_end`, `thinking_end`, and `toolcall_end` retain their block content or tool call, so hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
+The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved, and enough is added to rebuild the message client-side. `text_start`, `thinking_start`, and `toolcall_start` carry `block`: the shell of the content block at `contentIndex`, with its streamed content emptied (`text` and `thinking` are `""`, a tool call's `arguments` are `{}`; its `id`, `name`, and other metadata are kept), so the deltas that follow always apply from empty. The server snapshots a block when it handles the event, not when the model emitted it, so a start's snapshot can already hold text that a later delta delivers; hence the emptying. `text_end` and `thinking_end` keep `content` and add `block`: the same block without its text, so its signature and other metadata (`textSignature`, `thinkingSignature`, ...) are available; rebuild the block as `{ ...block, text: content }` or `{ ...block, thinking: content }`. `image_end` carries the whole image as `content` and `toolcall_end` the whole tool call as `toolCall`; each is the block at `contentIndex`. A `start` (a restart of the streaming message within a turn) carries `message`: the whole message to restart from; that snapshot can likewise be ahead of the deltas that follow, so treat each block's `*_end` as authoritative for its final content. `text_delta` and `thinking_delta` carry the text to append to the block at `contentIndex`; `toolcall_delta` carries a fragment of the tool call's arguments JSON, and the arguments are complete only in `toolcall_end`'s `toolCall`. Rebuilding covers the message's `content`: `usage`, `responseId`, `stopReason`, and the other message fields arrive only in `message_end`. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message and is authoritative: it can differ from the rebuilt content, for example when inline-edit recovery lifts edit payload text out of a text block and synthesizes an `edit` tool call just before it. Block kinds with no start event also arrive only in full there. Hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
 
 Each command replaces the whole filter state: omitting `messageUpdates` resets it to `"full"`, the default, which retains the original full snapshots. An invalid `events` shape (anything other than `null` or an array of non-empty strings), or a mode other than `"full"` or `"delta"`, returns an error without changing either setting. Event names are not checked against a fixed catalog; unknown non-empty names are accepted. Projection works in protocol v1 and v2, including with `events: null`. Detect support from the echoed `data.messageUpdates` field: older servers ignore the option and do not echo it. This opt-in is raw-protocol only; the TypeScript `RpcClient` and Python client keep their full-message listener contracts.
 
@@ -1241,7 +1244,7 @@ Extensions in RPC mode use request/response UI frames. `--no-ui` disables the ex
 - Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
 - Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
 - MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
-- A host-issued `login` is independent of both UI settings: it can emit `open_url`, progress `notify`, and non-secret `input` requests after the authorization URL. Secret input and prompts before an authorization URL remain unsupported.
+- A host-issued `login` is independent of both UI settings: it can emit `open_url`, progress `notify`, and non-secret `input` requests after the authorization URL. Provider login prompts marked `secret: true` and prompts before an authorization URL remain unsupported.
 
 Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-ui --no-ui` to answer tool dialogs while keeping extensions headless. Plain `--mode rpc-ui` enables both extension and tool UI.
 
@@ -1254,6 +1257,10 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
     description, emits a positionally aligned
     `optionDetails: Array<{ description?: string }>` array. Hosts that do not
     render descriptions can continue using `options` alone.
+  - `input` carries `title: string` and optional `placeholder?: string`,
+    `timeout?: number`, and `secret?: boolean`. `secret` is an unnegotiated
+    host hint from `ExtensionUIDialogOptions.secret`; hosts that support
+    masked input should hide typed characters when `secret: true`.
   - `ask` is emitted only after `set_ask_dialog` enables it. It carries every
     question of one `ask` tool call:
     `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
@@ -1594,7 +1601,8 @@ stdout:
   "id": "ui_7",
   "method": "input",
   "title": "Branch name",
-  "placeholder": "feature/..."
+  "placeholder": "feature/...",
+  "secret": false
 }
 ```
 

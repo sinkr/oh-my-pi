@@ -1952,7 +1952,7 @@ func (v *CacheWarmingMode) UnmarshalJSON(data []byte) error {
 	return unknownValue("CacheWarmingMode", s)
 }
 
-// `set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`.
+// `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.
 type MessageUpdates string
 
 const (
@@ -5482,6 +5482,7 @@ type InputUiRequest struct {
 	Title       string  `json:"title"`
 	Placeholder *string `json:"placeholder,omitempty"`
 	Timeout     *int64  `json:"timeout,omitempty"`
+	Secret      *bool   `json:"secret,omitempty"`
 }
 
 func (v *InputUiRequest) UnmarshalJSON(data []byte) error {
@@ -5497,6 +5498,7 @@ func (v *InputUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("title", &out.Title)
 	d.optional("placeholder", &out.Placeholder)
 	d.optional("timeout", &out.Timeout)
+	d.optional("secret", &out.Secret)
 	if d.err != nil {
 		return d.err
 	}

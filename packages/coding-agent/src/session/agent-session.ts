@@ -1940,8 +1940,9 @@ export class AgentSession implements SettingsScope {
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
-			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames) =>
-				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames),
+			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames) =>
+				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames),
+			getAllToolNames: () => this.getAllToolNames(),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			getMountedXdevToolNames: () => this.getMountedXdevToolNames(),
@@ -2062,7 +2063,8 @@ export class AgentSession implements SettingsScope {
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
-			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
+			syncAfterModelChange: (previousEditMode, options) =>
+				this.#tools.syncAfterModelChange(previousEditMode, options),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, options) =>
@@ -2483,7 +2485,9 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#cancelFatalRecoveryHint = postmortem.registerFatalRecoveryHint(() => {
 			const sessionId = this.sessionManager.getSessionId();
-			if (!sessionId || !this.sessionManager.getSessionFile()) return undefined;
+			// `--resume <id>` fails on a session that never reached disk (issue #8860), or whose
+			// first remote write the exit aborts before the store confirms it.
+			if (!sessionId || !this.sessionManager.isSessionConfirmedOnDisk()) return undefined;
 			return {
 				label: this.#agentId ?? (this.#agentKind === "main" ? "Main" : "Agent"),
 				command: resumeCommand(sessionId),
@@ -6977,9 +6981,13 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.setActiveToolPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
 	}
 
-	/** Restores a non-MCP presentation snapshot while retaining the current MCP selection. */
-	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void> {
-		return this.#tools.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames);
+	/** Restores a non-MCP presentation snapshot plus the MCP selection and non-built-in tools registered after it. */
+	restoreNonMCPToolPresentation(
+		nonMCPToolNames: string[],
+		nonMCPMountedToolNames: string[],
+		registeredToolNames: readonly string[],
+	): Promise<void> {
+		return this.#tools.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames);
 	}
 
 	/** Current enabled eval prelude definitions. */
@@ -8667,6 +8675,7 @@ export class AgentSession implements SettingsScope {
 					autoResizeImages: cfgImagesAutoResize.get(this.settings),
 					useHashLines: resolveFileDisplayMode(this).hashLines,
 					snapshotStore: getEditStore(this),
+					signal: setupAbort.signal,
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));

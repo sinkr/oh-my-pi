@@ -122,7 +122,7 @@ export function exitProcess(code: number): never {
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
 
-/** User-facing command printed before fatal cleanup so interrupted work can be resumed. */
+/** User-facing command printed after fatal or SIGTERM cleanup so interrupted work can be resumed. */
 export interface FatalRecoveryHint {
 	/** Stable label identifying the recoverable session or process. */
 	label: string;
@@ -480,7 +480,10 @@ export function interceptUnhandledRejections(interceptor: (reason: unknown) => b
 
 /**
  * Register a synchronous recovery command to print when the process exits
- * through an uncaught exception or unhandled rejection.
+ * through an uncaught exception, an unhandled rejection, or SIGTERM.
+ *
+ * Providers are read once cleanup finishes (or hits its deadline), so they
+ * report what teardown left behind: a session it saved or one it dropped.
  */
 export function registerFatalRecoveryHint(provider: FatalRecoveryHintProvider): () => void {
 	fatalRecoveryHintProviders.add(provider);
@@ -494,10 +497,10 @@ function escapeFatalHintText(value: string): string {
 	});
 }
 
-function formatFatalRecoveryHints(): string {
+function formatFatalRecoveryHints(providers: Iterable<FatalRecoveryHintProvider>): string {
 	const lines: string[] = [];
 	const seenCommands = new Set<string>();
-	for (const provider of fatalRecoveryHintProviders) {
+	for (const provider of providers) {
 		try {
 			const hint = provider();
 			if (!hint?.command || seenCommands.has(hint.command)) continue;
@@ -519,21 +522,47 @@ function formatFatalError(label: string, err: Error): string {
 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
 }
 
+/** Write a final report to stderr once terminal owners have handed the terminal back. */
+function writeTerminalReport(output: string): void {
+	restoreTerminalStderr();
+	// A revoked terminal can make stream writes raise another fatal error. Use
+	// the descriptor directly so failure stays synchronous and contained.
+	try {
+		fs.writeSync(2, output);
+	} catch {}
+}
+
+let recoveryHintsWritten = false;
+
+/**
+ * Print the recovery commands at most once per process. Callers snapshot the
+ * providers before cleanup, because a session's own cleanup unregisters its
+ * provider, and call this after cleanup, because teardown can still save the
+ * session (an unsent draft, an aborted first reply) or drop an empty one.
+ */
+function writeRecoveryHints(providers: readonly FatalRecoveryHintProvider[], heading = ""): void {
+	if (recoveryHintsWritten) return;
+	const hints = formatFatalRecoveryHints(providers);
+	if (!hints) return;
+	recoveryHintsWritten = true;
+	writeTerminalReport(`${heading}${hints}`);
+}
+
 async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
-	const forcedExit = setTimeout(() => exitProcess(1), CLEANUP_DEADLINE_MS);
+	const hintProviders = [...fatalRecoveryHintProviders];
+	const forcedExit = setTimeout(() => {
+		writeRecoveryHints(hintProviders);
+		exitProcess(1);
+	}, CLEANUP_DEADLINE_MS);
 	try {
 		// Cleanup callbacks are invoked synchronously before runCleanup returns its
 		// completion promise. TUI owners therefore hand the cursor back before the
 		// fatal report is written, while slower resource cleanup continues afterward.
 		const cleanup = runCleanup(reason);
-		restoreTerminalStderr();
-		// A revoked terminal can make stream writes raise another fatal error. Use
-		// the descriptor directly so failure stays synchronous and contained.
-		try {
-			fs.writeSync(2, output);
-		} catch {}
+		writeTerminalReport(output);
 		logger.error(logMessage, { err });
 		await cleanup;
+		writeRecoveryHints(hintProviders);
 	} finally {
 		clearTimeout(forcedExit);
 		exitProcess(1);
@@ -552,12 +581,12 @@ function handleWorkerSendEpipe(err: Error): boolean {
  */
 export async function fatal(error: unknown): Promise<never> {
 	const err = error instanceof Error ? error : new Error(String(error));
-	const output = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n${formatFatalRecoveryHints()}`;
+	const report = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n`;
 	if (!Bun.isMainThread) {
-		process.stderr.write(output);
+		process.stderr.write(`${report}${formatFatalRecoveryHints(fatalRecoveryHintProviders)}`);
 		process.exit(1);
 	}
-	return exitAfterFatal(output, "Fatal error", err, Reason.UNHANDLED_REJECTION);
+	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);
 }
 
 if (Bun.isMainThread) {
@@ -607,7 +636,7 @@ if (Bun.isMainThread) {
 				return;
 			}
 			await exitAfterFatal(
-				`${formatFatalError("Uncaught Exception", err)}${formatFatalRecoveryHints()}`,
+				formatFatalError("Uncaught Exception", err),
 				"Uncaught exception",
 				err,
 				Reason.UNCAUGHT_EXCEPTION,
@@ -630,7 +659,7 @@ if (Bun.isMainThread) {
 				}
 			}
 			await exitAfterFatal(
-				`${formatFatalError("Unhandled Rejection", err)}${formatFatalRecoveryHints()}`,
+				formatFatalError("Unhandled Rejection", err),
 				"Unhandled rejection",
 				err,
 				Reason.UNHANDLED_REJECTION,
@@ -640,7 +669,12 @@ if (Bun.isMainThread) {
 			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
 		})
 		.on("SIGTERM", async () => {
+			// A stopped session otherwise leaves its last frame above the shell prompt,
+			// which reads as a crash. A repeated SIGTERM joins the same cleanup and the
+			// hints still print once.
+			const hintProviders = [...fatalRecoveryHintProviders];
 			await runCleanup(Reason.SIGTERM);
+			writeRecoveryHints(hintProviders, "\n[Stopped by SIGTERM]");
 			exitProcess(143); // 128 + SIGTERM (15)
 		})
 		.on("SIGHUP", async () => {

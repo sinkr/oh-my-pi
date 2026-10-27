@@ -378,7 +378,7 @@ export type QueuedMessageQueue = "steering" | "followUp";
 
 export type CacheWarmingMode = "off" | "streaming" | "idle";
 
-/** `set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`. */
+/** `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches. */
 export type MessageUpdates = "full" | "delta";
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
@@ -1237,6 +1237,7 @@ export interface InputUiRequest {
 	title: string;
 	placeholder?: string;
 	timeout?: number;
+	secret?: boolean;
 }
 
 export interface EditorUiRequest {
