@@ -76,12 +76,20 @@ pub(crate) fn automatic_buffer_size(fs: &BlockingFs, files: &[OsString]) -> usiz
 
 	// Prefer the tighter bound when both hints exist, otherwise fall back to
 	// whichever hint is available.
-	match (file_hint, mem_hint) {
+	let size = match (file_hint, mem_hint) {
 		(Some(file), Some(mem)) => file.min(mem),
 		(Some(file), None) => file,
 		(None, Some(mem)) => mem,
 		(None, None) => super::FALLBACK_AUTOMATIC_BUF_SIZE,
-	}
+	};
+	with_floor(size, mem_hint)
+}
+
+/// The automatic size keeps chunks of at least 8 MiB, two of them in
+/// memory, but no more than the memory hint allows: in a cgroup with a few
+/// MiB of headroom, the floor alone would pass the limit.
+fn with_floor(size: usize, mem_hint: Option<usize>) -> usize {
+	size.max(super::AUTOMATIC_BUF_FLOOR.min(mem_hint.unwrap_or(usize::MAX)))
 }
 
 fn file_size_hint(fs: &BlockingFs, files: &[OsString]) -> Option<usize> {
@@ -316,6 +324,21 @@ mod tests {
 			desired_file_buffer_bytes(large as u128),
 			super::super::MAX_AUTOMATIC_BUF_SIZE as u128
 		);
+	}
+
+	// Failure mode: in a cgroup with 8 MiB of headroom, the 8 MiB chunk floor
+	// raised both chunks to 16 MiB together, over the cgroup's limit.
+	#[test]
+	fn the_automatic_floor_stays_under_the_memory_hint() {
+		const MIB: usize = 1024 * 1024;
+		// A small file, plenty of memory: the floor applies.
+		assert_eq!(with_floor(MIB / 2, Some(1024 * MIB)), 16 * MIB);
+		// No memory hint: the floor applies.
+		assert_eq!(with_floor(MIB / 2, None), 16 * MIB);
+		// 8 MiB of headroom gives a 2 MiB hint; the floor does not pass it.
+		assert_eq!(with_floor(2 * MIB, Some(2 * MIB)), 2 * MIB);
+		// A size above the floor is kept.
+		assert_eq!(with_floor(64 * MIB, Some(64 * MIB)), 64 * MIB);
 	}
 
 	fn write_files(dir: &Path, files: &[(&str, &str)]) {
@@ -1536,11 +1559,9 @@ fn reader_writer<
 
 	// One chunk is sorted while the next is read, so each gets half the
 	// buffer: as with GNU sort, `-S` bounds the memory of both, records
-	// included. The automatic size keeps chunks of at least 8 MiB.
-	let mut chunk_budget = settings.buffer_size / 2;
-	if !settings.buffer_size_is_explicit {
-		chunk_budget = chunk_budget.max(8 * 1024 * 1024);
-	}
+	// included. The automatic size has its floor already (see
+	// `buffer_hint::automatic_buffer_size`).
+	let chunk_budget = settings.buffer_size / 2;
 	let read_result: ReadResult<Tmp> =
 		read_write_loop(files, tmp_dir, separator, chunk_budget, settings, receiver, sender)?;
 	// A cancelled sorter stops mid-input; what was read is not the answer.
@@ -1753,8 +1774,7 @@ mod tests {
 
 		// 1 KiB leaves each chunk no room past its first 512-byte read, about
 		// 100 of these 5-byte records, so the 2000 records take 20 chunks.
-		let settings =
-			GlobalSettings { buffer_size: 1024, buffer_size_is_explicit: true, ..Default::default() };
+		let settings = GlobalSettings { buffer_size: 1024, ..Default::default() };
 
 		let out_dir = tempfile::tempdir().expect("temp dir");
 		let out_path = out_dir.path().join("sorted.txt");
@@ -3255,6 +3275,9 @@ const POSITIVE: &u8 = &b'+';
 const MIN_AUTOMATIC_BUF_SIZE: usize = 512 * 1024; // 512 KiB
 const FALLBACK_AUTOMATIC_BUF_SIZE: usize = 32 * 1024 * 1024; // 32 MiB
 const MAX_AUTOMATIC_BUF_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
+/// The automatic size keeps chunks of at least 8 MiB (two in memory),
+/// unless the memory hint is smaller.
+const AUTOMATIC_BUF_FLOOR: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum SortError {
@@ -3453,7 +3476,6 @@ pub struct GlobalSettings {
 	separator:               Option<u8>,
 	line_ending:             LineEnding,
 	buffer_size:             usize,
-	buffer_size_is_explicit: bool,
 	/// `--compress-program`: the program plus the shell context its children
 	/// must inherit (working directory, exported environment, stderr).
 	compress:                Option<Compressor>,
@@ -3661,7 +3683,6 @@ impl Default for GlobalSettings {
 			separator:               None,
 			line_ending:             LineEnding::Newline,
 			buffer_size:             FALLBACK_AUTOMATIC_BUF_SIZE,
-			buffer_size_is_explicit: false,
 			compress:                None,
 			merge_batch_size:        default_merge_batch_size(),
 			numeric_locale:          NumericLocaleSettings::default(),
@@ -5443,10 +5464,8 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		settings.buffer_size = GlobalSettings::parse_byte_count(size_str).map_err(|e| {
 			SortError::message(format_error_message(&e, size_str, options::BUF_SIZE))
 		})?;
-		settings.buffer_size_is_explicit = true;
 	} else {
 		settings.buffer_size = automatic_buffer_size(&fs, &files);
-		settings.buffer_size_is_explicit = false;
 	}
 
 	let tmp_base = matches
