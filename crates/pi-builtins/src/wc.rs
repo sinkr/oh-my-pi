@@ -250,6 +250,8 @@ mod countable {
 		fn native_file(&self) -> Option<&std::fs::File>;
 		/// Whether the command was cancelled; for the descriptor shortcuts,
 		/// which bypass the reads that fail once it is.
+		// Only the Linux splice path polls it.
+		#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 		fn is_cancelled(&self) -> bool;
 	}
 
