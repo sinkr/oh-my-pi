@@ -134,6 +134,8 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
       - raw mode suppresses both
 - Prefix format in hashline mode is a `[PATH#TAG]` header followed by `LINE:TEXT`, e.g. `[src/foo.ts#0A1B]` and `41:def alpha():`, from the session snapshot store plus `formatNumberedLine()` / `formatHashlineHeader()`.
 - The `edit`/hashline path consumes that header plus bare line numbers later; the four-hex tag is a content-derived hash of the whole normalized file, resolvable through the session snapshot store that recorded it. Immutable sources and `:raw` intentionally suppress hashline headers.
+- Raw comma ranges join the selected source lines with a single newline, without elision rows. Finite raw ranges omit the terminal newline and have no continuation footer when satisfied; open-ended ranges reaching EOF retain the terminal newline. Actual byte/line ceilings still carry truncation diagnostics. Conflict markers remain source text in raw reads: registration and `conflictCount` are retained, while conflict instructions move to `details.notes` instead of the body.
+- Raw out-of-bounds selections contribute no source text; skipped-range and single-line bounds diagnostics remain in `details.notes`. Repeated raw reads also keep loop hints in `details.notes`, and recovered paths stay in `details.suffixResolution` without a body prefix. `details.raw` carries the resolved mode to these shared notice emitters, including when a literal filename resembles a selector.
 
 ### Directory listings
 
@@ -150,10 +152,13 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Supported archive containers (extension table in `packages/utils/src/ar/registry.ts`): tar family `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`/`.tbz`, `.tar.xz`/`.txz`, `.tar.zst`/`.tzst`, `.tar.z`; ZIP family `.zip`, `.jar`, `.war`, `.ear`, `.apk`, `.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`; standalone `.rar`/`.cbr`, `.7z`, `.iso`, `.cab`, `.cpio`, `.rpm`, `.ar`/`.a`/`.lib`, `.deb`, `.lzh`/`.lha`, `.arj`, `.asar`; single-stream `.gz`, `.bz2`, `.xz`, `.zst`, `.z`, `.lzma`.
 - Syntax: `archive.ext`, `archive.ext:path/inside`, `archive.ext:path/inside:50-60`.
 - `openArchive()` dispatches through the `@oh-my-pi/pi-utils/ar` registry (`packages/utils/src/ar/open.ts`); limits live in `packages/utils/src/ar/limits.ts`: in-memory archives cap at 256 MiB, index reads at 64 MiB, and individual member extraction at 64 MiB.
+- Plain TAR indexing reads headers and bounded metadata through byte ranges, skipping member payloads. Its container size is not subject to the whole-buffer limit; selected members retain the extraction limit.
 - Archive paths normalize `/`, drop `.` segments, and reject `..`.
 - Directory reads list immediate children; files show `name` plus ` (size)` when size > 0.
 - Directory listing default limit is `500` entries in `readArchiveDirectory()`.
-- File entries are UTF-8 decoded. Non-UTF-8 entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
+- Selected PDF entries use the same Markdown conversion as ordinary PDF files, including line, multi-range, tail, and raw selectors. The read identity retains both the archive and member path and is immutable.
+- PDF page-image reads such as `a.zip:folder/sample document.pdf:page2.png` render only the selected member through Chromium. Its bounded temporary PDF is removed after success, failure, or cancellation; archive paths are never unpacked into the working directory.
+- Other file entries are UTF-8 decoded. Unsupported binary entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
 - Text archive entries reuse the normal in-memory pagination/anchoring path.
 
 ### Executables and IDA databases
@@ -276,7 +281,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 - `parseReadUrlTarget()` accepts `http://`, `https://`, or `www.` targets.
 - Plain URL reads call `executeReadUrl()` in `packages/coding-agent/src/tools/fetch.ts`.
-- `:raw` means raw HTML/body fallback path; plain URL reads prefer rendered/reader-friendly output.
+- `:raw` returns the response body without a transport header or whitespace normalization; URL, Content-Type, Method, and notes remain in structured details. Plain URL reads prefer rendered/reader-friendly output and keep the transport header below.
 - `:N`, `:A-B`, `:A+C`, and comma-separated multi-ranges do not refetch when cached output is usable. They page over cached output from the prior or current URL render.
 - URL render pipeline in `renderUrl()`:
    1. normalize scheme (`https://` added for bare `www.`)
@@ -286,7 +291,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    5. handle JSON directly, feeds via feed parser, plain text directly
    6. for HTML and non-raw mode, try markdown alternates, `URL.md`, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
    7. fall back to raw body text/html
-- URL output is wrapped with a small header:
+- Non-raw whole-URL output is wrapped with a small header; line selectors address body lines, not these header rows. Raw URL artifacts and search materialization use the same unwrapped body coordinates:
 
 ```text
 URL: ...
@@ -339,7 +344,7 @@ Notes: ...
 - Profile summaries run only for whole-file reads of recognized reports at most `32 MiB`; line selectors and `:raw` read the file.
 - Image input max: `20 MiB`.
 - Directory tree caps for local directories: depth `2`, per-directory children `12`.
-- Archive directory default list cap: `500` entries; archive members cap at `64 MiB`, and tar/tgz containers cap at `256 MiB`.
+- Archive directory default list cap: `500` entries; archive members cap at `64 MiB`. Whole-buffer archive reads cap at `256 MiB`; plain TARs are ranged, and large gzip/zstd TARs use bounded decompression passes.
 - SQLite:
    - default row query limit `20`
    - schema sample limit `5`
