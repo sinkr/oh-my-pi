@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- ACP clients now receive each tool's name on `tool_call`, so tools without a specific ACP kind (`task`, `wait`, `ask`, …) show their own name instead of a generic "tool" label
+
 ## [18.13.1] - 2026-10-27
 
 ### Added
