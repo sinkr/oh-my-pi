@@ -153,7 +153,10 @@ describe("generateFileMentionMessages path resolution", () => {
 				`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL_NS}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
 			],
 			["xl/sharedStrings.xml", `<sst xmlns="${NS}"><si><t>Mentioned Cell</t></si></sst>`],
-			["xl/worksheets/sheet1.xml", `<worksheet xmlns="${NS}"><sheetData><row r="1"><c t="s"><v>0</v></c></row></sheetData></worksheet>`],
+			[
+				"xl/worksheets/sheet1.xml",
+				`<worksheet xmlns="${NS}"><sheetData><row r="1"><c t="s"><v>0</v></c></row></sheetData></worksheet>`,
+			],
 		]);
 		await Bun.write(path.join(cwd, "table.xlsx"), xlsxBytes);
 
@@ -193,7 +196,10 @@ describe("generateFileMentionMessages path resolution", () => {
 				`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL_NS}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
 			],
 			["xl/sharedStrings.xml", `<sst xmlns="${NS}"><si><t>Aborted Cell</t></si></sst>`],
-			["xl/worksheets/sheet1.xml", `<worksheet xmlns="${NS}"><sheetData><row r="1"><c t="s"><v>0</v></c></row></sheetData></worksheet>`],
+			[
+				"xl/worksheets/sheet1.xml",
+				`<worksheet xmlns="${NS}"><sheetData><row r="1"><c t="s"><v>0</v></c></row></sheetData></worksheet>`,
+			],
 		]);
 		await Bun.write(path.join(cwd, "aborted.xlsx"), xlsxBytes);
 
