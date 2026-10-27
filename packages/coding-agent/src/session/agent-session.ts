@@ -632,6 +632,35 @@ export class SessionBusyError extends Error {
 	}
 }
 
+/** Result of {@link AgentSession.navigateTree}. */
+export interface NavigateTreeResult {
+	editorText?: string;
+	/** Image attachments of the target user message, parallel to the positional `[Image #N]` markers in {@link editorText}. */
+	editorImages?: ImageContent[];
+	cancelled: boolean;
+	aborted?: boolean;
+	summaryEntry?: BranchSummaryEntry;
+	/** Raw session context built during navigation — pass to renderInitialMessages to skip a second O(N) walk. */
+	sessionContext?: SessionContext;
+	/**
+	 * Set when `targetId` is an `ask` toolResult, `options.allowAskReopen`
+	 * was set, and `options.reanswerAskResult` was not supplied: nothing was
+	 * mutated. The caller must re-open the ask picker with these
+	 * `questions`, then call `navigateTree(targetId, { ...options,
+	 * reanswerAskResult })` with the produced result to actually branch
+	 * (issue #5642).
+	 */
+	reopenAsk?: { toolCallId: string; questions: AskToolInput["questions"] };
+	/**
+	 * `true` when this call committed a new sibling answer for an `ask`
+	 * re-answer (`reanswerAskResult` was applied). The interactive caller
+	 * resumes the agent via {@link AgentSession.resumeAfterAskReanswer} *after* rebuilding
+	 * its transcript, so the resumed turn never renders against the stale
+	 * pre-rebuild UI (issue #6483).
+	 */
+	askReanswerCommitted?: boolean;
+}
+
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 	context_notes: true,
 	new_context: true,
@@ -1913,8 +1942,9 @@ export class AgentSession implements SettingsScope {
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
-			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames) =>
-				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames),
+			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames) =>
+				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames),
+			getAllToolNames: () => this.getAllToolNames(),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			getMountedXdevToolNames: () => this.getMountedXdevToolNames(),
@@ -2035,7 +2065,8 @@ export class AgentSession implements SettingsScope {
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
-			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
+			syncAfterModelChange: (previousEditMode, options) =>
+				this.#tools.syncAfterModelChange(previousEditMode, options),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, options) =>
@@ -2456,7 +2487,9 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#cancelFatalRecoveryHint = postmortem.registerFatalRecoveryHint(() => {
 			const sessionId = this.sessionManager.getSessionId();
-			if (!sessionId || !this.sessionManager.getSessionFile()) return undefined;
+			// `--resume <id>` fails on a session that never reached disk (issue #8860), or whose
+			// first remote write the exit aborts before the store confirms it.
+			if (!sessionId || !this.sessionManager.isSessionConfirmedOnDisk()) return undefined;
 			return {
 				label: this.#agentId ?? (this.#agentKind === "main" ? "Main" : "Agent"),
 				command: resumeCommand(sessionId),
@@ -6950,9 +6983,13 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.setActiveToolPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
 	}
 
-	/** Restores a non-MCP presentation snapshot while retaining the current MCP selection. */
-	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void> {
-		return this.#tools.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames);
+	/** Restores a non-MCP presentation snapshot plus the MCP selection and non-built-in tools registered after it. */
+	restoreNonMCPToolPresentation(
+		nonMCPToolNames: string[],
+		nonMCPMountedToolNames: string[],
+		registeredToolNames: readonly string[],
+	): Promise<void> {
+		return this.#tools.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames);
 	}
 
 	/** Current enabled eval prelude definitions. */
@@ -8640,6 +8677,7 @@ export class AgentSession implements SettingsScope {
 					autoResizeImages: cfgImagesAutoResize.get(this.settings),
 					useHashLines: resolveFileDisplayMode(this).hashLines,
 					snapshotStore: getEditStore(this),
+					signal: setupAbort.signal,
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
@@ -13336,34 +13374,13 @@ export class AgentSession implements SettingsScope {
 			 * the original one.
 			 */
 			reanswerAskResult?: AgentToolResult<AskToolDetails>;
+			/**
+			 * Refuse with {@link SessionBusyError} when work started while the hooks
+			 * or the branch summary were awaited, before any tree change is made.
+			 */
+			requireIdle?: boolean;
 		} = {},
-	): Promise<{
-		editorText?: string;
-		/** Image attachments of the target user message, parallel to the positional `[Image #N]` markers in {@link editorText}. */
-		editorImages?: ImageContent[];
-		cancelled: boolean;
-		aborted?: boolean;
-		summaryEntry?: BranchSummaryEntry;
-		/** Raw session context built during navigation — pass to renderInitialMessages to skip a second O(N) walk. */
-		sessionContext?: SessionContext;
-		/**
-		 * Set when `targetId` is an `ask` toolResult, `options.allowAskReopen`
-		 * was set, and `options.reanswerAskResult` was not supplied: nothing was
-		 * mutated. The caller must re-open the ask picker with these
-		 * `questions`, then call `navigateTree(targetId, { ...options,
-		 * reanswerAskResult })` with the produced result to actually branch
-		 * (issue #5642).
-		 */
-		reopenAsk?: { toolCallId: string; questions: AskToolInput["questions"] };
-		/**
-		 * `true` when this call committed a new sibling answer for an `ask`
-		 * re-answer (`reanswerAskResult` was applied). The interactive caller
-		 * resumes the agent via {@link resumeAfterAskReanswer} *after* rebuilding
-		 * its transcript, so the resumed turn never renders against the stale
-		 * pre-rebuild UI (issue #6483).
-		 */
-		askReanswerCommitted?: boolean;
-	}> {
+	): Promise<NavigateTreeResult> {
 		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
@@ -13513,6 +13530,9 @@ export class AgentSession implements SettingsScope {
 			summaryText = hookSummary.summary;
 			summaryDetails = hookSummary.details;
 		}
+
+		// A run admitted during the hook or summary awaits would keep writing into the branch the leaf leaves.
+		if (options.requireIdle) this.#assertIdleForSnapshot("navigate the session tree");
 
 		// All cancellation/no-op exits are behind us. Invalidate prompt setup
 		// admitted on the abandoned branch before committing any tree changes.

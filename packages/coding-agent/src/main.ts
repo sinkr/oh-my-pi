@@ -14,6 +14,7 @@ import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
+	getAgentDir,
 	getLogPath,
 	getProjectDir,
 	normalizePathForComparison,
@@ -145,6 +146,8 @@ import {
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
+import { scheduleGcAutoCompress } from "./cli/gc-auto-compress";
+import { cfgGcAutoCompress } from "./cli/gc-settings";
 import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
@@ -2613,6 +2616,11 @@ export async function runRootCommand(
 					);
 				}
 				void startBackgroundModelDiscovery?.();
+				if (cfgGcAutoCompress.get(settingsInstance)) {
+					void scheduleGcAutoCompress(getAgentDir()).catch(error =>
+						logger.warn("Background session compression failed to start", { error: String(error) }),
+					);
+				}
 			};
 			const refreshScopedModelsAfterLogin = async () => {
 				await rebuildScopedModels(session, parsedArgs, modelRegistry, settingsInstance);
