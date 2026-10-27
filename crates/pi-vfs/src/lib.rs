@@ -55,7 +55,7 @@ pub use error::{
 };
 pub use file::{File, FileHandle};
 #[cfg(unix)]
-pub use file::{POLL_SLICE_MS, wait_readable};
+pub use file::{POLL_SLICE_MS, fd_reads_can_block, reads_can_block, wait_readable};
 pub use fs::{BlockingFs, Fs};
 pub use metadata::Metadata;
 pub use options::{

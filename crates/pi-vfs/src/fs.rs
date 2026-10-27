@@ -187,8 +187,8 @@ fn native_open(scope: &Scope, path: &Path, options: &OpenOptions) -> io::Result<
 enum ScopedOpen {
 	/// Open, then bind the file to the scope (see [`File::bind`]).
 	Plain,
-	/// Open a file whose type is known: `poll` when it is not a regular file,
-	/// so binding it takes no `fstat`.
+	/// Open a file whose type is known: `poll` when its reads can block (see
+	/// [`crate::reads_can_block`]), so binding it takes no `fstat`.
 	#[cfg(unix)]
 	Typed { token: CancellationToken, poll: bool },
 	/// Open one end of a FIFO, which waits until the other end connects, so
@@ -198,8 +198,8 @@ enum ScopedOpen {
 }
 
 /// Under a cancellable scope on Unix, a read-only or write-only open takes
-/// one `stat` first. The file type says whether the file's reads must poll
-/// (anything but a regular file) and whether the open itself can block: a
+/// one `stat` first. It says whether the file's reads must poll (see
+/// [`crate::reads_can_block`]) and whether the open itself can block: a
 /// FIFO's open waits for the other end. Without a token, for any other open,
 /// or when the `stat` fails, the open is [`ScopedOpen::Plain`]. If the path
 /// changes between the `stat` and the open, the file is opened as the `stat`
@@ -222,7 +222,7 @@ fn plan_scoped_open(scope: &Scope, path: &Path, options: &OpenOptions) -> Scoped
 		if kind.is_fifo() && options.get_custom_flags() & libc::O_NONBLOCK == 0 {
 			return ScopedOpen::Fifo { token: token.clone(), end };
 		}
-		return ScopedOpen::Typed { token: token.clone(), poll: !kind.is_file() };
+		return ScopedOpen::Typed { token: token.clone(), poll: crate::reads_can_block(&meta) };
 	}
 	#[cfg(not(unix))]
 	let _ = (scope, path, options);

@@ -94,9 +94,9 @@ pub struct File {
 #[derive(Clone)]
 struct HostCancel {
 	token: CancellationToken,
-	/// The file is not a regular file (a pipe, FIFO, terminal, socket or
-	/// device), so one read can block for as long as no data arrives: such a
-	/// read first waits for readiness in short slices, checking the token.
+	/// Reads of the file can block for as long as no data arrives (see
+	/// [`reads_can_block`]): such a read first waits for readiness in short
+	/// slices, checking the token.
 	#[cfg(unix)]
 	poll:  bool,
 }
@@ -109,9 +109,7 @@ impl HostCancel {
 			token,
 			// A failed `fstat` leaves reads as they were: unpolled.
 			#[cfg(unix)]
-			poll: file
-				.metadata()
-				.is_ok_and(|meta| !meta.file_type().is_file()),
+			poll: file.metadata().is_ok_and(|meta| reads_can_block(&meta)),
 		}
 	}
 }
@@ -119,6 +117,46 @@ impl HostCancel {
 /// How long one readiness wait lasts before cancellation is checked again.
 #[cfg(unix)]
 pub const POLL_SLICE_MS: i32 = 100;
+
+/// Whether one read of a host file with `meta` can block until data arrives,
+/// so a cancellable read must first wait for readiness.
+///
+/// True for a pipe, FIFO, terminal, socket or device, but not for a regular
+/// file or the null device. A read of the null device returns EOF at once,
+/// yet `poll` never reports it readable on macOS and the BSDs, so a readiness
+/// wait would last until cancellation.
+#[cfg(unix)]
+pub fn reads_can_block(meta: &std::fs::Metadata) -> bool {
+	use std::os::unix::fs::{FileTypeExt, MetadataExt};
+	let kind = meta.file_type();
+	!(kind.is_file() || kind.is_char_device() && *NULL_DEVICE_RDEV == Some(meta.rdev()))
+}
+
+/// [`reads_can_block`] for an open descriptor; `true` when `fstat` fails.
+#[cfg(unix)]
+pub fn fd_reads_can_block(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+	use std::os::fd::AsRawFd;
+	let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+	// SAFETY: `stat` is valid for writes of one `struct stat`; `fd` is borrowed
+	// from a live descriptor for the call.
+	if unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+		return true;
+	}
+	// SAFETY: a successful `fstat` filled the whole struct.
+	let stat = unsafe { stat.assume_init() };
+	let kind = stat.st_mode & libc::S_IFMT;
+	#[allow(clippy::unnecessary_cast, reason = "`dev_t` is `i32` on macOS")]
+	let rdev = stat.st_rdev as u64;
+	!(kind == libc::S_IFREG || kind == libc::S_IFCHR && *NULL_DEVICE_RDEV == Some(rdev))
+}
+
+/// The device id of `/dev/null`; `None` when it cannot be stat'd, so no file
+/// counts as the null device.
+#[cfg(unix)]
+static NULL_DEVICE_RDEV: std::sync::LazyLock<Option<u64>> = std::sync::LazyLock::new(|| {
+	use std::os::unix::fs::MetadataExt;
+	std::fs::metadata("/dev/null").ok().map(|meta| meta.rdev())
+});
 
 /// Waits until a read of `fd` would not block, checking `is_cancelled` every
 /// [`POLL_SLICE_MS`]; fails with [`crate::cancelled`] once it is.
@@ -782,5 +820,50 @@ impl Write for File {
 impl Seek for File {
 	fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
 		(&*self).seek(pos)
+	}
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use std::os::fd::AsFd;
+
+	use super::*;
+
+	/// The null device reads as EOF at once, but `poll` never reports it
+	/// readable on macOS and the BSDs, so a cancellable read of it must not
+	/// wait for readiness: there `timeout 1 cat /dev/null` waited for the limit
+	/// and exited 124. A file bound to a token after its open and one the
+	/// scoped open typed both read it without polling; `/dev/zero` still polls.
+	#[test]
+	fn cancellable_reads_of_the_null_device_never_poll() {
+		let null = std::fs::File::open("/dev/null").unwrap();
+		let zero = std::fs::File::open("/dev/zero").unwrap();
+		let token = CancellationToken::new();
+		assert!(!HostCancel::for_file(token.clone(), &null).poll, "bound after the open");
+		assert!(HostCancel::for_file(token.clone(), &zero).poll);
+
+		let opened = crate::BlockingFs::native()
+			.with_cancellation(token)
+			.open("/dev/null")
+			.unwrap();
+		let poll = opened.read_cancel.as_ref().map(|cancel| cancel.poll);
+		assert_eq!(poll, Some(false), "typed by the scoped open");
+	}
+
+	/// Of the null device, `/dev/zero`, a regular file and a pipe, only the
+	/// reads of `/dev/zero` and the pipe can block, by metadata and by
+	/// descriptor alike.
+	#[test]
+	fn readiness_predicates_exempt_regular_files_and_the_null_device() {
+		let null = std::fs::File::open("/dev/null").unwrap();
+		let zero = std::fs::File::open("/dev/zero").unwrap();
+		let regular = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+		let (pipe, _writer) = std::io::pipe().unwrap();
+
+		for (file, blocks) in [(&null, false), (&regular, false), (&zero, true)] {
+			assert_eq!(reads_can_block(&file.metadata().unwrap()), blocks, "{file:?}");
+			assert_eq!(fd_reads_can_block(file.as_fd()), blocks, "{file:?}");
+		}
+		assert!(fd_reads_can_block(pipe.as_fd()));
 	}
 }

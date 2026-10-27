@@ -1426,7 +1426,8 @@ impl ChildEnv {
 /// Standard input for a utility builtin: the command's fd 0 plus the
 /// cancellation flag.
 ///
-/// On unix, when fd 0 is a real descriptor, reads wait for readiness in short
+/// On unix, when fd 0 is a descriptor whose reads can block (a pipe, FIFO,
+/// terminal, socket or device), reads wait for readiness in short
 /// slices so an abort or `timeout` is observed even when input never arrives on
 /// a blocked pipe. A cancelled read fails with [`pi_vfs::cancelled`], not EOF,
 /// so a utility never reports a result for input it did not finish reading
@@ -1470,12 +1471,16 @@ impl Stdin {
 }
 
 /// The raw descriptor [`Stdin`] polls for readiness, so a blocked read
-/// observes cancellation; `None` off unix or for in-process streams.
+/// observes cancellation; `None` off unix, for in-process streams, and for a
+/// descriptor whose reads never block (see [`pi_vfs::reads_can_block`]).
 fn pollable_fd(file: &OpenFile) -> Option<i32> {
 	#[cfg(unix)]
 	{
 		use std::os::fd::AsRawFd;
-		file.try_borrow_as_fd().ok().map(|fd| fd.as_raw_fd())
+		file.try_borrow_as_fd()
+			.ok()
+			.filter(|fd| pi_vfs::fd_reads_can_block(*fd))
+			.map(|fd| fd.as_raw_fd())
 	}
 	#[cfg(not(unix))]
 	{
@@ -2158,6 +2163,18 @@ mod testing {
 		pub(crate) fn cancel_flag_for_test(&self) -> Arc<AtomicBool> {
 			Arc::clone(&self.cancel)
 		}
+	}
+
+	/// `poll` never reports the null device readable on macOS and the BSDs, so
+	/// a utility whose stdin is `/dev/null` (the bash tool wires it there)
+	/// waited for cancellation before it saw EOF. Stdin from a pipe still polls.
+	#[cfg(unix)]
+	#[test]
+	fn stdin_from_the_null_device_is_not_polled() {
+		let null = openfiles::null().unwrap();
+		assert_eq!(super::pollable_fd(&null), None);
+		let (reader, _writer) = std::io::pipe().unwrap();
+		assert!(super::pollable_fd(&OpenFile::from(reader)).is_some());
 	}
 
 	#[cfg(windows)]
