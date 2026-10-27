@@ -1353,8 +1353,10 @@ fn compute_apply_patch_replacements(
 		if let Some(context) = &hunk.change_context {
 			for anchor in context.split('\n') {
 				let pattern = [anchor];
-				let found = seek_apply_patch_sequence(lines, &pattern, cursor, false)
-					.ok_or_else(|| EditError::apply(format!("Failed to find context '{anchor}' in {path}")))?;
+				let found =
+					seek_apply_patch_sequence(lines, &pattern, cursor, false).ok_or_else(|| {
+						EditError::apply(format!("Failed to find context '{anchor}' in {path}"))
+					})?;
 				cursor = found + 1;
 			}
 		}
@@ -1365,19 +1367,25 @@ fn compute_apply_patch_replacements(
 				lines.len()
 			}
 		} else {
-			seek_apply_patch_sequence(lines, &hunk.old_lines, cursor, hunk.is_end_of_file)
-				.ok_or_else(|| EditError::apply(format!(
-					"Failed to find expected lines in {path}:\n{}",
-					hunk.old_lines.join("\n")
-				)))?
+			seek_apply_patch_sequence(lines, &hunk.old_lines, cursor, hunk.is_end_of_file).ok_or_else(
+				|| {
+					EditError::apply(format!(
+						"Failed to find expected lines in {path}:\n{}",
+						hunk.old_lines.join("\n")
+					))
+				},
+			)?
 		};
 		let matched = &lines[found..found + hunk.old_lines.len()];
 		replacements.push(Replacement {
 			start_index: found,
-			old_len: hunk.old_lines.len(),
-			new_lines: adjust_lines_indentation(
+			old_len:     hunk.old_lines.len(),
+			new_lines:   adjust_lines_indentation(
 				&hunk.old_lines,
-				&matched.iter().map(|line| (*line).to_owned()).collect::<Vec<_>>(),
+				&matched
+					.iter()
+					.map(|line| (*line).to_owned())
+					.collect::<Vec<_>>(),
 				&hunk.new_lines,
 			),
 		});
@@ -1627,7 +1635,10 @@ fn apply_entry(
 				.diff
 				.ok_or_else(|| EditError::apply("Update operation requires diff (hunks)"))?;
 			let read = files.read(input.path)?;
-			let (after, warnings) = if input.first_match && move_to.is_some() && js_trim(diff).is_empty() {
+			let (after, warnings) = if input.first_match
+				&& move_to.is_some()
+				&& js_trim(diff).is_empty()
+			{
 				(read.text.clone(), Vec::new())
 			} else {
 				let hunks = if input.first_match {

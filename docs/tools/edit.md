@@ -144,6 +144,11 @@ An `*** Update File` followed only by `*** Move to:` renames a UTF-8 file
 without changing its bytes or permissions. An empty update without a move
 still rejects, as do missing sources and occupied destinations.
 
+Envelope sections see the results of earlier sections in order. A move vacates
+its source before a later add, and subsequent updates can target the moved
+file. Preview and application validate this same virtual namespace before
+the first filesystem write; a later invalid section leaves all files unchanged.
+
 ## Output and side effects
 
 Hashline applies in one tool call; it does not use the staged `xd://resolve` / `xd://reject` flow used by `ast_edit`.

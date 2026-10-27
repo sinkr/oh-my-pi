@@ -48,6 +48,16 @@ describe("EditTool details", () => {
 		expect(await Bun.file(target).text()).toBe("79 named states\n");
 	});
 
+	test("apply_patch moves a file before recreating its old path", async () => {
+		await Bun.write(path.join(tempDir, "a.txt"), "old\n");
+		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("move-add", {
+			input: "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt\n@@\n-old\n+moved\n*** Add File: a.txt\n+replacement\n*** End Patch",
+		});
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(path.join(tempDir, "a.txt")).text()).toBe("replacement\n");
+		expect(await Bun.file(path.join(tempDir, "b.txt")).text()).toBe("moved\n");
+	});
+
 	test("apply_patch moves a file without hunks and preserves its bytes and mode", async () => {
 		const source = path.join(tempDir, "source.sh");
 		const destination = path.join(tempDir, "moved.sh");
