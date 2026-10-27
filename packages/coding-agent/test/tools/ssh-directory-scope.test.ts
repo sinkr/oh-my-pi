@@ -20,7 +20,8 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 		.join("\n");
 }
 
-describe("grep ssh:// directory scopes", () => {
+// The fake remote is the local filesystem behind a POSIX shell.
+describe.skipIf(process.platform === "win32")("grep ssh:// directory scopes", () => {
 	let fixture: string;
 	let root: string;
 	let tool: GrepTool;
