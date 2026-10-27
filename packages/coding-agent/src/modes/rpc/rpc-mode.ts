@@ -34,10 +34,11 @@ import {
 } from "../../extensibility/extensions";
 import {
 	type BuiltSkillPromptMessage,
-	loadSkillPromptBody,
+	loadSkillPrompt,
 	parseSkillInvocation,
 	type Skill,
 	type SkillPromptInput,
+	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
@@ -250,7 +251,8 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 export type RpcSkillCommandSession = Pick<
 	AgentSession,
 	"buildUserSkillPrompt" | "renderUserSkillPrompt" | "promptCustomMessage" | "skills" | "skillsSettings"
->;
+> &
+	SkillRediscoverySource;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
@@ -326,11 +328,12 @@ export async function dispatchRpcSkillPrompt(input: {
 	const invocation = resolveRpcSkillInvocation(input.session, input.message);
 	if (!invocation) return null;
 	// Read the skill before acknowledging the command so a missing SKILL.md
-	// still fails immediately. Rendering (and authorizing model tags) happens
+	// still fails immediately (a stale one is read from its rediscovered
+	// replacement first). Rendering (and authorizing model tags) happens
 	// only after the in-flight submission survives the currentness check.
-	const body = await loadSkillPromptBody(invocation.skill);
+	const loaded = await loadSkillPrompt(invocation.skill, input.session);
 	if (input.isCurrent && !input.isCurrent()) return "cancelled";
-	const built = input.session.renderUserSkillPrompt(invocation.skill, invocation, body);
+	const built = input.session.renderUserSkillPrompt(loaded.skill, invocation, loaded.body);
 	// A failure before admission still resolves this wait (without rejecting this
 	// call) — reportPromptResult already routed it to onError and a failed prompt_result.
 	await watchAndReportPromptResult({

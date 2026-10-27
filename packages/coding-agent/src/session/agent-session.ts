@@ -170,10 +170,11 @@ import type { CustomCommandContext } from "../extensibility/custom-commands/type
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
 	type BuiltSkillPromptMessage,
-	loadSkillPromptBody,
+	loadSkillPrompt,
 	renderSkillPromptMessage,
 	type Skill,
 	type SkillPromptInput,
+	type SkillRediscoveryHost,
 	type SkillWarning,
 } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
@@ -6971,6 +6972,30 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * This session as the holder `skill://`, `/skill:` and autoload rediscover through when a skill
+	 * goes stale: a reloadable session refreshes its skills (also when the plugin registries replaced
+	 * a skill's install), a fixed list (a subagent's) re-points the entries whose files are gone and
+	 * stores the result, and concurrent misses share one pass.
+	 */
+	skillRediscoveryHost(): SkillRediscoveryHost {
+		const reloadable = this.#tools.skillsReloadable;
+		return {
+			skills: this.skills,
+			refreshSkills: reloadable
+				? async () => {
+						await this.refreshSkills();
+						return this.skills;
+					}
+				: undefined,
+			replaceSkills: reloadable ? undefined : skills => this.#tools.replaceSkills(skills),
+			shareRediscovery: rediscover => this.#tools.shareSkillRediscovery(rediscover),
+			settings: this.settings,
+			cwd: this.sessionManager.getCwd(),
+			extensionRoots: this.effectiveExtensionRoots,
+		};
+	}
+
+	/**
 	 * Rediscovers skills and file-based slash commands for the current cwd, rebuilds the
 	 * system prompt, and notifies command-metadata listeners (TUI autocomplete, RPC/ACP
 	 * command lists). Serialized so overlapping reloads apply in call order.
@@ -10382,12 +10407,16 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.skills;
 	}
 
-	/** Load a user-invoked skill and authorize model tags in its arguments. */
+	/**
+	 * Load a user-invoked skill and authorize model tags in its arguments. A stale skill (its plugin
+	 * install was replaced or deleted) is read from this session's rediscovered same-named skill.
+	 */
 	async buildUserSkillPrompt(
 		skill: Pick<Skill, "name" | "filePath" | "baseDir">,
 		input: SkillPromptInput,
 	): Promise<BuiltSkillPromptMessage> {
-		return this.renderUserSkillPrompt(skill, input, await loadSkillPromptBody(skill));
+		const loaded = await loadSkillPrompt(skill, this);
+		return this.renderUserSkillPrompt(loaded.skill, input, loaded.body);
 	}
 
 	/** Render an already-loaded skill only after the invoking submission is still current. */
