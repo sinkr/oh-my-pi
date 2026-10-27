@@ -5,6 +5,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
+import {
+	GC_AUTO_COMPRESS_INTERVAL_MS,
+	GC_AUTO_COMPRESS_LOG,
+	scheduleGcAutoCompress,
+} from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { compressMethod } from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -2772,5 +2777,37 @@ describe("runGcCommand session compression", () => {
 
 		expect(configured.compress?.wouldCompress).toBe(0);
 		expect(overridden.compress?.wouldCompress).toBe(2);
+	});
+
+	test.skipIf(!supported)(
+		"the background run compresses idle sessions, then waits a day before running again",
+		async () => {
+			const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
+			const logPath = path.join(root, GC_AUTO_COMPRESS_LOG);
+
+			const child = await scheduleGcAutoCompress(root);
+			expect(await child?.exited).toBe(0);
+			for (const target of [file, artifact]) {
+				const after = await snapshot(target);
+				expect(after.allocated).toBeLessThan(after.size);
+			}
+			expect(await Bun.file(logPath).text()).toContain("compress: 2/2 files in 1 sessions");
+
+			expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+
+			const lastRun = (Date.now() - GC_AUTO_COMPRESS_INTERVAL_MS - 60_000) / 1000;
+			await fs.utimes(logPath, lastRun, lastRun);
+			const next = await scheduleGcAutoCompress(root);
+			expect(await next?.exited).toBe(0);
+			expect(await Bun.file(logPath).text()).toContain("compress: 0/0 files in 0 sessions");
+		},
+		60_000,
+	);
+
+	test.skipIf(supported)("the background run never starts without filesystem compression", async () => {
+		await writeIdleSession(Bun.randomUUIDv7());
+
+		expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).exists()).toBe(false);
 	});
 });
