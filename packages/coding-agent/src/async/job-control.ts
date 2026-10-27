@@ -8,7 +8,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
 import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
 
-import { renderStructuredJson, structuredStatusLabel } from "../session/async-job-delivery";
+import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -326,17 +326,10 @@ export function buildJobResult(
 		for (const j of completed) {
 			lines.push(`### ${j.id} [${j.type}] — ${j.status}`);
 			lines.push(`Label: ${j.label}`);
-			// A task job's id can differ from its agent id (a messaged agent's next
-			// turn, vibe turns, workpool batches, /tan) while its output and
-			// transcript stay under the agent id, so name the reachable handles.
-			// `agent://` only for a job that completed and did not report writing
-			// no output: a follow-up turn that neither yielded nor reported a
-			// message result, and a cancelled `/tan` clone, leave that id holding
-			// an earlier turn's output or none at all.
-			if (j.agentUrlId && j.agentUrlId !== j.id) {
-				const agentUrlHolds = j.status === "completed" && j.agentOutputPublished !== false;
+			const handles = taskAgentHandles(j.id, j, j.agentUrlId);
+			if (handles) {
 				lines.push(
-					agentUrlHolds
+					handles === "agent"
 						? `Agent: agent://${j.agentUrlId}, history://${j.agentUrlId}`
 						: `Agent: history://${j.agentUrlId}`,
 				);
