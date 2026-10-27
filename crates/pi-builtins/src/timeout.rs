@@ -657,6 +657,38 @@ mod tests {
 		assert_eq!(ran.status, 124);
 	}
 
+	/// `mapfile` read its input without waiting for it first, so input that
+	/// paused before a delimiter or EOF (`{ printf x; sleep 60; } | timeout 1
+	/// mapfile a`) held the task that runs `timeout` in a blocking read, and
+	/// the limit never fired. Read a block at a time and, with `-n`, a byte at
+	/// a time.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_of_paused_input_stops_at_the_limit() {
+		use std::io::Write as _;
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let fifo = dir.path().join("fifo");
+		pi_vfs::BlockingFs::native()
+			.make_node(&fifo, pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let mut shell = full_shell(dir.path()).await;
+		for command in ["timeout 0.2 mapfile a < fifo", "timeout 0.2 mapfile -n 2 a < fifo"] {
+			let path = fifo.clone();
+			let writer = std::thread::spawn(move || {
+				let mut file = std::fs::OpenOptions::new()
+					.write(true)
+					.open(path)
+					.expect("open FIFO for writing");
+				file.write_all(b"x").expect("write to FIFO");
+				// Pauses past the test's deadline, then ends the input.
+				std::thread::sleep(Duration::from_secs(2));
+			});
+			let ran = run_in_process(&mut shell, command, None).await;
+			assert_eq!((ran.status, ran.stderr.as_str()), (124, ""), "{command}");
+			writer.join().expect("FIFO writer");
+		}
+	}
+
 	/// `ls -R` walked the whole tree before it looked at cancellation.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]

@@ -144,7 +144,9 @@ impl MapFileCommand {
 		// empty entries) never reaches EOF. The bytes are read without
 		// awaiting, so every so often yield to the runtime, which lets a
 		// `timeout` running this on the same task reach its deadline, and then
-		// notice cancellation (abort, `timeout`), as `read` does.
+		// notice cancellation (abort, `timeout`), as `read` does. Input that
+		// pauses before a delimiter or EOF is waited for without blocking the
+		// task, for the same reason.
 		let cancel_token = context.cancel_token();
 		let mut steps = 0usize;
 
@@ -157,7 +159,11 @@ impl MapFileCommand {
 			let mut line = vec![];
 			let mut saw_delimiter = false;
 
-			while let Some(byte) = input.next_byte()? {
+			loop {
+				input.wait_for_input(cancel_token.as_ref()).await?;
+				let Some(byte) = input.next_byte()? else {
+					break;
+				};
 				// Interactive keys end input only on a terminal; in a file or
 				// pipe they are data.
 				if terminal && (byte == CTRL_C || byte == CTRL_D && line.is_empty()) {
