@@ -113,6 +113,10 @@ type InstallValidation = {
 	pluginEntry: MarketplacePluginEntry;
 	pluginId: string;
 	existing: InstalledPluginEntry[] | undefined;
+	/** The plugin's source directory when it is already on disk; `undefined` for a source a real install must fetch. */
+	sourcePath: string | undefined;
+	/** The target scope's installed-plugins registry, as read for the checks above. */
+	instReg: InstalledPluginsRegistry;
 };
 
 export class MarketplaceManager {
@@ -335,7 +339,18 @@ export class MarketplaceManager {
 			throw new Error(`Plugin "${pluginId}" is already installed. Use force option to reinstall.`);
 		}
 
-		return { force, scope, registryPath, catalog, marketplaceClonePath, pluginEntry, pluginId, existing };
+		return {
+			force,
+			scope,
+			registryPath,
+			catalog,
+			marketplaceClonePath,
+			pluginEntry,
+			pluginId,
+			existing,
+			sourcePath,
+			instReg,
+		};
 	}
 
 	async validateInstallPlugin(
@@ -343,7 +358,19 @@ export class MarketplaceManager {
 		marketplace: string,
 		options?: { force?: boolean; scope?: "user" | "project" },
 	): Promise<void> {
-		await this.#validateInstall(name, marketplace, options);
+		const { scope, pluginId, existing, sourcePath, instReg } = await this.#validateInstall(
+			name,
+			marketplace,
+			options,
+		);
+		// `installPlugin` also rejects a runtime package name another plugin owns, but only
+		// after it has resolved the source. A source already on disk needs no clone and no
+		// write for that check, so a preview of it raises the same error the install would.
+		// A source the install must fetch keeps its name unknown until then, as `to` does.
+		if (sourcePath === undefined) return;
+		const packageName = await this.#resolvePluginPackageName(sourcePath, name);
+		const previousPackageNames = await this.#resolveInstalledPackageNames(existing ?? [], name);
+		await this.#assertRuntimePackageNameAvailable(scope, packageName, instReg, pluginId, previousPackageNames);
 	}
 
 	async installPlugin(

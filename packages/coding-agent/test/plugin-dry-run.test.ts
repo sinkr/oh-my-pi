@@ -218,6 +218,35 @@ describe("plugin --dry-run beyond install, uninstall and link", () => {
 		expect(logged()).toContain(UPGRADE_PREVIEW);
 	});
 
+	// A release that renames the runtime package onto a name another plugin owns is rejected by the
+	// real upgrade before its first write. The preview reads the same local source, so it must refuse
+	// too instead of promising an upgrade that cannot happen.
+	test("upgrade <id> --dry-run refuses a release whose runtime package name another plugin owns", async () => {
+		await Bun.write(
+			path.join(marketplaceDir, "plugins", "hello", "package.json"),
+			JSON.stringify({ name: LINKED, version: "2.0.0" }),
+		);
+		const exit = spyOn(process, "exit").mockImplementation(() => {
+			throw new Error("process.exit");
+		});
+		const before = await snapshotTree(root);
+
+		await expect(runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: { dryRun: true } })).rejects.toThrow(
+			"process.exit",
+		);
+
+		expect(exit).toHaveBeenCalledWith(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining(`Runtime package name "${LINKED}" conflicts`));
+		expect(logged()).not.toContain(UPGRADE_PREVIEW);
+		expect(await snapshotTree(root)).toEqual(before);
+
+		// The real upgrade refuses it the same way, so the preview promised nothing it would not.
+		await expect(runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: {} })).rejects.toThrow(
+			"process.exit",
+		);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining(`Runtime package name "${LINKED}" conflicts`));
+	});
+
 	test("update --plugins --check reports plugin upgrades and changes no plugin state", async () => {
 		const before = await snapshotTree(root);
 
