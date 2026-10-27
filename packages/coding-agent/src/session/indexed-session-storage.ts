@@ -75,6 +75,8 @@ interface EnqueueOptions {
 interface IndexAppend {
 	mtimeMs: number;
 	previous: IndexEntry | undefined;
+	/** Set when the queued op removes the path (unlink, delete, rename source). */
+	removal?: true;
 }
 
 const RESOLVED = Promise.resolve();
@@ -185,9 +187,13 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	existsConfirmedSync(path: string): boolean {
+		const frames = this.#pendingFrames.get(path);
+		if (!frames) return this.#index.has(path);
+		// A removal in flight can delete the content before its op settles (Redis deletes the
+		// file key before the metadata), so the path is unconfirmed until the removal settles.
+		if (frames.some(frame => frame.removal)) return false;
 		// The oldest live frame's previous entry is the last state the backend confirmed.
-		const oldest = this.#pendingFrames.get(path)?.[0];
-		return oldest ? oldest.previous !== undefined : this.#index.has(path);
+		return frames[0]?.previous !== undefined;
 	}
 
 	/**
@@ -369,7 +375,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const dstPrevious = this.#index.get(dst);
 		this.#index.delete(src);
 		this.#index.set(dst, { ...entry });
-		this.#pushFrame(src, { mtimeMs: entry.mtimeMs, previous: entry });
+		this.#pushFrame(src, { mtimeMs: entry.mtimeMs, previous: entry, removal: true });
 		this.#pushFrame(dst, { mtimeMs: entry.mtimeMs, previous: dstPrevious });
 		try {
 			await this.#enqueuePaths([src, dst], () => this.#backend.move(src, dst, entry.mtimeMs), { trackDrain: false });
@@ -387,7 +393,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const previous = this.#index.get(path);
 		if (!previous) throw enoent(path);
 		this.#index.delete(path);
-		this.#pushFrame(path, { mtimeMs: previous.mtimeMs, previous });
+		this.#pushFrame(path, { mtimeMs: previous.mtimeMs, previous, removal: true });
 		try {
 			await this.#enqueuePath(path, () => this.#backend.remove([path]), { trackDrain: false });
 			this.#dropFrame(path, previous.mtimeMs);
@@ -417,7 +423,9 @@ export class IndexedSessionStorage implements SessionStorage {
 			if (entry) previous.set(path, entry);
 			this.#index.delete(path);
 		}
-		for (const [path, entry] of previous) this.#pushFrame(path, { mtimeMs: sessionEntry.mtimeMs, previous: entry });
+		for (const [path, entry] of previous) {
+			this.#pushFrame(path, { mtimeMs: sessionEntry.mtimeMs, previous: entry, removal: true });
+		}
 
 		try {
 			await this.#enqueuePaths(paths, () => this.#backend.remove(paths), { trackDrain: false });

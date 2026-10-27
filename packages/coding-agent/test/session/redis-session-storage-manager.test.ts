@@ -275,4 +275,33 @@ describe("SessionManager + RedisSessionStorage", () => {
 		await expect(first.rewriteEntries()).rejects.toBeInstanceOf(SessionWriteConflictError);
 		expect(redis.strings.get(`omp:sessions:file:${sessionFile}`)).toContain("durable Redis peer turn");
 	});
+
+	it("does not count a session as resumable while its Redis removal is in flight", async () => {
+		// remove() deletes the file key before the metadata HDEL; an exit-time resume hint read
+		// while the HDEL is stalled would advertise a session whose content is already gone.
+		const redis = createFakeRedis();
+		const hdelStarted = Promise.withResolvers<void>();
+		const allowHdel = Promise.withResolvers<void>();
+		const hdel = redis.hdel.bind(redis);
+		redis.hdel = async (key, ...fields) => {
+			hdelStarted.resolve();
+			await allowHdel.promise;
+			return hdel(key, ...fields);
+		};
+		const storage = await RedisSessionStorage.create({ client: redis });
+		const manager = SessionManager.create("/cwd", path.join(sessionRoot, "removing"), storage);
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(manager.isSessionConfirmedOnDisk()).toBe(true);
+
+		const removal = manager.dropSession(sessionFile);
+		await hdelStarted.promise;
+		expect(redis.strings.has(`omp:sessions:file:${sessionFile}`)).toBe(false);
+		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
+
+		allowHdel.resolve();
+		await removal;
+		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
+	});
 });
