@@ -135,6 +135,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Prefix format in hashline mode is a `[PATH#TAG]` header followed by `LINE:TEXT`, e.g. `[src/foo.ts#0A1B]` and `41:def alpha():`, from the session snapshot store plus `formatNumberedLine()` / `formatHashlineHeader()`.
 - The `edit`/hashline path consumes that header plus bare line numbers later; the four-hex tag is a content-derived hash of the whole normalized file, resolvable through the session snapshot store that recorded it. Immutable sources and `:raw` intentionally suppress hashline headers.
 - Raw comma ranges join the selected source lines with a single newline, without elision rows. Finite raw ranges omit the terminal newline and have no continuation footer when satisfied; open-ended ranges reaching EOF retain the terminal newline. Actual byte/line ceilings still carry truncation diagnostics. Conflict markers remain source text in raw reads: registration and `conflictCount` are retained, while conflict instructions move to `details.notes` instead of the body.
+- Raw out-of-bounds selections contribute no source text; skipped-range and single-line bounds diagnostics remain in `details.notes`. Repeated raw reads also keep loop hints in `details.notes`, and recovered paths stay in `details.suffixResolution` without a body prefix. `details.raw` carries the resolved mode to these shared notice emitters, including when a literal filename resembles a selector.
 
 ### Directory listings
 

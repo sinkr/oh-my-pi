@@ -1749,6 +1749,7 @@ export async function fetchReadUrl(
 			finalUrl: result.finalUrl,
 			contentType: result.contentType,
 			method: result.method,
+			raw: raw || undefined,
 			truncated: Boolean(result.truncated),
 			notes: result.notes,
 		},

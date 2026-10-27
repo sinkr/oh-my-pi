@@ -236,6 +236,18 @@ describe("raw URL response bytes", () => {
 		);
 	});
 
+	it("keeps repeated raw JSON URL bodies parseable without suppressing the loop diagnostic", async () => {
+		const origin = serve('{"ok":true}\n', "application/json");
+		const tool = new ReadTool(makeSession(testDir));
+		for (let count = 1; count <= 4; count++) {
+			const result = await tool.execute("repeat-raw-url", { path: `${origin}/body:raw` });
+			const text = result.content.find(c => c.type === "text")?.text;
+			expect(text).toBe('{"ok":true}\n');
+			expect(JSON.parse(text ?? "")).toEqual({ ok: true });
+			if (count >= 3) expect(result.details?.notes?.join("\n")).toContain(`identical output ${count} times`);
+		}
+	});
+
 	it("stores raw artifacts and search materialization in the same body coordinates as URL ranges", async () => {
 		const body = `${Array.from({ length: 320 }, (_, i) => `body ${i + 1}`).join("\n")}\n`;
 		const origin = serve(body, "text/plain");

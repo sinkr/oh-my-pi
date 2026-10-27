@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
+import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
@@ -20,13 +21,14 @@ function getTextOutput(result: { content: Array<{ type: string; text?: string }>
 		.join("\n");
 }
 
-function makeSession(cwd: string): ToolSession {
+function makeSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
 		getSessionFile: () => path.join(cwd, "session.jsonl"),
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "session"),
+		getClientBridge: bridge ? () => bridge : undefined,
 		settings: Settings.isolated(),
 	};
 }
@@ -61,6 +63,9 @@ describe("read tool raw range exactness", () => {
 			["2-:raw", "B\nC\nD\n"],
 			["raw:1,3-", "A\nC\nD\n"],
 			["raw:1,3-99", "A\nC\nD"],
+			["raw:1,99", "A"],
+			["raw:99,101", ""],
+			["raw:99", ""],
 		])("returns only selected source lines for %s", async (selector, expected) => {
 			const body = "A\nB\nC\nD\n";
 			await Bun.write(filePath, body);
@@ -78,7 +83,78 @@ describe("read tool raw range exactness", () => {
 			const result = await wrapped.execute("raw-selected-lines", { path: `${target}:${selector}` });
 			expect(getTextOutput(result)).toBe(expected);
 			expect(result.details?.meta?.truncation).toBeUndefined();
+			if (["raw:1,99", "raw:99,101", "raw:99"].includes(selector)) {
+				expect(result.details?.notes?.join("\n")).toContain("beyond end");
+			}
 		});
+	});
+
+	it.each(["disk", "in-memory"])("keeps non-raw out-of-bounds notices in the %s body", async source => {
+		await Bun.write(filePath, "A\nB\n");
+		const handler: ProtocolHandler = {
+			scheme: "verbatim",
+			spec: { backing: "virtual", selectors: "lines", immutable: true },
+			resolve: async url => ({ url: url.href, content: "A\nB\n", contentType: "text/plain" }),
+		};
+		InternalUrlRouter.resetForTests();
+		InternalUrlRouter.instance().register(handler);
+
+		const target = source === "disk" ? filePath : "verbatim://fixture";
+		const result = await tool.execute("normal-bounds", { path: `${target}:1-1,99-99` });
+		expect(getTextOutput(result)).toContain("A");
+		expect(getTextOutput(result)).toContain("Range 99-99 is beyond end");
+		expect(result.details?.notes).toBeUndefined();
+	});
+
+	it.each(["disk", "bridge", "archive", "json"])(
+		"keeps a recovered %s source path in details rather than a raw prefix",
+		async source => {
+			const nested = path.join(testDir, "nested");
+			let target: string;
+			let bridge: ClientBridge | undefined;
+			if (source === "archive") {
+				await writeArchive(path.join(nested, "recovered.zip"), "zip", [["lines.txt", "A\nB\n"]]);
+				target = "recovered.zip:lines.txt";
+			} else if (source === "json") {
+				await Bun.write(path.join(nested, "recovered.json"), '["A","B"]');
+				target = "recovered.json?q=.[]&raw=true";
+			} else {
+				await Bun.write(path.join(nested, "recovered.txt"), source === "bridge" ? "disk A\ndisk B\n" : "A\nB\n");
+				target = "recovered.txt";
+				if (source === "bridge") {
+					bridge = {
+						capabilities: { readTextFile: true },
+						readTextFile: async () => "A\nB\n",
+					};
+				}
+			}
+			const read = wrapToolWithMetaNotice(new ReadTool(makeSession(testDir, bridge)));
+			for (const [selector, expected] of [
+				["2:raw", "B"],
+				["1,99:raw", "A"],
+			]) {
+				const result = await read.execute("recovered-raw", { path: `${target}:${selector}` });
+				expect(getTextOutput(result)).toBe(expected);
+				expect(result.details?.suffixResolution?.to).toContain("nested/recovered.");
+			}
+			expect(getTextOutput(await read.execute("recovered-normal", { path: target }))).toContain("via suffix match");
+		},
+	);
+
+	it("keeps repeated raw content unchanged while retaining the loop diagnostic in details", async () => {
+		await Bun.write(filePath, "A\nB\n");
+		const read = wrapToolWithMetaNotice(tool);
+		for (let count = 1; count <= 4; count++) {
+			const result = await read.execute("repeat-raw", { path: `${filePath}:2:raw` });
+			expect(getTextOutput(result)).toBe("B");
+			if (count >= 3) expect(result.details?.notes?.join("\n")).toContain(`identical output ${count} times`);
+		}
+		const normal = wrapToolWithMetaNotice(new ReadTool(makeSession(testDir)));
+		await normal.execute("normal-first", { path: filePath });
+		await normal.execute("normal-second", { path: filePath });
+		expect(getTextOutput(await normal.execute("normal-third", { path: filePath }))).toContain(
+			"identical output 3 times",
+		);
 	});
 
 	it("preserves CR bytes and joins disjoint raw windows with only a source line separator", async () => {
