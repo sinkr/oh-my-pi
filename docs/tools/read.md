@@ -219,6 +219,12 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - per-column width `40` (`MAX_COLUMN_WIDTH`)
 - `openSqliteReadConnection()` in `sqlite-reader.ts` uses strict Bun SQLite with `PRAGMA query_only = ON` and `busy_timeout = 3000`. It normally opens read-only; missing WAL sidecars or `SQLITE_CANTOPEN` trigger a read-write connection (`create: false`) solely to initialize sidecars.
 
+### JSON queries
+
+- `file.json?q=<jq filter>` runs the embedded jq interpreter. `raw=true` returns unquoted strings; `compact=true` keeps values on one line. `offset` and `limit` page array elements or whole JSONL results with a continuation hint.
+
+- One leading UTF-8 BOM is accepted per JSON input, including JSONL. U+FEFF inside strings and raw-input (`jq -R`) bytes remain unchanged; malformed JSON still reports a parse error.
+
 ### Documents
 
 - `CONVERTIBLE_EXTENSIONS` in `packages/coding-agent/src/utils/markit.ts` covers `.pdf`, `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`, `.rtf`, `.epub`.
