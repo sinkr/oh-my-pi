@@ -2017,10 +2017,11 @@ export class ModelRegistry {
 				: `${providerConfig.provider}:openai-models-list-context-v4`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
-			// rich-v5 invalidates rows written before discovery filtered known
+			// rich-v6 invalidates rows written before `mode: decisions` groups moved
+			// to the Decisions runner; rich-v5 before discovery filtered known
 			// non-conversational modes. Keep this in lockstep with the catalog
 			// package's `litellm:rich-vN` namespace whenever mapping behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v5`;
+			return `${providerConfig.provider}:litellm-rich-v6`;
 		}
 		return providerConfig.provider;
 	}
@@ -2331,6 +2332,7 @@ export class ModelRegistry {
 								accounts?.map(account => ({
 									accessToken: account.accessToken,
 									accountKey: oauthAccountKey(account),
+									projectId: account.projectId,
 								})) ?? null
 							);
 						},
@@ -3346,6 +3348,7 @@ export class ModelRegistry {
 			accountIds: accountAccess && Object.keys(accountAccess),
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
+			rejectedAccessToken: options?.rejectedAccessToken,
 			signal: options?.signal,
 		});
 	}
@@ -3413,25 +3416,32 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Remove custom API/OAuth registrations for a specific extension source.
+	 * Remove custom API/OAuth registrations for one or more extension sources.
+	 * The model catalog is rebuilt once, however many sources are cleared.
 	 */
-	clearSourceRegistrations(sourceId: string): void {
-		unregisterCustomApis(sourceId);
-		unregisterOAuthProviders(sourceId);
-		const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
-		if (!sourceProviders || sourceProviders.size === 0) {
-			return;
-		}
-		this.#ensureFullSnapshot();
-		this.#runtimeProvidersBySource.delete(sourceId);
-		for (const providerName of sourceProviders) {
-			if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) {
+	clearSourceRegistrations(sourceIds: string | Iterable<string>): void {
+		let cleared = false;
+		for (const sourceId of typeof sourceIds === "string" ? [sourceIds] : sourceIds) {
+			unregisterCustomApis(sourceId);
+			unregisterOAuthProviders(sourceId);
+			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
+			if (!sourceProviders || sourceProviders.size === 0) {
 				continue;
 			}
-			this.#runtimeProviderSourceByName.delete(providerName);
-			this.#clearRuntimeProviderState(providerName);
+			this.#ensureFullSnapshot();
+			this.#runtimeProvidersBySource.delete(sourceId);
+			for (const providerName of sourceProviders) {
+				if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) {
+					continue;
+				}
+				this.#runtimeProviderSourceByName.delete(providerName);
+				this.#clearRuntimeProviderState(providerName);
+			}
+			cleared = true;
 		}
-		this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
+		if (cleared) {
+			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
+		}
 	}
 
 	/**
@@ -3458,11 +3468,9 @@ export class ModelRegistry {
 	 */
 	syncExtensionSources(activeSourceIds: string[]): void {
 		const activeSources = new Set(activeSourceIds);
-		for (const sourceId of this.#registeredProviderSources) {
-			if (activeSources.has(sourceId)) {
-				continue;
-			}
-			this.clearSourceRegistrations(sourceId);
+		const inactiveSources = [...this.#registeredProviderSources].filter(sourceId => !activeSources.has(sourceId));
+		this.clearSourceRegistrations(inactiveSources);
+		for (const sourceId of inactiveSources) {
 			this.#registeredProviderSources.delete(sourceId);
 		}
 	}

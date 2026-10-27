@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import { createNativeJudge } from "@oh-my-pi/pi-ai/judgment";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
@@ -3197,6 +3198,11 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		const advertised = registry.find("openai-test", "acme-think-1");
+		// The same metadata block carries the route's identity and window; the
+		// bundled-catalog fallback must not shadow what the server advertises.
+		expect(advertised?.name).toBe("Acme Think 1");
+		expect(advertised?.contextWindow).toBe(272_000);
+		expect(advertised?.input).toEqual(["text", "image"]);
 		expect(advertised?.reasoning).toBe(true);
 		expect(advertised?.thinking?.mode).toBe("effort");
 		expect(advertised?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
@@ -3426,6 +3432,69 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		expect(registry.find("lm-studio-test", "local-vlm")?.input).toEqual(["text", "image"]);
+	});
+
+	test("lm-studio discovery serves decision models as judges over /v1/decisions", async () => {
+		writeRawModelsJson({
+			"lm-studio-test": {
+				baseUrl: "http://127.0.0.1:9995",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "lm-studio" },
+			},
+		});
+		const json = (body: unknown) =>
+			new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9995/v1/models") {
+				return json({
+					data: [
+						{ id: "kev-0.8b", object: "model" },
+						{ id: "plain-llm", object: "model" },
+					],
+				});
+			}
+			if (url === "http://127.0.0.1:9995/api/v0/models") {
+				return json({ data: [{ id: "plain-llm", type: "llm" }] });
+			}
+			if (url === "http://127.0.0.1:9995/api/v1/models") {
+				return json({
+					models: [
+						{ type: "decision", key: "kev-0.8b", max_context_length: 262144, has_vision_adapter: false },
+						{ type: "llm", key: "plain-llm" },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		const judgeModel = registry.find("lm-studio-test", "kev-0.8b");
+		expect(judgeModel).toMatchObject({ api: "openai-decisions", kind: "judge", contextWindow: 262144 });
+		expect(registry.find("lm-studio-test", "plain-llm")).toMatchObject({ api: "openai-completions" });
+
+		const requests: { url: string; body: unknown }[] = [];
+		const judge = createNativeJudge(judgeModel!, {
+			apiKey: "lm-studio-local",
+			fetch: async (input, init) => {
+				requests.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+				return json({
+					model: "kev-0.8b",
+					answers: [{ type: "predicate", name: "urgent", probability: 0.9 }],
+					usage: { input_tokens: 12, output_tokens: 0 },
+				});
+			},
+		});
+		const { answers } = await judge.judge({
+			state: "I was charged twice.",
+			questions: { urgent: { type: "noul", instructions: "Does this need attention today?" } },
+		});
+
+		expect(requests.map(request => request.url)).toEqual(["http://127.0.0.1:9995/v1/decisions"]);
+		expect(requests[0]?.body).toMatchObject({ model: "kev-0.8b", input: "I was charged twice." });
+		expect(answers.urgent).toEqual({ type: "noul", noul: 0.9 });
 	});
 
 	test("proxy discovery honors API-reported context_length and endpoint routing", async () => {
@@ -3943,6 +4012,58 @@ describe("ModelRegistry runtime discovery", () => {
 			"keep-responses",
 			"keep-unknown",
 		]);
+	});
+
+	test("configured litellm discovery routes decisions-mode groups to the judge role on both paths (#16939)", async () => {
+		writeRawModelsJson({
+			"litellm-rich": {
+				baseUrl: "http://127.0.0.1:4012/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm" },
+			},
+			"litellm-fallback": {
+				baseUrl: "http://127.0.0.1:4013/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:4012/model_group/info") {
+				return Response.json({
+					data: [
+						{
+							model_group: "typesafe/jev-1.14",
+							mode: "decisions",
+							providers: ["typesafe"],
+							supports_vision: false,
+						},
+						{ model_group: "keep-chat", mode: "chat", providers: ["anthropic"], supports_vision: false },
+					],
+				});
+			}
+			if (url === "http://127.0.0.1:4013/v1/models") {
+				return Response.json({
+					data: [
+						{ id: "typesafe/jev-1.14", mode: "decisions" },
+						{ id: "keep-chat", mode: "chat" },
+					],
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		for (const provider of ["litellm-rich", "litellm-fallback"]) {
+			expect(registry.find(provider, "typesafe/jev-1.14")).toMatchObject({ api: "openai-decisions", kind: "judge" });
+			const chat = registry.find(provider, "keep-chat");
+			expect(chat?.api).toBe("openai-completions");
+			expect(chat?.kind).toBeUndefined();
+		}
 	});
 
 	test("litellm discovery reuses configured bearer on rich and fallback requests", async () => {
