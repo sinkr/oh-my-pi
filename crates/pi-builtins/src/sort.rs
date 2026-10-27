@@ -1207,6 +1207,21 @@ mod tests {
 		assert!(held <= BUDGET, "a chunk held {held} bytes for a budget of {BUDGET}");
 	}
 
+	// Failure mode: `sort -k2` of a line of many short fields held 16 bytes
+	// of field bounds per field, 8 times the line, outside the budget.
+	#[test]
+	fn a_keyed_chunk_of_many_fields_stays_within_its_budget() {
+		const BUDGET: usize = 1 << 20;
+		let mut settings = GlobalSettings::default();
+		settings.selectors = vec![super::super::FieldSelector::parse("2", &settings).expect("key")];
+		settings.init_precomputed();
+		let mut input = b"a ".repeat(BUDGET / 4);
+		input.push(b'\n');
+		input.extend(b"b c\n".repeat(1000));
+		let held = largest_chunk(&input, BUDGET, &settings);
+		assert!(held <= BUDGET, "a chunk held {held} bytes for a budget of {BUDGET}");
+	}
+
 	/// Counts the `read` calls made on the input it wraps.
 	struct CountingReader<'a> {
 		input: &'a [u8],
@@ -3441,6 +3456,10 @@ impl NumericLocaleSettings {
 #[derive(Clone, Debug, Default)]
 struct Precomputed {
 	needs_tokens:                    bool,
+	/// The last field any key reads. Tokenizing stops after it, so a line of
+	/// many fields does not grow the token buffer by 16 bytes a field; 0
+	/// tokenizes every field.
+	key_fields:                      usize,
 	num_infos_per_line:              usize,
 	floats_per_line:                 usize,
 	selections_per_line:             usize,
@@ -3489,6 +3508,12 @@ impl GlobalSettings {
 	/// compare with it when set, and by bytes otherwise.
 	fn init_precomputed(&mut self) {
 		self.precomputed.needs_tokens = self.selectors.iter().any(|s| s.needs_tokens);
+		self.precomputed.key_fields = self
+			.selectors
+			.iter()
+			.map(|s| s.to.as_ref().map_or(s.from.field, |to| to.field.max(s.from.field)))
+			.max()
+			.unwrap_or(0);
 		self.precomputed.selections_per_line =
 			self.selectors.iter().filter(|s| s.needs_selection).count();
 		self.precomputed.num_infos_per_line = self
@@ -3958,7 +3983,8 @@ impl<'a> Line<'a> {
 	}
 }
 
-/// Tokenize a line into fields. The result is stored into `token_buffer`.
+/// Tokenize a line into its first `precomputed.key_fields` fields. The result
+/// is stored into `token_buffer`.
 fn tokenize(
 	line: &[u8],
 	separator: Option<u8>,
@@ -3967,10 +3993,11 @@ fn tokenize(
 ) {
 	assert!(token_buffer.is_empty());
 	if let Some(separator) = separator {
-		tokenize_with_separator(line, separator, token_buffer);
+		tokenize_with_separator(line, separator, precomputed.key_fields, token_buffer);
 	} else {
 		tokenize_default(
 			line,
+			precomputed.key_fields,
 			token_buffer,
 			precomputed.tokenize_blank_thousands_sep,
 			precomputed.tokenize_allow_unit_after_blank,
@@ -3980,9 +4007,10 @@ fn tokenize(
 
 /// By default fields are separated by the first whitespace after
 /// non-whitespace. Whitespace is included in fields at the start.
-/// The result is stored into `token_buffer`.
+/// The first `fields` fields are stored into `token_buffer`.
 fn tokenize_default(
 	line: &[u8],
+	fields: usize,
 	token_buffer: &mut Vec<Field>,
 	blank_thousands_sep: bool,
 	allow_unit_after_blank: bool,
@@ -4005,6 +4033,9 @@ fn tokenize_default(
 		if treat_as_separator {
 			if !previous_was_whitespace {
 				token_buffer.last_mut().unwrap().end = idx;
+				if token_buffer.len() == fields {
+					return;
+				}
 				token_buffer.push(idx..0);
 			}
 			previous_was_whitespace = true;
@@ -4041,8 +4072,8 @@ fn is_blank_thousands_sep(line: &[u8], idx: usize, allow_unit_after_blank: bool)
 }
 
 /// Split between separators. These separators are not included in fields.
-/// The result is stored into `token_buffer`.
-fn tokenize_with_separator(line: &[u8], separator: u8, token_buffer: &mut Vec<Field>) {
+/// The first `fields` fields are stored into `token_buffer`.
+fn tokenize_with_separator(line: &[u8], separator: u8, fields: usize, token_buffer: &mut Vec<Field>) {
 	let separator_indices = line
 		.iter()
 		.enumerate()
@@ -4050,6 +4081,9 @@ fn tokenize_with_separator(line: &[u8], separator: u8, token_buffer: &mut Vec<Fi
 	let mut start = 0;
 	for sep_idx in separator_indices {
 		token_buffer.push(start..sep_idx);
+		if token_buffer.len() == fields {
+			return;
+		}
 		start = sep_idx + 1;
 	}
 	if start < line.len() {
