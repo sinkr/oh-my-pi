@@ -71,10 +71,7 @@ describe("handleReadTheDocs versioned source guard", () => {
 			"MAIN BRANCH RST SOURCE",
 		);
 
-		const result = await handleReadTheDocs(
-			"https://niquests.readthedocs.io/en/latest/user/quickstart.html",
-			20,
-		);
+		const result = await handleReadTheDocs("https://niquests.readthedocs.io/en/latest/user/quickstart.html", 20);
 
 		expect(result?.contentType).toBe("text/plain");
 		expect(result?.content).toContain("MAIN BRANCH RST SOURCE");
