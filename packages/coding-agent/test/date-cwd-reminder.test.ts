@@ -444,6 +444,143 @@ describe("date-cwd-reminder", () => {
 			expect(after.messages[1]?.content).toBe(rolled.messages[2]!.content);
 			expect(after.messages[1]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nkept`);
 		});
+
+		// A context hook (superpowers' bootstrap) inserts its own first message, built afresh and
+		// stamped `Date.now()`, on every request until the run ends.
+		for (const { advisor: advisorRequests, label } of [
+			{ advisor: "none", label: "" },
+			// The advisor's state sits between the main conversation's: the predecessor is not the newest state.
+			{ advisor: "every", label: " with an advisor request before each request" },
+			// The advisor's state ages behind ten main requests, more than the injector keeps conversations for.
+			{ advisor: "once", label: " with one advisor request ten requests back" },
+		] as const) {
+			it(`keeps a first turn a context hook re-creates under a new timestamp${label}`, () => {
+				const injector = new DateCwdReminderInjector();
+				const wire = (messages: Message[]) =>
+					messages.map(message => JSON.stringify([message.role, message.content]));
+				let stamp = 1000;
+				const task: Message = { role: "user", content: "task", timestamp: 1 };
+				const advisorTurn: Message = { role: "user", content: "review the turn", timestamp: 2 };
+				const history: Message[] = [task];
+				const main = (date: string) =>
+					injector.transform(
+						{
+							systemPrompt: ["system"],
+							messages: [{ role: "user", content: "BOOTSTRAP", timestamp: stamp++ }, ...history],
+						},
+						date,
+						"/work",
+					);
+				const advisor = (date: string) =>
+					injector.transform({ systemPrompt: ["advisor"], messages: [advisorTurn] }, date, "/work");
+				const sent: string[][] = [];
+				let firstAdvisor: Context | undefined;
+				for (let request = 0; request < 10; request++) {
+					if (advisorRequests === "every" || (advisorRequests === "once" && request === 0)) {
+						const out = advisor("2026-08-14");
+						firstAdvisor ??= out;
+					}
+					sent.push(wire(main("2026-08-14").messages));
+					history.push(createAssistantMessage(`call ${request}`), {
+						role: "toolResult",
+						toolCallId: `call-${request}`,
+						toolName: "read",
+						content: [{ type: "text", text: `result ${request}` }],
+						isError: false,
+						timestamp: 10 + request,
+					});
+				}
+				const rolledAdvisor = advisorRequests === "none" ? undefined : advisor("2026-08-15");
+				sent.push(wire(main("2026-08-15").messages));
+				history.push(createAssistantMessage("call last"));
+				sent.push(wire(main("2026-08-15").messages));
+
+				for (let request = 1; request < sent.length; request++) {
+					expect(sent[request]!.slice(0, sent[request - 1]!.length)).toEqual(sent[request - 1]!);
+				}
+				expect(sent[0]![0]).toBe(
+					JSON.stringify(["user", `${renderDateCwdReminder("2026-08-14", "/work")}\n\nBOOTSTRAP`]),
+				);
+				const control = JSON.stringify(["developer", renderDateCwdReminder("2026-08-15", "/work")]);
+				expect(sent.at(-2)!.at(-1)).toBe(control);
+				expect(sent.at(-1)!.filter(message => message === control)).toHaveLength(1);
+				if (rolledAdvisor) expect(rolledAdvisor.messages[0]?.content).toBe(firstAdvisor!.messages[0]!.content);
+			});
+		}
+
+		for (const recreated of [false, true]) {
+			it(`tells the model the new date again when a request leaves out the turn that carried it${recreated ? " under a re-created first turn" : ""}`, () => {
+				// A side request (/btw) appends its own question to the history; the question takes the new
+				// date, and the next main request does not resend it.
+				const injector = new DateCwdReminderInjector();
+				let stamp = 1000;
+				const head = (): Message[] =>
+					recreated ? [{ role: "user", content: "BOOTSTRAP", timestamp: stamp++ }] : [];
+				const task: Message = { role: "user", content: "task", timestamp: 1 };
+				const assistant = createAssistantMessage("call 1");
+				const toolResult: Message = {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "result" }],
+					isError: false,
+					timestamp: 3,
+				};
+				const question: Message = { role: "user", content: "side question", timestamp: 50 };
+				injector.transform({ systemPrompt: ["system"], messages: [...head(), task] }, "2026-08-14", "/work");
+				const side = injector.transform(
+					{ systemPrompt: ["system"], messages: [...head(), task, assistant, toolResult, question] },
+					"2026-08-15",
+					"/work",
+				);
+				const main = injector.transform(
+					{ systemPrompt: ["system"], messages: [...head(), task, assistant, toolResult] },
+					"2026-08-15",
+					"/work",
+				);
+
+				const newDate = renderDateCwdReminder("2026-08-15", "/work");
+				expect(side.messages.at(-1)?.content).toBe(`${newDate}\n\nside question`);
+				expect(JSON.stringify([main.messages.at(-1)?.role, main.messages.at(-1)?.content])).toBe(
+					JSON.stringify(["developer", newDate]),
+				);
+			});
+		}
+
+		it("leaves a re-created turn after a compaction summary unchanged when the date rolls over", () => {
+			// The same hook inserts its bootstrap behind the summary, ahead of the turns that follow it,
+			// so it is not the first user turn.
+			const injector = new DateCwdReminderInjector();
+			const wire = (messages: Message[]) => messages.map(message => JSON.stringify([message.role, message.content]));
+			const summary: Message = { role: "user", content: "summary", timestamp: 5 };
+			const prompt: Message = { role: "user", content: "next step", timestamp: 6 };
+			const bootstrap = (timestamp: number): Message => ({ role: "user", content: "BOOTSTRAP", timestamp });
+			const toolResult: Message = {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "result" }],
+				isError: false,
+				timestamp: 7,
+			};
+			const assistant = createAssistantMessage("call 1");
+			const first = injector.transform(
+				{ systemPrompt: ["system"], messages: [summary, bootstrap(1000), prompt] },
+				"2026-08-14",
+				"/work",
+			);
+			const rolled = injector.transform(
+				{ systemPrompt: ["system"], messages: [summary, bootstrap(1001), prompt, assistant, toolResult] },
+				"2026-08-15",
+				"/work",
+			);
+
+			expect(wire(rolled.messages).slice(0, first.messages.length)).toEqual(wire(first.messages));
+			expect(rolled.messages[1]?.content).toBe("BOOTSTRAP");
+			expect(wire(rolled.messages).at(-1)).toBe(
+				JSON.stringify(["developer", renderDateCwdReminder("2026-08-15", "/work")]),
+			);
+		});
 	});
 });
 
@@ -742,4 +879,112 @@ describe("date-cwd reminder on the provider wire", () => {
 			}
 		});
 	}
+
+	it("keeps a first message a context hook re-creates on every request byte-identical when the date rolls over mid-run", async () => {
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-");
+		await Bun.write(tempDir.join("notes.txt"), "notes");
+		const api = "test-date-cwd-reminder-recreated";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			const request = contexts.length;
+			queueMicrotask(() => {
+				if (request < 4) {
+					// The run crosses midnight between tool continuations.
+					if (request === 2) setSystemTime(new Date(2026, 7, 15, 0, 1));
+					const toolCall = {
+						type: "toolCall" as const,
+						id: `read-${request}`,
+						name: "read",
+						arguments: { path: "notes.txt" },
+					};
+					const message: AssistantMessage = {
+						...createAssistantMessage(""),
+						content: [toolCall],
+						stopReason: "toolUse",
+					};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				}
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "date-cwd-reminder-recreated",
+			name: "Date cwd reminder recreated",
+			api,
+			provider: "managed-primary",
+			// Remote endpoint: a loopback URL would turn on append-only context, which pins message identity.
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.keys.setRuntime(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		// superpowers' pi extension: its bootstrap goes first, built afresh and stamped per request.
+		let stamp = 1_000_000;
+		const bootstrapHook: ExtensionFactory = pi => {
+			pi.on("context", event => ({
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "BOOTSTRAP" }], timestamp: stamp++ },
+					...event.messages,
+				],
+			}));
+		};
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			toolNames: ["read"],
+			disableExtensionDiscovery: true,
+			extensions: [bootstrapHook],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		sessions.push(session);
+
+		setSystemTime(new Date(2026, 7, 14, 23, 59));
+		try {
+			await session.sendUserMessage("first");
+			await session.waitForIdle();
+
+			expect(contexts).toHaveLength(4);
+			const wire = contexts.map(context =>
+				context.messages.map(message => JSON.stringify([message.role, message.content])),
+			);
+			expect(wire[0]![0]).toContain("BOOTSTRAP");
+			// Bytes the provider already saw stay put on every later request; the new date is appended once.
+			for (let request = 1; request < wire.length; request++) {
+				expect(wire[request]!.slice(0, wire[request - 1]!.length)).toEqual(wire[request - 1]!);
+			}
+			const reminder = JSON.stringify([
+				"developer",
+				renderDateCwdReminder("2026-08-15", normalizePromptPath(tempDir.path())),
+			]);
+			expect(wire[2]!.at(-1)).toBe(reminder);
+			expect(wire[3]!.filter(message => message === reminder)).toHaveLength(1);
+		} finally {
+			setSystemTime();
+			authStorage.close();
+		}
+	});
 });

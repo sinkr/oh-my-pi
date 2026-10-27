@@ -95,8 +95,6 @@ const MAX_ROOTS = 8;
  */
 export class DateCwdReminderInjector {
 	#states = new Map<string, RootState>();
-	/** The root of the most recent request. */
-	#active: string | undefined;
 
 	/** Apply the current reminder while preserving all earlier injected bytes. */
 	transform(context: Context, date: string, cwd: string): Context {
@@ -176,13 +174,13 @@ export class DateCwdReminderInjector {
 	 * not always the last conversation served: an advisor request can sit between
 	 * a conversation's last request before a compaction and its first after it.
 	 */
-	#predecessorOf(keys: string[]): RootState | undefined {
+	#predecessorOf(keys: string[]): { root: string; state: RootState } | undefined {
 		const present = new Set(keys);
-		const states = [...this.#states.values()];
-		for (let index = states.length - 1; index >= 0; index--) {
-			const state = states[index]!;
+		const entries = [...this.#states.entries()];
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const [root, state] = entries[index]!;
 			for (const key of present) {
-				if (state.seen.has(key) || state.injections.has(key)) return state;
+				if (state.seen.has(key) || state.injections.has(key)) return { root, state };
 			}
 		}
 		return undefined;
@@ -195,11 +193,30 @@ export class DateCwdReminderInjector {
 	 * sent with, or their bytes change under signed thinking; its other turns are
 	 * left out. That conversation keeps its own state, because a later request can
 	 * return to it: an advisor request does not end the turn that asked for it.
+	 *
+	 * A first turn equal to the one the conversation it continues started with is
+	 * that turn again under a new timestamp: a context hook that inserts its own
+	 * first message can build it afresh, stamped `Date.now()`, for every request.
+	 * The conversation goes on under the new key with the reminder that turn was
+	 * first sent with, so a changed reminder is appended instead of rewriting it.
 	 */
-	#newRootState(keys: string[], counts: Map<string, number>, reminder: string): RootState {
-		const previous = this.#predecessorOf(keys);
+	#newRootState(
+		keys: string[],
+		counts: Map<string, number>,
+		root: string,
+		firstUser: UserMessage,
+		reminder: string,
+	): RootState {
+		const predecessor = this.#predecessorOf(keys);
+		const previous = predecessor?.state;
+		const previousFirst = predecessor?.state.injections.get(predecessor.root);
+		const recreated =
+			predecessor !== undefined &&
+			previousFirst !== undefined &&
+			previousFirst.source.attribution === firstUser.attribution &&
+			Bun.deepEquals(previousFirst.source.content, firstUser.content);
 		const state: RootState = {
-			reminder,
+			reminder: recreated ? predecessor.state.reminder : reminder,
 			injections: new Map(previous?.injections),
 			controls: previous ? [...previous.controls] : [],
 			seen: new Set(previous?.seen),
@@ -214,14 +231,42 @@ export class DateCwdReminderInjector {
 			if (!present.has(key)) state.seen.delete(key);
 		}
 		state.controls = state.controls.filter(control => present.has(control.anchor));
+		if (recreated) {
+			state.injections.set(root, {
+				reminder: previousFirst.reminder,
+				source: firstUser,
+				injected: injectReminder(firstUser, previousFirst.reminder),
+			});
+			state.reminder = this.#carriedReminder(state, keys) ?? previousFirst.reminder;
+			// One conversation under a new first-turn key: the old key is never sent again.
+			this.#states.delete(predecessor.root);
+		} else if (!state.injections.has(root) && !messageStartsWithReminder(firstUser, reminder)) {
+			state.injections.set(root, { reminder, source: firstUser, injected: injectReminder(firstUser, reminder) });
+		}
 		return state;
+	}
+
+	/**
+	 * The newest reminder this request's turns still carry: the last reminder placed
+	 * at or after the latest turn that has one. A request can leave out the turn that
+	 * carried the conversation's newest reminder (a side request's question, a branch
+	 * point before it), and the model must then be told again.
+	 */
+	#carriedReminder(state: RootState, keys: string[]): string | undefined {
+		for (let index = keys.length - 1; index >= 0; index--) {
+			const key = keys[index]!;
+			const control = state.controls.findLast(control => control.anchor === key);
+			if (control && typeof control.message.content === "string") return control.message.content;
+			const injection = state.injections.get(key);
+			if (injection) return injection.reminder;
+		}
+		return undefined;
 	}
 
 	/** Make `root` the most recent conversation, forgetting the oldest over the cap. */
 	#activate(root: string, state: RootState): void {
 		this.#states.delete(root);
 		this.#states.set(root, state);
-		this.#active = root;
 		while (this.#states.size > MAX_ROOTS) {
 			const oldest = this.#states.keys().next().value;
 			if (oldest === undefined) break;
@@ -238,21 +283,26 @@ export class DateCwdReminderInjector {
 		let state = this.#states.get(root);
 		if (state) {
 			this.#followOrdinals(state, counts, false);
+			state.reminder = this.#carriedReminder(state, keys) ?? state.reminder;
 		} else {
-			state = this.#newRootState(keys, counts, reminder);
-			if (!state.injections.has(root) && !messageStartsWithReminder(firstUser, reminder)) {
-				state.injections.set(root, {
-					reminder,
-					source: firstUser,
-					injected: injectReminder(firstUser, reminder),
-				});
-			}
+			state = this.#newRootState(keys, counts, root, firstUser, reminder);
 		}
 		this.#activate(root, state);
 		if (state.reminder !== reminder) {
-			let newUser: number | undefined;
+			// Only a turn appended after everything already sent takes the changed
+			// reminder: an unsent key earlier in the history is a turn a context hook
+			// builds afresh for every request (a new timestamp, the same bytes), and
+			// writing into it would rewrite the middle of the cached history.
+			let lastSent = -1;
 			for (let index = messages.length - 1; index >= 0; index--) {
-				if (messages[index]!.role === "user" && !state.seen.has(keys[index]!)) {
+				if (state.seen.has(keys[index]!)) {
+					lastSent = index;
+					break;
+				}
+			}
+			let newUser: number | undefined;
+			for (let index = messages.length - 1; index > lastSent; index--) {
+				if (messages[index]!.role === "user") {
 					newUser = index;
 					break;
 				}
