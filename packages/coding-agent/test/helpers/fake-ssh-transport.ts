@@ -5,7 +5,7 @@ import type { SSHConnectionTarget } from "../../src/ssh/connection-manager";
 import { quotePosixArgument } from "../../src/utils/shell-quote";
 
 /** Execute production POSIX snippets locally, without an SSH connection or global environment changes. */
-export function fakeSshTransport(home: (target: SSHConnectionTarget) => string) {
+export function fakeSshTransport(home: (target: SSHConnectionTarget) => string, onSpawn?: () => void) {
 	const commands: Array<{ target: SSHConnectionTarget; command: string }> = [];
 	vi.spyOn(connectionManager, "ensureConnection").mockResolvedValue(undefined);
 	vi.spyOn(connectionManager, "ensureHostInfo").mockResolvedValue({
@@ -22,7 +22,9 @@ export function fakeSshTransport(home: (target: SSHConnectionTarget) => string) 
 	const spawn = ptree.spawn;
 	vi.spyOn(ptree, "spawn").mockImplementation((command, options) => {
 		if (command[0] === "ssh" && command[1] === "--fixture") {
-			return spawn(["sh", "-c", command[2]], options);
+			const child = spawn(["sh", "-c", command[2]], options);
+			onSpawn?.();
+			return child;
 		}
 		return spawn(command, options);
 	});

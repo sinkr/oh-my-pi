@@ -443,6 +443,10 @@ export class InternalUrlFilesystem {
 		if (!node.directory) throw new UrlFsError("ENOTDIR", `Not a directory: ${node.url}`);
 		if (node.entries) return { entries: Array.from(node.entries, ([name, fileType]) => ({ name, fileType })) };
 		if (node.sourcePath) return { local: node.sourcePath };
+		const handler = this.#router.getHandler(schemeOf(node.url));
+		if (handler?.readDirectory) {
+			return { entries: await handler.readDirectory(parseInternalUrl(node.url), this.#context) };
+		}
 		throw new UrlFsError("ENOTSUP", `${node.url} lists only through the read tool`);
 	}
 
