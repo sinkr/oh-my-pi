@@ -247,6 +247,80 @@ describe("plugin --dry-run beyond install, uninstall and link", () => {
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining(`Runtime package name "${LINKED}" conflicts`));
 	});
 
+	// `upgrade` with no id and the startup auto-update take their rows from checkForUpdates. The
+	// "0.0.0" a source with no declared version falls back to is not a newer version, so it must
+	// stay out of those rows, while the named force-reinstall preview still shows it.
+	test("upgrade --dry-run with no id leaves out a local plugin whose source declares no version", async () => {
+		await writeMarketplace(marketplaceDir, "fixmkt", "nightly");
+		await runPluginCommand({ action: "marketplace", args: ["update", "fixmkt"], flags: {} });
+		await runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: {} });
+		await writeMarketplace(marketplaceDir, "fixmkt", undefined);
+		await runPluginCommand({ action: "marketplace", args: ["update", "fixmkt"], flags: {} });
+		output.length = 0;
+		const before = await snapshotTree(root);
+
+		await runPluginCommand({ action: "upgrade", args: [], flags: { dryRun: true } });
+		expect(logged()).toContain("All marketplace plugins are up to date");
+		expect(logged()).not.toContain("0.0.0");
+
+		await runPluginCommand({ action: "upgrade", args: [], flags: {} });
+		expect(await snapshotTree(root)).toEqual(before);
+
+		// The named command still force-reinstalls it, so its preview still shows the fallback.
+		output.length = 0;
+		await runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: { dryRun: true } });
+		expect(logged()).toContain(`Would upgrade ${PLUGIN_ID} (user): nightly -> 0.0.0`);
+	});
+
+	// The real install builds a cache path from the version the plugin manifest resolves to, not
+	// from the catalog entry's. A manifest version that is unsafe as a path component must stop
+	// the preview with the same error.
+	test("upgrade <id> --dry-run refuses a manifest version that is unsafe as a cache path", async () => {
+		await writeMarketplace(marketplaceDir, "fixmkt", "2.0.0");
+		await Bun.write(
+			path.join(marketplaceDir, "plugins", "hello", ".claude-plugin", "plugin.json"),
+			JSON.stringify({ name: "hello", version: "2/0", description: "fixture" }),
+		);
+		await runPluginCommand({ action: "marketplace", args: ["update", "fixmkt"], flags: {} });
+		const exit = spyOn(process, "exit").mockImplementation(() => {
+			throw new Error("process.exit");
+		});
+		const before = await snapshotTree(root);
+
+		await expect(runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: { dryRun: true } })).rejects.toThrow(
+			"process.exit",
+		);
+
+		expect(exit).toHaveBeenCalledWith(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Invalid version for cache: "2/0"'));
+		expect(await snapshotTree(root)).toEqual(before);
+
+		await expect(runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: {} })).rejects.toThrow(
+			"process.exit",
+		);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Invalid version for cache: "2/0"'));
+	});
+
+	// `upgradeAllPlugins` skips a row whose install fails, so the no-id preview must not promise it.
+	test("upgrade --dry-run with no id leaves out a row the real run skips", async () => {
+		await Bun.write(
+			path.join(marketplaceDir, "plugins", "hello", "package.json"),
+			JSON.stringify({ name: LINKED, version: "2.0.0" }),
+		);
+		await runPluginCommand({ action: "marketplace", args: ["update", "fixmkt"], flags: {} });
+		output.length = 0;
+		const before = await snapshotTree(root);
+
+		await runPluginCommand({ action: "upgrade", args: [], flags: { dryRun: true } });
+		expect(logged()).toContain("All marketplace plugins are up to date");
+		expect(logged()).not.toContain(UPGRADE_PREVIEW);
+
+		output.length = 0;
+		await runPluginCommand({ action: "upgrade", args: [], flags: {} });
+		expect(logged()).toContain("All marketplace plugins are up to date");
+		expect(await snapshotTree(root)).toEqual(before);
+	});
+
 	test("update --plugins --check reports plugin upgrades and changes no plugin state", async () => {
 		const before = await snapshotTree(root);
 

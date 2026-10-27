@@ -358,19 +358,29 @@ export class MarketplaceManager {
 		marketplace: string,
 		options?: { force?: boolean; scope?: "user" | "project" },
 	): Promise<void> {
-		const { scope, pluginId, existing, sourcePath, instReg } = await this.#validateInstall(
+		const { scope, registryPath, pluginId, existing, sourcePath, instReg, pluginEntry } = await this.#validateInstall(
 			name,
 			marketplace,
 			options,
 		);
-		// `installPlugin` also rejects a runtime package name another plugin owns, but only
-		// after it has resolved the source. A source already on disk needs no clone and no
-		// write for that check, so a preview of it raises the same error the install would.
-		// A source the install must fetch keeps its name unknown until then, as `to` does.
+		// `installPlugin` also rejects a runtime package name another plugin owns, a resolved version
+		// that is unsafe as a cache path, and a cache path that case-collides with another installed
+		// plugin — but only after it has resolved the source. A source already on disk needs no clone
+		// and no write for those checks, so a preview of it raises the same errors in the same order.
+		// A source the install must fetch keeps its name and its version unknown until then.
 		if (sourcePath === undefined) return;
 		const packageName = await this.#resolvePluginPackageName(sourcePath, name);
 		const previousPackageNames = await this.#resolveInstalledPackageNames(existing ?? [], name);
 		await this.#assertRuntimePackageNameAvailable(scope, packageName, instReg, pluginId, previousPackageNames);
+		const version = (await this.#resolveCatalogVersion(pluginEntry, sourcePath)) ?? "0.0.0";
+		const prospectiveCachePath = getCachedPluginPath(this.#opts.pluginsCacheDir, marketplace, name, version);
+		const otherRegistryPath =
+			scope === "user" ? this.#opts.projectInstalledRegistryPath : this.#opts.installedRegistryPath;
+		const registriesToCheck =
+			otherRegistryPath && otherRegistryPath !== registryPath
+				? [instReg, await readInstalledPluginsRegistry(otherRegistryPath)]
+				: [instReg];
+		this.#assertCachePathAvailable(prospectiveCachePath, pluginId, registriesToCheck);
 	}
 
 	async installPlugin(
@@ -794,12 +804,14 @@ export class MarketplaceManager {
 
 	// Compare installed plugin versions against the version each catalog entry currently publishes
 	// (see #resolveCatalogVersion). Returns one entry per (pluginId, scope) pair that is outdated.
-	// Plugins whose catalog side declares no version are skipped.
+	// Plugins whose catalog side declares no version are skipped: the "0.0.0" a reinstall records
+	// for them is a fallback, not a newer version, and an unattended upgrade must not replace a
+	// tagged install with it. The named force-reinstall preview still shows that fallback.
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
 		for (const row of await this.listCatalogVersions()) {
 			const { to } = row;
-			if (to && classifyVersionChange(row.from, to) === "upgrade") {
+			if (to && row.declared && classifyVersionChange(row.from, to) === "upgrade") {
 				updates.push({ pluginId: row.pluginId, scope: row.scope, from: row.from, to });
 			}
 		}
@@ -808,14 +820,21 @@ export class MarketplaceManager {
 
 	// Every installed (pluginId, scope) pair whose marketplace catalog still lists the plugin, with the
 	// installed version and the version a reinstall would record now. A local source that declares no
-	// version gets `installPlugin`'s "0.0.0" fallback; `to` is undefined only for a remote source with
-	// no catalog version (known only after cloning). Same, older and newer versions all appear; reads
-	// only the registries, cached catalogs and local manifests.
+	// version gets `installPlugin`'s "0.0.0" fallback, and `declared` is false for that row; `to` is
+	// undefined only for a remote source with no catalog version (known only after cloning). Same,
+	// older and newer versions all appear; reads only the registries, cached catalogs and local
+	// manifests.
 	async listCatalogVersions(): Promise<
-		Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string | undefined }>
+		Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string | undefined; declared: boolean }>
 	> {
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
-		const rows: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string | undefined }> = [];
+		const rows: Array<{
+			pluginId: string;
+			scope: "user" | "project";
+			from: string;
+			to: string | undefined;
+			declared: boolean;
+		}> = [];
 
 		// Keyed by (path, scope) so each scope is checked independently.
 		// A plugin current in user scope but stale in project scope must still appear.
@@ -836,6 +855,7 @@ export class MarketplaceManager {
 				if (!mktEntry) continue;
 
 				let catalogVersion: string | undefined;
+				let declared = false;
 				try {
 					const catalog = await this.#readCatalog(mktEntry);
 					const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
@@ -847,12 +867,13 @@ export class MarketplaceManager {
 						catalogMetadata: catalog.metadata,
 					});
 					const resolved = await this.#resolveCatalogVersion(pluginEntry, pluginDir);
+					declared = resolved !== undefined;
 					catalogVersion = resolved ?? (pluginDir ? "0.0.0" : undefined);
 				} catch {
 					continue;
 				}
 
-				rows.push({ pluginId, scope, from: installed.version, to: catalogVersion });
+				rows.push({ pluginId, scope, from: installed.version, to: catalogVersion, declared });
 			}
 		}
 
@@ -964,6 +985,26 @@ export class MarketplaceManager {
 			}
 		}
 		return results;
+	}
+
+	// What `upgradeAllPlugins()` would reinstall, without changing anything. A row whose install the
+	// current state already refuses (a runtime package name another plugin owns, a version unsafe as
+	// a cache path) is left out, because the real run skips it too.
+	async previewUpgradeAllPlugins(): Promise<
+		Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>
+	> {
+		const rows: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
+		for (const update of await this.checkForUpdates()) {
+			const parsed = parsePluginId(update.pluginId);
+			if (!parsed) continue;
+			try {
+				await this.validateInstallPlugin(parsed.name, parsed.marketplace, { force: true, scope: update.scope });
+			} catch {
+				continue;
+			}
+			rows.push(update);
+		}
+		return rows;
 	}
 
 	// ── Private helpers ───────────────────────────────────────────────────────

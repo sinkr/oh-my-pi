@@ -395,11 +395,11 @@ async function handleUpgrade(
 }
 
 /**
- * `upgrade --dry-run` with no id: the outdated rows of `checkForUpdates`, which are exactly
- * the (plugin, scope) pairs `upgradeAllPlugins` reinstalls.
+ * `upgrade --dry-run` with no id: the rows `upgradeAllPlugins` would reinstall, which are the
+ * outdated rows of `checkForUpdates` without the ones whose install the current state refuses.
  */
 async function previewMarketplaceUpgradeAll(manager: MarketplaceManager): Promise<void> {
-	const updates = await manager.checkForUpdates();
+	const updates = await manager.previewUpgradeAllPlugins();
 	if (updates.length === 0) {
 		console.log(chalk.dim("[dry-run] All marketplace plugins are up to date"));
 		return;
