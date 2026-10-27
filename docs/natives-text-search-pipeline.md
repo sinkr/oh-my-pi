@@ -139,7 +139,7 @@ The native bridge bounds in-flight delivery to eight batches and checks cancella
    - skip `.git` always;
    - `includeNodeModules`, when supplied, controls node-module inclusion; when omitted, inclusion is inferred from whether the pattern mentions `node_modules`;
    - apply glob match;
-   - apply `FileType` enum filtering after walker collection; symlink `File`/`Dir` filters resolve target metadata through the selected filesystem. This post-collection filter does not trigger empty-cache revalidation.
+   - apply `FileType` enum filtering after walker collection; symlink `File`/`Dir` filters resolve target metadata through the selected filesystem and retain its mtime and regular-file size on accepted matches. Dangling links are excluded by those target-type filters. This post-collection filter does not trigger empty-cache revalidation.
 5. Optional sort by mtime descending (`sortByMtime`), then path ascending, before truncating to `maxResults`. Callbacks receive the returned, ordered match set; `totalMatches` is its length, not an untruncated total.
 
 ### `fuzzyFind` flow
