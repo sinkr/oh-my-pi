@@ -1229,6 +1229,7 @@ export interface InputUiRequest {
 	title: string;
 	placeholder?: string;
 	timeout?: number;
+	secret?: boolean;
 }
 
 export interface EditorUiRequest {
