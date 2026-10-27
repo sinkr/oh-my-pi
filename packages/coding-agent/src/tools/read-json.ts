@@ -72,21 +72,23 @@ export function splitJsonQueryTarget(readPath: string): { jsonPath: string; quer
 }
 
 /**
- * Parses `q`, `raw`, `compact`, `offset`, and `limit`; null without a filter.
+ * Parses `q`/`query`, `raw`, `compact`, `offset`, and `limit`.
+ * Modifiers or an empty filter imply `.`; unknown-only query strings return null.
  * `q` is percent-decoded but never form-decoded, so jq's `+` survives.
  */
 export function parseJsonSelector(queryString: string): JsonSelector | null {
 	const match = /(?:^|&)(?:q|query)=([^&]*)/.exec(queryString);
-	if (!match?.[1]) return null;
+	const params = new URLSearchParams(queryString);
+	if (!match && !["raw", "compact", "offset", "limit"].some(name => params.has(name))) return null;
+	const encodedQuery = match?.[1] || ".";
 	let query: string;
 	try {
-		query = decodeURIComponent(match[1]);
+		query = decodeURIComponent(encodedQuery);
 	} catch {
 		// A filter with a bare `%` (jq modulo) is not valid percent-encoding; take it verbatim.
-		query = match[1];
+		query = encodedQuery;
 	}
 
-	const params = new URLSearchParams(queryString);
 	const flag = (name: string) => {
 		const value = params.get(name)?.toLowerCase();
 		return value === "true" || value === "1";
@@ -355,7 +357,7 @@ export async function executeJsonQuery(
 	return withStderr(text, stderr);
 }
 
-/** A JSON file path with its parsed `?q=` selector, ready for {@link readJson}. */
+/** A JSON file path with its parsed selector, ready for {@link readJson}. */
 export interface ResolvedJsonReadPath {
 	absolutePath: string;
 	selector: JsonSelector;
