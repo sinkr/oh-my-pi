@@ -508,7 +508,7 @@ pi.on("assistant_message", event => ({
 }));
 ```
 
-`before_agent_start` prepares policy for an ordinary prompt and for each steering or follow-up batch containing user work when that batch is actually dequeued. It is not an enqueue notification: a live batch can fire it without another `agent_start`. Queue peeks, provider retries, tool-only iterations, and synthetic-only queued continuations do not fire it. Explicit synthetic prompts retain their ordinary prompt lifecycle.
+`before_agent_start` prepares policy for an ordinary prompt and for each steering or follow-up batch containing user work when that batch is actually dequeued (`reason: "prompt"`). It is not an enqueue notification: a live batch can fire it without another `agent_start`. Queue peeks, provider retries, tool-only iterations, and synthetic-only queued continuations do not fire it. Explicit synthetic prompts retain their ordinary prompt lifecycle. Reviving a parked subagent (for a wake, a message, or just to focus it) fires it once after `session_start` with `reason: "revive"`, an empty `prompt`, and its result discarded, so an extension can register again what it registered at the subagent's first prompt; handlers doing per-prompt work (recall, classification, logging) should return early for `reason: "revive"`, since the revive waits on them. Wake turns are agent-initiated and do not fire it, while a later ordinary prompt runs it as usual.
 
 For queued batches, `prompt` contains the already-transformed text of every selected user message, joined with two newlines between messages; text blocks within a message are concatenated. `images` contains their already-normalized images in delivery order. Hidden agent-attributed companions are excluded from these event inputs but remain in the delivered batch. Input hooks, commands, templates, and original attachment preprocessing are not rerun.
 
@@ -882,7 +882,7 @@ before and performs no extra syscalls.
 
 Supported:
 
-- dialogs: `select`, `confirm`, `input`, `editor`, optional `askDialog`
+- dialogs: `select`, `confirm`, `input` (honors `ExtensionUIDialogOptions.secret` by masking typed characters as bullets), `editor`, optional `askDialog`
 - input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`; `supportsEditor` indicates whether paste updates a local or remote composer (absent means unsupported)
 - autocomplete stacking: `addAutocompleteProvider(factory)` wraps the built-in editor provider (factories apply in registration order and re-apply on every slash-command refresh)
 - terminal title and working message (`setTitle`, `setWorkingMessage`)
@@ -1058,7 +1058,7 @@ backends turn argv into shell text, under the required POSIX grammar assertion.
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:
 
-- dialog methods (`select`, `confirm`, `input`, `editor`) round-trip to client responses
+- dialog methods (`select`, `confirm`, `input`, `editor`) round-trip to client responses; `input` forwards `ExtensionUIDialogOptions.secret` as an unnegotiated host hint (`secret?: boolean`) on the `extension_ui_request` frame
 - fire-and-forget methods emit requests (`notify`, `setStatus`, `setWidget` for string arrays or removal, and `setEditorText` as `method: "set_editor_text"`); `pasteToEditor` falls back to `setEditorText`
 - `setTitle` emits only when `PI_RPC_EMIT_TITLE` is `1`, `true`, `yes`, or `on` (case-insensitive)
 
@@ -1081,7 +1081,7 @@ When no UI context is supplied to runner init, `ctx.hasUI` is `false` and method
 ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in
 `modes/acp/acp-agent.ts`). `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true`.
 `select`/`confirm`/`input`/`editor` and optional `askDialog` round-trip as ACP form
-elicitations; defaults are returned when the client lacks `elicitation.form`.
+elicitations; defaults are returned when the client lacks `elicitation.form`, and `input` returns `undefined` without emitting a form elicitation when `dialogOptions.secret` is `true`.
 The non-elicitation surface (widgets, editor control, theming, terminal input,
 autocomplete stacking) is inert; `notify` logs a debug notification.
 

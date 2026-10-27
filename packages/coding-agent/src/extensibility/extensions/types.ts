@@ -206,6 +206,13 @@ export interface ExtensionUIDialogOptions {
 	onTimeoutStart?: () => void;
 	/** Invoked when user input resets a UI-managed timeout countdown */
 	onTimeoutReset?: () => void;
+	/**
+	 * Host hint to mask entered characters in `input` dialogs.
+	 * Enforced by the interactive TUI (masked as bullets), forwarded on RPC `input`
+	 * requests for hosts that honor it, and rejected (`undefined`) in ACP mode where
+	 * form elicitation does not support secret masking.
+	 */
+	secret?: boolean;
 	/** Initial cursor position for select dialogs (0-indexed) */
 	initialIndex?: number;
 	/** Render an outlined list for select dialogs */
@@ -1061,9 +1068,14 @@ export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
 	type: "after_provider_response";
 }
 
-/** Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider. */
+/**
+ * Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider
+ * (`reason: "prompt"`), and once with an empty `prompt` when a parked subagent is revived
+ * (`reason: "revive"`, result discarded).
+ */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
+	reason: "prompt" | "revive";
 	/** Already-transformed text; queued batches join user messages with two newlines, excluding agent companions. */
 	prompt: string;
 	/** Already-normalized user images in delivery order. */
