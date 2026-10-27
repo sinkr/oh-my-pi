@@ -588,8 +588,6 @@ use super::{
 };
 
 const ALLOC_CHUNK_SIZE: usize = 64 * 1024;
-const MAX_TOKEN_BUFFER_BYTES: usize = 4 * 1024 * 1024;
-const MAX_TOKEN_BUFFER_ELEMS: usize = MAX_TOKEN_BUFFER_BYTES / size_of::<Range<usize>>();
 /// Collation sort keys measured at most 2.5 bytes per input byte (upper
 /// case, punctuation, invalid UTF-8) plus 6 bytes of level separators.
 const COLLATION_KEY_BYTES_PER_BYTE: usize = 3;
@@ -1310,6 +1308,28 @@ mod tests {
 		input.extend(b"b c\n".repeat(1000));
 		let (held, _) = read_chunks(&input, BUDGET, &settings);
 		assert!(held <= BUDGET, "a chunk held {held} bytes for a budget of {BUDGET}");
+	}
+
+	// Failure mode: `sort -k262144` of a line of 262144 one-byte fields kept
+	// the bounds of every field up to the key, 4 MiB, outside the budget.
+	#[test]
+	fn a_key_on_a_high_field_stays_within_its_budget() {
+		const BUDGET: usize = 1 << 20;
+		const FIELD: usize = BUDGET / 4;
+		for separator in [None, Some(b' ')] {
+			let mut settings = GlobalSettings { separator, ..GlobalSettings::default() };
+			let key = format!("{FIELD},{FIELD}");
+			settings.selectors = vec![super::super::FieldSelector::parse(&key, &settings).expect("key")];
+			settings.init_precomputed();
+			let mut input = b"a ".repeat(FIELD);
+			input.push(b'\n');
+			input.extend(b"b c\n".repeat(1000));
+			let (held, _) = read_chunks(&input, BUDGET, &settings);
+			assert!(
+				held <= BUDGET,
+				"with separator {separator:?}, a chunk held {held} bytes for a budget of {BUDGET}"
+			);
+		}
 	}
 
 	// Failure mode: `timeout` waited while a chunk of tens of millions of
@@ -3656,10 +3676,11 @@ impl NumericLocaleSettings {
 #[derive(Clone, Debug, Default)]
 struct Precomputed {
 	needs_tokens:                    bool,
-	/// The last field any key reads. Tokenizing stops after it, so a line of
-	/// many fields does not grow the token buffer by 16 bytes a field; 0
-	/// tokenizes every field.
-	key_fields:                      usize,
+	/// The fields the keys read, in increasing order. Tokenizing keeps only
+	/// these and stops after the last, so the token buffer holds at most two
+	/// fields a key, whatever field a key names and however many fields a
+	/// line has. Empty keeps every field.
+	key_fields:                      Vec<usize>,
 	num_infos_per_line:              usize,
 	floats_per_line:                 usize,
 	selections_per_line:             usize,
@@ -3708,12 +3729,14 @@ impl GlobalSettings {
 	/// compare with it when set, and by bytes otherwise.
 	fn init_precomputed(&mut self) {
 		self.precomputed.needs_tokens = self.selectors.iter().any(|s| s.needs_tokens);
-		self.precomputed.key_fields = self
+		let mut key_fields: Vec<usize> = self
 			.selectors
 			.iter()
-			.map(|s| s.to.as_ref().map_or(s.from.field, |to| to.field.max(s.from.field)))
-			.max()
-			.unwrap_or(0);
+			.flat_map(|s| std::iter::once(s.from.field).chain(s.to.as_ref().map(|to| to.field)))
+			.collect();
+		key_fields.sort_unstable();
+		key_fields.dedup();
+		self.precomputed.key_fields = key_fields;
 		self.precomputed.selections_per_line =
 			self.selectors.iter().filter(|s| s.needs_selection).count();
 		self.precomputed.num_infos_per_line = self
@@ -4003,9 +4026,10 @@ impl<'a> Line<'a> {
 			return Self { line, index };
 		}
 		token_buffer.clear();
-		if settings.precomputed.needs_tokens {
-			tokenize(line, settings.separator, token_buffer, &settings.precomputed);
-		}
+		let tokens = settings
+			.precomputed
+			.needs_tokens
+			.then(|| tokenize(line, settings.separator, token_buffer, &settings.precomputed));
 		if settings.mode == SortMode::Numeric {
 			// exclude inf, nan, scientific notation
 			let line_num_float = (!line.iter().any(u8::is_ascii_alphabetic))
@@ -4015,7 +4039,7 @@ impl<'a> Line<'a> {
 			line_data.line_num_floats.push(line_num_float);
 		}
 		for (selector, selection) in settings.selectors.iter().map(|selector| {
-			(selector, selector.get_selection(line, token_buffer, settings.numeric_locale))
+			(selector, selector.get_selection(line, tokens, settings.numeric_locale))
 		}) {
 			match selection {
 				Selection::AsBigDecimal(parsed_float) => line_data.parsed_floats.push(parsed_float),
@@ -4065,9 +4089,9 @@ impl<'a> Line<'a> {
 		writeln!(writer)?;
 
 		let mut fields = vec![];
-		tokenize(self.line, settings.separator, &mut fields, &settings.precomputed);
+		let tokens = tokenize(self.line, settings.separator, &mut fields, &settings.precomputed);
 		for selector in &settings.selectors {
-			let mut selection = selector.get_range(self.line, Some(&fields));
+			let mut selection = selector.get_range(self.line, Some(tokens));
 			match selector.settings.mode {
 				SortMode::Numeric | SortMode::HumanNumeric => {
 					// find out which range is used for numeric comparisons
@@ -4182,39 +4206,93 @@ impl<'a> Line<'a> {
 	}
 }
 
-/// Tokenize a line into its first `precomputed.key_fields` fields. The result
-/// is stored into `token_buffer`.
-fn tokenize(
+/// The fields of a line that its keys read, as [`tokenize`] found them.
+#[derive(Clone, Copy, Debug)]
+struct Tokens<'a> {
+	/// The numbers of the fields kept, in increasing order: `fields[i]` is
+	/// field `numbers[i]`. If empty, every field is kept: `fields[i]` is
+	/// field `i + 1`.
+	numbers: &'a [usize],
+	fields:  &'a [Field],
+	/// The fields the line has, counted no further than the last of `numbers`.
+	count:   usize,
+}
+
+impl Tokens<'_> {
+	/// Field `number` (1-indexed), which the line must have.
+	fn field(self, number: usize) -> Field {
+		let index = if self.numbers.is_empty() {
+			number - 1
+		} else {
+			self.numbers.binary_search(&number).expect("a field a key reads")
+		};
+		self.fields[index].clone()
+	}
+}
+
+/// Takes the fields of a line in order and keeps those that `numbers` names
+/// (every field if `numbers` is empty).
+struct FieldSink<'a> {
+	numbers: &'a [usize],
+	/// The index in `numbers` of the next field to keep.
+	next:    usize,
+	/// The fields taken so far.
+	count:   usize,
+	fields:  &'a mut Vec<Field>,
+}
+
+impl FieldSink<'_> {
+	/// Takes the line's next field. Returns false when no later field is
+	/// kept, so tokenizing can stop.
+	fn push(&mut self, field: Field) -> bool {
+		self.count += 1;
+		if self.numbers.is_empty() {
+			self.fields.push(field);
+			return true;
+		}
+		if self.numbers[self.next] == self.count {
+			self.fields.push(field);
+			self.next += 1;
+		}
+		self.next < self.numbers.len()
+	}
+}
+
+/// Tokenize a line up to the last of `precomputed.key_fields`, and keep
+/// those fields in `token_buffer`.
+fn tokenize<'t>(
 	line: &[u8],
 	separator: Option<u8>,
-	token_buffer: &mut Vec<Field>,
-	precomputed: &Precomputed,
-) {
+	token_buffer: &'t mut Vec<Field>,
+	precomputed: &'t Precomputed,
+) -> Tokens<'t> {
 	assert!(token_buffer.is_empty());
+	let mut sink =
+		FieldSink { numbers: &precomputed.key_fields, next: 0, count: 0, fields: &mut *token_buffer };
 	if let Some(separator) = separator {
-		tokenize_with_separator(line, separator, precomputed.key_fields, token_buffer);
+		tokenize_with_separator(line, separator, &mut sink);
 	} else {
 		tokenize_default(
 			line,
-			precomputed.key_fields,
-			token_buffer,
+			&mut sink,
 			precomputed.tokenize_blank_thousands_sep,
 			precomputed.tokenize_allow_unit_after_blank,
 		);
 	}
+	let count = sink.count;
+	Tokens { numbers: &precomputed.key_fields, fields: token_buffer, count }
 }
 
 /// By default fields are separated by the first whitespace after
 /// non-whitespace. Whitespace is included in fields at the start.
-/// The first `fields` fields are stored into `token_buffer`.
+/// The fields go to `sink` in order, until it wants no more.
 fn tokenize_default(
 	line: &[u8],
-	fields: usize,
-	token_buffer: &mut Vec<Field>,
+	sink: &mut FieldSink<'_>,
 	blank_thousands_sep: bool,
 	allow_unit_after_blank: bool,
 ) {
-	token_buffer.push(0..0);
+	let mut start = 0;
 	// pretend that there was whitespace in front of the line
 	let mut previous_was_whitespace = true;
 	for (idx, char) in line.iter().enumerate() {
@@ -4231,18 +4309,17 @@ fn tokenize_default(
 
 		if treat_as_separator {
 			if !previous_was_whitespace {
-				token_buffer.last_mut().unwrap().end = idx;
-				if token_buffer.len() == fields {
+				if !sink.push(start..idx) {
 					return;
 				}
-				token_buffer.push(idx..0);
+				start = idx;
 			}
 			previous_was_whitespace = true;
 		} else {
 			previous_was_whitespace = false;
 		}
 	}
-	token_buffer.last_mut().unwrap().end = line.len();
+	sink.push(start..line.len());
 }
 
 fn is_blank_thousands_sep(line: &[u8], idx: usize, allow_unit_after_blank: bool) -> bool {
@@ -4271,22 +4348,21 @@ fn is_blank_thousands_sep(line: &[u8], idx: usize, allow_unit_after_blank: bool)
 }
 
 /// Split between separators. These separators are not included in fields.
-/// The first `fields` fields are stored into `token_buffer`.
-fn tokenize_with_separator(line: &[u8], separator: u8, fields: usize, token_buffer: &mut Vec<Field>) {
+/// The fields go to `sink` in order, until it wants no more.
+fn tokenize_with_separator(line: &[u8], separator: u8, sink: &mut FieldSink<'_>) {
 	let separator_indices = line
 		.iter()
 		.enumerate()
 		.filter_map(|(i, &c)| if c == separator { Some(i) } else { None });
 	let mut start = 0;
 	for sep_idx in separator_indices {
-		token_buffer.push(start..sep_idx);
-		if token_buffer.len() == fields {
+		if !sink.push(start..sep_idx) {
 			return;
 		}
 		start = sep_idx + 1;
 	}
 	if start < line.len() {
-		token_buffer.push(start..line.len());
+		sink.push(start..line.len());
 	}
 }
 
@@ -4512,20 +4588,15 @@ impl FieldSelector {
 	}
 
 	/// Get the selection that corresponds to this selector for the line.
-	/// If `needs_fields` returned false, tokens may be empty.
+	/// `tokens` is None if no key needs fields.
 	fn get_selection<'a>(
 		&self,
 		line: &'a [u8],
-		tokens: &[Field],
+		tokens: Option<Tokens<'_>>,
 		numeric_locale: NumericLocaleSettings,
 	) -> Selection<'a> {
-		// `get_range` expects `None` when we don't need tokens and would get confused
-		// by an empty vector.
-		let tokens = if self.needs_tokens {
-			Some(tokens)
-		} else {
-			None
-		};
+		// `get_range` expects `None` when this key does not need tokens.
+		let tokens = tokens.filter(|_| self.needs_tokens);
 		let mut range_str = &line[self.get_range(line, tokens)];
 		if self.settings.mode == SortMode::Numeric || self.settings.mode == SortMode::HumanNumeric {
 			// Parse NumInfo for this number.
@@ -4552,7 +4623,7 @@ impl FieldSelector {
 
 	/// Look up the range in the line that corresponds to this selector.
 	/// If `needs_fields` returned false, tokens must be None.
-	fn get_range(&self, line: &[u8], tokens: Option<&[Field]>) -> Range<usize> {
+	fn get_range(&self, line: &[u8], tokens: Option<Tokens<'_>>) -> Range<usize> {
 		enum Resolution {
 			// The start index of the resolved character, inclusive
 			StartOfChar(usize),
@@ -4568,13 +4639,13 @@ impl FieldSelector {
 		/// Get the index for this line given the [`KeyPosition`]
 		fn resolve_index(
 			line: &[u8],
-			tokens: Option<&[Field]>,
+			tokens: Option<Tokens<'_>>,
 			position: &KeyPosition,
 		) -> Resolution {
-			if matches!(tokens, Some(tokens) if tokens.len() < position.field) {
+			if matches!(tokens, Some(tokens) if tokens.count < position.field) {
 				Resolution::TooHigh
 			} else if position.char == 0 {
-				let end = tokens.unwrap()[position.field - 1].end;
+				let end = tokens.unwrap().field(position.field).end;
 				if end == 0 {
 					Resolution::TooLow
 				} else {
@@ -4586,7 +4657,7 @@ impl FieldSelector {
 					// We don't need tokens for this case.
 					0
 				} else {
-					tokens.unwrap()[position.field - 1].start
+					tokens.unwrap().field(position.field).start
 				};
 				// strip blanks if needed
 				if position.ignore_blanks {
@@ -6776,6 +6847,43 @@ mod tests {
 		assert_eq!(tokenize_helper(line, Some(b'a')), vec![0..0, 1..1]);
 		let line = b"..a..a";
 		assert_eq!(tokenize_helper(line, Some(b'a')), vec![0..2, 3..5]);
+	}
+
+	// Tokenizing keeps only the fields the keys name; each key must select
+	// what it selects from every field of the line.
+	#[test]
+	fn a_key_selects_the_same_range_from_the_kept_fields() {
+		let lines: &[&[u8]] = &[
+			b"",
+			b"a",
+			b"  a b  c d e f g h i j k",
+			b"a,b,,c,d,e,f,g,h,i,j,k",
+			b"1 2 3",
+			b",,,,",
+			b" ",
+		];
+		let keys = ["1", "2", "3,5", "2.2,4.0", "1.2b,10", "5b,2.3", "4,4", "11", "2,11.2", "3.1,3.0"];
+		let every_field = Precomputed::default();
+		for separator in [None, Some(b',')] {
+			for key in keys {
+				let mut settings = GlobalSettings { separator, ..GlobalSettings::default() };
+				let selector = FieldSelector::parse(key, &settings).expect("key");
+				settings.selectors = vec![selector.clone()];
+				settings.init_precomputed();
+				for &line in lines {
+					let (mut kept_buffer, mut every_buffer) = (Vec::new(), Vec::new());
+					let kept = tokenize(line, separator, &mut kept_buffer, &settings.precomputed);
+					let every = tokenize(line, separator, &mut every_buffer, &every_field);
+					assert_eq!(
+						selector.get_range(line, Some(kept)),
+						selector.get_range(line, Some(every)),
+						"key {key} with separator {separator:?} on {:?}",
+						String::from_utf8_lossy(line),
+					);
+					assert!(kept.fields.len() <= 2, "key {key} kept {} fields", kept.fields.len());
+				}
+			}
+		}
 	}
 
 	#[test]
