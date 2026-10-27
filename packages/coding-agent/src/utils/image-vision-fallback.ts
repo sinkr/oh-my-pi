@@ -20,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { Api, completeSimple, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
+import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -131,18 +132,22 @@ function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | unde
 	const preferred = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(deps.activeModelString);
 	if (preferred) return preferred;
 
-	let fallback: Model<Api> | undefined;
-	let lowestPrice = Number.POSITIVE_INFINITY;
+	let cheapest: Model<Api> | undefined;
+	let cheapestPrice = Number.POSITIVE_INFINITY;
+	let firstImageModel: Model<Api> | undefined;
 	for (const model of available) {
 		if (!sendsImageInputOnWire(model)) continue;
-		const price = model.cost.input + model.cost.output;
-		// Zero rates may mean missing pricing; prefer a known price when available.
-		if (!fallback || (price > 0 && price < lowestPrice)) {
-			fallback = model;
-			if (price > 0) lowestPrice = price;
+		firstImageModel ??= model;
+		// Rows without a rate card rank last; a declared free row prices at 0.
+		if (getModelPricingStatus(model) === "unknown") continue;
+		const cost = getEffectiveTokenCost(model.cost);
+		const price = cost.input + cost.output;
+		if (price < cheapestPrice) {
+			cheapest = model;
+			cheapestPrice = price;
 		}
 	}
-	return fallback;
+	return cheapest ?? firstImageModel;
 }
 
 /** Run one vision-description round-trip; returns trimmed text or `null` on any failure. */

@@ -150,6 +150,22 @@ describe("describeAttachedImagesForTextModel", () => {
 		expect(stub.calls[0]?.[0]).toMatchObject({ id: "gpt-4o-mini" });
 	});
 
+	it("prefers a declared free vision model over a paid one listed after it", async () => {
+		const free = {
+			...visionModel,
+			id: "free-vision",
+			pricingStatus: "free" as const,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+		const stub = makeCompleteStub("description");
+		await describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			makeDeps(testDir, [textModel, free, cheaperVisionModel], stub.fn),
+		);
+
+		expect(stub.calls[0]?.[0]).toMatchObject({ id: "free-vision" });
+	});
+
 	it("keeps a configured vision role ahead of the cheaper fallback", async () => {
 		const stub = makeCompleteStub("description");
 		const deps = makeDeps(testDir, [textModel, visionModel, cheaperVisionModel], stub.fn);
