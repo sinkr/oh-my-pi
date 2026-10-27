@@ -86,6 +86,17 @@ fn build_line_map(previous: &str, current: &str) -> HashMap<u32, u32> {
 	map
 }
 
+/// The current numbers of `lines` of `previous`, by the line map recovery
+/// remaps anchors with; `None` if any line has no unchanged image in `current`.
+pub(crate) fn current_line_numbers(
+	previous: &str,
+	current: &str,
+	lines: &[u32],
+) -> Option<Vec<u32>> {
+	let map = build_line_map(previous, current);
+	lines.iter().map(|line| map.get(line).copied()).collect()
+}
+
 fn duplicated_values(lines: &[&str]) -> HashSet<String> {
 	let mut seen = HashSet::new();
 	let mut duplicated = HashSet::new();
