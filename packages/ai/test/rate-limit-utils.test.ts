@@ -4,14 +4,17 @@ import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/err
 import {
 	calculateRateLimitBackoffMs,
 	is402BillingCapBody,
+	isAccountScopedQuotaExhausted,
 	isConcurrencyCapExclusion,
 	isOpaqueStatusBody,
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
+	parseGoogleRpcRateLimitReason,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
+import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -543,6 +546,64 @@ describe("parseRateLimitReason", () => {
 		expect(zeroEntitlement.errorStatus).toBe(429);
 		expect(is(zeroEntitlement.errorId ?? 0, Flag.UsageLimit)).toBe(true);
 		expect(isUsageLimitOutcome(zeroEntitlement.errorStatus, zeroEntitlement.errorMessage)).toBe(true);
+	});
+	it("preserves in-band SSE error chunk details on streamGoogle and streamGoogleGeminiCli", async () => {
+		const sseErrorPayload =
+			'data: {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_CAPACITY_EXHAUSTED","domain":"googleapis.com"}]}}\n\n';
+
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+
+		const sseFetch: FetchImpl = Object.assign(
+			async () =>
+				new Response(sseErrorPayload, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+
+		// 1. Test streamGoogle
+		const googleModel: Model<"google-generative-ai"> = buildModel({
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.example/v1beta",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
+		const googleStream = streamGoogle(googleModel, context, { apiKey: "test-key", fetch: sseFetch });
+		const googleResult = await googleStream.result();
+		expect(googleResult.stopReason).toBe("error");
+		expect(googleResult.errorMessage).toBeDefined();
+		expect(parseGoogleRpcRateLimitReason(googleResult.errorMessage!)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isAccountScopedQuotaExhausted(googleResult.errorMessage!)).toBe(false);
+
+		// 2. Test streamGoogleGeminiCli
+		const cliModel: Model<"google-gemini-cli"> = buildModel({
+			id: "gemini-2.5-flash",
+			name: "Gemini 2.5 Flash",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const cliStream = streamGoogleGeminiCli(cliModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: sseFetch,
+		});
+		const cliResult = await cliStream.result();
+		expect(cliResult.stopReason).toBe("error");
+		expect(cliResult.errorMessage).toBeDefined();
+		expect(parseGoogleRpcRateLimitReason(cliResult.errorMessage!)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isAccountScopedQuotaExhausted(cliResult.errorMessage!)).toBe(false);
 	});
 });
 
