@@ -1434,6 +1434,9 @@ fn apply_hunks(
 		copied = replacement.start_index + replacement.old_len;
 	}
 	result.extend_from_slice(&lines[copied..]);
+	if first_match && result.is_empty() {
+		return Ok((String::new(), warnings));
+	}
 	if stripped {
 		result.push("");
 	}

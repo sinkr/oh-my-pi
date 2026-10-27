@@ -48,6 +48,16 @@ describe("EditTool details", () => {
 		expect(await Bun.file(target).text()).toBe("79 named states\n");
 	});
 
+	test("apply_patch deletes an import line including its newline", async () => {
+		const target = path.join(tempDir, "imports.py");
+		await Bun.write(target, "from x import (\n    A,\n    B,\n)\n");
+		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("delete-line", {
+			input: "*** Begin Patch\n*** Update File: imports.py\n@@\n-    A,\n*** End Patch",
+		});
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(target).text()).toBe("from x import (\n    B,\n)\n");
+	});
+
 	test("apply_patch rejects wrong old lines without changing any file", async () => {
 		const before = '{\n    "sha": "0123456789abcdef0123456789abcdef01234567",\n    "ref": "refs/heads/main"\n}\n';
 		await Bun.write(path.join(tempDir, "fixture.py"), before);

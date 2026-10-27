@@ -64,3 +64,43 @@ async fn wrong_context_in_a_later_file_rejects_the_entire_envelope() {
 	assert_eq!(workspace.read("first.txt").as_deref(), Some("before\n"));
 	assert_eq!(workspace.read("fixture.txt").as_deref(), Some("void configure(int first, int middle, int last);\n"));
 }
+
+#[tokio::test]
+async fn line_deletion_removes_its_terminator_and_preserves_other_empty_lines() {
+	for ending in ["\n", "\r\n"] {
+		for final_newline in [false, true] {
+			for (lines, index) in [
+				(vec!["first", "remove", "last"], 1),
+				(vec!["remove", "middle", "last"], 0),
+				(vec!["first", "middle", "remove"], 2),
+				(vec!["remove"], 0),
+				(vec!["first", "", "remove", "", "last"], 2),
+			] {
+				let mut before = lines.join(ending);
+				if final_newline {
+					before.push_str(ending);
+				}
+				let mut remaining = lines;
+				remaining.remove(index);
+				let mut expected = remaining.join(ending);
+				if final_newline && !remaining.is_empty() {
+					expected.push_str(ending);
+				}
+				let workspace = common::Workspace::new(EditMode::ApplyPatch);
+				let path = workspace.write("fixture.txt", &before);
+				workspace.apply_raw(&update("@@\n-remove"), &common::DiskWriter::default()).await.unwrap();
+				assert_eq!(std::fs::read(path).unwrap(), expected.as_bytes(), "{before:?}");
+			}
+		}
+	}
+}
+
+#[tokio::test]
+async fn deleting_an_import_line_does_not_leave_an_empty_row() {
+	let workspace = common::Workspace::new(EditMode::ApplyPatch);
+	let path = workspace.write("fixture.txt", "from x import (\n    A,\n    B,\n)\n");
+	workspace.apply_raw(&update("@@\n-    A,"), &common::DiskWriter::default()).await.unwrap();
+	assert_eq!(std::fs::read(&path).unwrap(), b"from x import (\n    B,\n)\n");
+	workspace.apply_raw(&update("@@\n-    B,\n+    C,"), &common::DiskWriter::default()).await.unwrap();
+	assert_eq!(std::fs::read(path).unwrap(), b"from x import (\n    C,\n)\n");
+}
