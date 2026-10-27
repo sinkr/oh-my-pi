@@ -3229,12 +3229,16 @@ export class SessionManager {
 	 * {@link isSessionOnDisk}, counting only what the backing store has
 	 * confirmed. Remote storage publishes asynchronously, so a hint printed
 	 * just before the process exits must not count a write still in flight:
-	 * the exit aborts it and `--resume <id>` would find nothing.
+	 * the exit aborts it and `--resume <id>` would find nothing. A deferring
+	 * store without `existsConfirmedSync` cannot vouch for its writes, so it
+	 * reports false.
 	 */
 	isSessionConfirmedOnDisk(): boolean {
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile) return false;
-		return this.#storage.existsConfirmedSync?.(sessionFile) ?? this.#storage.existsSync(sessionFile);
+		const storage = this.#storage;
+		if (storage.existsConfirmedSync) return storage.existsConfirmedSync(sessionFile);
+		return !storage.defersSyncPublish && storage.existsSync(sessionFile);
 	}
 
 	getArtifactsDir(): string | null {
