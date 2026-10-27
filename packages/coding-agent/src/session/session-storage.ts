@@ -173,7 +173,8 @@ export interface SessionStorage {
 	 * on a deferring backend also reports queued, unconfirmed writes; a check
 	 * that must not outlive an aborted publish (an exit-time resume hint) uses
 	 * this instead. In-body backends omit it: their {@link existsSync} already
-	 * reports confirmed state.
+	 * reports confirmed state. A {@link defersSyncPublish} backend that omits
+	 * it is treated as never confirmed.
 	 */
 	existsConfirmedSync?(path: string): boolean;
 	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void;

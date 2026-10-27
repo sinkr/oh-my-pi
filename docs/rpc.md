@@ -96,6 +96,7 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 13. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 14. Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
 15. Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
+16. Draft-only dictation frames (`dictation_state`, `dictation_transcript`, `dictation_end`); see [Dictation Sub-Protocol](#dictation-sub-protocol)
 
 Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
@@ -364,7 +365,7 @@ Wait on `prompt_result` to present a turn's answer; wait on `session_settled` (o
 
 ### `open_session` payload
 
-`open_session` binds the process to a host-keyed conversation directory — the runtime equivalent of `--session-dir <dir> --continue`, so a pre-spawned process can adopt a thread after startup. It continues the newest non-empty session in `sessionDir`, or starts a fresh session there when none exists. Reopening the session that is already active (including a still-empty fresh session in the same directory) is a no-op that does not interrupt a running turn; otherwise the current run is aborted as with `switch_session`, and open prompts complete with `status: "aborted"`.
+`open_session` binds the process to a host-keyed conversation directory — the runtime equivalent of `--session-dir <dir> --continue`, so a pre-spawned process can adopt a thread after startup. It continues the newest non-empty session in `sessionDir` (or, like `--continue` in a terminal with no record of its last session, the copy of that session's conversation with the newest turn when it went on in another file), or starts a fresh session there when none exists. Reopening the session that is already active (including a still-empty fresh session in the same directory) is a no-op that does not interrupt a running turn; otherwise the current run is aborted as with `switch_session`, and open prompts complete with `status: "aborted"`.
 
 ```json
 { "cancelled": false, "resumed": true, "sessionId": "01a0...", "sessionFile": "/srv/threads/t1/2026-...jsonl" }
@@ -431,7 +432,7 @@ Take queued user input back and abort, atomically — the RPC equivalent of pres
 {"id":"req_4","type":"response","command":"abort_and_restore_queue","success":true,"data":{"steering":[{"text":"Use the existing parser"}],"followUp":[{"text":"Then run the tests","images":[{"type":"image","mimeType":"image/png","data":"..."}]}]}}
 ```
 
-Before aborting, the server withdraws every user-authored steering and follow-up message, including input the run already took from the queue but never recorded in the transcript: steering the aborted response claimed live, and steering or follow-ups dequeued for its next model call. Non-user internal steers (goal/plan/budget notices, IRC and extension asides) are dropped, except advisor cards, which the abort keeps as visible advice. Nothing withdrawn runs after the abort, so no new turn starts from the old queue. A plain `abort` instead requeues stranded steers and drains them into a fresh turn; withdrawing them first with `remove_queued_message` races the agent loop.
+Before aborting, the server withdraws every user-authored steering and follow-up message, including input the run already took from the queue but never recorded in the transcript: steering the aborted response claimed live, and steering or follow-ups dequeued for its next model call. Visible queued messages that an extension or agent sent (extension cards from `pi.sendMessage`, a parent agent's steer, agent-attributed prompts with their hidden companions, advisor cards) are not returned and not lost: once the run stops, the abort records them in the transcript without starting a turn, so the model sees them with the next prompt. Other hidden queued context is dropped: `display: false` custom messages (goal/plan/budget notices) and synthetic developer directives. The abort starts no turn from the old queue; if another source started a turn while it was finishing, the visible messages join that turn as follow-ups. A plain `abort` instead requeues stranded steers and drains them into a fresh turn; withdrawing them first with `remove_queued_message` races the agent loop.
 
 `data.steering` and `data.followUp` list the withdrawn messages oldest first, as `{ text, images? }` with `text` being the queue-chip text, so a client can put them back in its editor. The command otherwise behaves like `abort`: it stops goal continuation, cancels input received before it that is not yet admitted (that input is dropped, not returned), and responds after the abort completes. Older runtimes reject this command. The TypeScript client exposes `abortAndRestoreQueue(): Promise<{ steering, followUp }>`.
 
@@ -1419,7 +1420,7 @@ connection and the pending `live_start` then fails. `voice` defaults to the
 `live.voice` setting and the response reports the voice used. `instructions`
 replaces the bundled live prompt; it is rendered as a Handlebars template with
 `{{username}}` and `{{firstName}}` of the local OS account. Starting while a
-session is connecting, active, or closing fails.
+session is connecting, active, or closing, or while dictation is active, fails.
 
 `live_stop` responds after the session has stopped and succeeds when none is
 active. `live_mute` sets the microphone mute, or toggles it when `muted` is
@@ -1441,6 +1442,38 @@ Live frames are not session events: `set_event_filter` never drops them.
 
 Closing stdin, or `pi.shutdown()`, stops an active live session before the
 process exits.
+
+## Dictation Sub-Protocol
+
+Draft-only dictation captures from the machine's microphone using the session's
+configured `modelRoles.dictation` speech-to-text engine and `stt.language`.
+It requires `stt.enabled: true`; when disabled, start fails before opening the
+microphone or initializing a speech model. It does not submit a prompt,
+interpret speech submit triggers, or play audio.
+Live voice and dictation are mutually exclusive, including while either starts
+or stops.
+
+- `{ id?, type: "dictation_start", captureId: string }` starts a capture and responds when recording. `captureId` must be a non-blank string of at most 128 UTF-16 code units; the host must choose a unique ID for each capture.
+- `{ id?, type: "dictation_stop" }` stops the microphone and flushes transcription, then responds with `data: { text: string }`. With no capture it succeeds with empty text. A failure returns an error response.
+
+Bundled clients allow 600 seconds for both dictation commands: start may need to download and load a cold speech model, and stop may need to finish a slow local or cloud transcription flush. The TypeScript `RpcClient.dictationStart(captureId, timeoutMs)` and `RpcClient.dictationStop(timeoutMs)` accept caller-selected deadlines in milliseconds. A client timeout only stops waiting; it does not cancel the server operation. Send `dictation_stop` (or call `dictationStop()`) to cancel a pending start or stop an active capture, and keep the `dictation_end` subscription active to receive a flush result that arrives after a request deadline.
+
+Stop can be sent while start is pending: it cancels the start, waits for the
+microphone to close, and causes the pending start to fail. The terminal frame
+may arrive before either response, so subscribe before starting and correlate
+by `captureId` rather than response order.
+
+These unsolicited frames bypass `set_event_filter`:
+
+- `{ type: "dictation_state", captureId, state: "starting" | "recording" | "transcribing" }`
+- `{ type: "dictation_transcript", captureId, text }` — full accumulated preview; replace the prior preview for this capture rather than appending it.
+- `{ type: "dictation_end", captureId, text, error? }` — exactly one terminal frame for a started capture, with its accumulated result and an optional error. The stop result and terminal frame describe the same text; insert it only once into the draft that initiated the capture.
+
+Session changes stop and flush dictation before changing sessions, including
+extension-initiated transitions. A transcription failure is reported in the
+terminal frame but does not veto the session change once capture has been
+released. On stdin EOF, RPC output failure, or process shutdown, active capture
+is disposed and the microphone is closed without waiting for transcription.
 
 ## Host URI Sub-Protocol
 
@@ -1666,6 +1699,7 @@ Current helper characteristics:
 - Exposes `onPromptResult()`, `onSessionSettled()`, command-availability and subagent listeners, plus extension UI requests
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
 - Drives live voice sessions with `liveStart()`, `liveStop()`, `liveMute()`, and delivers live frames through `onLive()`
+- Drives draft-only speech input with `dictationStart(captureId)`, `dictationStop()`, and `onDictation()`
 - `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
 - Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)` and `getLogoutAccounts(...)` / `logout(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
 
