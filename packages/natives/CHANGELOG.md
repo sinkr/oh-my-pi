@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in, cycle-safe descendant-link traversal to native `glob` through `followLinks`, leaving default traversal unchanged ([#17180](https://github.com/can1357/oh-my-pi/pull/17180) by [@alphastorm](https://github.com/alphastorm))
+
+### Fixed
+
+- Fixed native `glob` file-type filters discarding target size and modification time for linked files ([#17180](https://github.com/can1357/oh-my-pi/pull/17180) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.13.0] - 2026-10-26
 
 ### Added
