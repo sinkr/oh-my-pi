@@ -110,6 +110,17 @@ import {
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
 import { yieldIfDue } from "./utils/yield";
+
+async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
+	try {
+		while (agentPauseGate.paused && !signal?.aborted) {
+			config.onPauseChange?.(true);
+			await agentPauseGate.waitUntilResumed(signal);
+		}
+	} finally {
+		config.onPauseChange?.(false);
+	}
+}
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
 
@@ -1331,7 +1342,7 @@ async function runLoopBody(
 				// Park at the turn boundary while the process-wide pause gate is
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
+				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1443,6 +1454,7 @@ async function runLoopBody(
 				let recovered: HarmonyRecoveredToolCall | undefined;
 				let message: AssistantMessage;
 				try {
+					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(
 						currentContext,
 						config,
@@ -3349,6 +3361,7 @@ async function executeToolCalls(
 			tool,
 			args,
 			interruptible,
+			handlesToolInterrupt: interruptible && tool?.handlesToolInterrupt === true,
 			signal: interruptible ? interruptibleSignal : nonInterruptibleSignal,
 			started: false,
 			result: undefined as AgentToolResult<any> | undefined,
@@ -3366,6 +3379,22 @@ async function executeToolCalls(
 			transformError: prepared.transformError,
 		};
 	});
+
+	// Derive batch readiness from existing dispatch records, not extra participants.
+	const refreshPauseState = (): void => {
+		config.onPauseChange?.(
+			agentPauseGate.paused &&
+				!signal?.aborted &&
+				!speculationCoordinator?.isRunning &&
+				records.some(record => !record.started && !record.skipped && !record.toolResultMessage) &&
+				!records.some(record => record.started && !record.toolResultMessage),
+		);
+	};
+	if (speculationCoordinator) speculationCoordinator.onIdle = refreshPauseState;
+
+	const isToolAborted = (record: (typeof records)[number]): boolean =>
+		signal?.aborted === true ||
+		(record.signal.aborted && !(record.handlesToolInterrupt && record.signal.reason === TOOL_INTERRUPT_ABORT_REASON));
 
 	const checkAsideInterrupts = async (): Promise<void> => {
 		// Asides only fire once: an interrupt already recorded on interruptState
@@ -3429,9 +3458,9 @@ async function executeToolCalls(
 			// interruptMode is "wait") raises the cooperative soft signal for
 			// everything else: the boundary dequeue
 			// below injects the message as soon as running tools finish (or
-			// background themselves), and not-yet-started interruptible waits
-			// are skipped. Idempotent — a second steer poll after the abort is
-			// a no-op.
+			// background themselves). Not-yet-started interruptible tools are
+			// skipped unless they can drain the queued wake. Idempotent — a
+			// second steer poll after the abort is a no-op.
 			if (!steeringAbortController.signal.aborted) {
 				interruptState.triggered = true;
 				interruptState.source = steeringSource ?? "unknown";
@@ -3494,8 +3523,8 @@ async function executeToolCalls(
 	};
 
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
-		// A pending interrupt preempts not-yet-started *interruptible* waits so
-		// the message injects promptly instead of sitting out a `wait`.
+		// A pending interrupt preempts not-yet-started interruptible tools,
+		// except receivers that drain the wake with an already-aborted signal.
 		// Non-interruptible work is never skipped, whatever the source: the
 		// expensive part — generating the call — is already paid, the tool
 		// itself is cheap, and a skip only makes the model re-emit the same
@@ -3505,7 +3534,7 @@ async function executeToolCalls(
 		// the parent steers mid-stream (#10645). The steer still injects at the
 		// batch boundary; the cooperative soft signal lets long-running tools
 		// step aside on their own.
-		if (interruptState.triggered && record.interruptible) {
+		if (interruptState.triggered && record.interruptible && !record.handlesToolInterrupt) {
 			// Skip both span emission and the collector orphan record here. The
 			// tail sweep below (after `Promise.allSettled`) is the single path
 			// that handles "no result message was produced" — it calls
@@ -3517,7 +3546,11 @@ async function executeToolCalls(
 		// Park before starting this tool while the process-wide pause gate is
 		// engaged. Tools already executing are unaffected (pausing never aborts);
 		// a batch interrupted mid-pause unwinds via the signal checks below.
-		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(record.signal);
+		while (agentPauseGate.paused && !record.signal.aborted) {
+			refreshPauseState();
+			await agentPauseGate.waitUntilResumed(record.signal);
+		}
+		config.onPauseChange?.(false);
 
 		const { toolCall, tool } = record;
 		// Validation (and the beforeToolCall hook) ran in the prepare phase; a
@@ -3535,14 +3568,14 @@ async function executeToolCalls(
 			return;
 		}
 		const effectiveArgs = record.args;
-		if (record.signal.aborted) {
+		if (isToolAborted(record)) {
 			record.skipped = true;
 			recordSkippedTool(telemetry, {
 				toolCallId: toolCall.id,
 				toolName: toolCall.name,
 				status: "aborted",
 			});
-			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
+			emitToolResult(record, createToolSignalAbortedResult(signal?.aborted ? signal : record.signal), true);
 			return;
 		}
 		record.started = true;
@@ -3570,17 +3603,19 @@ async function executeToolCalls(
 		let caughtError: unknown;
 		let completedToolExecution = false;
 		let executionStarted = false;
+		const abortBeforeToolExecution = (): boolean => {
+			if (!isToolAborted(record)) return false;
+			result = createToolSignalAbortedResult(signal?.aborted ? signal : record.signal);
+			isError = true;
+			return true;
+		};
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
 				if (!tool) {
 					throw new Error(formatToolNotFoundMessage(toolCall.name, tools, suggestFallbackToolNames?.()));
 				}
-				if (record.signal.aborted) {
-					result = createToolSignalAbortedResult(record.signal);
-					isError = true;
-					return;
-				}
+				if (abortBeforeToolExecution()) return;
 
 				if (record.prepareError !== undefined) throw record.prepareError;
 				if (record.blocked) {
@@ -3591,6 +3626,9 @@ async function executeToolCalls(
 					record.executionArgs ??
 					(transformToolCallArguments ? transformToolCallArguments(effectiveArgs, toolCall.name) : effectiveArgs);
 				record.args = executionArgs;
+				// A transform or awaited claim can cancel the external run after
+				// a queued wake already fixed the combined signal's reason.
+				if (abortBeforeToolExecution()) return;
 
 				const speculativeOutcome = speculationCoordinator
 					? await speculationCoordinator.claim(tool, toolCall, executionArgs)
@@ -3607,6 +3645,7 @@ async function executeToolCalls(
 				}
 
 				if (!completedToolExecution) {
+					if (abortBeforeToolExecution()) return;
 					// The cooperative steering signal and the passive-context sink
 					// ride the loop-owned ToolCallContext (surfacing as
 					// `ctx.toolCall.*`); the host surfaces the sink on the context it
@@ -3631,9 +3670,12 @@ async function executeToolCalls(
 					} else if (streamSession && !streamSession.contextIndependent) {
 						await streamSession.discard("outer tool context cannot carry stream speculation");
 					}
-					executionStarted = true;
 					let rawResult: unknown;
 					try {
+						// Context construction and stream cleanup can also cancel;
+						// nothing may await or call host code after this final check.
+						if (abortBeforeToolExecution()) return;
+						executionStarted = true;
 						rawResult = await tool.execute(
 							toolCall.id,
 							executionArgs,
@@ -3713,10 +3755,10 @@ async function executeToolCalls(
 		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;
 		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
-		if (record.interruptible && interrupted && abortedDuringExecution) {
+		if (record.interruptible && interrupted && abortedDuringExecution && !signal?.aborted) {
 			// Queued steering/asides abort only interruptible tools. An external
-			// user abort can also fail a non-interruptible tool (e.g. cancelled
-			// ask); keep its actual error instead of attributing it to the queue.
+			// user abort takes priority even if a queued interrupt fixed the
+			// combined signal's reason first; keep the actual cancellation error.
 			record.skipped = true;
 			emitToolResult(record, createSkippedToolResult(interruptState.source, executionStarted), true);
 		} else {
@@ -3773,7 +3815,7 @@ async function executeToolCalls(
 		(softInterrupts || records.some(record => record.interruptible)) &&
 		(hasSteeringMessages !== undefined || hasAsidePeek);
 	// Live-taken steering is already pending: interrupt before any call starts
-	// so not-yet-started interruptible waits are skipped outright.
+	// so interruptible tools skip or drain the queued wake without blocking.
 	if (liveSteering.length > 0) await checkSteering();
 	const eventDrivenSteeringWatch =
 		watchSteeringWhileRunning && config.waitForSteeringMessages !== undefined && hasSteeringMessages !== undefined;
@@ -3851,7 +3893,13 @@ async function executeToolCalls(
 			concurrency = concurrencyMode ?? "shared";
 		}
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
-		const task = start.then(() => runTool(record, index));
+		const task = start.then(async () => {
+			try {
+				await runTool(record, index);
+			} finally {
+				refreshPauseState();
+			}
+		});
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
@@ -3863,6 +3911,8 @@ async function executeToolCalls(
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
+		if (speculationCoordinator) speculationCoordinator.onIdle = undefined;
+		config.onPauseChange?.(false);
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);
