@@ -59,3 +59,27 @@ jobs:
         run: nix flake check --all-systems --no-build --show-trace
       - name: Verify generated Bun dependencies
         run: nix build --no-link .#checks.x86_64-linux.bun-lock --show-trace
+
+  # A cold build without a binary cache takes ~30 minutes, so pull requests
+  # only evaluate; main pushes build and smoke-test the package once. Thin LTO
+  # exercises the same derivations as release builds at a fraction of the link.
+  build:
+    name: Build package
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+      - name: Build omp with thin LTO
+        run: |
+          out=$(nix build --no-link --print-out-paths --print-build-logs --show-trace --impure \
+            --expr "(builtins.getFlake \"git+file://$GITHUB_WORKSPACE\").packages.x86_64-linux.omp.override { withFatLto = false; }")
+          echo "OMP_OUT=$out" >> "$GITHUB_ENV"
+      - name: Smoke-test omp
+        run: |
+          "$OMP_OUT/bin/omp" --version
+          "$OMP_OUT/bin/omp" --smoke-test
