@@ -21,15 +21,18 @@
 //! points check [`GrammarSource::load`] first and treat
 //! [`GrammarError::NotInstalled`] as "no tree" or report it.
 
+#[cfg(feature = "wasm")]
+use std::{cell::RefCell, sync::LazyLock};
 use std::{
-	cell::RefCell,
 	error::Error,
 	fmt,
 	path::PathBuf,
-	sync::{LazyLock, Mutex, OnceLock, PoisonError, RwLock},
+	sync::{Mutex, OnceLock, PoisonError, RwLock},
 };
 
-use anyhow::{Context, Result};
+#[cfg(feature = "wasm")]
+use anyhow::Context;
+use anyhow::Result;
 use tree_sitter::{Language, Parser, Tree};
 #[cfg(feature = "wasm")]
 use tree_sitter::{WasmStore, wasmtime::Engine};
