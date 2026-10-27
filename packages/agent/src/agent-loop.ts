@@ -3361,6 +3361,7 @@ async function executeToolCalls(
 			tool,
 			args,
 			interruptible,
+			handlesToolInterrupt: interruptible && tool?.handlesToolInterrupt === true,
 			signal: interruptible ? interruptibleSignal : nonInterruptibleSignal,
 			started: false,
 			result: undefined as AgentToolResult<any> | undefined,
@@ -3390,6 +3391,10 @@ async function executeToolCalls(
 		);
 	};
 	if (speculationCoordinator) speculationCoordinator.onIdle = refreshPauseState;
+
+	const isToolAborted = (record: (typeof records)[number]): boolean =>
+		signal?.aborted === true ||
+		(record.signal.aborted && !(record.handlesToolInterrupt && record.signal.reason === TOOL_INTERRUPT_ABORT_REASON));
 
 	const checkAsideInterrupts = async (): Promise<void> => {
 		// Asides only fire once: an interrupt already recorded on interruptState
@@ -3453,9 +3458,9 @@ async function executeToolCalls(
 			// interruptMode is "wait") raises the cooperative soft signal for
 			// everything else: the boundary dequeue
 			// below injects the message as soon as running tools finish (or
-			// background themselves), and not-yet-started interruptible waits
-			// are skipped. Idempotent — a second steer poll after the abort is
-			// a no-op.
+			// background themselves). Not-yet-started interruptible tools are
+			// skipped unless they can drain the queued wake. Idempotent — a
+			// second steer poll after the abort is a no-op.
 			if (!steeringAbortController.signal.aborted) {
 				interruptState.triggered = true;
 				interruptState.source = steeringSource ?? "unknown";
@@ -3518,8 +3523,8 @@ async function executeToolCalls(
 	};
 
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
-		// A pending interrupt preempts not-yet-started *interruptible* waits so
-		// the message injects promptly instead of sitting out a `wait`.
+		// A pending interrupt preempts not-yet-started interruptible tools,
+		// except receivers that drain the wake with an already-aborted signal.
 		// Non-interruptible work is never skipped, whatever the source: the
 		// expensive part — generating the call — is already paid, the tool
 		// itself is cheap, and a skip only makes the model re-emit the same
@@ -3529,7 +3534,7 @@ async function executeToolCalls(
 		// the parent steers mid-stream (#10645). The steer still injects at the
 		// batch boundary; the cooperative soft signal lets long-running tools
 		// step aside on their own.
-		if (interruptState.triggered && record.interruptible) {
+		if (interruptState.triggered && record.interruptible && !record.handlesToolInterrupt) {
 			// Skip both span emission and the collector orphan record here. The
 			// tail sweep below (after `Promise.allSettled`) is the single path
 			// that handles "no result message was produced" — it calls
@@ -3563,14 +3568,14 @@ async function executeToolCalls(
 			return;
 		}
 		const effectiveArgs = record.args;
-		if (record.signal.aborted) {
+		if (isToolAborted(record)) {
 			record.skipped = true;
 			recordSkippedTool(telemetry, {
 				toolCallId: toolCall.id,
 				toolName: toolCall.name,
 				status: "aborted",
 			});
-			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
+			emitToolResult(record, createToolSignalAbortedResult(signal?.aborted ? signal : record.signal), true);
 			return;
 		}
 		record.started = true;
@@ -3604,8 +3609,8 @@ async function executeToolCalls(
 				if (!tool) {
 					throw new Error(formatToolNotFoundMessage(toolCall.name, tools, suggestFallbackToolNames?.()));
 				}
-				if (record.signal.aborted) {
-					result = createToolSignalAbortedResult(record.signal);
+				if (isToolAborted(record)) {
+					result = createToolSignalAbortedResult(signal?.aborted ? signal : record.signal);
 					isError = true;
 					return;
 				}
@@ -3801,7 +3806,7 @@ async function executeToolCalls(
 		(softInterrupts || records.some(record => record.interruptible)) &&
 		(hasSteeringMessages !== undefined || hasAsidePeek);
 	// Live-taken steering is already pending: interrupt before any call starts
-	// so not-yet-started interruptible waits are skipped outright.
+	// so interruptible tools skip or drain the queued wake without blocking.
 	if (liveSteering.length > 0) await checkSteering();
 	const eventDrivenSteeringWatch =
 		watchSteeringWhileRunning && config.waitForSteeringMessages !== undefined && hasSteeringMessages !== undefined;
