@@ -1369,6 +1369,8 @@
 ### Fixed
 
 - Fixed plugin skill upgrades failing after a name collision when the plugin cache is reached through a symlink, including macOS path aliases; rediscovery still requires the original plugin's identity.
+- Preserved SQL-backed title, ID, and path resume through continuation lookup, including `/clir`, while retaining replaced-file safeguards.
+- Preserved literal path-shaped paste in hook editors, side-question follow-ups, and approval steering without disabling image-only clipboard paste.
 
 Older entries are archived in [packages/coding-agent/CHANGELOG.md@529c1841b699](https://github.com/can1357/oh-my-pi/blob/529c1841b6990b8c014aa79bac60ac2d54fbaf83/packages/coding-agent/CHANGELOG.md).
 ## [18.13.2] - 2026-10-27
