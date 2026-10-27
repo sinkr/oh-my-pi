@@ -20,7 +20,6 @@ import {
 	getBtwTurns,
 } from "./btw-history";
 import { compactImageMarkers, formatVisionMarker } from "../prompt/composer-attachments";
-import { extractImagePastePathsFromText } from "../prompt/custom-editor";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
 import {
@@ -64,8 +63,6 @@ interface BtwHistoryPanelOptions {
 	) => Promise<boolean>;
 	/** Read a clipboard image into the follow-up (an empty paste, as terminals send for one). */
 	onPasteImage?: () => Promise<unknown>;
-	/** Attach an image file whose path was pasted or dropped into the follow-up. */
-	onPasteImagePath?: (path: string) => Promise<void>;
 	/** Configured push-to-talk keys for a follow-up composer. */
 	spaceHoldKeys?: readonly KeyId[];
 	spaceHold?: (input: Input) => SpaceHoldHandler;
@@ -382,7 +379,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options.requestRender();
 		let images: ImageContent[] | undefined;
 		if (composer.images.length > 0) {
-			// Path pastes attach as they finish loading; submit numbers images in text order.
+			// Clipboard images can finish loading out of order; number them in text order.
 			const compacted = compactImageMarkers(question, composer.images.length, { byAppearance: true });
 			images = compacted ? compacted.keep.map(index => composer.images[index]!) : composer.images;
 			if (compacted) question = compacted.text.trim();
@@ -468,13 +465,11 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options.requestRender();
 	}
 
-	/** A pasted image path or an empty (clipboard image) paste attaches an image; other text is typed. */
+	/** Empty pastes read clipboard images; all nonempty payloads remain literal text. */
 	#paste(content: string): void {
-		const imagePaths = extractImagePastePathsFromText(content);
 		if (content.length === 0 && this.#options.onPasteImage) void this.#options.onPasteImage();
-		else if (imagePaths && this.#options.onPasteImagePath) {
-			for (const path of imagePaths) void this.#options.onPasteImagePath(path);
-		} else this.pasteText(content);
+		// Path-shaped clipboard text is still text, not an image attachment.
+		else this.pasteText(content);
 	}
 
 	handleInput(data: string): void {
