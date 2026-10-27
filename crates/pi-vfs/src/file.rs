@@ -600,6 +600,25 @@ impl File {
 		}
 	}
 
+	/// A synchronous read that also fails with [`crate::cancelled`] once
+	/// `cancel` fires, for a reader whose cancellation is narrower than that of
+	/// the facade that opened the file (a `timeout` operand reading a redirect
+	/// its outer command opened). A provider read is raced against `cancel`; a
+	/// host read checks it first, then reads as [`Read::read`] does.
+	pub fn read_until_cancelled(
+		&self,
+		buf: &mut [u8],
+		cancel: &CancellationToken,
+	) -> io::Result<usize> {
+		if cancel.is_cancelled() {
+			return Err(crate::cancelled());
+		}
+		match &self.repr {
+			Repr::Native(file) => self.read_host(file, |reader| reader.read(buf)),
+			Repr::Virtual(shared) => shared.run(Scope::guard(Some(cancel), shared.handle().read(buf))),
+		}
+	}
+
 	pub async fn read_async(&self, buf: &mut [u8]) -> io::Result<usize> {
 		match &self.repr {
 			Repr::Native(file) => self.read_host(file, |reader| reader.read(buf)),

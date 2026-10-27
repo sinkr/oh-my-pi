@@ -1438,7 +1438,11 @@ pub(crate) struct Stdin {
 	file:   OpenFile,
 	#[cfg_attr(not(unix), allow(dead_code, reason = "readiness polling is unix-only"))]
 	fd:     Option<i32>,
-	cancel: Arc<AtomicBool>,
+	/// The command's cancellation. A provider-backed fd 0 (`< virtual://f`) has
+	/// no descriptor to poll, and the facade that opened it is usually the
+	/// outer command's, not this command's (a `timeout` operand), so its reads
+	/// are raced against this command's token directly.
+	cancel: CommandCancel,
 }
 
 impl Stdin {
@@ -1459,14 +1463,14 @@ impl Stdin {
 	pub fn try_clone(&self) -> io::Result<Self> {
 		let file = self.file.try_clone()?;
 		let fd = pollable_fd(&file);
-		Ok(Self { file, fd, cancel: Arc::clone(&self.cancel) })
+		Ok(Self { file, fd, cancel: self.cancel.clone() })
 	}
 
 	/// Whether the command was cancelled, for utilities that read fd 0's
 	/// descriptor directly (`wc -c` splices a pipe) and so bypass the reads
 	/// that fail once it is.
 	pub fn is_cancelled(&self) -> bool {
-		self.cancel.load(Ordering::Relaxed)
+		self.cancel.fired()
 	}
 }
 
@@ -1491,16 +1495,19 @@ fn pollable_fd(file: &OpenFile) -> Option<i32> {
 
 impl Read for Stdin {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		if self.cancel.load(Ordering::Relaxed) {
+		if self.cancel.fired() {
 			return Err(pi_vfs::cancelled());
 		}
 		#[cfg(unix)]
 		if let Some(fd) = self.fd {
 			// SAFETY: `fd` is owned by the live `OpenFile` held in this struct.
 			let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-			pi_vfs::wait_readable(fd, || self.cancel.load(Ordering::Relaxed))?;
+			pi_vfs::wait_readable(fd, || self.cancel.fired())?;
 		}
-		self.file.read(buf)
+		match (&self.file, &self.cancel.token) {
+			(OpenFile::Vfs(file), Some(token)) => file.read_until_cancelled(buf, token),
+			_ => self.file.read(buf),
+		}
 	}
 }
 
@@ -1953,7 +1960,7 @@ fn build_host<SE: ShellExtensions>(
 		stdin: Stdin {
 			file:   or_null(stdin)?,
 			fd:     stdin_fd,
-			cancel: Arc::clone(&cancel),
+			cancel: command_cancel,
 		},
 		stdout,
 		stderr,
@@ -2104,7 +2111,7 @@ mod testing {
 				stdin:                 Stdin {
 					file:   OpenFile::Stream(stdin),
 					fd:     None,
-					cancel: Arc::clone(&cancel),
+					cancel: command_cancel.clone(),
 				},
 				stdout:                SigpipeGuard::wrap(
 					stdout,
