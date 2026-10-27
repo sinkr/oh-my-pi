@@ -26,8 +26,8 @@ use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
 use crate::grep::{
-	CompiledMatcher, MAX_LINE_BYTES, RecordFormat, describe_search_error, exit_status,
-	for_each_nonempty_match, pcre2_jit_enabled, read_pattern_source,
+	BoundedSearchReader, CompiledMatcher, RecordFormat, SEARCH_HEAP_LIMIT, describe_search_error,
+	exit_status, for_each_nonempty_match, pcre2_jit_enabled, read_pattern_source,
 };
 use crate::host::{Host, StreamWriter, Utility, forward_slash_display};
 
@@ -918,7 +918,7 @@ fn build_searcher(cli: &Rg, opts: &SearchOptions, mode: BinaryMode) -> Result<Se
 		.max_matches(cli.max_count)
 		.encoding(encoding)
 		.bom_sniffing(bom_sniffing)
-		.heap_limit(Some(MAX_LINE_BYTES));
+		.heap_limit(Some(SEARCH_HEAP_LIMIT));
 	if cli.null_data {
 		builder.line_terminator(LineTerminator::byte(b'\0'));
 	} else if cli.crlf && !cli.no_crlf {
@@ -1230,6 +1230,7 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 	stats: &mut Stats,
 	out: &mut W,
 ) -> io::Result<bool> {
+	let reader = BoundedSearchReader::new(reader, searcher, matcher);
 	if opts.json {
 		let mut builder = JSONBuilder::new();
 		builder.replacement(opts.replacement.clone());
@@ -1308,7 +1309,7 @@ fn process_file<M: Matcher, W: Write>(
 		Ok(any_match) => Ok(SearchOutcome { any_match, had_error: false }),
 		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
 		Err(error) => {
-			let message = describe_search_error(&error, searcher.multi_line_with_matcher(matcher));
+			let message = describe_search_error(&error);
 			Ok(SearchOutcome {
 				any_match: false,
 				had_error: report_path_error(host, display, path, &message, opts),
@@ -1751,14 +1752,7 @@ fn execute_search<M: Matcher, W: Write>(
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
-						let _ = writeln!(
-							host.stderr,
-							"rg: <stdin>: {}",
-							describe_search_error(
-								&error,
-								explicit_searcher.multi_line_with_matcher(matcher)
-							)
-						);
+						let _ = writeln!(host.stderr, "rg: <stdin>: {}", describe_search_error(&error));
 					}
 				},
 			}

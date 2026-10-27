@@ -1074,6 +1074,7 @@ fn process_reader<M: Matcher, R: Read, W: Write>(
 ) -> io::Result<bool> {
 	let mut sink =
 		GrepSink { out, matcher, display, opts, match_count: 0, any_match: false, binary: false };
+	let reader = BoundedSearchReader::new(reader, searcher, matcher);
 	searcher.search_reader(matcher, reader, &mut sink)?;
 	Ok(sink.any_match)
 }
@@ -1114,7 +1115,7 @@ fn search_file_path<M: Matcher, W: Write>(
 							host.stderr,
 							"grep: {}: {}",
 							display_path.to_string_lossy(),
-							describe_search_error(&error, false)
+							describe_search_error(&error)
 						);
 					}
 					Ok(false)
@@ -1370,19 +1371,80 @@ fn build_path_rules(host: &mut Host, cli: &GrepArgs, matches: &ArgMatches) -> Re
 /// Pattern files (`-f`) are held to the same size.
 pub(crate) const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Says what happened when a search stopped at [`MAX_LINE_BYTES`]; any other
-/// error reads as reported. `whole_file` is set when the searcher buffers the
-/// whole file (multi-line search) rather than one line.
-pub(crate) fn describe_search_error(error: &io::Error, whole_file: bool) -> String {
-	let message = error.to_string();
-	// grep-searcher reports its heap limit only through this message.
-	if error.kind() == io::ErrorKind::Other
-		&& message == format!("configured allocation limit ({MAX_LINE_BYTES}) exceeded")
-	{
-		let what = if whole_file { "file larger than" } else { "line longer than" };
-		format!("{what} {} MiB, not searched", MAX_LINE_BYTES >> 20)
-	} else {
-		message
+/// The searcher's own allocation cap, a backstop behind [`BoundedSearchReader`].
+///
+/// The reader stops a run one read past [`MAX_LINE_BYTES`], so the buffer needs
+/// that much room plus one read's worth of growth before the typed error fires;
+/// retained context lines can still push it over, and that rarer failure is
+/// reported with the searcher's own message.
+pub(crate) const SEARCH_HEAP_LIMIT: usize = MAX_LINE_BYTES + (1 << 20);
+
+/// A search stopped because one record outgrew [`MAX_LINE_BYTES`].
+#[derive(Debug)]
+pub(crate) struct LineLimitExceeded {
+	/// The searcher buffers the whole file (multi-line search), not one line.
+	whole_file: bool,
+}
+
+impl fmt::Display for LineLimitExceeded {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let what = if self.whole_file { "file larger than" } else { "line longer than" };
+		write!(f, "{what} {} MiB, not searched", MAX_LINE_BYTES >> 20)
+	}
+}
+
+impl std::error::Error for LineLimitExceeded {}
+
+/// Enforces [`MAX_LINE_BYTES`] on what a searcher reads, failing with a typed
+/// [`LineLimitExceeded`] instead of letting the searcher's buffer grow.
+///
+/// In line mode it tracks the unterminated run since the last terminator; in
+/// whole-file mode (no terminator) every byte counts. It wraps the raw input,
+/// beneath grep-searcher's decoder, so the error reaches the caller unchanged.
+pub(crate) struct BoundedSearchReader<R> {
+	inner:      R,
+	/// `None` bounds the whole input rather than one line.
+	terminator: Option<u8>,
+	run:        usize,
+}
+
+impl<R: Read> BoundedSearchReader<R> {
+	/// Bounds `inner` the way `searcher` will buffer it for `matcher`.
+	pub(crate) fn new<M: Matcher>(inner: R, searcher: &Searcher, matcher: M) -> Self {
+		let terminator =
+			(!searcher.multi_line_with_matcher(matcher)).then(|| searcher.line_terminator().as_byte());
+		Self { inner, terminator, run: 0 }
+	}
+}
+
+impl<R: Read> Read for BoundedSearchReader<R> {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		let n = self.inner.read(buf)?;
+		let chunk = &buf[..n];
+		// Lines strictly inside one read are shorter than the read, which the
+		// searcher's heap limit already bounds; only the run crossing into
+		// this read and the one left open at its end can grow without bound.
+		let (crossing, open) = match self.terminator {
+			Some(byte) => match memchr::memchr(byte, chunk) {
+				Some(first) => (self.run + first, n - memchr::memrchr(byte, chunk).map_or(0, |last| last + 1)),
+				None => (self.run + n, self.run + n),
+			},
+			None => (self.run + n, self.run + n),
+		};
+		if crossing.max(open) > MAX_LINE_BYTES {
+			return Err(io::Error::other(LineLimitExceeded { whole_file: self.terminator.is_none() }));
+		}
+		self.run = open;
+		Ok(n)
+	}
+}
+
+/// The message for a failed search: [`LineLimitExceeded`] says which bound it
+/// hit, anything else reads as reported.
+pub(crate) fn describe_search_error(error: &io::Error) -> String {
+	match error.get_ref().and_then(|inner| inner.downcast_ref::<LineLimitExceeded>()) {
+		Some(limit) => limit.to_string(),
+		None => error.to_string(),
 	}
 }
 
@@ -1428,7 +1490,7 @@ fn build_searcher(cli: &GrepArgs, opts: &Options, max_count: Option<u64>) -> Sea
 		.invert_match(cli.invert)
 		.binary_detection(binary_detection)
 		.max_matches(max_count)
-		.heap_limit(Some(MAX_LINE_BYTES));
+		.heap_limit(Some(SEARCH_HEAP_LIMIT));
 	if cli.null_data {
 		builder.line_terminator(LineTerminator::byte(b'\0'));
 	}
@@ -1488,7 +1550,7 @@ fn execute_search<M: Matcher>(
 						let _ = writeln!(
 							host.stderr,
 							"grep: (standard input): {}",
-							describe_search_error(&error, false)
+							describe_search_error(&error)
 						);
 					}
 				},
@@ -1868,6 +1930,44 @@ mod tests {
 		assert_eq!(capture.out(), "");
 		let err = capture.err();
 		assert!(err.contains("grep: big: pattern file larger than 256 MiB"), "{err}");
+	}
+
+	/// Drains `input` through the line bound, as the searcher would, and
+	/// returns the typed limit error if one stopped it.
+	fn drain_bounded(input: impl Read, terminator: Option<u8>) -> Option<String> {
+		let mut reader = BoundedSearchReader { inner: input, terminator, run: 0 };
+		let mut buf = vec![0u8; 64 * 1024];
+		loop {
+			match reader.read(&mut buf) {
+				Ok(0) => return None,
+				Ok(_) => {},
+				Err(error) => {
+					assert!(
+						error.get_ref().is_some_and(|inner| inner.is::<LineLimitExceeded>()),
+						"untyped error: {error}"
+					);
+					return Some(describe_search_error(&error));
+				},
+			}
+		}
+	}
+
+	/// The bound counts the unterminated run, including one that a terminator
+	/// later in the same read closes: a line one byte over fails with the typed
+	/// error whether or not it is ever terminated, and a terminator resets it.
+	#[test]
+	fn line_bound_fails_one_byte_past_the_limit_with_a_typed_error() {
+		let limit = MAX_LINE_BYTES as u64;
+		let line = || io::repeat(b'x').take(limit);
+
+		assert_eq!(drain_bounded(line().chain(&b"\n"[..]).chain(line()), Some(b'\n')), None);
+		let over = Some("line longer than 256 MiB, not searched".to_owned());
+		assert_eq!(drain_bounded(line().chain(&b"x"[..]), Some(b'\n')), over);
+		assert_eq!(drain_bounded(line().chain(&b"x\nshort\n"[..]), Some(b'\n')), over);
+		assert_eq!(
+			drain_bounded(line().chain(&b"\n"[..]).chain(line()).chain(&b"\n"[..]), None),
+			Some("file larger than 256 MiB, not searched".to_owned())
+		);
 	}
 
 	#[test]
