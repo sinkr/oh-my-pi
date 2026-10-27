@@ -2006,14 +2006,25 @@ export class SessionTools {
 		}, signal);
 	}
 
-	/** Restores a non-MCP presentation snapshot while retaining the current MCP selection. */
-	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void> {
+	/** Restores a non-MCP presentation snapshot plus the MCP selection and non-built-in tools registered after it. */
+	restoreNonMCPToolPresentation(
+		nonMCPToolNames: string[],
+		nonMCPMountedToolNames: string[],
+		registeredToolNames: readonly string[],
+	): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
+			const registered = new Set(registeredToolNames);
+			const isLateNonBuiltIn = (name: string) =>
+				!isMCPToolName(name) && !this.hasBuiltInTool(name) && !registered.has(name);
 			const currentMCPToolNames = this.getSelectedMCPToolNames();
 			const currentMountedMCPToolNames = this.getMountedXdevToolNames().filter(isMCPToolName);
 			await this.setActiveToolPresentation(
-				[...nonMCPToolNames, ...currentMCPToolNames],
-				[...nonMCPMountedToolNames, ...currentMountedMCPToolNames],
+				[...nonMCPToolNames, ...currentMCPToolNames, ...this.getEnabledToolNames().filter(isLateNonBuiltIn)],
+				[
+					...nonMCPMountedToolNames,
+					...currentMountedMCPToolNames,
+					...this.getMountedXdevToolNames().filter(isLateNonBuiltIn),
+				],
 			);
 		});
 	}
