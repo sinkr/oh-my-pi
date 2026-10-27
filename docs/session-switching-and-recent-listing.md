@@ -96,7 +96,7 @@ Breadcrumb writes are best-effort and non-fatal.
    - `resolveResumableSession(...)` searches local sessions first, then all sessions unless a custom `sessionDir` disables global fallback
    - matching is case-insensitive and accepts `id` prefix, full JSONL filename prefix, or session-id suffix after the timestamp
    - first match in modified-descending order is used (no ambiguity prompt)
-   - with no match, `findUnlistedSessionContinuation(...)` looks in the same scopes for a `<timestamp>_<id>.jsonl` file whose name matches but which no longer reads as a session (the listing skips it)
+   - with no match, the resolver (`resolveResumeTarget`) looks in the same scopes for a `<timestamp>_<id>.jsonl` file whose name matches but which no longer reads as a session (the listing skips it)
 
 Both modes follow the session's continuations: when its conversation went on in a sibling file whose header names it in `continuationOf`, the copy with the newest turn opens instead (unless the named file has turns that copy lacks) and a notice names both files. A file that no longer holds the session its generated name records was replaced under that session; it is followed by that name's id when it no longer parses, or, for a resume key that matched only the file name, when it holds another session.
 
@@ -146,7 +146,7 @@ Flow:
    - cancel -> hide overlay, restore editor focus, rerender
    - exit -> hide overlay, then `ctx.shutdown()`
 
-`/resume <id-prefix>` resolves local then global matches, follows `findSessionContinuation` from the match to the copy with the newest turn, and switches to it. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
+`/resume <id-prefix>` resolves local then global matches with `resolveResumeTarget`, the same resolver the CLI's `--resume <id>` uses, and switches to the copy it picks. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
 
 ## Session selector component behavior
 
@@ -194,7 +194,7 @@ The recorded model resolves as in startup resume: the first role/default candida
 
 ## UI state rebuild after interactive switch
 
-`SelectorController.handleResumeSession` invokes `switchSession` first (with `followContinuation`, on the copy `findSessionContinuation` picks). If it returns `false`, the selector stops before applying any new-session UI updates and leaves the existing session/UI unchanged. After a successful switch, it:
+`SelectorController.handleResumeSession` invokes `switchSession` first (on the copy a continuation names, found here with `followContinuation` or handed in by the caller). If it returns `false`, the selector stops before applying any new-session UI updates and leaves the existing session/UI unchanged. After a successful switch, it:
 
 - stop loading animation
 - clear status container

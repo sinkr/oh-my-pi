@@ -127,7 +127,7 @@ describe("/resume slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 		expect(harness.showSessionSelector).not.toHaveBeenCalled();
 		expect(harness.showError).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath, { continuation: undefined });
 	});
 
 	it("checks the active session directory before global cwd buckets", async () => {
@@ -141,7 +141,7 @@ describe("/resume slash command", () => {
 
 		expect(handled).toBe(true);
 		expect(harness.showError).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath, { continuation: undefined });
 	});
 
 	it("resumes a matching session id prefix from another cwd", async () => {
@@ -158,7 +158,7 @@ describe("/resume slash command", () => {
 
 		expect(handled).toBe(true);
 		expect(harness.showError).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath);
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPath, { continuation: undefined });
 	});
 
 	it("resumes the continuation of an id whose file no longer reads as a session", async () => {
@@ -174,7 +174,9 @@ describe("/resume slash command", () => {
 
 		expect(handled).toBe(true);
 		expect(harness.showError).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(continuation);
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(continuation, {
+			continuation: expect.objectContaining({ from: replaced, copies: 2 }),
+		});
 	});
 
 	it("resumes the continuation of an id whose file now holds another session", async () => {
@@ -193,7 +195,9 @@ describe("/resume slash command", () => {
 
 		expect(handled).toBe(true);
 		expect(harness.showError).not.toHaveBeenCalled();
-		expect(harness.handleResumeSession).toHaveBeenCalledWith(continuation);
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(continuation, {
+			continuation: expect.objectContaining({ from: replaced, copies: 2 }),
+		});
 	});
 
 	it("keeps explicit session directories scoped unless global fallback is enabled", async () => {
@@ -255,7 +259,7 @@ describe("/resume slash command", () => {
 			const handled = await executeBuiltinSlashCommand("/resume 019ed999", harness.runtime);
 			expect(handled).toBe(true);
 			expect(harness.showError).not.toHaveBeenCalled();
-			expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPathA);
+			expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPathA, { continuation: undefined });
 		} finally {
 			if (originalXdgData !== undefined) process.env.XDG_DATA_HOME = originalXdgData;
 			else delete process.env.XDG_DATA_HOME;

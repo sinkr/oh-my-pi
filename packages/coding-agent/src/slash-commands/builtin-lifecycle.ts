@@ -410,8 +410,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return;
 			}
 			try {
-				// The target is already the copy to open; following it again would be a no-op read.
-				await runtime.ctx.handleResumeSession(target.session.path);
+				await runtime.ctx.handleResumeSession(target.session.path, { continuation: target.continuation });
 			} catch (error) {
 				// The picker reports a failed switch itself; `/resume <id>` has no picker.
 				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
