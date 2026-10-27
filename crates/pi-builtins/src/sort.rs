@@ -136,11 +136,37 @@ fn available_memory_hint() -> Option<usize> {
 
 fn system_available_memory() -> Option<u128> {
 	#[cfg(target_os = "linux")]
-	if let Some(bytes) = uucore::parser::parse_size::available_memory_bytes() {
+	if let Some(bytes) =
+		std::fs::read_to_string("/proc/meminfo").ok().as_deref().and_then(meminfo_available_bytes)
+	{
 		return Some(bytes);
 	}
 
 	physical_memory_bytes()
+}
+
+/// The memory available to start new work, from the text of
+/// `/proc/meminfo`: `MemAvailable`, or on kernels without it `MemFree +
+/// Buffers + Cached`. The file counts in KiB. (uucore's reader multiplied
+/// the procfs crate's values, already in bytes, by 1024 again, so available
+/// memory always gave the 1 GiB maximum; only a cgroup limit made the hint
+/// smaller.)
+#[cfg(any(target_os = "linux", test))]
+fn meminfo_available_bytes(meminfo: &str) -> Option<u128> {
+	let field = |name: &str| -> Option<u128> {
+		meminfo
+			.lines()
+			.find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))?
+			.split_ascii_whitespace()
+			.next()?
+			.parse::<u128>()
+			.ok()
+	};
+	let kib = field("MemAvailable").filter(|&kib| kib > 0).or_else(|| {
+		let free = field("MemFree")? + field("Buffers").unwrap_or(0) + field("Cached").unwrap_or(0);
+		(free > 0).then_some(free)
+	})?;
+	Some(kib * 1024)
 }
 
 /// Memory the process's cgroups still let it use. `/proc/meminfo` reports the
@@ -339,6 +365,21 @@ mod tests {
 		assert_eq!(with_floor(2 * MIB, Some(2 * MIB)), 2 * MIB);
 		// A size above the floor is kept.
 		assert_eq!(with_floor(64 * MIB, Some(64 * MIB)), 64 * MIB);
+	}
+
+	// Failure mode: the available-memory hint read procfs's byte counts as
+	// KiB, so a host with 3 GiB available got the 1 GiB maximum instead of a
+	// quarter of what is available.
+	#[test]
+	fn the_memory_hint_is_a_quarter_of_available_memory() {
+		const GIB: u128 = 1024 * 1024 * 1024;
+		let meminfo = "MemTotal:       16384000 kB\nMemFree:          524288 kB\nMemAvailable:    3145728 kB\nBuffers:           10240 kB\nCached:          2097152 kB\nSwapCached:            0 kB\n";
+		let available = meminfo_available_bytes(meminfo).expect("MemAvailable");
+		assert_eq!(available, 3 * GIB);
+		assert_eq!(clamp_hint(available / 4), 768 * 1024 * 1024);
+		// Kernels before 3.14 have no MemAvailable.
+		let old = "MemTotal:       16384000 kB\nMemFree:          524288 kB\nBuffers:           10240 kB\nCached:          2097152 kB\nSwapCached:       999999 kB\n";
+		assert_eq!(meminfo_available_bytes(old), Some((524_288 + 10_240 + 2_097_152) * 1024));
 	}
 
 	fn write_files(dir: &Path, files: &[(&str, &str)]) {
