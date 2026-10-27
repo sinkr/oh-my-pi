@@ -13,7 +13,9 @@
   withFatLto ? true,
 }:
 let
-  workspaceVersion = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version;
+  rootCargoToml = builtins.readFile (source + "/Cargo.toml");
+  lockText = builtins.readFile (source + "/Cargo.lock");
+  workspaceVersion = (builtins.fromTOML rootCargoToml).workspace.package.version;
   platform =
     {
       aarch64-darwin = {
@@ -59,7 +61,7 @@ let
         || lib.hasPrefix "crates/" relative;
     };
 
-    cargoVendorDir = craneLib.vendorCargoDeps { cargoLock = ../Cargo.lock; };
+    cargoVendorDir = craneLib.vendorCargoDeps { cargoLockContents = lockText; };
     cargoExtraArgs = "--locked -p pi-natives ${lib.optionalString withWaylandScreencast "--features wayland-pipewire"}";
     nativeBuildInputs = [
       cmake
@@ -86,22 +88,73 @@ let
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "16";
     };
   };
-  vendoredCrates = builtins.path {
-    path = source + "/crates/vendor";
-    name = "omp-vendored-crates";
-    # brush-core depends on OMP's pi-vfs, so build it with the real OMP crates.
-    filter = path: _type: path != "${source}/crates/vendor/brush-core";
-  };
   # The dependency build sees the workspace version as 0.0.0, so a release
   # bump does not invalidate it. Only the root Cargo.toml and the workspace
   # entries in Cargo.lock carry that version. Every member inherits it.
   placeholderVersion = "0.0.0";
-  lockText = builtins.readFile ../Cargo.lock;
   workspaceCrates = map (crate: crate.name) (
     builtins.filter (
       crate: !(crate ? source) && crate.version == workspaceVersion
     ) (builtins.fromTOML lockText).package
   );
+  # Vendored crates are built from real source in the dependency stage, since
+  # registry crates depend on their real APIs (e.g. nix -> cfg_aliases). A
+  # vendored crate that depends on an OMP crate, directly or through another
+  # vendored crate, would compile against a dummy there, so it stays a dummy
+  # and builds with the OMP crates instead (brush-core -> pi-vfs today).
+  vendoredCrates =
+    let
+      vendorDir = source + "/crates/vendor";
+      dependencyNames =
+        manifest:
+        let
+          tables = [
+            (manifest.dependencies or { })
+            (manifest.build-dependencies or { })
+          ]
+          ++ lib.concatMap (target: [
+            (target.dependencies or { })
+            (target.build-dependencies or { })
+          ]) (builtins.attrValues (manifest.target or { }));
+        in
+        lib.concatMap (lib.mapAttrsToList (
+          name: spec: if builtins.isAttrs spec && spec ? package then spec.package else name
+        )) tables;
+      crates = lib.mapAttrsToList (
+        dir: _type:
+        let
+          manifest = builtins.fromTOML (builtins.readFile "${vendorDir}/${dir}/Cargo.toml");
+        in
+        {
+          inherit dir;
+          inherit (manifest.package) name;
+          dependencies = dependencyNames manifest;
+        }
+      ) (lib.filterAttrs (_: type: type == "directory") (builtins.readDir vendorDir));
+      # Grow the dummy set until no vendored crate depends on a dummy.
+      dummies =
+        names:
+        let
+          next =
+            names
+            ++ map (crate: crate.name) (
+              builtins.filter (
+                crate:
+                !builtins.elem crate.name names
+                && builtins.any (dependency: builtins.elem dependency names) crate.dependencies
+              ) crates
+            );
+        in
+        if builtins.length next == builtins.length names then names else dummies next;
+      dummyCrates = dummies workspaceCrates;
+    in
+    map (crate: {
+      inherit (crate) dir;
+      path = builtins.path {
+        path = "${vendorDir}/${crate.dir}";
+        name = "omp-vendored-${crate.dir}";
+      };
+    }) (builtins.filter (crate: !builtins.elem crate.name dummyCrates) crates);
   versionEntry = version: name: "name = \"${name}\"\nversion = \"${version}\"";
   dependencyCargoLock = writeText "Cargo.lock" (
     builtins.replaceStrings (map (versionEntry workspaceVersion) workspaceCrates)
@@ -111,7 +164,7 @@ let
   # Crane writes a workspace root as its cleaned Cargo.toml, so only the
   # version differs from what mkDummySrc would produce.
   dependencyCargoToml = craneLib.writeTOML "Cargo.toml" (
-    lib.recursiveUpdate (craneLib.cleanCargoToml { cargoToml = ../Cargo.toml; }) {
+    lib.recursiveUpdate (craneLib.cleanCargoToml { cargoTomlContents = rootCargoToml; }) {
       workspace.package.version = placeholderVersion;
     }
   );
@@ -132,11 +185,10 @@ let
     extraDummyScript = ''
       cp ${dependencyCargoToml} "$out/Cargo.toml"
       cp ${dependencyCargoLock} "$out/Cargo.lock"
-      for crate in ${vendoredCrates}/*; do
-        name="$(basename "$crate")"
-        rm -rf "$out/crates/vendor/$name"
-        cp -R "$crate" "$out/crates/vendor/$name"
-      done
+      ${lib.concatMapStrings (crate: ''
+        rm -rf "$out/crates/vendor/${crate.dir}"
+        cp -R ${crate.path} "$out/crates/vendor/${crate.dir}"
+      '') vendoredCrates}
     '';
   };
   dependencyArtifacts = craneLib.buildDepsOnly (

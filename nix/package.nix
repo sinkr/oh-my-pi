@@ -36,7 +36,12 @@ let
   packageJson = lib.importJSON ../packages/coding-agent/package.json;
   rootPackageJson = lib.importJSON ../package.json;
   nativeBuild = callPackage ./native.nix {
-    inherit source craneLib withWaylandScreencast withFatLto;
+    inherit
+      source
+      craneLib
+      withWaylandScreencast
+      withFatLto
+      ;
   };
   inherit (nativeBuild) platform;
   bunRuntimeTemplate = callPackage ./bun-runtime.nix { inherit bun; };
