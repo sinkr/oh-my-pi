@@ -224,6 +224,14 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - per-column width `40` (`MAX_COLUMN_WIDTH`)
 - `openSqliteReadConnection()` in `sqlite-reader.ts` uses strict Bun SQLite with `PRAGMA query_only = ON` and `busy_timeout = 3000`. It normally opens read-only; missing WAL sidecars or `SQLITE_CANTOPEN` trigger a read-write connection (`create: false`) solely to initialize sidecars.
 
+### JSON queries
+
+- `file.json?q=<jq filter>` runs the embedded jq interpreter. `raw=true` returns unquoted strings; `compact=true` keeps values on one line. `offset` and `limit` page array elements or whole JSONL results with a continuation hint.
+- Explicit JSON selectors also work on backups of JSON files (`config.json.bak`, dated suffixes) and on other files, such as extensionless ones, whose content opens with a JSON object or array. Existing literal filenames containing `?` win over selectors; raster image, video, SVG `:img` and PDF-page questions keep their image route. Invalid JSON in a JSON-named file reports a JSON parse error.
+- Modifier-only selectors (`?limit=2`, `?offset=1`, `?raw=true`, `?compact=true`) and empty `q=`/`query=` use the identity filter `.`. Unknown-only query strings are not JSON selectors.
+- One leading UTF-8 BOM is accepted per JSON input, including JSONL. U+FEFF inside strings and raw-input (`jq -R`) bytes remain unchanged; malformed JSON still reports a parse error.
+- `ssh://HOST/tmp/data.json?q=.items&limit=2` resolves the bare SSH file URI and runs the same JSON renderer locally on its bounded text. The 1 MiB SSH ceiling still applies. Filters never enter the remote shell, `%3F` still names a literal `?`, and unsupported URL parameters remain errors. Temporary query input is owned and removed on success, failure, or cancellation; trailing line selectors address query output.
+
 ### Documents
 
 - `CONVERTIBLE_EXTENSIONS` in `packages/coding-agent/src/utils/markit.ts` covers `.pdf`, `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`, `.rtf`, `.epub`.

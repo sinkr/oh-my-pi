@@ -49,6 +49,7 @@ import {
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { parseInternalUrl } from "../internal-urls/parse";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -173,7 +174,7 @@ import {
 import { splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { readBinary, resolveBinaryViewPath } from "./read-binary";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
-import { readJson, resolveJsonReadPath, splitJsonQueryTarget } from "./read-json";
+import { parseJsonSelector, readJson, resolveJsonReadPath, splitJsonQueryTarget } from "./read-json";
 import {
 	getReadTextFileBridge,
 	isProseSummaryPath,
@@ -799,12 +800,22 @@ export function splitImageQuestionTarget(readPath: string): { path: string; ques
 		if (!scheme || !InternalUrlRouter.instance().spec(scheme)?.imageQuestion) return { path: readPath };
 	}
 	if (parseSqlitePathCandidates(readPath).length > 0) return { path: readPath };
-	if (splitJsonQueryTarget(readPath)) return { path: readPath };
+	const jsonTarget = splitJsonQueryTarget(readPath);
+	if (jsonTarget && /\.(?:jsonl?|ndjson)$/i.test(jsonTarget.jsonPath)) return { path: readPath };
 
 	const queryIndex = readPath.indexOf("?");
 	if (queryIndex === -1) return { path: readPath };
 	const question = new URLSearchParams(readPath.slice(queryIndex + 1)).get("q");
 	return question ? { path: readPath.slice(0, queryIndex), question } : { path: readPath };
+}
+
+/** A `?q=` target whose path before the query names media a vision question applies to, never JSON. */
+const MEDIA_QUESTION_TARGET =
+	/(?::img|:page\d+\.png|\.(?:png|jpe?g|gif|webp|bmp|tiff?|svg|heic|heif|avif|ico|mp4|m4v|mov|webm|mkv|avi))$/i;
+
+function isMediaQuestionTarget(readPath: string): boolean {
+	const queryIndex = readPath.indexOf("?");
+	return queryIndex !== -1 && MEDIA_QUESTION_TARGET.test(readPath.slice(0, queryIndex));
 }
 
 // Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization
@@ -1754,7 +1765,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
 		);
 		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
-		const imageQuestion = splitImageQuestionTarget(readPath);
+		// Filesystem-backed reads choose JSON versus image questions after resolving
+		// the literal file and sniffing its content, not from its final extension.
+		// A `local://`/`artifact://` URL is resolved by its handler first, so a question
+		// on a media target (`:img`, an image, video or PDF page) is peeled here as before.
+		const scheme = extractUriScheme(readPath);
+		const imageQuestion =
+			!scheme || ((scheme === "local" || scheme === "artifact") && !isMediaQuestionTarget(readPath))
+				? { path: readPath }
+				: splitImageQuestionTarget(readPath);
 		readPath = imageQuestion.path;
 		const question = imageQuestion.question;
 
@@ -1797,9 +1816,34 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					`Invalid selector ':${peeled.sel}' on '${peeled.path}'. Use :N, :N-M, :N+K, :N- (open-ended), :-N (last N lines), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
 				);
 			}
-			const target = await internalRouter.target(normalizedPath, sessionResolveContext(this.session, { signal }));
+			// SSH owns arbitrary URL queries. Only a recognized read-only JSON selector
+			// is peeled here; its filter never reaches the remote path or shell.
+			const sshQuery = extractUriScheme(peeled.path) === "ssh" ? splitJsonQueryTarget(peeled.path) : null;
+			const sshSelector =
+				sshQuery &&
+				!parseInternalUrl(peeled.path).hash &&
+				[...new URLSearchParams(sshQuery.queryString).keys()].every(key =>
+					["q", "query", "raw", "compact", "offset", "limit"].includes(key),
+				)
+					? parseJsonSelector(sshQuery.queryString)
+					: null;
+			const target = await internalRouter.target(
+				sshQuery && sshSelector ? sshQuery.jsonPath : normalizedPath,
+				sessionResolveContext(this.session, { signal }),
+			);
 			if (target) {
 				const url = target.url.rawHref ?? target.url.href;
+				if (sshSelector) {
+					const resource = await internalRouter.resolve(url, sessionResolveContext(this.session, { signal }));
+					if (resource.isDirectory)
+						throw new ToolError("JSON selectors require a regular SSH file, not a directory.");
+					return readJson(
+						this.session,
+						{ url: peeled.path, content: resource.content, selector: sshSelector },
+						peeled.sel,
+						signal,
+					);
+				}
 				if (target.kind === "resource") return this.#handleInternalUrl(url, target.spec, parsed, question, signal);
 				located = { url, path: target.path, sel: target.sel, spec: target.spec };
 			}
@@ -1862,16 +1906,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		options: FilesystemReadOptions,
 		media: { path?: string },
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const {
-			located,
-			question,
-			questionPath,
-			signal,
-			onBufferedFile,
-			onConflictMarkers,
-			lexicalAbsolutePath,
-			toolContext,
-		} = options;
+		const { located, questionPath, signal, onBufferedFile, onConflictMarkers, lexicalAbsolutePath, toolContext } =
+			options;
+		let { question } = options;
 		const rawImages = toolContext?.rawImages === true;
 		const immutable = located?.spec.immutable === true;
 		const displayMode = resolveFileDisplayMode(this.session, { immutable });
@@ -1886,11 +1923,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// POSIX filenames containing selector-looking suffixes win over structured
 		// archive / sqlite / unsupported PDF-image dispatch. A located URL's selector
 		// stays separate so it cannot be mistaken for part of the resolved path.
-		const literalSplit = located
+		let literalSplit = located
 			? { path: readPath, sel: located.sel }
 			: await splitPathAndSelPreferringLiteral(readPath, this.session.cwd);
 		const rawPathIsLiteral =
-			!located && literalSplit.sel === undefined && splitPathAndSel(readPath).sel !== undefined;
+			!located &&
+			literalSplit.sel === undefined &&
+			(splitPathAndSel(readPath).sel !== undefined ||
+				(readPath.includes("?") && (await probeLiteralPathExists(readPath, this.session.cwd)) !== "missing"));
 
 		let pdfImageRead: PdfImageReadTarget | null = null;
 
@@ -1927,12 +1967,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				located && (jsonScheme === "local" || jsonScheme === "artifact")
 					? `${literalSplit.path}${located.url.slice(jsonQuery)}`
 					: literalSplit.path;
-			const jsonPath = await resolveJsonReadPath(this.session, jsonReadPath, suffixCache, signal);
+			const jsonPath =
+				located && jsonQuery < 0
+					? null
+					: await resolveJsonReadPath(this.session, jsonReadPath, suffixCache, signal);
 			if (jsonPath) {
 				if (jsonPath.suffixResolution) {
 					markRawSuffixResolution(jsonPath.suffixResolution, isRawSelector(parseSel(literalSplit.sel)));
 				}
 				return readJson(this.session, jsonPath, literalSplit.sel, signal);
+			}
+
+			// JSON admission has ruled out this target (for example, raster image
+			// bytes or an SVG/PDF image selector). Preserve the existing vision route.
+			const questionTarget = splitJsonQueryTarget(located?.url ?? readPath);
+			const imageQuestion = questionTarget ? new URLSearchParams(questionTarget.queryString).get("q") : null;
+			if (questionTarget && imageQuestion) {
+				question = imageQuestion;
+				if (!located) {
+					readPath = questionTarget.jsonPath;
+					literalSplit = await splitPathAndSelPreferringLiteral(readPath, this.session.cwd);
+				}
 			}
 
 			// `bin:main`, `bin:imports`, `bin:main:10-40`: an executable/IDB prefix
