@@ -594,13 +594,19 @@ export class InternalUrlFilesystem {
 		} catch (error) {
 			// A symlink holding a URL looks dangling to the host; follow it through this filesystem.
 			if (!(error instanceof UrlContainmentError)) throw error;
+			if (this.#context.containSkillPaths && schemeOf(url) === "skill") throw error;
 			const redirected = await this.#urlSymlinkTarget(route, target);
 			if (redirected === undefined) throw error;
 			return this.#node(redirected, follow, create, hops + 1);
 		}
 		if (located !== null) return { kind: "host", url, spec, path: located };
 		const redirected = await this.#urlSymlinkTarget(route, target);
-		if (redirected !== undefined) return this.#node(redirected, follow, create, hops + 1);
+		if (redirected !== undefined) {
+			if (this.#context.containSkillPaths && schemeOf(url) === "skill") {
+				throw new UrlContainmentError(`Skill link resolves outside its filesystem root: ${url}`);
+			}
+			return this.#node(redirected, follow, create, hops + 1);
+		}
 		if (create) throw this.#readOnly({ url, spec });
 		// No backing file (agent://<id>/<json-path>) or a missing entry: the handler renders it or reports why not.
 		return this.#virtualNode(route, target, url);
