@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Google `RESOURCE_EXHAUSTED` (HTTP 429) responses with structured `MODEL_CAPACITY_EXHAUSTED` `ErrorInfo`, short-window `QuotaFailure` violations, or short `RetryInfo` delays being misclassified as account quota exhaustion when the text mentions `"quota"`, while preserving credential rotation for daily `QuotaFailure` caps and zero-entitlement (`quotaValue: "0"`) violations ([#17127](https://github.com/can1357/oh-my-pi/pull/17127) by [@GTanger](https://github.com/GTanger))
+- Fixed transient Google 429 rate-limit and capacity responses retrying in place without blocking or rotating credentials, while daily caps and zero-entitlement limits still rotate ([#17127](https://github.com/can1357/oh-my-pi/pull/17127) by [@GTanger](https://github.com/GTanger))
 
 ## [18.13.1] - 2026-10-27
 
