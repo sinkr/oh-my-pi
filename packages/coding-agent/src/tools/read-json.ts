@@ -29,6 +29,22 @@ import { parseSel } from "./read-selector";
 import { throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
+/** A JSON name, including a backup or dated copy of one (`config.json.bak`, `data.jsonl~`). */
+const JSON_FILE_PATTERN = /\.(?:jsonl?|ndjson)(?:[.~][^/\\]*)?$/i;
+const UTF8_BOM = [0xef, 0xbb, 0xbf] as const;
+
+/** Whether `header` opens a JSON object or array, after an optional UTF-8 BOM and whitespace. */
+function opensLikeJson(header: Uint8Array): boolean {
+	let index = header[0] === UTF8_BOM[0] && header[1] === UTF8_BOM[1] && header[2] === UTF8_BOM[2] ? 3 : 0;
+	while (
+		index < header.length &&
+		(header[index] === 0x20 || header[index] === 0x09 || header[index] === 0x0a || header[index] === 0x0d)
+	) {
+		index++;
+	}
+	return header[index] === 0x7b || header[index] === 0x5b;
+}
+
 const DEFAULT_JSON_QUERY_LIMIT = 100;
 const MAX_JSON_QUERY_LIMIT = 1000;
 const MAX_QUERY_CAPTURE_CHARS = 5 * 1024 * 1024;
@@ -388,14 +404,17 @@ export async function resolveJsonReadPath(
 	if (!selector) return null;
 
 	const absolutePath = resolveReadPath(target.jsonPath, session.cwd);
+	// A `.json`/`.jsonl`/`.ndjson` name always admits; any other name (a backup, an
+	// extensionless file) admits only when it opens like JSON, so `?q=` on a video,
+	// SVG, PDF or raster image keeps its vision-question route.
 	const resolved = async (filePath: string): Promise<boolean> => {
 		const stat = await Bun.file(filePath).stat();
 		if (!stat.isFile()) return false;
-		return peekFile(
-			filePath,
-			IMAGE_METADATA_HEADER_BYTES,
-			header => !parseImageMetadata(header) && !parseHeifImageMimeType(header),
-		);
+		const jsonName = JSON_FILE_PATTERN.test(filePath);
+		return peekFile(filePath, IMAGE_METADATA_HEADER_BYTES, header => {
+			if (parseImageMetadata(header) || parseHeifImageMimeType(header)) return false;
+			return jsonName || opensLikeJson(header);
+		});
 	};
 	try {
 		return (await resolved(absolutePath)) ? { absolutePath, selector } : null;

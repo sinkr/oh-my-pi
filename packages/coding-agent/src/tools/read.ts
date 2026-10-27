@@ -809,6 +809,15 @@ export function splitImageQuestionTarget(readPath: string): { path: string; ques
 	return question ? { path: readPath.slice(0, queryIndex), question } : { path: readPath };
 }
 
+/** A `?q=` target whose path before the query names media a vision question applies to, never JSON. */
+const MEDIA_QUESTION_TARGET =
+	/(?::img|:page\d+\.png|\.(?:png|jpe?g|gif|webp|bmp|tiff?|svg|heic|heif|avif|ico|mp4|m4v|mov|webm|mkv|avi))$/i;
+
+function isMediaQuestionTarget(readPath: string): boolean {
+	const queryIndex = readPath.indexOf("?");
+	return queryIndex !== -1 && MEDIA_QUESTION_TARGET.test(readPath.slice(0, queryIndex));
+}
+
 // Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
@@ -1758,9 +1767,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
 		// Filesystem-backed reads choose JSON versus image questions after resolving
 		// the literal file and sniffing its content, not from its final extension.
+		// A `local://`/`artifact://` URL is resolved by its handler first, so a question
+		// on a media target (`:img`, an image, video or PDF page) is peeled here as before.
 		const scheme = extractUriScheme(readPath);
 		const imageQuestion =
-			!scheme || scheme === "local" || scheme === "artifact"
+			!scheme || ((scheme === "local" || scheme === "artifact") && !isMediaQuestionTarget(readPath))
 				? { path: readPath }
 				: splitImageQuestionTarget(readPath);
 		readPath = imageQuestion.path;
