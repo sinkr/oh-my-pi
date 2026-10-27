@@ -234,14 +234,14 @@ describe("dialogs under a native surface", () => {
 				inputGuard: {
 					isBlocked: () => draft.length > 0,
 					handleInput: key => routed.push(key),
-					hint: "Finish or clear the current prompt to answer",
+					hint: "typing edits your prompt",
 				},
 			},
 		);
 		const line = () => stripVTControlCharacters(dialog.render(200).join("\n"));
 
 		dialog.handleInput("\x1bh");
-		expect(line()).toContain("Finish or clear the current prompt to answer");
+		expect(line()).toContain("answer · typing edits your prompt");
 		expect(line()).not.toContain("/⏎ show");
 		dialog.handleInput(ENTER);
 		expect(routed).toEqual([ENTER]);
