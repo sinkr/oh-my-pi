@@ -120,7 +120,9 @@ describe("composeRecallQuery", () => {
 			{ role: "user", content: "Run the tests" },
 		];
 		const out = composeRecallQuery("Run the tests", repeated, 2);
-		expect(out).toBe("Prior context:\n\nuser: Run the tests\nassistant: 1 failing spec in auth.test.ts\n\nRun the tests");
+		expect(out).toBe(
+			"Prior context:\n\nuser: Run the tests\nassistant: 1 failing spec in auth.test.ts\n\nRun the tests",
+		);
 	});
 });
 
