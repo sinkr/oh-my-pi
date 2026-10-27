@@ -54,6 +54,7 @@ The tool returns a single text block plus structured `details`.
    - no glob chars (`*`, `?`, `[`, `{`) => search that path with implicit `**/*`.
    - glob in the first segment => search from `.` and, unless the pattern already starts with `**/`, prefix it with `**/`.
    - glob later in the path => split at the first glob-bearing segment.
+   - a glob ending in `/` (or a Windows `\` separator) => remove the terminal separator from the matcher and restrict matches to directories, including directory symlinks; files with matching names are excluded.
    - internal URL => split below its `scheme://` root like a later-segment glob (`local://*.md` → base `local://`, non-recursive `*.md`); the glob tail is percent-decoded with encoded metacharacters kept literal, and `router.isGlob()` keeps queries, fragments, and host authorities out of the glob.
 6. `resolveSearchBase()` converts the base path to an absolute path under the session cwd; internal URLs stay URLs. A remaining resolved `/` is rejected with `Searching from root directory '/' is not allowed`. A directly constructed `GlobTool` without `rootPathAlias` also rejects slash-only inputs.
 7. `limit` defaults to `DEFAULT_LIMIT` (`200`), must be positive and finite, is floored, then clamped to `MAX_LIMIT` (`200`). `hidden` and `gitignore` both default to `true`. An internal timeout of `5` seconds (`5000` ms) is built via `AbortSignal.timeout(...)`.
