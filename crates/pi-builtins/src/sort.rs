@@ -791,7 +791,6 @@ pub fn read<T: Read>(
 		buffer.shrink_to_fit();
 	}
 	if settings.cancel.load(AtomicOrdering::Relaxed) {
-		// Parsing a chunk of tens of millions of records takes a while.
 		return Ok(false);
 	}
 
@@ -838,7 +837,9 @@ pub fn read<T: Read>(
 		// The receiver goes away when the consumer thread (sorter, merger, or
 		// checker) stops early after hitting an error or a closed output. Stop
 		// reading gracefully; the real error is reported by that other thread.
-		if sender.send(payload?).is_err() {
+		let chunk = payload?;
+		// A cancelled parse stops part way; the chunk is not the input.
+		if settings.cancel.load(AtomicOrdering::Relaxed) || sender.send(chunk).is_err() {
 			return Ok(false);
 		}
 	}
@@ -846,7 +847,8 @@ pub fn read<T: Read>(
 }
 
 /// Split `read`, which holds `line_count` lines, into `Line`s, and add them
-/// to `lines`.
+/// to `lines`. Once `settings.cancel` is set it stops part way: parsing a
+/// chunk of tens of millions of records takes a while.
 fn parse_lines<'a>(
 	read: &'a [u8],
 	lines: &mut Vec<Line<'a>>,
@@ -879,6 +881,9 @@ fn parse_lines<'a>(
 	let mut start = 0usize;
 	let mut index = 0usize;
 	for sep_idx in memchr_iter(separator, read) {
+		if index % (64 * 1024) == 0 && settings.cancel.load(AtomicOrdering::Relaxed) {
+			return;
+		}
 		let line = &read[start..sep_idx];
 		lines.push(Line::create(line, index, line_data, token_buffer, settings));
 		index += 1;
@@ -1220,6 +1225,27 @@ mod tests {
 		input.extend(b"b c\n".repeat(1000));
 		let held = largest_chunk(&input, BUDGET, &settings);
 		assert!(held <= BUDGET, "a chunk held {held} bytes for a budget of {BUDGET}");
+	}
+
+	// Failure mode: `timeout` waited while a chunk of tens of millions of
+	// records was parsed to its end.
+	#[test]
+	fn parsing_stops_once_cancelled() {
+		const RECORDS: usize = 1 << 20;
+		let settings = GlobalSettings::default();
+		settings.cancel.store(true, AtomicOrdering::Relaxed);
+		let input = b"a\n".repeat(RECORDS);
+		let mut lines = Vec::new();
+		parse_lines(
+			&input,
+			&mut lines,
+			&mut LineData::default(),
+			&mut Vec::new(),
+			RECORDS,
+			b'\n',
+			&settings,
+		);
+		assert!(lines.len() < RECORDS / 8, "{} of {RECORDS} records parsed after a cancel", lines.len());
 	}
 
 	/// Counts the `read` calls made on the input it wraps.
