@@ -435,6 +435,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							if (stat.timedOut) return [] as string[];
 							if (stat.value.isFile()) return [formatScopePath(target.searchPath)];
 						}
+						const fileType = target.directoryOnly ? natives.FileType.Dir : undefined;
 						const results = await runCustom(
 							Promise.resolve(
 								customOps.glob(target.globPattern, target.searchPath, {
@@ -442,13 +443,13 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 									limit: effectiveLimit,
 									hidden: includeHidden,
 									gitignore: useGitignore,
-									fileType: target.directoryOnly ? natives.FileType.Dir : undefined,
+									fileType,
 									signal: combinedSignal,
 								}),
 							),
 						);
 						if (results.timedOut) return [] as string[];
-						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath));
+						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath, fileType));
 					}),
 				);
 				const seen = new Set<string>();

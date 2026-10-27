@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { FileType, glob } from "@oh-my-pi/pi-natives";
+import { glob } from "@oh-my-pi/pi-natives";
 import { Settings } from "../../src/config/settings";
 import { InternalUrlFilesystem } from "../../src/internal-urls/url-filesystem";
 import type { ToolSession } from "../../src/tools";
@@ -97,7 +97,7 @@ describe("directory-only glob patterns", () => {
 						gitignore: options.gitignore,
 						filesystem: filesystem.shellFilesystem(),
 					});
-					return matches.matches.map(match => match.path + (match.fileType === FileType.Dir ? "/" : ""));
+					return matches.matches.map(match => match.path);
 				},
 			},
 		}).execute("delegated-directories", { path: "./beta.8*/" });
