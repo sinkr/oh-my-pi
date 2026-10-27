@@ -18,6 +18,7 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./session-manager/helpers";
 
 const reply = { role: "assistant", content: [] } as unknown as AgentMessage;
@@ -343,7 +344,7 @@ describe("delta message updates over a real session run", () => {
 	afterEach(async () => {
 		await session?.dispose();
 		session = undefined;
-		if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+		if (tempDir) await removeWithRetries(tempDir);
 	});
 
 	// `burst`: the provider queues every event before the agent loop reads one, so each snapshot is far ahead of its event.
@@ -417,7 +418,7 @@ describe("delta message updates over a real session run", () => {
 			};
 
 			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "rpc-delta-rebuild-"));
-			const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+			const authStorage = await AuthStorage.create(":memory:");
 			authStorage.keys.setRuntime("anthropic", "test-key");
 			const agent = new Agent({
 				getApiKey: () => "test-key",
