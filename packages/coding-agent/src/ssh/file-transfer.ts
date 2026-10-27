@@ -14,6 +14,9 @@ import { wrapInPosixShell } from "./utils";
 /** Per-operation timeout for remote transfers (matches the ssh tool's grep window). */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/** Successful HOME lookups, separated by the full host/account connection identity. */
+const remoteHomes = new Map<string, string>();
+
 /**
  * Ensure the ControlMaster connection and pick the verified POSIX shell to
  * run transfer commands under. Returns the shell name so the caller can
@@ -59,6 +62,29 @@ export interface RemoteFileReadResult {
 export interface RemoteFileWriteOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
+}
+
+/** Resolve the remote account's HOME without shell-expanding any caller-supplied path. */
+export async function remoteHomeDirectory(
+	target: SSHConnectionTarget,
+	opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<string> {
+	opts.signal?.throwIfAborted();
+	const key = JSON.stringify([target.name, target.host, target.username, target.port, target.keyPath]);
+	const cached = remoteHomes.get(key);
+	if (cached !== undefined) return cached;
+	const shell = await ensurePosixRemote(target);
+	const args = await buildRemoteCommand(target, wrapInPosixShell(shell, `printf '%s' "$HOME"`));
+	using child = ptree.spawn(["ssh", ...args], {
+		signal: ptree.combineSignals(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+	});
+	const home = new TextDecoder("utf-8", { fatal: true }).decode(await child.bytes());
+	await child.exitedCleanly;
+	if (!home.startsWith("/") || home.includes("\0")) {
+		throw new Error(`ssh://: ${target.name} did not return an absolute remote HOME`);
+	}
+	remoteHomes.set(key, home);
+	return home;
 }
 
 /**
