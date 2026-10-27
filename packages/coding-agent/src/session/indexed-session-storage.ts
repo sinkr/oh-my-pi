@@ -57,6 +57,12 @@ interface IndexEntry {
 	title?: string;
 	titleSource?: SessionTitleUpdate["source"];
 	titleUpdatedAt?: string;
+	/**
+	 * Set on an entry restored after a failed removal: the backend may have
+	 * deleted part of the path (Redis deletes the file key before the
+	 * metadata), so only a later full write confirms it again.
+	 */
+	unconfirmed?: true;
 }
 
 interface EnqueueOptions {
@@ -188,12 +194,16 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	existsConfirmedSync(path: string): boolean {
 		const frames = this.#pendingFrames.get(path);
-		if (!frames) return this.#index.has(path);
+		if (!frames) {
+			const entry = this.#index.get(path);
+			return entry !== undefined && !entry.unconfirmed;
+		}
 		// A removal in flight can delete the content before its op settles (Redis deletes the
 		// file key before the metadata), so the path is unconfirmed until the removal settles.
 		if (frames.some(frame => frame.removal)) return false;
 		// The oldest live frame's previous entry is the last state the backend confirmed.
-		return frames[0]?.previous !== undefined;
+		const confirmed = frames[0]?.previous;
+		return confirmed !== undefined && !confirmed.unconfirmed;
 	}
 
 	/**
@@ -512,6 +522,8 @@ export class IndexedSessionStorage implements SessionStorage {
 			title: title === undefined ? current?.title : (title?.title ?? undefined),
 			titleSource: title === undefined ? current?.titleSource : (title?.source ?? undefined),
 			titleUpdatedAt: title === undefined ? current?.titleUpdatedAt : (title?.updatedAt ?? undefined),
+			// An append extends the current content, so it does not restore what a failed removal deleted.
+			...(current?.unconfirmed ? { unconfirmed: true } : {}),
 		});
 		if (mtimeMs > this.#nextMtimeMs) this.#nextMtimeMs = mtimeMs;
 	}
@@ -570,7 +582,8 @@ export class IndexedSessionStorage implements SessionStorage {
 	 * proves a newer commit won; an absent entry (unlink/rename-src
 	 * bookkeeping) or our own optimistic entry still restores. Rebased
 	 * chains stay exact: the oldest live frame's previous is always
-	 * durable state.
+	 * durable state. A failed removal may have deleted part of the path
+	 * before it failed, so the entry it hands on is marked unconfirmed.
 	 */
 	#failFrame(path: string, mtimeMs: number): void {
 		const frames = this.#pendingFrames.get(path);
@@ -580,10 +593,12 @@ export class IndexedSessionStorage implements SessionStorage {
 		const [failed] = frames.splice(index, 1);
 		if (failed === undefined) return;
 		const next = frames[index];
+		const previous =
+			failed.removal && failed.previous ? { ...failed.previous, unconfirmed: true as const } : failed.previous;
 		if (next === undefined) {
 			const current = this.#index.get(path);
-			if (current === undefined || current.mtimeMs === mtimeMs) this.#restoreIndex(path, failed.previous);
-		} else next.previous = failed.previous;
+			if (current === undefined || current.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+		} else next.previous = previous;
 		if (frames.length === 0) this.#pendingFrames.delete(path);
 	}
 

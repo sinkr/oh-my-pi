@@ -304,4 +304,34 @@ describe("SessionManager + RedisSessionStorage", () => {
 		await removal;
 		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
 	});
+
+	it("keeps a session unconfirmed after a Redis removal fails past its file delete", async () => {
+		// remove() deletes the file key, then the metadata HDEL rejects: the rollback restores the
+		// index entry, but the content is gone, so an exit-time resume hint must not offer it.
+		const redis = createFakeRedis();
+		const storage = await RedisSessionStorage.create({ client: redis });
+		const manager = SessionManager.create("/cwd", path.join(sessionRoot, "failed-removal"), storage);
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		redis.hdel = async () => {
+			throw new Error("connection lost");
+		};
+
+		await expect(manager.dropSession(sessionFile)).rejects.toThrow("connection lost");
+		expect(redis.strings.has(`omp:sessions:file:${sessionFile}`)).toBe(false);
+		expect(storage.existsSync(sessionFile)).toBe(true);
+		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
+
+		// An append extends whatever the backend holds, which no longer includes the header.
+		const writer = storage.openWriter(sessionFile);
+		await writer.append("{}\n");
+		await writer.close();
+		expect(manager.isSessionConfirmedOnDisk()).toBe(false);
+
+		// A later full write replaces the content, so the backend confirms the path again.
+		storage.writeTextSync(sessionFile, "rewritten\n");
+		await storage.drain();
+		expect(manager.isSessionConfirmedOnDisk()).toBe(true);
+	});
 });
