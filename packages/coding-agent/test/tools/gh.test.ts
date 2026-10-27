@@ -1262,7 +1262,7 @@ echo ok
 				child.exited,
 			]);
 			expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-			expect(JSON.parse(stdout)).toEqual({ exitCode: 0, stderr: "", stdout: "ok" });
+			expect(JSON.parse(stdout)).toEqual({ exitCode: 0, stderr: "", stdout: "ok", stdoutTruncated: false });
 		} finally {
 			await removeWithRetries(fakeBin);
 		}

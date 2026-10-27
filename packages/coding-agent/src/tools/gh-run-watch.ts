@@ -260,7 +260,7 @@ export function buildFailedLogDetails(failedJobLogs: GhFailedJobLog[]): GhRunWat
 
 function failedJobLogsArtifactLabel(failedJobLogs: GhFailedJobLog[]): string {
 	if (!failedJobLogs.some(entry => entry.available && entry.full)) return "Failed-job log diagnostics";
-	return failedJobLogs.every(entry => entry.available && entry.full)
+	return failedJobLogs.every(entry => entry.available && entry.full && !entry.truncated)
 		? "Full failed-job logs"
 		: "Partial failed-job logs";
 }
@@ -685,6 +685,7 @@ export async function fetchFailedJobLogs(
 				tail: logTail,
 				available: Boolean(fullLog),
 				unavailableReason,
+				truncated: result.stdoutTruncated,
 			};
 		}),
 	);

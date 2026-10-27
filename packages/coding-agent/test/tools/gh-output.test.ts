@@ -42,7 +42,13 @@ const unavailableLog: ForgeCliResult = {
 	stdout: "NOT_A_CAPTURED_LOG",
 	stderr: `gh: HTTP 403: log access denied ${"界".repeat(10_000)} OMITTED_ERROR_SUFFIX`,
 };
-const watchCases = [
+interface WatchCase {
+	name: string;
+	logs: ForgeCliResult[];
+	label: string;
+	reason?: string;
+}
+const watchCases: WatchCase[] = [
 	{
 		name: "labels all-unavailable logs as diagnostics and keeps a bounded fetch failure",
 		logs: [unavailableLog],
@@ -53,6 +59,16 @@ const watchCases = [
 		name: "labels captured logs as full only when every failed job has log content",
 		logs: [capturedLog, { ...capturedLog, stdout: "other first line\nSECOND_CAPTURED_LOG" }],
 		label: "Full failed-job logs",
+	},
+	{
+		name: "labels a single truncated capture as partial instead of full",
+		logs: [{ ...capturedLog, stdoutTruncated: true }],
+		label: "Partial failed-job logs",
+	},
+	{
+		name: "labels all-available logs as partial when one capture is truncated",
+		logs: [capturedLog, { ...capturedLog, stdoutTruncated: true }],
+		label: "Partial failed-job logs",
 	},
 	{
 		name: "labels partial logs and names the failed job whose log fetch failed",
@@ -139,7 +155,12 @@ for (const mode of ["run", "commit"] as const) {
 					expect(artifact).toContain(jobs[index].name);
 					if (available) {
 						expect(artifact).toContain(log.stdout);
-						expect(artifact).toContain("Full log:");
+						if (log.stdoutTruncated) {
+							expect(artifact).toContain("Partial log (capture truncated):");
+							expect(text).toContain("log capture truncated");
+						} else {
+							expect(artifact).toContain("Full log:");
+						}
 						expect(text).not.toContain(log.stdout.split("\n")[0]);
 					} else {
 						expect(text).toContain(fixture.reason!);
@@ -172,6 +193,37 @@ for (const mode of ["run", "commit"] as const) {
 		}
 	});
 }
+
+it("keeps multiline gh stderr on one terminal diagnostic row", async () => {
+	const session = await createSession();
+	vi.spyOn(github, "json")
+		.mockResolvedValueOnce({ id: 77, status: "completed", conclusion: "failure" })
+		.mockResolvedValueOnce({
+			total_count: 1,
+			jobs: [{ id: 201, name: "failed-job-201", status: "completed", conclusion: "failure" }],
+		});
+	vi.spyOn(github, "run").mockResolvedValue({
+		exitCode: 7,
+		stdout: "",
+		stderr: "first line\nsecond line\r\nthird\tline\u001b[31m\u0007\u001b[0m",
+	});
+	const result = await new GithubTool(session).execute("watch-multiline", {
+		op: "run_watch",
+		repo: "owner/repo",
+		run: "77",
+	});
+	await themeModule.initTheme();
+	const theme = await themeModule.getThemeByName("dark");
+	if (!theme) throw new Error("expected an initialized theme");
+	const options = { expanded: true, isPartial: false };
+	const rows = githubToolRenderer.renderResult(result, options, theme).render(200);
+	expect(rows.every(row => !/[\r\n\u0007]/.test(row))).toBe(true);
+	const diagnosticRow = rows.map(row => Bun.stripANSI(row)).find(row => row.includes("log tail unavailable"));
+	expect(diagnosticRow).toContain("first line second line third");
+	expect(diagnosticRow).toContain("exit code 7");
+	const described = JSON.stringify(githubToolRenderer.describeResult(result, options));
+	expect(described).toContain("first line second line third");
+});
 
 describe("pr_create concise output", () => {
 	for (const route of ["direct", "xd"] as const) {

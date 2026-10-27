@@ -65,7 +65,7 @@ Most operations return a text result built by `buildTextResult()` in `packages/c
   - `pr_checkout` adds `checkouts: GhPrCheckoutSummary[]`, including `reused` and optional `clonedWith`.
   - `run_watch` adds `watch: GhRunWatchViewDetails`, which drives the custom live/result renderer in `packages/tui/src/tools/github.ts`.
 - Artifact trailer: when `artifactId` is present, the text body gets an appended line like `Full failed-job logs: artifact://<id>`.
-  - `run_watch` uses `Full failed-job logs` only when every failed job has captured log content, `Partial failed-job logs` when only some do, and `Failed-job log diagnostics` when none do. Unavailable entries name the failed job and explain the fetch failure.
+  - `run_watch` uses `Full failed-job logs` only when every failed job has a complete log capture, `Partial failed-job logs` when some logs are missing or a capture is truncated, and `Failed-job log diagnostics` when none have content. Unavailable entries name the failed job and explain the fetch failure.
   - Artifacts are allocated with `session.allocateOutputArtifact("github")`; persistent sessions save captured logs and diagnostics as `<artifact-dir>/<id>.github.log`.
 
 - `run_watch` is the only streaming op. It emits `onUpdate` snapshots while polling, then returns one final text result. Empty search results and commit watches that find no runs are marked `useless: true`.
@@ -249,9 +249,9 @@ Watch flow:
 - Poll interval is `3` seconds (`RUN_WATCH_INTERVAL_DEFAULT`) for the first `60` seconds of the watch (`RUN_WATCH_FAST_WINDOW_MS`), then `15` seconds (`RUN_WATCH_INTERVAL_SLOW`). Rate-limited poll errors back off at the slow interval and are retried up to `5` consecutive failures (`RUN_WATCH_MAX_POLL_FAILURES`). Commit mode gives up with a clear message after `90` seconds if no runs ever appear (`RUN_WATCH_NO_RUNS_GIVE_UP_MS`).
 - Failure grace period is fixed at 5 seconds (`RUN_WATCH_GRACE_DEFAULT`). When any failed job appears before completion, the tool emits a note, waits once, re-fetches state, then collects logs so concurrent failures are included.
 - Failed-job logs are fetched with `gh api /repos/<repo>/actions/jobs/<jobId>/logs` via `github.run()`, not `json()`. Non-zero exit or empty output leaves `available: false` instead of failing the whole watch. Each unavailable entry retains a reason capped at 512 UTF-8 bytes, including exit status and stderr for failed commands.
-- Inline result includes only the last `tail` lines per failed job. The saved artifact contains the captured full logs (`mode: "full"`) and identifies any jobs without logs, with the same failure reasons.
+- Inline result includes only the last `tail` captured lines per failed job. The saved artifact contains the captured logs (`mode: "full"`) and identifies any jobs without logs, with the same failure reasons. The subprocess capture's structured truncation flag marks logs exceeding 8 MiB as partial in both the artifact label and its contents.
 - In commit mode, success is intentionally double-checked: once all known runs are successful, the tool waits one more poll interval and succeeds only if the set of run IDs is unchanged. This avoids returning before late workflow runs appear for the same commit.
-- `details.watch` drives a specialized renderer in `packages/tui/src/tools/github.ts`; non-watch results use the fallback summary renderer.
+- `details.watch` drives a specialized renderer in `packages/tui/src/tools/github.ts`; unavailable-log reasons are sanitized and flattened to one display row. Non-watch results use the fallback summary renderer.
 
 ## Side Effects
 - Filesystem
