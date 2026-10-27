@@ -1059,16 +1059,16 @@ export class AskDialogComponent implements Component {
 				this.#setHidden(event.act === "hide");
 				return;
 			}
+			if (this.#hidden) return;
 			// A pointer action on the dialog is an explicit hand-off from the draft.
 			this.#releaseGuardForPointer();
-			if (this.#hidden) return;
 			if (event.act === "submit") this.#pressEnter();
 			else if (event.act === "note") this.#pressNote();
 			return;
 		}
 		if (event.type !== "select" && event.type !== "activate") return;
-		this.#releaseGuardForPointer();
 		if (this.#hidden) return;
+		this.#releaseGuardForPointer();
 		const key = leafKey(event.key);
 		if (key === "tabs") {
 			if (!this.#hasSubmitTab()) return;
