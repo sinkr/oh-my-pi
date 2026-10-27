@@ -1799,7 +1799,7 @@ use std::{cmp::Ordering, io::Read};
 use itertools::Itertools;
 
 use super::super::{
-	GlobalSettings, OpenFile, Output, SortError, SortResult,
+	AtomicOrdering, GlobalSettings, OpenFile, Output, SortError, SortResult,
 	chunks::{self, Chunk},
 	compare_by, print_sorted, sort_by,
 	tmp_dir::TmpDirWrapper,
@@ -1829,6 +1829,10 @@ pub fn ext_sort(
 	let mut chunk = Chunk::try_new(input, |buffer| {
 		Ok::<_, SortError>(chunks::parse_into_chunk(buffer, separator, settings))
 	})?;
+	// A cancelled parse stops part way, and sorting no lines succeeds.
+	if settings.cancel.load(AtomicOrdering::Relaxed) {
+		return Err(SortError::Cancelled);
+	}
 	let sorted = chunk
 		.with_dependent_mut(|_, contents| sort_by(&mut contents.lines, settings, &contents.line_data));
 	if !sorted {
