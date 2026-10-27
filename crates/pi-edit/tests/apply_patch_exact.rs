@@ -1,6 +1,6 @@
 mod common;
 
-use pi_edit::EditMode;
+use pi_edit::{EditMode, modes::apply_patch::{parse_apply_patch, parse_apply_patch_streaming}};
 
 fn update(body: &str) -> String {
 	format!("*** Begin Patch\n*** Update File: fixture.txt\n{body}\n*** End Patch")
@@ -103,4 +103,72 @@ async fn deleting_an_import_line_does_not_leave_an_empty_row() {
 	assert_eq!(std::fs::read(&path).unwrap(), b"from x import (\n    B,\n)\n");
 	workspace.apply_raw(&update("@@\n-    B,\n+    C,"), &common::DiskWriter::default()).await.unwrap();
 	assert_eq!(std::fs::read(path).unwrap(), b"from x import (\n    C,\n)\n");
+}
+
+const MOVE_ONLY: &str = "*** Begin Patch\n*** Update File: fixture.txt\n*** Move to: moved.txt\n*** End Patch";
+
+#[tokio::test]
+async fn move_only_parse_preview_and_apply_preserve_source_bytes() {
+	assert_eq!(parse_apply_patch(MOVE_ONLY).unwrap(), parse_apply_patch_streaming(MOVE_ONLY).unwrap());
+	for before in ["alpha\n", "alpha", "\u{feff}alpha\r\nbeta\r\n", ""] {
+		let workspace = common::Workspace::new(EditMode::ApplyPatch);
+		workspace.write("fixture.txt", before);
+		let mut session = workspace.session();
+		session.set_args_json(&serde_json::json!({"input": MOVE_ONLY}).to_string());
+		session.finish();
+		let preview = session.preview();
+		assert!(preview.files[0].error.is_none(), "{preview:?}");
+		assert_eq!(preview.files[0].rename.as_deref(), Some("moved.txt"));
+		let outcome = workspace.apply_raw(MOVE_ONLY, &common::DiskWriter::default()).await.unwrap();
+		assert_eq!(outcome.files[0].old_text.as_deref(), Some(before));
+		assert_eq!(outcome.files[0].new_text.as_deref(), Some(before));
+		assert!(!workspace.cwd().join("fixture.txt").exists());
+		assert_eq!(std::fs::read(workspace.cwd().join("moved.txt")).unwrap(), before.as_bytes());
+	}
+}
+
+#[tokio::test]
+async fn move_only_keeps_missing_source_collision_and_same_path_guards() {
+	for (source, destination, input, error) in [
+		(None, None, MOVE_ONLY, "File not found"),
+		(Some("source\n"), Some("destination\n"), MOVE_ONLY, "destination already exists"),
+		(Some("source\n"), None, "*** Begin Patch\n*** Update File: fixture.txt\n*** Move to: ./fixture.txt\n*** End Patch", "same as source"),
+	] {
+		let workspace = common::Workspace::new(EditMode::ApplyPatch);
+		if let Some(before) = source { workspace.write("fixture.txt", before); }
+		if let Some(before) = destination { workspace.write("moved.txt", before); }
+		let writer = common::DiskWriter::default();
+		let result = workspace.apply_raw(input, &writer).await.unwrap_err();
+		assert!(result.to_string().contains(error), "{result}");
+		assert!(writer.requests.lock().is_empty());
+		assert_eq!(workspace.read("fixture.txt").as_deref(), source);
+		assert_eq!(workspace.read("moved.txt").as_deref(), destination);
+	}
+}
+
+#[tokio::test]
+async fn a_later_invalid_hunk_does_not_commit_a_move_only_section() {
+	let workspace = common::Workspace::new(EditMode::ApplyPatch);
+	workspace.write("fixture.txt", "alpha\n");
+	workspace.write("other.txt", "other\n");
+	let input = "*** Begin Patch\n*** Update File: fixture.txt\n*** Move to: moved.txt\n*** Update File: other.txt\n@@\n-missing\n+new\n*** End Patch";
+	let writer = common::DiskWriter::default();
+	assert!(workspace.apply_raw(input, &writer).await.is_err());
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("fixture.txt").as_deref(), Some("alpha\n"));
+	assert_eq!(workspace.read("other.txt").as_deref(), Some("other\n"));
+	assert!(!workspace.cwd().join("moved.txt").exists());
+}
+
+#[tokio::test]
+async fn move_only_retains_the_existing_non_utf8_update_rejection() {
+	let workspace = common::Workspace::new(EditMode::ApplyPatch);
+	let path = workspace.cwd().join("fixture.txt");
+	std::fs::write(&path, [0xff, 0x00, 0x0a]).unwrap();
+	let writer = common::DiskWriter::default();
+	let error = workspace.apply_raw(MOVE_ONLY, &writer).await.unwrap_err();
+	assert_eq!(error.kind(), "invalid_utf8");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(std::fs::read(path).unwrap(), [0xff, 0x00, 0x0a]);
+	assert!(!workspace.cwd().join("moved.txt").exists());
 }

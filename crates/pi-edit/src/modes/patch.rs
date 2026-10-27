@@ -1503,6 +1503,9 @@ fn stage_from_parts(
 	let op = engine_op(input.op);
 	let persisted = match after.as_deref() {
 		Some(text) if use_new_encoding || read.is_none() => Some(persist_new(&resolved, text)?),
+		Some(text) if move_to.is_some() && read.as_ref().is_some_and(|read| read.text == text) => {
+			Some(read.as_ref().unwrap().raw.clone())
+		},
 		Some(text) => Some(read.as_ref().unwrap().persist(text)?),
 		None => None,
 	};
@@ -1624,16 +1627,19 @@ fn apply_entry(
 				.diff
 				.ok_or_else(|| EditError::apply("Update operation requires diff (hunks)"))?;
 			let read = files.read(input.path)?;
-			let hunks = if input.first_match {
-				parse_apply_patch_hunks(diff)?
+			let (after, warnings) = if input.first_match && move_to.is_some() && js_trim(diff).is_empty() {
+				(read.text.clone(), Vec::new())
 			} else {
-				parse_diff_hunks(diff)?
+				let hunks = if input.first_match {
+					parse_apply_patch_hunks(diff)?
+				} else {
+					parse_diff_hunks(diff)?
+				};
+				if hunks.is_empty() {
+					return Err(EditError::apply("Diff contains no hunks"));
+				}
+				apply_hunks(&read.text, input.path, &hunks, threshold, allow_fuzzy, input.first_match)?
 			};
-			if hunks.is_empty() {
-				return Err(EditError::apply("Diff contains no hunks"));
-			}
-			let (after, warnings) =
-				apply_hunks(&read.text, input.path, &hunks, threshold, allow_fuzzy, input.first_match)?;
 			Ok(AppliedEntry {
 				resolved: read.resolved.clone(),
 				read: Some(read),
