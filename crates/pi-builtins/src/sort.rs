@@ -927,7 +927,9 @@ struct Fill {
 /// * `budget`: The chunk's memory budget and what its records cost. Reading
 ///   stops, and the buffer stops growing, before the bytes and records read
 ///   would cost more than the budget; like GNU sort, each read asks for no
-///   more bytes than the budget could take if every byte ended a record. If
+///   more bytes than the budget could take if every byte ended a record,
+///   except that a read into buffer the chunk already holds asks for at
+///   least `ALLOC_CHUNK_SIZE` bytes while any room is left. If
 ///   None, the buffer does not grow, unless needed to read at least two
 ///   lines.
 /// * `start_offset`: The amount of bytes at the start of `buffer` that were
@@ -956,7 +958,12 @@ fn read_to_buffer<T: Read>(
 			None => buffer.len() - filled,
 		};
 		let want = if room > 0 {
-			room
+			// Bytes read into buffer the chunk already holds cost only the
+			// records they add, so take at least `ALLOC_CHUNK_SIZE` of it at a
+			// time: a chunk that recycled a full buffer and its record vectors
+			// starts with a few bytes of room and would otherwise read the
+			// whole buffer a few bytes per `read` call.
+			room.max(ALLOC_CHUNK_SIZE.min(buffer.len() - filled))
 		} else if separators >= 2 {
 			// The chunk is full. The separator ends the last whole line, so
 			// it is not carried over.
@@ -1139,6 +1146,55 @@ mod tests {
 		input.extend(long.repeat(4 * BUDGET / long.len()));
 		let held = largest_chunk(&input, BUDGET);
 		assert!(held <= BUDGET, "a chunk held {held} bytes for a budget of {BUDGET}");
+	}
+
+	/// Counts the `read` calls made on the input it wraps.
+	struct CountingReader<'a> {
+		input: &'a [u8],
+		reads: usize,
+	}
+
+	impl Read for CountingReader<'_> {
+		fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+			self.reads += 1;
+			self.input.read(buf)
+		}
+	}
+
+	// Failure mode: a chunk that recycled a full buffer and its record
+	// vectors started with a few bytes of room, and read the whole buffer a
+	// few bytes per `read` call: one system call per 4 bytes of a file of
+	// 100-byte lines.
+	#[test]
+	fn a_recycled_chunk_reads_its_buffer_in_large_steps() {
+		const BUDGET: usize = 1 << 20;
+		let line = [&[b'x'; 99][..], b"\n"].concat();
+		let input = line.repeat(8 * BUDGET / line.len());
+		let (sender, receiver) = flume::bounded::<Chunk>(1);
+		let settings = GlobalSettings::default();
+		let mut file = CountingReader { input: &input, reads: 0 };
+		let mut carry_over = Vec::new();
+		let mut recycled = RecycledChunk::new(8 * 1024);
+		loop {
+			let more = read(
+				&sender,
+				recycled,
+				Some(BUDGET),
+				&mut carry_over,
+				&mut file,
+				&mut iter::empty::<SortResult<CountingReader<'_>>>(),
+				b'\n',
+				&settings,
+			)
+			.expect("read");
+			let Ok(chunk) = receiver.try_recv() else { break };
+			recycled = chunk.recycle();
+			if !more {
+				break;
+			}
+		}
+		let most = input.len() / 4096;
+		assert!(file.reads <= most, "{} reads of a {}-byte input, at most {most} expected", file.reads, input.len());
 	}
 }
 
