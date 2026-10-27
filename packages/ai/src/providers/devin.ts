@@ -272,8 +272,8 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const replacementRequest = await options?.onPayload?.(request, model);
 			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
-			// Connect flags compression per envelope, so a small request goes out
-			// plain under the same `connect-content-encoding` header.
+			// A small request goes out plain and without `connect-content-encoding`,
+			// so no server sees an encoding it never has to decode.
 			const compress = reqBytes.byteLength >= MIN_COMPRESSED_BODY_BYTES;
 			const chatBody = compress ? await gzipAsync(reqBytes) : reqBytes;
 			const compressedBytes = compress ? chatBody.byteLength : undefined;
@@ -290,7 +290,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				headers: {
 					"content-type": "application/connect+proto",
 					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
+					...(compress ? { "connect-content-encoding": "gzip" } : {}),
 					"accept-encoding": "identity",
 					"user-agent": "connect-go/1.18.1 (go1.26.3)",
 					"connect-accept-encoding": "gzip",
