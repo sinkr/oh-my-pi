@@ -57,6 +57,7 @@ async function skillTargetPath(
 	skills: readonly Skill[],
 	directory: boolean,
 	create = false,
+	contain = false,
 ): Promise<string> {
 	const skillName = url.rawHost || url.hostname;
 	if (!skillName) {
@@ -97,14 +98,20 @@ async function skillTargetPath(
 	// Agent Plugin skills (§4.1): every target, including the bare instruction
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.
-	if (!skill.containRoot) return resolvedPath;
-	const escape = `skill:// path resolves outside the plugin root: ${url.href}`;
-	const contained = await resolveContainedPath(skill.containRoot, resolvedPath);
+	if (!skill.containRoot && !contain) return resolvedPath;
+	const containRoot = skill.containRoot ?? (await fs.realpath(skill.baseDir));
+	// Local skill roots may themselves be links. Rebase their lexical children
+	// onto the real root before the shared helper checks descendant links.
+	const containmentPath = skill.containRoot
+		? resolvedPath
+		: path.resolve(containRoot, path.relative(path.resolve(skill.baseDir), resolvedPath));
+	const escape = `skill:// path resolves outside the ${skill.containRoot ? "plugin" : "skill"} root: ${url.href}`;
+	const contained = await resolveContainedPath(containRoot, containmentPath);
 	if (contained.status === "outside") throw new UrlContainmentError(escape);
 	if (contained.status === "ok") return contained.realPath;
 	if (create) {
 		try {
-			await ensureCreatableWithinRoot(resolvedPath, skill.containRoot, "skill", url.href);
+			await ensureCreatableWithinRoot(containmentPath, containRoot, "skill", url.href);
 		} catch (error) {
 			// Same wording as the read path: the plugin root, not a per-skill root, bounds the package.
 			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
@@ -206,7 +213,13 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		const skills = context?.skills ?? getActiveSkills();
 		let targetPath: string;
 		try {
-			targetPath = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
+			targetPath = await skillTargetPath(
+				url,
+				skills,
+				options?.directory === true,
+				options?.create === true,
+				context?.containSkillPaths === true,
+			);
 		} catch (error) {
 			if (error instanceof UnknownSkillError && !options?.localOnly && MCPManager.available()) return null;
 			throw error;

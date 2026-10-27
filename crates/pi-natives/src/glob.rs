@@ -39,6 +39,9 @@ pub struct GlobOptions<'env> {
 	pub file_type:            Option<FileType>,
 	/// Match simple patterns recursively by default (`*.ts` -> recursive).
 	pub recursive:            Option<bool>,
+	/// Follow descendant symbolic links with cycle detection (default: false).
+	/// The filesystem provider is responsible for enforcing mount containment.
+	pub follow_links:         Option<bool>,
 	/// Include hidden files (default: false).
 	pub hidden:               Option<bool>,
 	/// Maximum number of results to return.
@@ -77,6 +80,7 @@ struct GlobConfig {
 	root:                  PathBuf,
 	pattern:               String,
 	recursive:             bool,
+	follow_links:          bool,
 	include_hidden:        bool,
 	file_type_filter:      Option<FileType>,
 	max_results:           usize,
@@ -202,7 +206,11 @@ fn run_glob(
 		.gitignore(config.use_gitignore)
 		.skip_git(true)
 		.skip_node_modules(!config.mentions_node_modules)
-		.follow_links(pi_walker::FollowLinks::Never)
+		.follow_links(if config.follow_links {
+			pi_walker::FollowLinks::Always
+		} else {
+			pi_walker::FollowLinks::Never
+		})
 		.detail(scan_detail)
 		.order(pi_walker::WalkOrder::Path)
 		.emit_root(false)
@@ -274,6 +282,7 @@ pub fn glob<'env>(
 		path,
 		file_type,
 		recursive,
+		follow_links,
 		hidden,
 		max_results,
 		gitignore,
@@ -300,6 +309,7 @@ pub fn glob<'env>(
 				include_hidden: hidden.unwrap_or(false),
 				file_type_filter: file_type,
 				recursive: recursive.unwrap_or(true),
+				follow_links: follow_links.unwrap_or(false),
 				max_results: max_results.map_or(usize::MAX, |value| value as usize),
 				use_gitignore: gitignore.unwrap_or(true),
 				mentions_node_modules: include_node_modules
@@ -376,6 +386,7 @@ mod tests {
 				root:                  root.path().to_path_buf(),
 				pattern:               "*.rs".to_string(),
 				recursive:             true,
+				follow_links:          false,
 				include_hidden:        false,
 				file_type_filter:      Some(super::FileType::File),
 				max_results:           usize::MAX,
@@ -420,6 +431,7 @@ mod tests {
 					root:                  root.path().to_path_buf(),
 					pattern:               pattern.to_string(),
 					recursive:             false,
+					follow_links:          false,
 					include_hidden:        true,
 					file_type_filter:      None,
 					max_results:           100,
@@ -469,6 +481,7 @@ mod tests {
 					root: root.clone(),
 					pattern: pattern.to_string(),
 					recursive: true,
+					follow_links: false,
 					include_hidden: false,
 					file_type_filter,
 					max_results: usize::MAX,
@@ -491,6 +504,42 @@ mod tests {
 
 		assert_eq!(run("*.rs", None), ["a b.rs", "a.rs", "sub/b.rs"]);
 		assert_eq!(run("*", Some(super::FileType::Dir)), ["sub"]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn run_glob_follows_descendant_links_only_when_requested_and_stops_cycles() {
+		let root = TempDirGuard::new();
+		fs::create_dir_all(root.path().join("scope")).expect("create scope");
+		fs::create_dir_all(root.path().join("shared/nested")).expect("create shared directory");
+		fs::write(root.path().join("shared/nested/sequence.py"), "pass\n").expect("write source");
+		std::os::unix::fs::symlink(root.path().join("shared"), root.path().join("scope/link"))
+			.expect("link shared directory");
+		std::os::unix::fs::symlink(root.path().join("scope"), root.path().join("shared/cycle"))
+			.expect("link ancestor cycle");
+		let run = |follow_links| {
+			super::run_glob(
+				super::GlobConfig {
+					filesystem: BlockingFs::native(),
+					root: root.path().join("scope"),
+					pattern: "**/*.py".to_string(),
+					recursive: false,
+					follow_links,
+					include_hidden: false,
+					file_type_filter: Some(super::FileType::File),
+					max_results: usize::MAX,
+					use_gitignore: false,
+					mentions_node_modules: false,
+					sort_by_mtime: true,
+					cache: false,
+				},
+				None,
+				crate::task::CancelToken::default(),
+			)
+			.expect("glob succeeds")
+		};
+		assert!(run(false).matches.is_empty());
+		assert_eq!(match_paths(&run(true)), ["link/nested/sequence.py"]);
 	}
 
 	#[cfg(unix)]

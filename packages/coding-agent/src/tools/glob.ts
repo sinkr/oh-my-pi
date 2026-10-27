@@ -224,7 +224,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const internalRouter = InternalUrlRouter.instance();
 			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
 			const urlFilesystem = new InternalUrlFilesystem({
-				context: sessionResolveContext(this.session, { signal }),
+				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
 				tier: resolveToolTier(this, params),
 			});
 			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
@@ -586,6 +586,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							// native auto-recursion so `dir/*` does not silently match
 							// `dir/sub/nested.ts`.
 							recursive: false,
+							followLinks: target.searchPath.startsWith("skill://"),
 							signal: combinedSignal,
 							timeoutMs,
 							filesystem: urlFilesystem.shellFilesystem(),
