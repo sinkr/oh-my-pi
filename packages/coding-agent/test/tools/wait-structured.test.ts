@@ -194,10 +194,11 @@ describe("wait structured output rendering", () => {
 		const cancelledId = manager.register(
 			"task",
 			"/tan work",
-			({ signal }) =>
-				new Promise<string>((_, reject) => {
-					signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-				}),
+			({ signal }) => {
+				const { promise, reject } = Promise.withResolvers<string>();
+				signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				return promise;
+			},
 			{ ownerId: SELF_ID, agentId: "Tan-1" },
 		);
 		expect(manager.cancel(cancelledId)).toBe(true);
