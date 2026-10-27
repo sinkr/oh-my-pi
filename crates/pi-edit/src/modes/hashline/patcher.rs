@@ -20,7 +20,7 @@ use super::{
 	},
 	mismatch::{MismatchDetails, format_header_only_message, mismatch_error},
 	parser::{ParseFailure, parse_patch},
-	recovery::{RecoveryArgs, current_line_numbers, try_recover},
+	recovery::{RecoveryArgs, current_line_map, try_recover},
 	types::{ApplyResult, BlockOpKind, BlockResolution, Edit, FileOp},
 };
 use crate::{
@@ -451,8 +451,10 @@ fn assert_seen_lines(
 	if seen.is_empty() {
 		return Ok(());
 	}
-	let mut unseen = guarded_lines(section, blocks)?
-		.into_iter()
+	let guarded = guarded_lines(section, blocks)?;
+	let mut unseen = guarded
+		.iter()
+		.copied()
 		.filter(|line| !seen.contains(line))
 		.collect::<Vec<_>>();
 	if unseen.is_empty() {
@@ -483,7 +485,7 @@ fn assert_seen_lines(
 		if value.chars().count() > SEEN_LINE_REVEAL_MAX_COLUMNS {
 			if let Some(current) = current {
 				return Err(stale_unseen_rejection(
-					section, &unseen, expected, canonical, store, text, current, true,
+					section, &unseen, &guarded, expected, canonical, store, text, current, true,
 				));
 			}
 			return Err(EditError::rejected(
@@ -505,7 +507,7 @@ fn assert_seen_lines(
 	let truncated = unseen.len() > revealed.len();
 	if truncated && let Some(current) = current {
 		return Err(stale_unseen_rejection(
-			section, &unseen, expected, canonical, store, text, current, false,
+			section, &unseen, &guarded, expected, canonical, store, text, current, false,
 		));
 	}
 	if !truncated {
@@ -530,9 +532,15 @@ fn assert_seen_lines(
 /// numbers in `current` and its tag. Every guarded line is a recovered anchor,
 /// so each maps; if one does not, the mismatch reply hands back the current
 /// tag and rows instead.
+///
+/// The reply asks for `unseen` only, so the live snapshot carries the other
+/// `guarded` anchors: the earlier read displayed them, and a line the map
+/// carries over holds the same text. Without them the edit reissued after the
+/// requested read meets the guard again on an anchor nobody can read away.
 fn stale_unseen_rejection(
 	section: &PatchSection,
 	unseen: &[u32],
+	guarded: &[u32],
 	expected: &str,
 	canonical: &Path,
 	store: &EditStore,
@@ -540,12 +548,22 @@ fn stale_unseen_rejection(
 	current: &str,
 	raw: bool,
 ) -> EditError {
-	let Some(live) = current_line_numbers(text, current, unseen) else {
+	let map = current_line_map(text, current);
+	let Some(live) = unseen
+		.iter()
+		.map(|line| map.get(line).copied())
+		.collect::<Option<Vec<u32>>>()
+	else {
 		return mismatch(section, canonical, current, expected, store);
 	};
-	// The reply prints no live rows, so a resend under the tag it hands back
-	// meets the guard instead of an unknown-provenance pass.
-	let live_tag = record_reply_provenance(store, canonical, current, Vec::new);
+	let unseen_set: BTreeSet<u32> = unseen.iter().copied().collect();
+	let live_tag = record_reply_provenance(store, canonical, current, || {
+		guarded
+			.iter()
+			.filter(|line| !unseen_set.contains(line))
+			.filter_map(|line| map.get(line).copied())
+			.collect()
+	});
 	EditError::rejected(
 		Rejection::UnseenLines,
 		stale_unseen_lines_message(section.path.as_str(), unseen, expected, &live, &live_tag, raw),
@@ -1546,5 +1564,39 @@ mod lifecycle {
 		assert_eq!(ctx.read("ext.ts", &(12..=57).collect::<Vec<_>>()), live_tag);
 		ctx.edit(&resend).await.unwrap();
 		assert_eq!(ctx.text("ext.ts").lines().count(), 16);
+	}
+
+	/// A cut whose range mixes rows the old read showed with more unseen rows
+	/// than the reveal holds. The reply asks for the unseen rows only, so the
+	/// live snapshot must carry the shown ones: after that one read, the cut
+	/// reissued at the live numbers applies.
+	#[tokio::test]
+	async fn stale_cut_carries_its_seen_anchors_onto_the_live_tag() {
+		let ctx = Lifecycle::new("carry.ts", 60);
+		let tag0 = ctx.read("carry.ts", &[54, 55]);
+		let original = ctx.text("carry.ts");
+		ctx.write_text("carry.ts", &format!("// ext a\n// ext b\n{original}"));
+		let before = ctx.text("carry.ts");
+		let err = ctx
+			.edit(&format!("[carry.ts#{tag0}]\nCUT 10.=55\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("`carry.ts:12-55`"), "unexpected error: {err}");
+		// The tag the reply gives the caller, not one the test assumes.
+		let live_tag = err
+			.rsplit("[carry.ts#")
+			.next()
+			.and_then(|rest| rest.split(']').next())
+			.expect("reply names a tag")
+			.to_owned();
+		assert_eq!(ctx.text("carry.ts"), before);
+
+		// Exactly the read the reply asked for: rows 56 and 57, which the
+		// first read displayed at 54 and 55, are not in it.
+		assert_eq!(ctx.read("carry.ts", &(12..=55).collect::<Vec<_>>()), live_tag);
+		ctx.edit(&format!("[carry.ts#{live_tag}]\nCUT 12.=57\n"))
+			.await
+			.unwrap();
+		assert_eq!(ctx.text("carry.ts").lines().count(), 16);
 	}
 }
