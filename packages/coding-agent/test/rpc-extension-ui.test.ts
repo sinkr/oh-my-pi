@@ -7,6 +7,7 @@ import {
 	type RpcExtensionUIResponse,
 	requestRpcAskDialog,
 	requestRpcDialog,
+	requestRpcInput,
 	requestRpcSelect,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 
@@ -351,6 +352,50 @@ await runRpcMode(session);
 			targetId: request.id,
 		});
 		expect(pendingRequests.size).toBe(0);
+	});
+
+	it("emits secret in extension_ui_request when dialogOptions.secret is provided", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+
+		// 1. undefined secret: omitted from wire payload
+		const unmaskedResult = requestRpcInput(pendingRequests, output, "Username", "e.g. alice");
+		const unmaskedRequest = output.mock.calls[0]?.[0];
+		expect(unmaskedRequest).toMatchObject({
+			type: "extension_ui_request",
+			method: "input",
+			title: "Username",
+			placeholder: "e.g. alice",
+		});
+		expect(unmaskedRequest).not.toHaveProperty("secret");
+		respond(pendingRequests, requireRequest(unmaskedRequest).id, { value: "alice" });
+		await unmaskedResult;
+
+		// 2. secret: true: included in wire payload as secret: true
+		const maskedResult = requestRpcInput(pendingRequests, output, "API Key", undefined, { secret: true });
+		const maskedRequest = output.mock.calls[1]?.[0];
+		expect(maskedRequest).toMatchObject({
+			type: "extension_ui_request",
+			method: "input",
+			title: "API Key",
+			secret: true,
+		});
+		respond(pendingRequests, requireRequest(maskedRequest).id, { value: "secret-token" });
+		await maskedResult;
+
+		// 3. secret: false: explicitly passed as secret: false
+		const explicitUnmaskedResult = requestRpcInput(pendingRequests, output, "Public Note", undefined, {
+			secret: false,
+		});
+		const explicitUnmaskedRequest = output.mock.calls[2]?.[0];
+		expect(explicitUnmaskedRequest).toMatchObject({
+			type: "extension_ui_request",
+			method: "input",
+			title: "Public Note",
+			secret: false,
+		});
+		respond(pendingRequests, requireRequest(explicitUnmaskedRequest).id, { value: "hello" });
+		await explicitUnmaskedResult;
 	});
 
 	it("rejects secret login input, completes ordinary OAuth input, and logs the stored account out", async () => {

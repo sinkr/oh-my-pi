@@ -48,7 +48,7 @@ import {
 	wordCompletionQuery,
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
-import { type AgentSession, SessionBusyError } from "../../session/agent-session";
+import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
 import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -419,7 +419,8 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  * Commands that skip the serial queue entirely; see {@link dispatchRpcInputFrame}.
  * (`prompt` and `steer_subagent` are also backgrounded there, but start through
  * the serial tail.) `btw_cancel` is synchronous and must overtake a `btw` still
- * starting or a long serial command.
+ * starting or a long serial command; `abort_branch_summary` likewise overtakes
+ * the `navigate_tree` whose summary it stops.
  * A Set, not a Record: `type` is untrusted input and must not hit prototype keys.
  */
 const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
@@ -427,6 +428,7 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 	"predict_word",
 	"live_start",
 	"btw_cancel",
+	"abort_branch_summary",
 ]);
 
 /**
@@ -1065,6 +1067,30 @@ export function requestRpcSelect(
 	);
 }
 
+/** Sends an RPC input request, passing optional secret masking and timeout metadata. */
+export function requestRpcInput(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	title: string,
+	placeholder?: string,
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<string | undefined> {
+	return requestRpcDialog(
+		pendingRequests,
+		output,
+		dialogOptions,
+		undefined,
+		{
+			method: "input",
+			title,
+			placeholder,
+			timeout: dialogOptions?.timeout,
+			...(dialogOptions?.secret !== undefined ? { secret: dialogOptions.secret } : {}),
+		},
+		response => parseValueDialogResponse(response, dialogOptions),
+	);
+}
+
 /** Validates `ask` answers against the questions; any mismatch throws instead of guessing. */
 function parseAskDialogResponse(
 	response: RpcExtensionUIResponse,
@@ -1474,14 +1500,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			placeholder?: string,
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> {
-			return requestRpcDialog(
-				this.pendingRequests,
-				this.output,
-				dialogOptions,
-				undefined,
-				{ method: "input", title, placeholder, timeout: dialogOptions?.timeout },
-				response => parseValueDialogResponse(response, dialogOptions),
-			);
+			return requestRpcInput(this.pendingRequests, this.output, title, placeholder, dialogOptions);
 		}
 
 		onTerminalInput(): () => void {
@@ -2061,6 +2080,68 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					await emitAvailableCommandsUpdate();
 				}
 				return success(id, result.type, result.data);
+			}
+
+			case "navigate_tree": {
+				if (typeof command.entryId !== "string") return error(id, "navigate_tree", "entryId must be a string");
+				// Validation first: a refused navigation must not cancel the running side question or touch the goal.
+				if (!session.sessionManager.getEntry(command.entryId)) {
+					return error(id, "navigate_tree", `Entry ${command.entryId} not found`, "entry_not_found");
+				}
+				// As `fork`: a run would keep writing into the branch the leaf just left.
+				if (session.isBusyForSnapshot) {
+					const busy = new SessionBusyError("navigate the session tree");
+					return error(id, "navigate_tree", busy.message, "session_busy");
+				}
+				await btw.close();
+				// A goal continuation waiting to start is held until the navigation ends, then resumes (same session).
+				await goalController.beginSessionChange();
+				let result: NavigateTreeResult;
+				try {
+					result = await session.navigateTree(command.entryId, {
+						summarize: command.summarize === true,
+						customInstructions:
+							typeof command.customInstructions === "string" ? command.customInstructions : undefined,
+						// Only to detect a re-answer, which moves nothing yet: refused below, since it needs a picker here.
+						allowAskReopen: true,
+						// Rechecked after the summary: work may have started while it ran.
+						requireIdle: true,
+					});
+				} catch (err) {
+					if (err instanceof SessionBusyError) return error(id, "navigate_tree", err.message, "session_busy");
+					throw err;
+				} finally {
+					await goalController.endSessionChange();
+					// Respond only once a resumed continuation is scheduled.
+					await goalController.settled();
+				}
+				if (result.reopenAsk) {
+					return error(
+						id,
+						"navigate_tree",
+						"Re-answering an ask is not available over RPC; select another entry",
+						"ask_reanswer_unsupported",
+					);
+				}
+				return success(id, "navigate_tree", {
+					cancelled: result.cancelled,
+					aborted: result.aborted,
+					editorText: result.editorText,
+				});
+			}
+
+			case "abort_branch_summary": {
+				session.abortBranchSummary();
+				return success(id, "abort_branch_summary");
+			}
+
+			case "set_label": {
+				if (typeof command.entryId !== "string") return error(id, "set_label", "entryId must be a string");
+				if (command.label !== undefined && typeof command.label !== "string") {
+					return error(id, "set_label", "label must be a string");
+				}
+				session.sessionManager.appendLabelChange(command.entryId, command.label);
+				return success(id, "set_label");
 			}
 
 			case "open_session": {

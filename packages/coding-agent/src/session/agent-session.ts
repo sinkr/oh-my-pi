@@ -87,6 +87,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
@@ -423,6 +424,7 @@ import {
 	type PrewalkRestartResult,
 } from "./prewalk";
 import {
+	IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
 	isHiddenUserCompanion,
@@ -628,6 +630,35 @@ export class SessionBusyError extends Error {
 		super(`Cannot ${action} while session maintenance or user work is still running`);
 		this.name = "SessionBusyError";
 	}
+}
+
+/** Result of {@link AgentSession.navigateTree}. */
+export interface NavigateTreeResult {
+	editorText?: string;
+	/** Image attachments of the target user message, parallel to the positional `[Image #N]` markers in {@link editorText}. */
+	editorImages?: ImageContent[];
+	cancelled: boolean;
+	aborted?: boolean;
+	summaryEntry?: BranchSummaryEntry;
+	/** Raw session context built during navigation — pass to renderInitialMessages to skip a second O(N) walk. */
+	sessionContext?: SessionContext;
+	/**
+	 * Set when `targetId` is an `ask` toolResult, `options.allowAskReopen`
+	 * was set, and `options.reanswerAskResult` was not supplied: nothing was
+	 * mutated. The caller must re-open the ask picker with these
+	 * `questions`, then call `navigateTree(targetId, { ...options,
+	 * reanswerAskResult })` with the produced result to actually branch
+	 * (issue #5642).
+	 */
+	reopenAsk?: { toolCallId: string; questions: AskToolInput["questions"] };
+	/**
+	 * `true` when this call committed a new sibling answer for an `ask`
+	 * re-answer (`reanswerAskResult` was applied). The interactive caller
+	 * resumes the agent via {@link AgentSession.resumeAfterAskReanswer} *after* rebuilding
+	 * its transcript, so the resumed turn never renders against the stale
+	 * pre-rebuild UI (issue #6483).
+	 */
+	askReanswerCommitted?: boolean;
 }
 
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
@@ -2034,7 +2065,8 @@ export class AgentSession implements SettingsScope {
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
-			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
+			syncAfterModelChange: (previousEditMode, options) =>
+				this.#tools.syncAfterModelChange(previousEditMode, options),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, options) =>
@@ -2455,7 +2487,9 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#cancelFatalRecoveryHint = postmortem.registerFatalRecoveryHint(() => {
 			const sessionId = this.sessionManager.getSessionId();
-			if (!sessionId || !this.sessionManager.getSessionFile()) return undefined;
+			// `--resume <id>` fails on a session that never reached disk (issue #8860), or whose
+			// first remote write the exit aborts before the store confirms it.
+			if (!sessionId || !this.sessionManager.isSessionConfirmedOnDisk()) return undefined;
 			return {
 				label: this.#agentId ?? (this.#agentKind === "main" ? "Main" : "Agent"),
 				command: resumeCommand(sessionId),
@@ -8643,6 +8677,7 @@ export class AgentSession implements SettingsScope {
 					autoResizeImages: cfgImagesAutoResize.get(this.settings),
 					useHashLines: resolveFileDisplayMode(this).hashLines,
 					snapshotStore: getEditStore(this),
+					signal: setupAbort.signal,
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
@@ -12319,7 +12354,13 @@ export class AgentSession implements SettingsScope {
 		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
 		assertEphemeralTurnReady();
 		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText, history, promptImages, imageDescriptionNotice);
+		const snapshot = this.#buildEphemeralSnapshot(
+			args.promptText,
+			history,
+			promptImages,
+			imageDescriptionNotice,
+			args.conversationKey,
+		);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		assertEphemeralTurnReady();
 		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
@@ -12472,16 +12513,17 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Build a message snapshot for an ephemeral side-channel turn.  Includes
-	 * the in-flight streaming assistant message (if any) so the model sees
-	 * the partial response in context, then appends detached side-channel history
-	 * and the current prompt after the no-tools reminder.
+	 * Build a message snapshot for an ephemeral side-channel turn. Includes the
+	 * in-flight streaming assistant reply, detached side history, and the current
+	 * prompt after the no-tools reminder. A keyed conversation can cache its
+	 * replayable side history up to the first regenerated vision description.
 	 */
 	#buildEphemeralSnapshot(
 		promptText: string,
 		history?: readonly AgentMessage[],
 		images?: ImageContent[],
 		imageDescriptionNotice?: CustomMessage,
+		conversationKey?: string,
 	): AgentMessage[] {
 		const messages = [...this.messages];
 		const streaming = this.agent.state.streamMessage;
@@ -12505,6 +12547,7 @@ export class AgentSession implements SettingsScope {
 					...streaming,
 					content: preservedBlocks,
 				};
+				markPerCallContextMessage(normalized);
 				const lastMessage = messages.at(-1);
 				if (lastMessage?.role === "assistant") {
 					messages[messages.length - 1] = normalized;
@@ -12513,23 +12556,41 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 		}
-		messages.push({
+		const reminder: AgentMessage = {
 			role: "developer",
 			content: [{ type: "text", text: sideChannelNoToolsReminder }],
 			attribution: "agent",
 			timestamp: Date.now(),
-		});
+		};
+		markPerCallContextMessage(reminder);
+		messages.push(reminder);
+		// A regenerated vision description can change between keyed follow-ups.
+		// No breakpoint after it can be read by the next request.
+		let volatileSuffix = false;
 		if (history?.length) {
 			// Detach before the conversion pipeline can await or mutate caller-owned messages.
-			messages.push(...structuredClone(history));
+			const detachedHistory = structuredClone(history);
+			for (const message of detachedHistory) {
+				if (message.role === "custom" && message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE) {
+					volatileSuffix = true;
+				}
+				if (!conversationKey || volatileSuffix) markPerCallContextMessage(message);
+			}
+			messages.push(...detachedHistory);
 		}
-		if (imageDescriptionNotice) messages.push(imageDescriptionNotice);
-		messages.push({
+		if (imageDescriptionNotice) {
+			markPerCallContextMessage(imageDescriptionNotice);
+			messages.push(imageDescriptionNotice);
+			volatileSuffix = true;
+		}
+		const sidePrompt: AgentMessage = {
 			role: "user",
 			content: [{ type: "text", text: promptText }, ...(images ?? [])],
 			attribution: "agent",
 			timestamp: Date.now(),
-		});
+		};
+		if (!conversationKey || volatileSuffix) markPerCallContextMessage(sidePrompt);
+		messages.push(sidePrompt);
 		return messages;
 	}
 
@@ -13313,34 +13374,13 @@ export class AgentSession implements SettingsScope {
 			 * the original one.
 			 */
 			reanswerAskResult?: AgentToolResult<AskToolDetails>;
+			/**
+			 * Refuse with {@link SessionBusyError} when work started while the hooks
+			 * or the branch summary were awaited, before any tree change is made.
+			 */
+			requireIdle?: boolean;
 		} = {},
-	): Promise<{
-		editorText?: string;
-		/** Image attachments of the target user message, parallel to the positional `[Image #N]` markers in {@link editorText}. */
-		editorImages?: ImageContent[];
-		cancelled: boolean;
-		aborted?: boolean;
-		summaryEntry?: BranchSummaryEntry;
-		/** Raw session context built during navigation — pass to renderInitialMessages to skip a second O(N) walk. */
-		sessionContext?: SessionContext;
-		/**
-		 * Set when `targetId` is an `ask` toolResult, `options.allowAskReopen`
-		 * was set, and `options.reanswerAskResult` was not supplied: nothing was
-		 * mutated. The caller must re-open the ask picker with these
-		 * `questions`, then call `navigateTree(targetId, { ...options,
-		 * reanswerAskResult })` with the produced result to actually branch
-		 * (issue #5642).
-		 */
-		reopenAsk?: { toolCallId: string; questions: AskToolInput["questions"] };
-		/**
-		 * `true` when this call committed a new sibling answer for an `ask`
-		 * re-answer (`reanswerAskResult` was applied). The interactive caller
-		 * resumes the agent via {@link resumeAfterAskReanswer} *after* rebuilding
-		 * its transcript, so the resumed turn never renders against the stale
-		 * pre-rebuild UI (issue #6483).
-		 */
-		askReanswerCommitted?: boolean;
-	}> {
+	): Promise<NavigateTreeResult> {
 		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
@@ -13490,6 +13530,9 @@ export class AgentSession implements SettingsScope {
 			summaryText = hookSummary.summary;
 			summaryDetails = hookSummary.details;
 		}
+
+		// A run admitted during the hook or summary awaits would keep writing into the branch the leaf leaves.
+		if (options.requireIdle) this.#assertIdleForSnapshot("navigate the session tree");
 
 		// All cancellation/no-op exits are behind us. Invalidate prompt setup
 		// admitted on the abandoned branch before committing any tree changes.
