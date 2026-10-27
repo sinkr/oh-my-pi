@@ -918,7 +918,6 @@ export class ExtensionUiController {
 					...(dialogOptions?.acceptImages
 						? {
 								onPasteImage: () => void this.ctx.handleImagePaste(),
-								onPasteImagePath: (path: string) => void this.ctx.handleImagePathPaste(path),
 							}
 						: {}),
 				},
@@ -1213,7 +1212,6 @@ export class ExtensionUiController {
 					acceptImages: true,
 					images: prefill?.images,
 					onPasteImage: () => this.ctx.handleImagePaste(),
-					onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
 				});
 				return promise;
 			};

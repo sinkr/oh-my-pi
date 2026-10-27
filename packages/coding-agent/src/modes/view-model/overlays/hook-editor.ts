@@ -45,12 +45,6 @@ export interface HookEditorOptions {
 	 */
 	onPasteImage?: () => Promise<boolean>;
 	/**
-	 * With `acceptImages`, called for each path of a bracketed paste made only of image paths.
-	 * Calls are not awaited in turn, so images attach as they finish loading and are renumbered
-	 * in text order on submit.
-	 */
-	onPasteImagePath?: (path: string) => void | Promise<void>;
-	/**
 	 * Max rows the inner Editor may occupy. When omitted, the editor is
 	 * bounded to the current terminal height minus the component's chrome
 	 * (≈10 rows) so long content scrolls instead of pushing the submit

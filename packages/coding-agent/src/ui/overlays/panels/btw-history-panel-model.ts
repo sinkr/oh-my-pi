@@ -10,14 +10,13 @@
  *
  * The follow-up composer takes push-to-talk dictation (a held Space shows the
  * transcription at the caret, the mic glyph in the caret's cell, and commits
- * it on release) and attaches pasted image paths.
+ * it on release) and attaches clipboard images.
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type KeyEvent, type ScrollRequest, signal, untrack } from "@oh-my-pi/pi-tui";
 import { holdText, SpaceHoldGesture, type SpaceHoldHandler } from "../../../config/keybindings/space-hold";
 import type { BtwInjectState } from "../../../modes/view-model/overlays/btw-inject";
 import { compactImageMarkers, formatVisionMarker } from "../../../modes/view-model/prompt/composer-attachments";
-import { extractImagePastePathsFromText } from "../../../modes/view-model/prompt/custom-editor";
 import {
 	type BtwHistoryRecord,
 	type BtwHistoryTurn,
@@ -61,8 +60,6 @@ export interface BtwHistoryOptions {
 	) => Promise<boolean>;
 	/** Read a clipboard image into the follow-up (terminals send an empty paste for one). */
 	readonly onPasteImage?: () => Promise<unknown>;
-	/** Attach a pasted image (or video) path to the follow-up; what it cannot attach comes back as a paste. */
-	readonly onPasteImagePath?: (path: string) => Promise<void>;
 	/** Push-to-talk keys (KeyEvent ids; default Space) recognized as held while the follow-up is written. */
 	readonly spaceHoldKeys?: readonly string[];
 	/** What a recognized hold drives, dictating into the follow-up; unset keeps the keys typing. */
@@ -168,8 +165,6 @@ export class BtwHistoryModel implements DictationTarget {
 	nativeScroll: ScrollRequest | undefined;
 	#copied: { id: string; text: string } | undefined;
 	readonly #spaceHold: SpaceHoldGesture | undefined;
-	/** Image-path pastes in flight: what they hand back as text (an unreadable path) is typed, not re-attached. */
-	#pathPastes = 0;
 
 	// Terminal geometry: written by the painter as it draws, read by paging and the wheel.
 	listScroll = 0;
@@ -333,6 +328,7 @@ export class BtwHistoryModel implements DictationTarget {
 		this.touch();
 	}
 
+	/** Empty pastes read clipboard images; all nonempty payloads remain literal text. */
 	paste(text: string): void {
 		const composer = this.composer;
 		if (!composer) return;
@@ -340,22 +336,8 @@ export class BtwHistoryModel implements DictationTarget {
 			void this.options.onPasteImage();
 			return;
 		}
-		const paths =
-			this.options.onPasteImagePath && this.#pathPastes === 0 ? extractImagePastePathsFromText(text) : undefined;
-		if (paths) {
-			void this.#pastePaths(paths);
-			return;
-		}
+		// Path-shaped clipboard text is still text, not an image attachment.
 		this.#insert(text);
-	}
-
-	async #pastePaths(paths: readonly string[]): Promise<void> {
-		this.#pathPastes++;
-		try {
-			for (const path of paths) await this.options.onPasteImagePath!(path);
-		} finally {
-			this.#pathPastes--;
-		}
 	}
 
 	/** Type `text` (one line) at the follow-up's caret. */

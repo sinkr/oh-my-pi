@@ -19,7 +19,6 @@ import {
 	formatVisionMarker,
 	visionMarkerRanges,
 } from "../../../modes/view-model/prompt/composer-attachments";
-import { extractImagePastePathsFromText } from "../../../modes/view-model/prompt/custom-editor";
 import "../../styles/forms";
 import "../../styles/panels/hook-dialogs";
 import { ActionButton, applyEdit, applyMaskedEdit, type LineValue } from "./common";
@@ -314,17 +313,11 @@ export function HookEditor(props: HookEditorProps & { readonly ref?: (handle: Ho
 		const { text, images } = value();
 		props.onCancel(text, images);
 	};
-	/** With `acceptImages`: an empty paste (image-only clipboard) and a paste of image paths attach images. */
+	/** With `acceptImages`: only an empty paste (image-only clipboard) attaches images; path text stays literal. */
 	const pasteImages = (text: string): boolean => {
-		if (!options.acceptImages) return false;
-		if (text === "") {
-			void options.onPasteImage?.();
-			return options.onPasteImage !== undefined;
-		}
-		const paths = extractImagePastePathsFromText(text);
-		if (!paths || !options.onPasteImagePath) return false;
-		for (const path of paths) void options.onPasteImagePath(path);
-		return true;
+		if (!options.acceptImages || text !== "") return false;
+		void options.onPasteImage?.();
+		return options.onPasteImage !== undefined;
 	};
 	const external = async () => {
 		if (!options.externalEditor) return;

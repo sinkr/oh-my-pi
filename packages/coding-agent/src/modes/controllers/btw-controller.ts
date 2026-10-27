@@ -787,7 +787,6 @@ export class BtwController {
 				return this.startFollowUp(record.id, question, signal, images);
 			},
 			onPasteImage: () => this.ctx.handleImagePaste(),
-			onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
 			spaceHoldKeys: this.ctx.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
 			spaceHold: target => this.ctx.dictationSpaceHold(target),
 			inject: this.#injectEnabled()

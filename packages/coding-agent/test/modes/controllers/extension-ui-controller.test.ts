@@ -308,6 +308,45 @@ describe("ExtensionUiController image paste into prompts", () => {
 		expect(result?.notes?.[0]?.text).toMatch(/^\[Image #1[^\]]*\]$/);
 		expect(result?.notes?.[0]?.images).toHaveLength(1);
 	});
+
+	it("keeps image-looking pasted text literal in an image-enabled ask note", async () => {
+		const harness = imageHarness();
+		const pending = harness.controller.showAskDialog(
+			[{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }],
+			{ acceptImages: true },
+		);
+		harness.term.press("n");
+		await flushMicrotasks();
+		expect(harness.ctx.promptPasteTarget).toBeDefined();
+		harness.term.paste("/tmp/shot.png");
+		harness.term.press("enter");
+		await flushMicrotasks();
+		harness.term.press("enter");
+		const result = await pending;
+		const answer = result?.kind === "submit" ? result.results[0] : undefined;
+		expect(answer?.note).toBe("/tmp/shot.png");
+		expect(answer?.noteImages).toBeUndefined();
+	});
+
+	it("keeps image-looking pasted text literal in an image-enabled form option's note", async () => {
+		const harness = imageHarness();
+		const pending = harness.controller.showFormDialog(
+			`<form><fieldset><legend>Database</legend>
+				<label><input type="radio" name="db" value="sqlite" checked> SQLite</label>
+				<label><input type="radio" name="db" value="postgres"> Postgres</label>
+			</fieldset></form>`,
+			{ acceptImages: true },
+		);
+		harness.term.press("n");
+		expect(harness.ctx.promptPasteTarget).toBeDefined();
+		harness.term.paste("/tmp/shot.png");
+		harness.term.press("enter");
+		harness.term.press("tab");
+		harness.term.press("enter");
+		const result = await pending;
+		expect(result?.notes?.[0]?.text).toBe("/tmp/shot.png");
+		expect(result?.notes?.[0]?.images).toBeUndefined();
+	});
 });
 
 describe("ExtensionUiController editor UI", () => {
@@ -580,6 +619,29 @@ describe("ExtensionUiController tool approval", () => {
 		clipboard.resolve("stop this call");
 		expect(await pending).toBe("deny");
 		expect(harness.agent.peekSteeringQueue()).toMatchObject([{ content: "stop this call" }]);
+	});
+
+	it("keeps path-shaped pasted text literal while the approval owns the composer", async () => {
+		const harness = makeHarness();
+		Object.assign(harness.ctx.session, { prewarmModelConnection: () => {} });
+		const input = new InputController(harness.ctx, {
+			readMacFileUrls: async () => [],
+			readImage: async () => null,
+			readText: async () => "",
+			isTerminalLocal: () => true,
+		});
+		const handleImagePathPaste = vi.spyOn(input, "handleImagePathPaste");
+		input.setupKeyHandlers();
+		harness.steerOnSubmit();
+		const pending = harness.controller.showCollabAwareApproval(prompt);
+		now = 2_000;
+		// Path-shaped text has no image provenance: it pastes as literal text.
+		harness.term.paste("/tmp/shot.png");
+		expect(handleImagePathPaste).not.toHaveBeenCalled();
+		expect(harness.composer.text()).toBe("/tmp/shot.png");
+		harness.term.press("enter");
+		expect(await pending).toBe("deny");
+		expect(harness.agent.peekSteeringQueue()).toMatchObject([{ content: "/tmp/shot.png" }]);
 	});
 
 	it("owns the composer while mounted and releases it when it settles", async () => {

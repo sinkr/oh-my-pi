@@ -178,12 +178,10 @@ describe("HookEditor prompt-style mode", () => {
 
 	it("keeps empty and image-path pastes as text in a prompt that did not opt into images", () => {
 		const onPasteImage = vi.fn(async () => true);
-		const onPasteImagePath = vi.fn();
 		const onSubmit = vi.fn();
 		const editor = mountEditor("Prompt", undefined, onSubmit, vi.fn(), {
 			promptStyle: true,
 			onPasteImage,
-			onPasteImagePath,
 		});
 
 		editor.term.paste("");
@@ -191,7 +189,6 @@ describe("HookEditor prompt-style mode", () => {
 		editor.handleInput("\r");
 
 		expect(onPasteImage).not.toHaveBeenCalled();
-		expect(onPasteImagePath).not.toHaveBeenCalled();
 		expect(onSubmit.mock.calls[0]?.[0]).toBe("/tmp/shot.png");
 	});
 
@@ -259,20 +256,20 @@ describe("HookEditor prompt-style mode", () => {
 		expect(onSubmit).toHaveBeenCalledWith("see [Image #1]", [image]);
 	});
 
-	it("hands each pasted image path to the host when the prompt opted into images", () => {
-		const onPasteImagePath = vi.fn();
+	it("keeps path-shaped bracketed pastes as text even when the prompt accepts images", () => {
+		const onPasteImage = vi.fn(async () => true);
 		const onSubmit = vi.fn();
 		const editor = mountEditor("Prompt", undefined, onSubmit, vi.fn(), {
 			promptStyle: true,
 			acceptImages: true,
-			onPasteImagePath,
+			onPasteImage,
 		});
 
-		editor.term.paste("/tmp/a.png /tmp/b.png");
+		editor.term.paste("/tmp/shot.png");
 		editor.handleInput("\r");
 
-		expect(onPasteImagePath.mock.calls.map(call => call[0])).toEqual(["/tmp/a.png", "/tmp/b.png"]);
-		expect(onSubmit.mock.calls[0]?.[0]).toBe("");
+		expect(onPasteImage).not.toHaveBeenCalled();
+		expect(onSubmit.mock.calls[0]?.[0]).toBe("/tmp/shot.png");
 	});
 
 	it("labels attached images with their size and deletes the marker as a unit", () => {

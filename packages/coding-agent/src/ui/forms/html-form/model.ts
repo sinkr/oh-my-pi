@@ -15,7 +15,6 @@ import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { applyEdit, applyMaskedEdit } from "../../overlays/panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
 import { compactImageMarkers, formatVisionMarker } from "../../../modes/view-model/prompt/composer-attachments";
-import { extractImagePastePathsFromText } from "../../../modes/view-model/prompt/custom-editor";
 import {
 	choiceValue,
 	fieldError,
@@ -79,8 +78,6 @@ export interface HtmlFormCallbacks {
 	 * reads with {@link HtmlFormModel.attachNoteImage}.
 	 */
 	onPasteImage?(): void;
-	/** With {@link onPasteImage}: each path of a paste made only of image paths, while a note is open. */
-	onPasteImagePath?(path: string): void;
 	/**
 	 * The paste key on a text box (a text field, an Other answer, a note without image support): the
 	 * host reads the clipboard and delivers its text through {@link HtmlFormModel.paste}, resolving
@@ -924,14 +921,9 @@ export class HtmlFormModel {
 			return;
 		}
 		const note = untrack(this.note);
-		if (note && this.#callbacks.onPasteImage) {
-			// An empty paste is an image-only clipboard; a paste of image paths attaches them.
-			if (text === "") return this.#callbacks.onPasteImage();
-			const paths = extractImagePastePathsFromText(text);
-			if (paths && this.#callbacks.onPasteImagePath) {
-				for (const path of paths) this.#callbacks.onPasteImagePath(path);
-				return;
-			}
+		if (note && this.#callbacks.onPasteImage && text === "") {
+			// An empty paste is an image-only clipboard; path-shaped text remains literal text.
+			return this.#callbacks.onPasteImage();
 		}
 		const target = this.#activeBox();
 		if (target) this.#pasteInto(target, text);
