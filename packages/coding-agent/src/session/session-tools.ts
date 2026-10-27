@@ -13,6 +13,7 @@ import type { CustomTool, CustomToolContext } from "../extensibility/custom-tool
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
+import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
@@ -701,14 +702,13 @@ export class SessionTools {
 		const names = new Set<string>();
 		for (const name of this.getEnabledToolNames()) {
 			const tool = this.#toolRegistry.get(name);
-			if (!tool) continue;
+			if (!tool || !isEvalBridgeToolCallable(tool)) continue;
 			names.add(name);
 			if (tool.customWireName && this.#resolveToolWireName(tool.customWireName) === tool) {
 				names.add(tool.customWireName);
 			}
 		}
-		// These require a direct toolResult and are rejected by callSessionTool.
-		return [...names].filter(name => name !== "checkpoint" && name !== "rewind");
+		return [...names];
 	}
 
 	/** Exact registry names shadow wire aliases, including when the exact tool is disabled. */

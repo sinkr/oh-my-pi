@@ -230,9 +230,24 @@ it("eval rejects ambiguous wire names rather than choosing a registry insertion 
 });
 
 it("eval does not advertise tools that require a direct tool result", async () => {
-	session = await createSession([makeFakeTool("checkpoint"), makeFakeTool("rewind"), makeFakeTool("read")]);
+	session = await createSession([
+		{ ...makeFakeTool("checkpoint"), customWireName: "savepoint" },
+		{ ...makeFakeTool("rewind"), customWireName: "restorepoint" },
+		makeFakeTool("read"),
+	]);
 
 	expect(session.getEvalBridgeToolNames()).toEqual(["read"]);
+});
+
+it("eval applies direct-only restrictions to the resolved tool rather than its wire spelling", async () => {
+	const tool = Object.assign(makeFakeTool("savepoint"), { customWireName: "checkpoint" });
+	session = await createSession([tool]);
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+
+	expect(session.getEvalBridgeToolNames()).toEqual(["savepoint", "checkpoint"]);
+	await callSessionTool("checkpoint", {}, { session: toolSession });
+	expect(tool.executeCalls).toBe(1);
 });
 
 it("explicit yolo approval mode skips the ACP permission gate", async () => {
