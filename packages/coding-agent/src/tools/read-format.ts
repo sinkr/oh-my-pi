@@ -602,7 +602,7 @@ export async function buildInMemoryMultiRangeResult(
 
 	let outputText = "";
 	if (!allLines) {
-		outputText = rawParts.length > 0 ? rawParts.join("\n\n…\n\n") : "";
+		outputText = rawParts.join("\n");
 	} else if (visibleSpans.length > 0) {
 		if (options.sourcePath && !spansCoverEveryLine(visibleSpans, totalLines)) {
 			await warmBlockContext({ path: options.sourcePath, text });

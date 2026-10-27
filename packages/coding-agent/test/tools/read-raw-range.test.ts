@@ -3,9 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { getConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
+import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -40,7 +45,99 @@ describe("read tool raw range exactness", () => {
 	});
 
 	afterEach(async () => {
+		InternalUrlRouter.resetForTests();
 		await fs.rm(testDir, { recursive: true, force: true });
+	});
+
+	describe.each(["disk", "located", "in-memory"])("%s raw reads", source => {
+		it.each([
+			["raw:2", "B"],
+			["2:raw", "B"],
+			["2-2:raw", "B"],
+			["raw:1,3", "A\nC"],
+			["1,3:raw", "A\nC"],
+			["raw:3-4,2-3", "B\nC\nD"],
+			["raw:-2", "C\nD"],
+			["2-:raw", "B\nC\nD\n"],
+			["raw:1,3-", "A\nC\nD\n"],
+			["raw:1,3-99", "A\nC\nD"],
+		])("returns only selected source lines for %s", async (selector, expected) => {
+			const body = "A\nB\nC\nD\n";
+			await Bun.write(filePath, body);
+			await Bun.write(path.join(testDir, "session", "0.read.log"), body);
+			const handler: ProtocolHandler = {
+				scheme: "verbatim",
+				spec: { backing: "virtual", selectors: "lines", immutable: true },
+				resolve: async url => ({ url: url.href, content: body, contentType: "text/plain" }),
+			};
+			InternalUrlRouter.resetForTests();
+			InternalUrlRouter.instance().register(handler);
+			const wrapped = wrapToolWithMetaNotice(new ReadTool(makeSession(testDir)));
+
+			const target = source === "disk" ? filePath : source === "located" ? "artifact://0" : "verbatim://fixture";
+			const result = await wrapped.execute("raw-selected-lines", { path: `${target}:${selector}` });
+			expect(getTextOutput(result)).toBe(expected);
+			expect(result.details?.meta?.truncation).toBeUndefined();
+		});
+	});
+
+	it("preserves CR bytes and joins disjoint raw windows with only a source line separator", async () => {
+		await Bun.write(filePath, "A\r\nB\r\nC\r\nD\r\n");
+		const wrapped = wrapToolWithMetaNotice(tool);
+
+		expect(getTextOutput(await wrapped.execute("crlf-comma", { path: `${filePath}:1,3:raw` }))).toBe("A\r\nC\r");
+		expect(getTextOutput(await wrapped.execute("crlf-single", { path: `${filePath}:2:raw` }))).toBe("B\r");
+		expect(getTextOutput(await wrapped.execute("crlf-open", { path: `${filePath}:raw:3-` }))).toBe("C\r\nD\r\n");
+	});
+
+	it("keeps conflict diagnostics in details without changing raw bytes or conflict registration", async () => {
+		const conflict = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs";
+		await Bun.write(filePath, `before\n${conflict}\nafter\n`);
+		const session = makeSession(testDir);
+		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
+		const raw = await wrapped.execute("raw-conflict", { path: `${filePath}:2-6:raw` });
+
+		expect(getTextOutput(raw)).toBe(conflict);
+		expect(raw.details?.conflictCount).toBe(1);
+		expect(raw.details?.notes?.join("\n")).toContain("conflict://<N>");
+		expect(getConflictHistory(session).entries()).toMatchObject([{ id: 1, startLine: 2, endLine: 6 }]);
+
+		const normal = await wrapped.execute("normal-conflict", { path: `${filePath}:2-6` });
+		expect(getTextOutput(normal)).toContain("conflict://<N>");
+		expect(normal.details?.conflictCount).toBe(1);
+		expect(normal.details?.notes).toBeUndefined();
+	});
+
+	it("still reports a real byte ceiling when a finite raw range is not satisfied", async () => {
+		const line = "x".repeat(DEFAULT_MAX_BYTES + 10);
+		await Bun.write(filePath, `first\n${line}\nlast\n`);
+		const result = await wrapToolWithMetaNotice(tool).execute("raw-byte-ceiling", { path: `${filePath}:2:raw` });
+		const truncation = result.details?.meta?.truncation;
+		if (!truncation) throw new Error("expected byte-limit metadata");
+
+		expect(truncation).toMatchObject({
+			truncatedBy: "bytes",
+			partialLine: true,
+			outputBytes: DEFAULT_MAX_BYTES,
+			totalBytes: line.length,
+		});
+		expect(getTextOutput(result)).toBe(
+			`${line.slice(0, DEFAULT_MAX_BYTES)}\n\n[${formatTruncationMetaNotice(truncation)}]`,
+		);
+	});
+
+	it("still reports a real line ceiling for an open-ended raw read", async () => {
+		await Bun.write(filePath, Array.from({ length: 320 }, (_, i) => `line ${i + 1}`).join("\n"));
+		const result = await wrapToolWithMetaNotice(tool).execute("raw-line-ceiling", { path: `${filePath}:raw` });
+		const truncation = result.details?.meta?.truncation;
+		if (!truncation) throw new Error("expected line-limit metadata");
+
+		expect(truncation).toMatchObject({
+			truncatedBy: "lines",
+			shownRange: { start: 1, end: 300 },
+			nextOffset: 301,
+		});
+		expect(getTextOutput(result)).toEndWith(`\n\n[${formatTruncationMetaNotice(truncation)}]`);
 	});
 
 	it("returns exactly the requested single line for raw:N-N", async () => {
@@ -91,7 +188,9 @@ describe("read tool raw range exactness", () => {
 		const streamedFile = path.join(testDir, "large.txt");
 		await Bun.write(streamedFile, `${"x".repeat(4 * 1024 * 1024)}\nline 2\nline 3\nline 4\n`);
 
-		const result = await tool.execute("streamed-raw-range", { path: `${streamedFile}:raw:2-3` });
+		const result = await wrapToolWithMetaNotice(tool).execute("streamed-raw-range", {
+			path: `${streamedFile}:raw:2-3`,
+		});
 		expect(getTextOutput(result)).toBe("line 2\nline 3");
 	});
 
@@ -113,8 +212,8 @@ describe("read tool raw range exactness", () => {
 
 		const buffered = await tool.execute("buffered-open-multi", { path: `${filePath}:raw:1,3-` });
 		const streamed = await tool.execute("streamed-open-multi", { path: `${streamedFile}:raw:2,4-` });
-		expect(getTextOutput(buffered)).toBe("one\n\n…\n\nthree\n");
-		expect(getTextOutput(streamed)).toBe("two\n\n…\n\nfour\n");
+		expect(getTextOutput(buffered)).toBe("one\nthree\n");
+		expect(getTextOutput(streamed)).toBe("two\nfour\n");
 	});
 
 	it("records the source line count for an open-ended range that reaches EOF", async () => {
