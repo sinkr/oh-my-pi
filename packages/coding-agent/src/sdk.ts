@@ -243,6 +243,7 @@ import {
 	composeAppendPrompt,
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
+	withoutAgentsMd,
 } from "./system-prompt";
 import type { AgentDefinition } from "./task/types";
 import { AgentOutputManager } from "./task/output-manager";
@@ -765,6 +766,8 @@ export interface CreateAgentSessionOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Discover no context files: not from cwd (on start or a cwd change), not for additional workspace roots, and no nested AGENTS.md list. Explicit `contextFiles` still load. Inherited by subagents. */
 	noContextFiles?: boolean;
+	/** Drop every context file named `AGENTS.md`: from `contextFiles`, cwd discovery, and additional workspace roots. Set for task subagents. */
+	excludeAgentsMd?: boolean;
 	/** Pre-built workspace tree (skips re-scanning; passed by parents to subagents). */
 	workspaceTree?: WorkspaceTree;
 	/** Prompt templates. Default: discovered from cwd/.omp/prompts/ + agentDir/prompts/ */
@@ -1163,9 +1166,7 @@ export async function loadCliExtensionProviders(
 	const extensionsResult = await loadSessionExtensions(options, cwd, settings, eventBus);
 	const activeSources = extensionsResult.extensions.map(extension => extension.path);
 	modelRegistry.syncExtensionSources(activeSources);
-	for (const sourceId of new Set(activeSources)) {
-		modelRegistry.clearSourceRegistrations(sourceId);
-	}
+	modelRegistry.clearSourceRegistrations(new Set(activeSources));
 	for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
 		modelRegistry.registerProvider(name, config, sourceId);
 	}
@@ -1888,10 +1889,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
 	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
 	// session-context build, tool creation, MCP discovery, and extension discovery.
-	const pinnedContextFiles = options.contextFiles ?? (options.noContextFiles ? [] : undefined);
+	const excludeAgentsMd = options.excludeAgentsMd === true;
+	const contextFileFilter = <T extends { path: string }>(files: T[]): T[] =>
+		excludeAgentsMd ? withoutAgentsMd(files) : files;
+	const pinnedContextFiles = options.contextFiles
+		? contextFileFilter(options.contextFiles)
+		: options.noContextFiles
+			? []
+			: undefined;
 	const contextFilesPromise = pinnedContextFiles
 		? Promise.resolve(pinnedContextFiles)
-		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
+		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir).then(contextFileFilter);
 	contextFilesPromise.catch(() => {});
 	const resolveRepoContext = async (repoCwd: string) => {
 		try {
@@ -2423,6 +2431,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.skills ?? skills;
 			},
 			refreshSkills: () => session.refreshSkills(),
+			skillRediscoveryHost: () => session.skillRediscoveryHost(),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
 			eventBus,
@@ -2869,9 +2878,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!restrictToolNames) {
 			const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
 			modelRegistry.syncExtensionSources(activeExtensionSources);
-			for (const sourceId of new Set(activeExtensionSources)) {
-				modelRegistry.clearSourceRegistrations(sourceId);
-			}
+			modelRegistry.clearSourceRegistrations(new Set(activeExtensionSources));
 		}
 		if (extensionsResult.runtime.pendingProviderRegistrations.length > 0) {
 			for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
@@ -3978,9 +3985,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
 			if (hasSession && pinnedContextFiles === undefined) {
-				contextFiles = await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-					...cfgDisabledExtensions.get(settings),
-				]);
+				contextFiles = contextFileFilter(
+					await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
+						...cfgDisabledExtensions.get(settings),
+					]),
+				);
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 			}
@@ -4139,6 +4148,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd: promptCwd,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				noContextFiles: options.noContextFiles,
+				excludeAgentsMd,
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
 				resolvedCustomPrompt: options.customSystemPrompt,
@@ -4756,6 +4766,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			get skillHintVisible() {
 				return toolSession.skillHintVisible;
+			},
+			// Live, not the spread's copy: a rediscovery after a plugin upgrade replaces the primary's list.
+			get skills() {
+				return toolSession.skills;
 			},
 			hasEditTool: true,
 			requireYieldTool: false,
