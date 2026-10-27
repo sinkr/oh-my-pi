@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed transient Google 429 rate-limit and capacity responses retrying in place without blocking or rotating credentials, while daily caps and zero-entitlement limits still rotate ([#17127](https://github.com/can1357/oh-my-pi/pull/17127) by [@GTanger](https://github.com/GTanger))
+- Fixed Devin requests compressing the request body on the UI thread, which briefly froze the TUI on long conversations; requests under 1 KiB are now sent uncompressed
 
 ## [18.13.1] - 2026-10-27
 
