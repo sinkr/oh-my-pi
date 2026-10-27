@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Anthropic side turns, including composer predictions, now cache the persisted conversation prefix instead of writing a side-only prompt that the next turn cannot reuse ([#17186](https://github.com/can1357/oh-my-pi/issues/17186))
+- Anthropic composer predictions now cache the persisted conversation prefix; `/btw` follow-ups also reuse cached topic history ([#17186](https://github.com/can1357/oh-my-pi/issues/17186))
 
 ## [18.13.1] - 2026-10-27
 

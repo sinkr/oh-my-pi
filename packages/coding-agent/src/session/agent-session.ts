@@ -12315,7 +12315,13 @@ export class AgentSession implements SettingsScope {
 		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
 		assertEphemeralTurnReady();
 		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText, history, promptImages, imageDescriptionNotice);
+		const snapshot = this.#buildEphemeralSnapshot(
+			args.promptText,
+			history,
+			promptImages,
+			imageDescriptionNotice,
+			args.conversationKey,
+		);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		assertEphemeralTurnReady();
 		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
@@ -12468,16 +12474,17 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Build a message snapshot for an ephemeral side-channel turn.  Includes
-	 * the in-flight streaming assistant message (if any) so the model sees
-	 * the partial response in context, then appends detached side-channel history
-	 * and the current prompt after the no-tools reminder.
+	 * Build a message snapshot for an ephemeral side-channel turn. Includes the
+	 * in-flight streaming assistant reply, detached side history, and the current
+	 * prompt after the no-tools reminder. A keyed conversation may replay its
+	 * history and prompt on the next follow-up, so those messages stay cacheable.
 	 */
 	#buildEphemeralSnapshot(
 		promptText: string,
 		history?: readonly AgentMessage[],
 		images?: ImageContent[],
 		imageDescriptionNotice?: CustomMessage,
+		conversationKey?: string,
 	): AgentMessage[] {
 		const messages = [...this.messages];
 		const streaming = this.agent.state.streamMessage;
@@ -12521,7 +12528,9 @@ export class AgentSession implements SettingsScope {
 		if (history?.length) {
 			// Detach before the conversion pipeline can await or mutate caller-owned messages.
 			const detachedHistory = structuredClone(history);
-			for (const message of detachedHistory) markPerCallContextMessage(message);
+			if (!conversationKey) {
+				for (const message of detachedHistory) markPerCallContextMessage(message);
+			}
 			messages.push(...detachedHistory);
 		}
 		if (imageDescriptionNotice) {
@@ -12534,7 +12543,7 @@ export class AgentSession implements SettingsScope {
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
-		markPerCallContextMessage(sidePrompt);
+		if (!conversationKey) markPerCallContextMessage(sidePrompt);
 		messages.push(sidePrompt);
 		return messages;
 	}

@@ -1359,6 +1359,61 @@ describe("AgentSession message pipeline", () => {
 		expect(cached.filter(index => index >= 1)).toEqual([1]);
 	});
 
+	it("caches reusable /btw topic history through its latest side question", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const bodies: Array<{
+			messages: Array<{ role: string; content: string | Array<{ text?: string; cache_control?: unknown }> }>;
+		}> = [];
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [{ role: "user", content: "Fix the issue", timestamp: 1 }, createAssistantMessage("Fixed.")],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (target, context, options) =>
+				streamSimple(target, context, {
+					...options,
+					apiKey: "test-key",
+					fetch: async (_url, init) => {
+						bodies.push(JSON.parse(requestBodyText(init) ?? "{}"));
+						return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
+					},
+				}),
+		});
+		sessions.push(session);
+		await expect(
+			session.runEphemeralTurn({ promptText: "First question", conversationKey: "btw:topic" }),
+		).rejects.toThrow();
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "Follow-up",
+				conversationKey: "btw:topic",
+				history: [
+					{ role: "user", content: [{ type: "text", text: "First question" }], timestamp: 2 },
+					{ ...createAssistantMessage("First answer"), model: model.id },
+				],
+			}),
+		).rejects.toThrow();
+
+		expect(bodies).toHaveLength(2);
+		expect(
+			bodies.map(body => {
+				const content = body.messages.at(-1)?.content;
+				return Array.isArray(content) && content.some(block => block.cache_control != null);
+			}),
+		).toEqual([true, true]);
+		const [firstWire, nextWire] = [bodies[0].messages, bodies[1].messages.slice(0, bodies[0].messages.length)].map(
+			messages => JSON.stringify(messages, (key, value) => (key === "cache_control" ? undefined : value)),
+		);
+		expect(nextWire).toEqual(firstWire);
+	});
+
 	it.each([
 		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
