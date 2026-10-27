@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
+import { parsePrUnifiedDiff, retainPrDiffGeneration } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
 import {
 	getCached,
 	getCachedGeneration,
@@ -491,6 +491,16 @@ describe("pr://.../diff family", () => {
 		const stored = getCached("owner/example", "pr-diff", 77, false, authKey);
 		expect(stored).not.toBeNull();
 		const fetchedAt = stored!.fetchedAt;
+		expect(
+			retainPrDiffGeneration({
+				repo: "owner/example",
+				number: 77,
+				fetchedAt,
+				rendered: stored!.rendered,
+				files: parsePrUnifiedDiff(stored!.rendered).files,
+				cacheAuthKey: authKey,
+			}),
+		).toBe(fetchedAt);
 		const fresh = parsePrUnifiedDiff(newDiff);
 		putCached({
 			authKey,
@@ -533,16 +543,16 @@ describe("pr://.../diff family", () => {
 		const authKey = resolveGithubCacheAuthKey();
 		expect(authKey).toBeDefined();
 		const parsed = parsePrUnifiedDiff(oldDiff);
-		putCached({
-			authKey,
-			repo: "owner/example",
-			kind: "pr-diff",
-			number: 77,
-			includeComments: false,
-			payload: { unified: "", files: parsed.files },
-			rendered: oldDiff,
-			fetchedAt: aged,
-		});
+		expect(
+			retainPrDiffGeneration({
+				repo: "owner/example",
+				number: 77,
+				fetchedAt: aged,
+				rendered: oldDiff,
+				files: parsed.files,
+				cacheAuthKey: authKey,
+			}),
+		).toBe(aged);
 
 		await expect(router.resolve(`pr://owner/example/77/diff/1?at=${aged}`, { settings })).rejects.toThrow(
 			/not available/,
@@ -559,6 +569,16 @@ describe("pr://.../diff family", () => {
 		const authKey = resolveGithubCacheAuthKey();
 		const stored = getCached("owner/example", "pr-diff", 77, false, authKey);
 		expect(stored).not.toBeNull();
+		expect(
+			retainPrDiffGeneration({
+				repo: "owner/example",
+				number: 77,
+				fetchedAt: stored!.fetchedAt,
+				rendered: stored!.rendered,
+				files: parsePrUnifiedDiff(stored!.rendered).files,
+				cacheAuthKey: authKey,
+			}),
+		).toBe(stored!.fetchedAt);
 		const settings = Settings.isolated({ "github.cache.enabled": false });
 
 		await expect(

@@ -479,32 +479,33 @@ describe("getOrFetchView (TTL semantics)", () => {
 		const updated = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);
 		expect(updated?.rendered).toBe("refreshed-diff");
 		expect(updated?.payload.refreshed).toBe(true);
-		const pinned = getCachedGeneration<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false, result.fetchedAt);
-		expect(pinned?.rendered).toBe("old-diff");
-		expect(pinned?.payload.refreshed).toBe(false);
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 52, false, result.fetchedAt)).toBeNull();
 	});
 
-	it("pins a pr-diff row that predates the generation table when it is served stale", async () => {
+	it("does not retain a generation when a pr-diff row is written or served stale", async () => {
 		const settings = Settings.isolated({
 			"github.cache.softTtlSec": 60,
 			"github.cache.hardTtlSec": 86400,
 		});
-		const fetchedAt = Date.now() - 5 * 60_000;
-		const db = openDb();
-		expect(db).not.toBeNull();
-		db?.query(
-			"INSERT INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		).run(
-			"default",
-			TEST_REPO,
-			"pr-diff",
-			88,
-			0,
-			fetchedAt,
-			JSON.stringify({ files: [], legacy: true }),
-			"legacy-diff",
-			null,
-		);
+		const firstAt = Date.now() - 5 * 60_000;
+		putCached({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 88,
+			includeComments: false,
+			payload: { files: [] },
+			rendered: "same-diff",
+			fetchedAt: firstAt,
+		});
+		putCached({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 88,
+			includeComments: false,
+			payload: { files: [] },
+			rendered: "same-diff",
+			fetchedAt: firstAt + 1_000,
+		});
 
 		const result = await getOrFetchView({
 			repo: TEST_REPO,
@@ -512,61 +513,36 @@ describe("getOrFetchView (TTL semantics)", () => {
 			number: 88,
 			includeComments: false,
 			fetchFresh: async () => ({
-				rendered: "refreshed-legacy",
+				rendered: "should-not-run",
 				sourceUrl: undefined,
-				payload: { files: [], legacy: false },
+				payload: { files: [] },
 			}),
 			settings,
 		});
 
 		expect(result.status).toBe("stale");
-		expect(result.rendered).toBe("legacy-diff");
-		expect(getCachedGeneration(TEST_REPO, "pr-diff", 88, false, fetchedAt)?.rendered).toBe("legacy-diff");
+		expect(result.rendered).toBe("same-diff");
+		const generations = openDb()?.query("SELECT COUNT(*) AS c FROM github_view_cache_generation").get() as
+			| { c: number }
+			| undefined;
+		expect(generations?.c).toBe(0);
 	});
 
-	it("keeps a published generation when a different diff reuses its timestamp", () => {
-		const fetchedAt = 1_700_000_000_000;
-		const first = retainCachedGeneration({
-			repo: TEST_REPO,
-			kind: "pr-diff",
-			number: 9,
-			includeComments: false,
-			payload: { n: 1 },
-			rendered: "diff-a",
-			fetchedAt,
-		});
-		const second = retainCachedGeneration({
-			repo: TEST_REPO,
-			kind: "pr-diff",
-			number: 9,
-			includeComments: false,
-			payload: { n: 2 },
-			rendered: "diff-b",
-			fetchedAt,
-		});
-		const again = retainCachedGeneration({
-			repo: TEST_REPO,
-			kind: "pr-diff",
-			number: 9,
-			includeComments: false,
-			payload: { n: 1 },
-			rendered: "diff-a",
-			fetchedAt,
-		});
-
-		expect(first).toBe(fetchedAt);
-		expect(second).toBe(fetchedAt + 1);
-		expect(again).toBe(fetchedAt);
-		expect(getCachedGeneration(TEST_REPO, "pr-diff", 9, false, fetchedAt)?.rendered).toBe("diff-a");
-		expect(getCachedGeneration(TEST_REPO, "pr-diff", 9, false, fetchedAt + 1)?.rendered).toBe("diff-b");
-	});
-
-	it("does not rewrite an existing pr-diff generation on a fresh cache hit", async () => {
+	it("does not rewrite a published generation on a fresh cache hit", async () => {
 		const settings = Settings.isolated({
 			"github.cache.softTtlSec": 300,
 			"github.cache.hardTtlSec": 86400,
 		});
 		const fetchedAt = Date.now();
+		retainCachedGeneration({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 91,
+			includeComments: false,
+			payload: { files: [] },
+			rendered: "original-diff",
+			fetchedAt,
+		});
 		putCached({
 			repo: TEST_REPO,
 			kind: "pr-diff",

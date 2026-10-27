@@ -13,10 +13,9 @@
  *     synchronously, falling back to the cached row if the live fetch fails.
  *   Expensive PR diff rows past soft TTL but within hard TTL → return cached
  *     row AND schedule a background refresh (errors logged, never thrown).
- *     Every pr-diff generation is also stored by `fetched_at`, so a review
- *     URL can keep reading the snapshot it froze after that refresh lands.
- *     A published generation is insert-only: a later snapshot that collides
- *     on the same millisecond gets a new id instead of replacing it.
+ *     Only `/review` stores the snapshot it froze, keyed by `fetched_at`.
+ *     Cache writes do not. A published generation is insert-only: a later
+ *     snapshot that collides on the same millisecond gets a new id.
  *   Past hard TTL → treat as miss and fetch fresh. Pinned generation reads
  *     use that same hard TTL and the cache kill switch.
  */
@@ -543,34 +542,12 @@ export function getRetainedGeneration<T = unknown>(
 	return row;
 }
 
-function hasCachedGeneration(view: CachedView<unknown>): boolean {
-	const db = openDb();
-	if (!db) return false;
-	try {
-		const row = db
-			.query(
-				"SELECT 1 AS present FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
-			)
-			.get(view.authKey, view.repo, view.kind, view.number, view.includeComments ? 1 : 0, view.fetchedAt) as
-			| { present: number }
-			| undefined;
-		return row !== null && row !== undefined;
-	} catch (err) {
-		logger.debug("github cache: generation lookup failed", { err: String(err) });
-		return false;
-	}
-}
-
 export function putCached<T = unknown>(input: PutCachedInput<T>): number | null {
 	const db = openDb();
 	if (!db) return null;
 	try {
-		let fetchedAt = input.fetchedAt ?? Date.now();
+		const fetchedAt = input.fetchedAt ?? Date.now();
 		const payloadJson = JSON.stringify(input.payload);
-		if (input.kind === "pr-diff") {
-			const storedAt = retainCachedGeneration({ ...input, fetchedAt });
-			if (storedAt !== null) fetchedAt = storedAt;
-		}
 		db.query(
 			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(
@@ -760,20 +737,18 @@ function storeResult<T>(
 	includeComments: boolean,
 	result: FreshResult<T>,
 	fetchedAt: number,
-): number {
-	return (
-		putCached<T>({
-			authKey,
-			repo,
-			kind,
-			number,
-			includeComments,
-			payload: result.payload,
-			rendered: result.rendered,
-			sourceUrl: result.sourceUrl,
-			fetchedAt,
-		}) ?? fetchedAt
-	);
+): void {
+	putCached<T>({
+		authKey,
+		repo,
+		kind,
+		number,
+		includeComments,
+		payload: result.payload,
+		rendered: result.rendered,
+		sourceUrl: result.sourceUrl,
+		fetchedAt,
+	});
 }
 
 /**
@@ -812,26 +787,6 @@ function scheduleBackgroundRefresh<T>(
 	});
 }
 
-/**
- * Backfill a live pr-diff row that predates the generation table. An existing
- * generation is left untouched so a cache hit does not rewrite the patch.
- */
-function pinPrDiffGeneration<T>(kind: CacheKind, cached: CachedView<T>): void {
-	if (kind !== "pr-diff") return;
-	if (hasCachedGeneration(cached)) return;
-	retainCachedGeneration({
-		authKey: cached.authKey,
-		repo: cached.repo,
-		kind: cached.kind,
-		number: cached.number,
-		includeComments: cached.includeComments,
-		payload: cached.payload,
-		rendered: cached.rendered,
-		sourceUrl: cached.sourceUrl,
-		fetchedAt: cached.fetchedAt,
-	});
-}
-
 export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise<CacheLookupResult<T>> {
 	const ttl = resolveCacheTtl(options.settings);
 	const now = options.now ?? Date.now();
@@ -863,7 +818,6 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 			// auth lapse, etc.) and we never get to overwrite it.
 			invalidate(options.repo, options.kind, options.number, options.includeComments, authKey);
 		} else if (age <= ttl.softMs) {
-			pinPrDiffGeneration(options.kind, cached);
 			return {
 				rendered: cached.rendered,
 				sourceUrl: cached.sourceUrl,
@@ -872,7 +826,6 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 				fetchedAt: cached.fetchedAt,
 			};
 		} else if (options.kind === "pr-diff" || options.kind === "mr-diff") {
-			pinPrDiffGeneration(options.kind, cached);
 			scheduleBackgroundRefresh(
 				authKey,
 				options.repo,
@@ -914,15 +867,8 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 	}
 
 	const fresh = await options.fetchFresh();
-	const fetchedAt = storeResult(
-		authKey,
-		options.repo,
-		options.kind,
-		options.number,
-		options.includeComments,
-		fresh,
-		Date.now(),
-	);
+	const fetchedAt = Date.now();
+	storeResult(authKey, options.repo, options.kind, options.number, options.includeComments, fresh, fetchedAt);
 	return { ...fresh, status: "miss", fetchedAt };
 }
 
