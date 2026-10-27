@@ -132,6 +132,14 @@ MV lib/welcome.py
 
 The mode prompts in `crates/pi-edit/prompts/` define the full syntax.
 
+`apply_patch` matches complete old/context lines in this order: exact, trailing
+whitespace trimmed, both ends trimmed, then Unicode punctuation normalized.
+It never uses substring or character-similarity matching, regardless of the
+fuzzy settings for other modes. Repeated context binds to the first match at
+or after the previous hunk; unmatched context rejects the entire envelope
+before any writes. Numeric prefixes in old and new lines remain literal text,
+not recovered line-number annotations.
+
 ## Output and side effects
 
 Hashline applies in one tool call; it does not use the staged `xd://resolve` / `xd://reject` flow used by `ast_edit`.
