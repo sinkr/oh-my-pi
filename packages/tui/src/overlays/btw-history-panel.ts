@@ -23,8 +23,6 @@ import {
 } from "./btw-history";
 import { BtwInjectAnswer, type BtwInjectState, describeBtwInjectAnswer } from "./btw-inject";
 import { compactImageAttachments, formatVisionMarker } from "../prompt/composer-attachments";
-import { classifyImagePaste } from "../prompt/custom-editor";
-import { OrderedPastes } from "../prompt/ordered-pastes";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
@@ -79,8 +77,6 @@ interface BtwHistoryPanelOptions {
 	) => Promise<boolean>;
 	/** Read a clipboard image into the follow-up (an empty paste, as terminals send for one). */
 	onPasteImage?: () => Promise<unknown>;
-	/** Attach an image file whose path was pasted or dropped into the follow-up. */
-	onPasteImagePath?: (path: string) => Promise<void>;
 	/** Configured push-to-talk keys for a follow-up composer. */
 	spaceHoldKeys?: readonly KeyId[];
 	spaceHold?: (input: Input) => SpaceHoldHandler;
@@ -496,14 +492,11 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options.requestRender();
 	}
 
-	/** A pasted image path or an empty (clipboard image) paste attaches an image; other text is typed. */
+	/** Empty pastes read clipboard images; all nonempty payloads remain literal text. */
 	#paste(content: string): void {
-		const { onPasteImage, onPasteImagePath } = this.#options;
-		const image = classifyImagePaste(content);
-		if (image.kind === "clipboard" && onPasteImage) void onPasteImage();
-		else if (image.kind === "paths" && onPasteImagePath) {
-			for (const path of image.paths) void onPasteImagePath(path);
-		} else this.pasteText(content);
+		if (content.length === 0 && this.#options.onPasteImage) void this.#options.onPasteImage();
+		// Path-shaped clipboard text is still text, not an image attachment.
+		else this.pasteText(content);
 	}
 
 	handleInput(data: string): void {
