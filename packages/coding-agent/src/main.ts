@@ -146,6 +146,7 @@ import {
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
+import { scheduleGcAutoCompress } from "./cli/gc-auto-compress";
 import { cfgGcAutoCompress } from "./cli/gc-settings";
 import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
@@ -2616,12 +2617,9 @@ export async function runRootCommand(
 				}
 				void startBackgroundModelDiscovery?.();
 				if (cfgGcAutoCompress.get(settingsInstance)) {
-					// Opt-in only: keep the spawn and compression code out of the default startup graph.
-					void import("./cli/gc-auto-compress")
-						.then(({ scheduleGcAutoCompress }) => scheduleGcAutoCompress(getAgentDir()))
-						.catch(error =>
-							logger.warn("Background session compression failed to start", { error: String(error) }),
-						);
+					void scheduleGcAutoCompress(getAgentDir()).catch(error =>
+						logger.warn("Background session compression failed to start", { error: String(error) }),
+					);
 				}
 			};
 			const refreshScopedModelsAfterLogin = async () => {
