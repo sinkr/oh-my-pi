@@ -1024,7 +1024,9 @@ fn read_to_buffer<T: Read>(
 /// lines in it cost more: a read can take more records than the chunk has
 /// room for (see `want` in [`read_to_buffer`]). `buffer[..from]` holds
 /// `before` separators, and `buffer[from..filled]` `added`. The chunk keeps
-/// at least two lines; the rest wait for the next chunk.
+/// at least two lines; the rest wait for the next chunk. A chunk ending at
+/// `end` keeps only `buffer[..end]` (see [`read`]), so that is what counts,
+/// not a buffer grown for a longer line or for lines carried over.
 fn cut_at_budget(
 	buffer: &[u8],
 	from: usize,
@@ -1035,14 +1037,14 @@ fn cut_at_budget(
 	budget: Option<(usize, ChunkCost)>,
 ) -> Option<Fill> {
 	let (budget, cost) = budget?;
-	if before + added <= 2 || cost.of_chunk(buffer.len(), filled, before + added) <= budget {
+	if before + added <= 2 || cost.of_chunk(filled, filled, before + added) <= budget {
 		return None;
 	}
 	let mut records = before;
 	let mut complete = None;
 	for end in memchr_iter(separator, &buffer[from..filled]).map(|i| from + i + 1) {
 		records += 1;
-		if records > 2 && cost.of_chunk(buffer.len(), end, records) > budget {
+		if records > 2 && cost.of_chunk(end, end, records) > budget {
 			let complete = complete
 				.unwrap_or_else(|| memrchr(separator, &buffer[..from]).map_or(0, |end| end + 1));
 			return Some(Fill { complete, filled, separators: records - 1, more: true });
@@ -1141,14 +1143,16 @@ mod tests {
 	}
 
 	/// Reads `input` in chunks of `budget`, recycling each chunk into the
-	/// next read, and returns the most memory any chunk held: its buffer and
-	/// the capacity of its record, selection and token vectors.
-	fn largest_chunk(input: &[u8], budget: usize, settings: &GlobalSettings) -> usize {
+	/// next read, and returns the most memory any chunk held (its buffer and
+	/// the capacity of its record, selection and token vectors) and the
+	/// number of chunks.
+	fn read_chunks(input: &[u8], budget: usize, settings: &GlobalSettings) -> (usize, usize) {
 		let (sender, receiver) = flume::bounded::<Chunk>(1);
 		let mut input = input;
 		let mut carry_over = Vec::new();
 		let mut recycled = RecycledChunk::new(8 * 1024);
 		let mut largest = 0;
+		let mut chunks = 0;
 		loop {
 			let more = read(
 				&sender,
@@ -1162,6 +1166,7 @@ mod tests {
 			)
 			.expect("read");
 			let Ok(chunk) = receiver.try_recv() else { break };
+			chunks += 1;
 			let contents = chunk.borrow_dependent();
 			largest = largest.max(
 				chunk.borrow_owner().capacity()
@@ -1174,7 +1179,7 @@ mod tests {
 				break;
 			}
 		}
-		largest
+		(largest, chunks)
 	}
 
 	// Failure mode: `sort -S 100T` of a 19 KB file aborted the host: the
@@ -1182,7 +1187,7 @@ mod tests {
 	#[test]
 	fn a_huge_budget_allocates_for_the_input_not_the_budget() {
 		let input = b"some line\n".repeat(2000);
-		let held = largest_chunk(&input, usize::MAX / 4, &GlobalSettings::default());
+		let (held, _) = read_chunks(&input, usize::MAX / 4, &GlobalSettings::default());
 		assert!(held <= 2 * input.len() + 64 * 1024, "a {}-byte input held {held} bytes", input.len());
 	}
 
@@ -1195,7 +1200,7 @@ mod tests {
 		let mut input = b"a\n".repeat(2 * BUDGET);
 		let long = [&[b'x'; 999][..], b"\n"].concat();
 		input.extend(long.repeat(4 * BUDGET / long.len()));
-		let held = largest_chunk(&input, BUDGET, &GlobalSettings::default());
+		let (held, _) = read_chunks(&input, BUDGET, &GlobalSettings::default());
 		assert!(held <= BUDGET, "a chunk held {held} bytes for a budget of {BUDGET}");
 	}
 
@@ -1208,8 +1213,24 @@ mod tests {
 		let long = [&[b'x'; 99][..], b"\n"].concat();
 		let mut input = long.repeat(2 * BUDGET / long.len());
 		input.extend(b"\n".repeat(2 * BUDGET));
-		let held = largest_chunk(&input, BUDGET, &GlobalSettings::default());
+		let (held, _) = read_chunks(&input, BUDGET, &GlobalSettings::default());
 		assert!(held <= BUDGET, "a chunk held {held} bytes for a budget of {BUDGET}");
+	}
+
+	// Failure mode: with `-S 16K`, the 64 KiB read after a line longer than
+	// the budget left lines in a buffer already past the budget, so each
+	// later chunk took two lines: thousands of chunks, each a temporary file.
+	#[test]
+	fn short_lines_after_a_long_line_fill_small_chunks() {
+		const BUDGET: usize = 8 * 1024;
+		const LINES: usize = 32 * 1024;
+		let mut input = vec![b'x'; 10_000];
+		input.push(b'\n');
+		input.extend(b"a\n".repeat(LINES));
+		let (_, chunks) = read_chunks(&input, BUDGET, &GlobalSettings::default());
+		// A line costs its 2 bytes and its `Line`.
+		let most = 2 * LINES * (2 + size_of::<Line>()) / BUDGET + 2;
+		assert!(chunks <= most, "{chunks} chunks, at most {most} expected");
 	}
 
 	// Failure mode: `sort -k2` of a line of many short fields held 16 bytes
@@ -1223,7 +1244,7 @@ mod tests {
 		let mut input = b"a ".repeat(BUDGET / 4);
 		input.push(b'\n');
 		input.extend(b"b c\n".repeat(1000));
-		let held = largest_chunk(&input, BUDGET, &settings);
+		let (held, _) = read_chunks(&input, BUDGET, &settings);
 		assert!(held <= BUDGET, "a chunk held {held} bytes for a budget of {BUDGET}");
 	}
 
