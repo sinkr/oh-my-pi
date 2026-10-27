@@ -11,7 +11,7 @@ import {
 	scheduleGcAutoCompress,
 } from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
-import { compressMethod } from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
+import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
@@ -2540,7 +2540,7 @@ describe("runGcCommand stale state", () => {
 });
 
 // Test roots live under the temp dir, so its filesystem decides which compression tests run.
-const method = await compressMethod(os.tmpdir());
+const method = await gcCompress.compressMethod(os.tmpdir());
 const supported = method !== undefined;
 const onApfs = method === "apfs";
 
@@ -2826,10 +2826,30 @@ describe("runGcCommand session compression", () => {
 		60_000,
 	);
 
+	test.skipIf(!supported)(
+		"a volume whose compression shrinks nothing is probed once a day and its sessions are left alone",
+		async () => {
+			const { file } = await writeIdleSession(Bun.randomUUIDv7());
+			const before = await snapshot(file);
+			const probe = spyOn(gcCompress, "compressionWorks").mockResolvedValue(false);
+			try {
+				expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+				expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+				expect(probe).toHaveBeenCalledTimes(1);
+			} finally {
+				probe.mockRestore();
+			}
+			expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped:");
+			expect(await snapshot(file)).toEqual(before);
+		},
+	);
+
 	test.skipIf(supported)("the background run never starts without filesystem compression", async () => {
-		await writeIdleSession(Bun.randomUUIDv7());
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
 
 		expect(await scheduleGcAutoCompress(root)).toBeUndefined();
-		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).exists()).toBe(false);
+		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped: unsupported");
+		expect(await snapshot(file)).toEqual(before);
 	});
 });
