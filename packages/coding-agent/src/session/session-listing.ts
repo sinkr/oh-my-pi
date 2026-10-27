@@ -726,8 +726,14 @@ export async function findMostRecentSession(
 export interface SessionContinuation {
 	/** The copy of the conversation to resume: the one with the newest turn. */
 	session: SessionInfo;
-	/** The session file that was asked for. */
+	/** The session file that was asked for, or that `--continue` picked. */
 	from: string;
+	/**
+	 * Set when `session` is not a file `from` went on in: an older copy that
+	 * `from` continues (`earlier`), or a copy on another branch of the same
+	 * conversation (`other`). Only {@link findRecentSessionContinuation} sets it.
+	 */
+	relation?: "earlier" | "other";
 	/**
 	 * Copies `from`'s conversation went on in, `from` and `session` included;
 	 * a copy left behind by one that went on after it does not count.
@@ -867,28 +873,9 @@ export async function findSessionContinuation(
 	const target = path.resolve(sessionPath);
 	const start = await scanSessionFile(target, storage, false);
 	if (!start) return undefined;
-	const createdAt = start.created.getTime();
-	const since = Number.isFinite(createdAt) ? createdAt : Number.NEGATIVE_INFINITY;
-	const later = storage
-		.listFilesSync(path.dirname(target), "*.jsonl")
-		.filter(file => path.resolve(file) !== target && sessionFileCreatedAt(file) >= since);
-	const continuations = new Map<string, SessionInfo[]>();
-	for (const session of await collectSessionsFromFiles(later, storage, false)) {
-		if (!session.continuationOf) continue;
-		const siblings = continuations.get(session.continuationOf);
-		if (siblings) siblings.push(session);
-		else continuations.set(session.continuationOf, [session]);
-	}
+	const continuations = await continuationsAfter(start, storage);
 	if (!continuations.has(start.id)) return undefined;
-	const activities = new Map<string, SessionActivity>();
-	const activityOf = async (copy: SessionInfo): Promise<SessionActivity> => {
-		let activity = activities.get(copy.path);
-		if (!activity) {
-			activity = await lastActivity(copy, storage);
-			activities.set(copy.path, activity);
-		}
-		return activity;
-	};
+	const activityOf = activityReader(storage);
 	const copies = [start];
 	const seen = new Set([start.path]);
 	for (let i = 0; i < copies.length; i++) {
@@ -917,6 +904,125 @@ export async function findSessionContinuation(
 		copies: copies.length,
 	});
 	return { session: newest, from: start.path, copies: copies.length };
+}
+
+/**
+ * The copy of the conversation in `sessionPath` to continue when `--continue`
+ * or auto-resume picked `sessionPath` as the most recently written session
+ * (or RPC `open_session` did): `undefined` when `sessionPath` itself is that copy.
+ *
+ * Unlike {@link findSessionContinuation}, nobody chose `sessionPath`, not
+ * even through the terminal's record of its last session; it won on file
+ * time, and a process writes its exit record or an idle cache refresh long
+ * after its last turn, so the pick can be any copy, an older one included.
+ * This looks at every copy linked to it by `continuationOf`, in both
+ * directions, drops each copy a continuation of it holds entirely (the
+ * continuation holds its newest turn), and takes the remaining copy with the
+ * newest turn, keeping `sessionPath` on a tie. Two copies that both went on
+ * after the move both remain, and the one with the later turn wins.
+ */
+export async function findRecentSessionContinuation(
+	sessionPath: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<SessionContinuation | undefined> {
+	const target = path.resolve(sessionPath);
+	const picked = await scanSessionFile(target, storage, false);
+	if (!picked) return undefined;
+	// Walk the links up to the first copy; each parent's file is named `<time>_<id>.jsonl` in this directory.
+	let root = picked;
+	const ancestors = new Set([root.path]);
+	while (root.continuationOf) {
+		const [parentFile] = storage.listFilesSync(path.dirname(target), `*_${root.continuationOf}.jsonl`);
+		const parent = parentFile ? await scanSessionFile(path.resolve(parentFile), storage, false) : undefined;
+		if (!parent || parent.id !== root.continuationOf || ancestors.has(parent.path)) break;
+		ancestors.add(parent.path);
+		root = parent;
+	}
+	const continuations = await continuationsAfter(root, storage);
+	if (root === picked && !continuations.has(root.id)) return undefined;
+	const activityOf = activityReader(storage);
+	const copies = [root];
+	const seen = new Set([root.path]);
+	const parentOf = new Map<string, SessionInfo>();
+	const remaining: SessionInfo[] = [];
+	for (let i = 0; i < copies.length; i++) {
+		const copy = copies[i];
+		const children = (continuations.get(copy.id) ?? []).filter(child => !seen.has(child.path));
+		for (const child of children) {
+			seen.add(child.path);
+			parentOf.set(child.path, copy);
+			copies.push(child);
+		}
+		const { id: newestTurn } = await activityOf(copy);
+		let superseded = false;
+		for (const child of children) {
+			if (newestTurn === undefined || (await holdsEntry(child.path, newestTurn, storage))) {
+				superseded = true;
+				break;
+			}
+		}
+		if (!superseded) remaining.push(copy);
+	}
+	let newest = remaining.find(copy => copy.path === picked.path);
+	let newestTime = newest ? (await activityOf(newest)).time : Number.NEGATIVE_INFINITY;
+	for (const copy of remaining) {
+		const { time } = await activityOf(copy);
+		if (time <= newestTime) continue;
+		newest = copy;
+		newestTime = time;
+	}
+	if (!newest || newest.path === picked.path) return undefined;
+	// How the copy taken relates to the pick: a file the pick went on in (the
+	// walk up from it reaches the pick), an older copy the pick continues, or a
+	// copy on another branch of the family.
+	let wentOnIn = 0;
+	let step: SessionInfo | undefined = newest;
+	while (step && step.path !== picked.path) {
+		wentOnIn++;
+		step = parentOf.get(step.path);
+	}
+	const relation = step ? undefined : ancestors.has(newest.path) ? "earlier" : "other";
+	logger.info("Continuing the copy of a session with the newest turn", {
+		from: picked.path,
+		to: newest.path,
+		relation: relation ?? "continuation",
+	});
+	return { session: newest, from: picked.path, copies: relation ? 2 : wentOnIn + 1, relation };
+}
+
+/**
+ * The sessions of `start`'s directory that continue another session, keyed by
+ * the id they continue. A continuation is named `<move time>_<id>.jsonl` and
+ * moves only after the session it continues was created, so only files named
+ * after `start`'s creation time are read.
+ */
+async function continuationsAfter(start: SessionInfo, storage: SessionStorage): Promise<Map<string, SessionInfo[]>> {
+	const createdAt = start.created.getTime();
+	const since = Number.isFinite(createdAt) ? createdAt : Number.NEGATIVE_INFINITY;
+	const later = storage
+		.listFilesSync(path.dirname(start.path), "*.jsonl")
+		.filter(file => path.resolve(file) !== start.path && sessionFileCreatedAt(file) >= since);
+	const continuations = new Map<string, SessionInfo[]>();
+	for (const session of await collectSessionsFromFiles(later, storage, false)) {
+		if (!session.continuationOf) continue;
+		const siblings = continuations.get(session.continuationOf);
+		if (siblings) siblings.push(session);
+		else continuations.set(session.continuationOf, [session]);
+	}
+	return continuations;
+}
+
+/** {@link lastActivity}, read once per session file. */
+function activityReader(storage: SessionStorage): (copy: SessionInfo) => Promise<SessionActivity> {
+	const activities = new Map<string, SessionActivity>();
+	return async copy => {
+		let activity = activities.get(copy.path);
+		if (!activity) {
+			activity = await lastActivity(copy, storage);
+			activities.set(copy.path, activity);
+		}
+		return activity;
+	};
 }
 
 /** Session id embedded in a `<file-safe-timestamp>_<id>.jsonl` filename, if present. */

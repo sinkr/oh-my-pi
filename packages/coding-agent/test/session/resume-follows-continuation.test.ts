@@ -1,15 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EVAL_STATE_CONTEXT_TYPE } from "@oh-my-pi/pi-coding-agent/eval/state";
 import { createSessionManager } from "@oh-my-pi/pi-coding-agent/main";
 import { openRpcSession, type RpcOpenSessionSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { SESSION_EXIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import type { SessionContinuation } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getTerminalSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../../src/session/session-manager.ts");
 const EXIT_DIAGNOSTICS_MODULE = path.join(import.meta.dir, "../../src/session/exit-diagnostics.ts");
@@ -256,6 +259,55 @@ async function movedOffSession(
 	return { original, continuation };
 }
 
+/**
+ * Both copies went on after the move: the holder kept writing `original` after
+ * the continuation was made, so `original` has the newest turn. Then a process
+ * on the continuation wrote its exit record, so the continuation is the most
+ * recently written file.
+ */
+async function divergedWithContinuationWrittenLast(
+	tempDir: TempDir,
+): Promise<{ original: string; continuation: string }> {
+	const original = await createSession(tempDir);
+	const holder = await Holder.resume(tempDir, original);
+	let continuation: string;
+	try {
+		await holder.append("holder turn");
+		await Bun.sleep(5);
+		continuation = await continueElsewhere(original, tempDir.path(), "continued turn");
+		await Bun.sleep(5);
+		await holder.append("holder kept going");
+	} finally {
+		await holder.exit();
+	}
+	await Bun.sleep(5);
+	const exiting = await open(continuation, tempDir.path());
+	exiting.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+		reason: "dispose",
+		kind: "normal",
+		recordedAt: new Date().toISOString(),
+	});
+	await exiting.close();
+	expect(exiting.getSessionFile()).toBe(continuation);
+	return { original, continuation };
+}
+
+/** An RPC process still on its startup session elsewhere; records the files `open_session` switches to. */
+function rpcHost(switchedTo: string[]): RpcOpenSessionSession {
+	return {
+		sessionFile: agentDir?.join("startup.jsonl"),
+		sessionId: "startup",
+		messages: [],
+		model: undefined,
+		setModel: async () => ({ switched: true }),
+		newSession: async () => true,
+		switchSession: async (sessionPath: string) => {
+			switchedTo.push(sessionPath);
+			return true;
+		},
+	} as unknown as RpcOpenSessionSession;
+}
+
 describe("--resume of a session that continued in a sibling file", () => {
 	// `continue`: the old file holds the holder's exit record, so it is the most recently written file.
 	const idleWrites: Record<string, IdleWrite> = {
@@ -296,23 +348,89 @@ describe("--resume of a session that continued in a sibling file", () => {
 		using tempDir = TempDir.createSync("@omp-resume-continuation-");
 		const { continuation } = await movedOffSession(tempDir);
 		const switchedTo: string[] = [];
-		// A process still on its startup session elsewhere; only the switch target matters.
-		const host = {
-			sessionFile: agentDir?.join("startup.jsonl"),
-			sessionId: "startup",
-			messages: [],
-			model: undefined,
-			setModel: async () => ({ switched: true }),
-			newSession: async () => true,
-			switchSession: async (sessionPath: string) => {
-				switchedTo.push(sessionPath);
-				return true;
-			},
-		} as unknown as RpcOpenSessionSession;
-
-		const opened = await openRpcSession(host, tempDir.path());
+		const opened = await openRpcSession(rpcHost(switchedTo), tempDir.path());
 		expect(opened.resumed).toBe(true);
 		expect(switchedTo).toEqual([continuation]);
+	}, 30_000);
+
+	it("continues the copy with the newest turn when the continuation was written last but the original went on", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const { original } = await divergedWithContinuationWrittenLast(tempDir);
+		// A terminal with no record of its last session: `--continue` picks the most recently written file.
+		await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
+
+		const followed: SessionContinuation[] = [];
+		const manager = await createSessionManager(
+			continueArgs(tempDir.path()),
+			tempDir.path(),
+			stubSettings,
+			undefined,
+			{
+				onSessionContinuation: c => followed.push(c),
+			},
+		);
+		try {
+			expect(manager?.getSessionFile()).toBe(original);
+			// The notice must not say the picked continuation went on in the older copy it continues.
+			expect(followed.map(c => c.relation)).toEqual(["earlier"]);
+		} finally {
+			await manager?.close();
+		}
+		const switchedTo: string[] = [];
+		await openRpcSession(rpcHost(switchedTo), tempDir.path());
+		expect(switchedTo).toEqual([original]);
+	}, 30_000);
+
+	it("keeps the terminal's own last session when both copies went on, even if the other copy has the newest turn", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const { continuation } = await divergedWithContinuationWrittenLast(tempDir);
+		// This terminal's record of its last session names the continuation; a
+		// terminal id is needed to keep one, so give this test its own.
+		const pane = process.env.TMUX_PANE;
+		process.env.TMUX_PANE = "%resume-continuation-test";
+		try {
+			await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
+			writeTerminalBreadcrumb(tempDir.path(), continuation);
+			const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings);
+			try {
+				expect(manager?.getSessionFile()).toBe(continuation);
+			} finally {
+				await manager?.close();
+			}
+		} finally {
+			if (pane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = pane;
+		}
+	}, 30_000);
+
+	it("continues the continuation when both copies went on, the continuation has the newest turn and the original was written last", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const holder = await Holder.resume(tempDir, original);
+		let continuation: string;
+		try {
+			await holder.append("holder turn");
+			await Bun.sleep(5);
+			continuation = await continueElsewhere(original, tempDir.path(), "continued turn");
+			await Bun.sleep(5);
+			await holder.append("holder kept going");
+			await Bun.sleep(5);
+			const writer = await open(continuation, tempDir.path());
+			writer.appendMessage(userTurn("continuation went on later"));
+			await writer.close();
+			await Bun.sleep(5);
+		} finally {
+			// The holder's exit record makes the original the most recently written file.
+			await holder.exit();
+		}
+		await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
+
+		const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(continuation);
+		} finally {
+			await manager?.close();
+		}
 	}, 30_000);
 
 	it("moves off again when the continuation is itself open in another live process", async () => {

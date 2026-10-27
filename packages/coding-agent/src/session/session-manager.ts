@@ -913,6 +913,7 @@ export class SessionManager {
 	/** Bumped by in-place entry updates, which a {@link SessionBodyStamp} cannot otherwise see. */
 	#bodyRevision = 0;
 	#sessionFile: string | undefined;
+	#continuedFromBreadcrumb = false;
 	#header!: SessionHeader;
 	#titleUpdatedAt = "";
 	#hasTitleSlot = true;
@@ -4508,7 +4509,17 @@ export class SessionManager {
 		const manager = new SessionManager(cwd, dir, true, storage);
 		if (chosenSession) await manager.setSessionFile(chosenSession);
 		else manager.#resetToNewSession();
+		manager.#continuedFromBreadcrumb =
+			!!breadcrumb && !!chosenSession && path.resolve(chosenSession) === path.resolve(breadcrumb.sessionFile);
 		return manager;
+	}
+
+	/**
+	 * Set by {@link continueRecent} when the session it opened is the one the
+	 * terminal's record of its last session names, not a pick by write time.
+	 */
+	get continuedFromBreadcrumb(): boolean {
+		return this.#continuedFromBreadcrumb;
 	}
 
 	/** Create an in-memory session (no file persistence). */

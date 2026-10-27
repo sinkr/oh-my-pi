@@ -120,6 +120,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { loadRuntimeIdentity } from "./session/runtime-identity";
 import {
+	findRecentSessionContinuation,
 	findSessionContinuation,
 	resolveResumableSession,
 	type SessionContinuation,
@@ -1385,11 +1386,12 @@ export async function createSessionManager(
 }
 
 /**
- * {@link SessionManager.continueRecent}, then the newest copy of that session's
- * conversation when it went on in another file. The recent pick goes by file
- * time, and a process holding the old file writes its exit record there last,
- * so the old file looks newest after a restart; the continuation lookup
- * compares real entries instead.
+ * {@link SessionManager.continueRecent}, then the copy of that session's
+ * conversation to resume when it went on in another file. The terminal's
+ * record of its last session names a file the way `--resume` does
+ * ({@link findSessionContinuation}). Without one the pick goes by file time,
+ * and a process writes its exit record or an idle cache refresh long after its
+ * last turn, so the pick can be any copy ({@link findRecentSessionContinuation}).
  */
 async function continueRecentSession(
 	cwd: string,
@@ -1398,7 +1400,12 @@ async function continueRecentSession(
 ): Promise<SessionManager> {
 	const recent = await SessionManager.continueRecent(cwd, sessionDir);
 	const recentFile = recent.getSessionFile();
-	const continuation = recentFile ? await findSessionContinuation(recentFile) : undefined;
+	// The terminal's own last session was chosen, as a named file is: keep it when both copies went on.
+	const continuation = !recentFile
+		? undefined
+		: recent.continuedFromBreadcrumb
+			? await findSessionContinuation(recentFile)
+			: await findRecentSessionContinuation(recentFile);
 	if (!continuation) return recent;
 	onSessionContinuation?.(continuation);
 	await recent.close();

@@ -354,7 +354,7 @@ Wait on `prompt_result` to present a turn's answer; wait on `session_settled` (o
 
 ### `open_session` payload
 
-`open_session` binds the process to a host-keyed conversation directory — the runtime equivalent of `--session-dir <dir> --continue`, so a pre-spawned process can adopt a thread after startup. It continues the newest non-empty session in `sessionDir` (or, like `--continue`, the newer file that session went on in), or starts a fresh session there when none exists. Reopening the session that is already active (including a still-empty fresh session in the same directory) is a no-op that does not interrupt a running turn; otherwise the current run is aborted as with `switch_session`, and open prompts complete with `status: "aborted"`.
+`open_session` binds the process to a host-keyed conversation directory — the runtime equivalent of `--session-dir <dir> --continue`, so a pre-spawned process can adopt a thread after startup. It continues the newest non-empty session in `sessionDir` (or, like `--continue` in a terminal with no record of its last session, the copy of that session's conversation with the newest turn when it went on in another file), or starts a fresh session there when none exists. Reopening the session that is already active (including a still-empty fresh session in the same directory) is a no-op that does not interrupt a running turn; otherwise the current run is aborted as with `switch_session`, and open prompts complete with `status: "aborted"`.
 
 ```json
 { "cancelled": false, "resumed": true, "sessionId": "01a0...", "sessionFile": "/srv/threads/t1/2026-...jsonl" }

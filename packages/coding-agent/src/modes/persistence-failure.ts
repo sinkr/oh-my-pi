@@ -57,9 +57,15 @@ export function formatSessionContinuationNotice(continuation: SessionContinuatio
 	const from = shortenPath(continuation.from);
 	const to = shortenPath(continuation.session.path);
 	// A session moves off its file for every SessionPersistenceNotice reason, not only another process's hold.
-	const message =
-		continuation.copies > 2
-			? `Session ${from} went on in ${continuation.copies - 1} other files; resuming the one with the newest turn, ${to}.`
-			: `Session ${from} went on in ${to}; resuming ${to}.`;
+	let message: string;
+	if (continuation.relation === "earlier") {
+		message = `Session ${to}, which ${from} continues, has the newest turn of their conversation; resuming ${to}.`;
+	} else if (continuation.relation === "other") {
+		message = `Session ${to}, another copy of the conversation in ${from}, has its newest turn; resuming ${to}.`;
+	} else if (continuation.copies > 2) {
+		message = `Session ${from} went on in ${continuation.copies - 1} other files; resuming the one with the newest turn, ${to}.`;
+	} else {
+		message = `Session ${from} went on in ${to}; resuming ${to}.`;
+	}
 	return replaceTabs(sanitizeText(message)).replace(/[\r\n]+/g, " ");
 }
