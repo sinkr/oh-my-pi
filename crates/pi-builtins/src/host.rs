@@ -2154,6 +2154,17 @@ mod testing {
 		(code, capture)
 	}
 
+	/// Writes `small` holding `needle` and a sparse `big` twice the line limit
+	/// of `grep` and `rg`, with no line terminator and no disk space used.
+	#[cfg(all(unix, feature = "util.grep"))]
+	pub(crate) fn tree_with_sparse_file() -> tempfile::TempDir {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("small"), "needle\n").unwrap();
+		let big = std::fs::File::create(tree.path().join("big")).unwrap();
+		big.set_len(2 * crate::grep::MAX_LINE_BYTES as u64).unwrap();
+		tree
+	}
+
 	/// Runs `script` in a real shell with every builtin registered, from `cwd`
 	/// with `stdin` on fd 0, returning its status, stdout, and stderr.
 	///
@@ -2453,4 +2464,6 @@ mod testing {
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
 pub(crate) use testing::{Capture, run_script, run_util};
+#[cfg(all(test, unix, feature = "util.grep"))]
+pub(crate) use testing::tree_with_sparse_file;
 
