@@ -180,6 +180,8 @@
 ### Fixed
 
 - Fixed plugin skill upgrades failing after a name collision when the plugin cache is reached through a symlink, including macOS path aliases; rediscovery still requires the original plugin's identity.
+- Preserved SQL-backed title, ID, and path resume through continuation lookup, including `/clir`, while retaining replaced-file safeguards.
+- Preserved literal path-shaped paste in hook editors, side-question follow-ups, and approval steering without disabling image-only clipboard paste.
 
 ## [18.13.2] - 2026-10-27
 
