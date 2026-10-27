@@ -7879,7 +7879,7 @@ func (c Commands) DictationStart(ctx context.Context, p DictationStartCommand) e
 // DictationStop sends "dictation_stop": Stop and flush draft-only dictation, returning the accumulated text.
 func (c Commands) DictationStop(ctx context.Context) (string, error) {
 	var out DictationStopResult
-	err := c.call(ctx, "dictation_stop", nil, 0, &out)
+	err := c.call(ctx, "dictation_stop", nil, 600*time.Second, &out)
 	return out.Text, err
 }
 

@@ -370,7 +370,7 @@
 				"result": "DictationStopResult",
 				"nullable": false,
 				"unwrap": "text",
-				"timeoutMs": null,
+				"timeoutMs": 600000,
 				"completion": null,
 				"clientOmit": []
 			},

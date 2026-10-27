@@ -210,6 +210,7 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		doc: "Stop and flush draft-only dictation, returning the accumulated text.",
 		result: { text: "string" },
 		unwrap: "text",
+		timeoutMs: 600_000,
 	},
 
 	{

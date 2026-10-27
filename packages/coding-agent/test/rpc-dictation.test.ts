@@ -308,11 +308,19 @@ describe("RpcDictationBridge", () => {
 	});
 });
 
-async function rpcHarness(slow = false) {
+async function rpcHarness(options: { slow?: boolean; fail?: boolean; failDispose?: boolean; disabled?: boolean } = {}) {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-dictation-"));
 	const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures", "live-rpc-agent.ts")], {
 		cwd: dir,
-		env: { ...process.env, PI_CODING_AGENT_DIR: dir, PI_NO_TITLE: "1", RPC_SLOW_DICTATION: slow ? "1" : "" },
+		env: {
+			...process.env,
+			PI_CODING_AGENT_DIR: dir,
+			PI_NO_TITLE: "1",
+			RPC_SLOW_DICTATION: options.slow ? "1" : "",
+			RPC_FAIL_DICTATION: options.fail ? "1" : "",
+			RPC_FAIL_DICTATION_DISPOSE: options.failDispose ? "1" : "",
+			RPC_DISABLE_DICTATION: options.disabled ? "1" : "",
+		},
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -351,6 +359,25 @@ async function cleanup(h: { child: { kill(): void; exited: Promise<number> }; st
 }
 
 describe("dictation over RPC", () => {
+	test("disabled native speech input rejects dictation without starting a capture", async () => {
+		const h = await rpcHarness({ disabled: true });
+		try {
+			expect(await h.command("disabled-start", { type: "dictation_start", captureId: "disabled" })).toMatchObject({
+				success: false,
+				command: "dictation_start",
+			});
+			expect(h.frames.some(frame => typeof frame.type === "string" && frame.type.startsWith("dictation_"))).toBe(
+				false,
+			);
+			expect(await h.command("idle-stop", { type: "dictation_stop" })).toMatchObject({
+				success: true,
+				data: { text: "" },
+			});
+		} finally {
+			await cleanup(h);
+		}
+	}, 60_000);
+
 	test("wire commands are exclusive with live, previews bypass filters, and EOF closes the microphone", async () => {
 		const h = await rpcHarness();
 		try {
@@ -421,6 +448,156 @@ describe("dictation over RPC", () => {
 		}
 	}, 60_000);
 
+	test.each([
+		"new_session",
+		"switch_session",
+		"branch",
+		"fork",
+		"open_session",
+		"extension-new",
+		"extension-switch",
+		"extension-reload",
+	] as const)(
+		"%s completes after a dictation flush error",
+		async route => {
+			const h = await rpcHarness({ fail: true });
+			try {
+				// Persist a real conversation so switch, branch, fork and reload have a source to reopen.
+				await h.send({ id: "seed", type: "prompt", message: "A conversation to retain" });
+				let seed: Record<string, unknown>;
+				do {
+					seed = await h.receive();
+				} while (seed.type !== "prompt_result" || seed.id !== "seed");
+				expect(seed).toMatchObject({ status: "completed" });
+				const original = (await h.command("original", { type: "get_state" })).data as {
+					sessionId: string;
+					sessionFile: string;
+				};
+				const branches = (await h.command("branches", { type: "get_branch_messages" })).data as {
+					messages: { entryId: string }[];
+				};
+				if (route === "switch_session" || route === "extension-switch") {
+					expect(await h.command("prepare-switch", { type: "new_session" })).toMatchObject({
+						success: true,
+						data: { cancelled: false },
+					});
+				}
+				const before = (await h.command("before-error", { type: "get_state" })).data as {
+					sessionId: string;
+				};
+				await fs.rm(path.join(h.dir, "session-switch.json"), { force: true });
+				expect(
+					await h.command("start-error", { type: "dictation_start", captureId: "failed-flush" }),
+				).toMatchObject({
+					success: true,
+				});
+
+				if (route.startsWith("extension-")) {
+					const message =
+						route === "extension-new"
+							? "/dictation-new-session"
+							: route === "extension-switch"
+								? `/dictation-switch-session ${original.sessionFile}`
+								: "/dictation-reload-session";
+					await h.send({ id: "change-error", type: "prompt", message });
+					let result: Record<string, unknown>;
+					do {
+						result = await h.receive();
+					} while (result.type !== "prompt_result" || result.id !== "change-error");
+					expect(result).toMatchObject({ status: "completed", agentInvoked: false });
+				} else {
+					let command: object;
+					switch (route) {
+						case "switch_session":
+							command = { type: route, sessionPath: original.sessionFile };
+							break;
+						case "branch":
+							command = { type: route, entryId: branches.messages[0]?.entryId };
+							break;
+						case "open_session": {
+							const sessionDir = path.join(h.dir, "other-sessions");
+							await fs.mkdir(sessionDir);
+							command = { type: route, sessionDir };
+							break;
+						}
+						default:
+							command = { type: route };
+					}
+					expect(await h.command("change-error", command)).toMatchObject({
+						success: true,
+						data: { cancelled: false },
+					});
+				}
+
+				const after = (await h.command("after-error", { type: "get_state" })).data as { sessionId: string };
+				if (route === "extension-reload") {
+					expect(after.sessionId).toBe(before.sessionId);
+					expect(await Bun.file(path.join(h.dir, "session-switch.json")).json()).toEqual({
+						reason: "resume",
+						sessionId: before.sessionId,
+					});
+				} else {
+					expect(after.sessionId).not.toBe(before.sessionId);
+					if (route === "switch_session" || route === "extension-switch") {
+						expect(after.sessionId).toBe(original.sessionId);
+					}
+				}
+				expect(await Bun.file(path.join(h.dir, "dictation-stopped.json")).json()).toEqual({ state: "idle" });
+				expect(await h.command("start-after-error", { type: "dictation_start", captureId: "next" })).toMatchObject({
+					success: true,
+				});
+				expect(
+					h.frames.filter(frame => frame.type === "dictation_end" && frame.captureId === "failed-flush"),
+				).toEqual([
+					{ type: "dictation_end", captureId: "failed-flush", text: "hello", error: "recognizer failed" },
+				]);
+			} finally {
+				await cleanup(h);
+			}
+		},
+		60_000,
+	);
+
+	test("explicit dictation stop reports a failed flush while releasing the capture", async () => {
+		const h = await rpcHarness({ fail: true });
+		try {
+			await h.command("start", { type: "dictation_start", captureId: "direct" });
+			expect(await h.command("stop", { type: "dictation_stop" })).toMatchObject({
+				success: false,
+				error: "recognizer failed",
+			});
+			expect(h.frames.filter(frame => frame.type === "dictation_end" && frame.captureId === "direct")).toEqual([
+				{ type: "dictation_end", captureId: "direct", text: "hello", error: "recognizer failed" },
+			]);
+			expect(await Bun.file(path.join(h.dir, "dictation-stopped.json")).json()).toEqual({ state: "idle" });
+			expect(await h.command("restart", { type: "dictation_start", captureId: "next" })).toMatchObject({
+				success: true,
+			});
+		} finally {
+			await cleanup(h);
+		}
+	}, 60_000);
+
+	test("a failed microphone cleanup still vetoes a session change", async () => {
+		const h = await rpcHarness({ fail: true, failDispose: true });
+		try {
+			const before = (await h.command("before", { type: "get_state" })).data as { sessionId: string };
+			await h.command("start", { type: "dictation_start", captureId: "stuck" });
+			expect(await h.command("change", { type: "new_session" })).toMatchObject({
+				success: false,
+				error: "microphone cleanup failed",
+			});
+			const after = (await h.command("after", { type: "get_state" })).data as { sessionId: string };
+			expect(after.sessionId).toBe(before.sessionId);
+			expect(await h.command("blocked", { type: "dictation_start", captureId: "next" })).toMatchObject({
+				success: false,
+			});
+			expect(await h.command("blocked-live", { type: "live_start" })).toMatchObject({ success: false });
+		} finally {
+			await cleanup(h);
+		}
+	}, 60_000);
+
 	test("nested extension transitions keep voice starts blocked until the outer change completes", async () => {
 		const h = await rpcHarness();
 		try {
@@ -479,7 +656,7 @@ describe("dictation over RPC", () => {
 	}, 60_000);
 
 	test("stop overtakes a pending start and responds only after cancellation", async () => {
-		const h = await rpcHarness(true);
+		const h = await rpcHarness({ slow: true });
 		try {
 			await h.send({ id: "start", type: "dictation_start", captureId: "slow" });
 			while ((await h.receive()).type !== "dictation_state") {}

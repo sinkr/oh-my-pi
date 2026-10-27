@@ -32,6 +32,22 @@ const extension = await loadExtensionFromFactory(
 				await ctx.newSession();
 			},
 		});
+		pi.registerCommand("dictation-switch-session", {
+			handler: async (args, ctx) => {
+				await ctx.switchSession(args);
+			},
+		});
+		pi.registerCommand("dictation-reload-session", {
+			handler: async (_args, ctx) => {
+				await ctx.reload();
+			},
+		});
+		pi.on("session_switch", async (event, ctx) => {
+			await Bun.write(
+				path.join(cwd, "session-switch.json"),
+				JSON.stringify({ reason: event.reason, sessionId: ctx.sessionManager.getSessionId() }),
+			);
+		});
 		pi.registerCommand("dictation-nested-session", {
 			handler: async (_args, ctx) => {
 				await ctx.newSession({
@@ -49,16 +65,20 @@ const extension = await loadExtensionFromFactory(
 	"dictation-session-change",
 );
 const extensionRunner = new ExtensionRunner([extension], runtime, cwd, sessionManager, modelRegistry);
-const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+const mock = createMockModel({ provider: model.provider, id: model.id, handler: () => ({ content: ["Done"] }) });
 const agent = new Agent({
 	getApiKey: () => "test-key",
-	initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
+	initialState: { model, systemPrompt: ["Test"], tools: [] },
 	streamFn: mock.stream,
 });
 const session = new AgentSession({
 	agent,
 	sessionManager,
-	settings: Settings.isolated({ "compaction.enabled": false }),
+	settings: Settings.isolated({
+		"compaction.enabled": false,
+		"stt.enabled": process.env.RPC_DISABLE_DICTATION !== "1",
+	}),
 	modelRegistry,
 	extensionRunner,
 });
@@ -117,6 +137,12 @@ class FakeDictationController implements RpcDictationController {
 		if (this.state !== "recording") return;
 		this.state = "transcribing";
 		this.#callbacks?.onStateChange("transcribing");
+		if (process.env.RPC_FAIL_DICTATION) {
+			this.state = "idle";
+			this.#callbacks?.onStateChange("idle");
+			this.#callbacks?.showWarning("recognizer failed");
+			return;
+		}
 		this.#target?.commitVolatileText("hello world");
 		this.state = "idle";
 		this.#callbacks?.onStateChange("idle");
@@ -124,6 +150,7 @@ class FakeDictationController implements RpcDictationController {
 
 	dispose(): void {
 		if (this.#closed) return;
+		if (process.env.RPC_FAIL_DICTATION_DISPOSE) throw new Error("microphone cleanup failed");
 		this.#closed = true;
 		this.#cancelled = true;
 		this.#startGate.resolve();

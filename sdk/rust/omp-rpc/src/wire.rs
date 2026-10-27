@@ -6539,7 +6539,7 @@ pub struct DictationStopCommand {}
 
 impl Command for DictationStopCommand {
 	const NAME: &'static str = "dictation_stop";
-	const TIMEOUT_MS: Option<u64> = None;
+	const TIMEOUT_MS: Option<u64> = Some(600000);
 	type Output = String;
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {

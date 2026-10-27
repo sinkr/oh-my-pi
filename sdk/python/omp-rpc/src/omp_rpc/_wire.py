@@ -3369,7 +3369,7 @@ class WireClient:
     def dictation_stop(self) -> str:
         """Stop and flush draft-only dictation, returning the accumulated text."""
         params: dict[str, object] = {}
-        return required(expect_object(self._command("dictation_stop", params), "dictation_stop"), "text", decode_str, "dictation_stop")
+        return required(expect_object(self._command("dictation_stop", params, timeout=600), "dictation_stop"), "text", decode_str, "dictation_stop")
 
     def set_model(self, provider: str, model_id: str) -> ModelInfo:
         """Select a model by provider and id."""

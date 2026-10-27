@@ -1433,14 +1433,16 @@ process exits.
 
 Draft-only dictation captures from the machine's microphone using the session's
 configured `modelRoles.dictation` speech-to-text engine and `stt.language`.
-It does not submit a prompt, interpret speech submit triggers, or play audio.
+It requires `stt.enabled: true`; when disabled, start fails before opening the
+microphone or initializing a speech model. It does not submit a prompt,
+interpret speech submit triggers, or play audio.
 Live voice and dictation are mutually exclusive, including while either starts
 or stops.
 
 - `{ id?, type: "dictation_start", captureId: string }` starts a capture and responds when recording. `captureId` must be a non-blank string of at most 128 UTF-16 code units; the host must choose a unique ID for each capture.
 - `{ id?, type: "dictation_stop" }` stops the microphone and flushes transcription, then responds with `data: { text: string }`. With no capture it succeeds with empty text. A failure returns an error response.
 
-Bundled clients allow 600 seconds for `dictation_start` because a cold speech model may need to download and load. The TypeScript `RpcClient.dictationStart(captureId, timeoutMs)` accepts a caller-selected deadline in milliseconds. A client timeout only stops waiting; it does not cancel the server operation, which could still start the microphone. Send `dictation_stop` (or call `dictationStop()`) to cancel a pending start or stop an active capture.
+Bundled clients allow 600 seconds for both dictation commands: start may need to download and load a cold speech model, and stop may need to finish a slow local or cloud transcription flush. The TypeScript `RpcClient.dictationStart(captureId, timeoutMs)` and `RpcClient.dictationStop(timeoutMs)` accept caller-selected deadlines in milliseconds. A client timeout only stops waiting; it does not cancel the server operation. Send `dictation_stop` (or call `dictationStop()`) to cancel a pending start or stop an active capture, and keep the `dictation_end` subscription active to receive a flush result that arrives after a request deadline.
 
 Stop can be sent while start is pending: it cancels the start, waits for the
 microphone to close, and causes the pending start to fail. The terminal frame
@@ -1453,9 +1455,11 @@ These unsolicited frames bypass `set_event_filter`:
 - `{ type: "dictation_transcript", captureId, text }` — full accumulated preview; replace the prior preview for this capture rather than appending it.
 - `{ type: "dictation_end", captureId, text, error? }` — exactly one terminal frame for a started capture, with its accumulated result and an optional error. The stop result and terminal frame describe the same text; insert it only once into the draft that initiated the capture.
 
-Session changes stop and flush dictation before changing sessions. On stdin EOF,
-RPC output failure, or process shutdown, active capture is disposed and the
-microphone is closed without waiting for transcription.
+Session changes stop and flush dictation before changing sessions, including
+extension-initiated transitions. A transcription failure is reported in the
+terminal frame but does not veto the session change once capture has been
+released. On stdin EOF, RPC output failure, or process shutdown, active capture
+is disposed and the microphone is closed without waiting for transcription.
 
 ## Host URI Sub-Protocol
 

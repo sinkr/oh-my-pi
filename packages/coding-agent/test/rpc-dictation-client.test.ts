@@ -32,6 +32,9 @@ function fakeAgent() {
 	return {
 		proc,
 		requests,
+		emit(frame: unknown) {
+			output.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+		},
 		reply(request: Request, data?: unknown) {
 			output.enqueue(
 				encoder.encode(
@@ -90,5 +93,46 @@ describe("RpcClient dictation start deadlines", () => {
 		expect(agent.requests[1].type).toBe("dictation_stop");
 		agent.reply(agent.requests[1], { text: "" });
 		await expect(stop).resolves.toEqual({ text: "" });
+	});
+});
+
+describe("RpcClient dictation stop deadlines", () => {
+	test("slow flush can finish after an ordinary request has timed out", async () => {
+		const agent = fakeAgent();
+		using client = new RpcClient({ spawn: () => agent.proc });
+		await client.start();
+
+		let stopSettled = false;
+		const stop = withScaledDeadline(() => client.dictationStop());
+		void stop.then(
+			() => {
+				stopSettled = true;
+			},
+			() => {
+				stopSettled = true;
+			},
+		);
+		const ordinary = withScaledDeadline(() => client.getState());
+		await expect(ordinary).rejects.toThrow("Timeout waiting for response to get_state");
+		expect(stopSettled).toBe(false);
+		expect(agent.requests[0].type).toBe("dictation_stop");
+		agent.reply(agent.requests[0], { text: "completed draft" });
+		await expect(stop).resolves.toEqual({ text: "completed draft" });
+	});
+
+	test("caller timeout rejects without losing the later terminal transcript", async () => {
+		const agent = fakeAgent();
+		using client = new RpcClient({ spawn: () => agent.proc });
+		await client.start();
+		const terminal = Promise.withResolvers<string>();
+		client.onDictation(frame => {
+			if (frame.type === "dictation_end") terminal.resolve(frame.text);
+		});
+
+		const stop = withScaledDeadline(() => client.dictationStop(6_000));
+		await expect(stop).rejects.toThrow("Timeout waiting for response to dictation_stop");
+		agent.emit({ type: "dictation_end", captureId: "slow-flush", text: "completed draft" });
+		agent.reply(agent.requests[0], { text: "completed draft" });
+		await expect(terminal.promise).resolves.toBe("completed draft");
 	});
 });

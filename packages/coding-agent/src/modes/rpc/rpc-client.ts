@@ -897,9 +897,13 @@ export class RpcClient {
 		this.#getData(response);
 	}
 
-	/** Stop and flush dictation, returning the accumulated draft. */
-	async dictationStop(): Promise<{ text: string }> {
-		const response = await this.#send({ type: "dictation_stop" });
+	/**
+	 * Stop and flush dictation, returning the accumulated draft. The deadline defaults to
+	 * 10 minutes for transcription; a timeout does not cancel the server operation, and
+	 * its terminal transcript can still be received via onDictation().
+	 */
+	async dictationStop(timeoutMs = 600_000): Promise<{ text: string }> {
+		const response = await this.#send({ type: "dictation_stop" }, timeoutMs);
 		return this.#getData(response);
 	}
 

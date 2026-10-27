@@ -58,6 +58,7 @@ import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/m
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import { cfgSttEnabled } from "../../stt/settings";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { EventBus } from "../../utils/event-bus";
@@ -1433,7 +1434,33 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const hostUriBridge = new RpcHostUriBridge(output);
 	// Live frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
 	const liveBridge = new RpcLiveBridge(session, output, createLiveSession);
-	dictationBridge = new RpcDictationBridge(session, output, createDictationController);
+	let lastDictationError: { message: string } | undefined;
+	const sessionDictationBridge = new RpcDictationBridge(
+		session,
+		frame => {
+			output(frame);
+			if (frame.type === "dictation_end" && frame.error) lastDictationError = { message: frame.error };
+		},
+		createDictationController,
+	);
+	dictationBridge = sessionDictationBridge;
+	const stopDictationForSessionChange = async (): Promise<void> => {
+		const previousError = lastDictationError;
+		try {
+			await sessionDictationBridge.stop();
+		} catch (cause) {
+			// Only a reported transcription failure after cleanup may leave the change proceeding.
+			if (
+				sessionDictationBridge.active ||
+				!lastDictationError ||
+				lastDictationError === previousError ||
+				!(cause instanceof Error) ||
+				cause.message !== lastDictationError.message
+			)
+				throw cause;
+			logger.warn("Dictation failed while changing sessions", { error: String(cause) });
+		}
+	};
 	let sessionChangesInProgress = 0;
 	const withSessionChange = async <T>(change: () => Promise<T>): Promise<T> => {
 		sessionChangesInProgress++;
@@ -1664,7 +1691,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			{ detachesRun }: { detachesRun: boolean },
 		): Promise<T> =>
 			withSessionChange(async () => {
-				await dictationBridge.stop();
+				await stopDictationForSessionChange();
 				await btw.close();
 				await goalController.beginSessionChange();
 				let result: T | undefined;
@@ -2036,7 +2063,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				const requestedModel =
 					command.type === "switch_session" ? await resolveRequestedRpcModel(session, command) : undefined;
 				// Validation first: a refused change must not cancel the running side question.
-				await dictationBridge.stop();
+				await stopDictationForSessionChange();
 				await btw.close();
 				await goalController.beginSessionChange();
 				let result: RpcSessionChangeResult | undefined;
@@ -2067,7 +2094,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "open_session": {
 				const requestedModel = await resolveRequestedRpcModel(session, command);
-				await dictationBridge.stop();
+				await stopDictationForSessionChange();
 				const fileBeforeOpen = session.sessionFile;
 				await btw.close();
 				await goalController.beginSessionChange();
@@ -2252,6 +2279,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (liveBridge.active) return error(id, "dictation_start", "End live voice before starting dictation");
 				if (sessionChangesInProgress > 0 || shutdownState.requested)
 					return error(id, "dictation_start", "Session is changing or shutting down");
+				if (!cfgSttEnabled.get(session.settings))
+					return error(id, "dictation_start", "Speech-to-text is disabled. Enable it in settings: stt.enabled");
 				await dictationBridge.start(command.captureId);
 				return success(id, "dictation_start");
 			}
