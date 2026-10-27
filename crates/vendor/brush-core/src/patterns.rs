@@ -49,8 +49,8 @@ enum GlobstarMode {
 	/// `**` ends the pattern: every entry below the base, plus the base itself,
 	/// spelled `base/` unless an earlier component is a glob.
 	Entries { globbed_base: bool },
-	/// `**/` ends the pattern: every directory below the base (a symlink to a
-	/// directory counts), plus the base itself.
+	/// `**/`, at the end or followed by more slashes (`**//x`): every directory
+	/// below the base (a symlink to a directory counts), plus the base itself.
 	Dirs,
 	/// More components follow: the base and every real directory below it.
 	/// With `link_bases`, also every symlink to a directory found below it,
@@ -65,6 +65,11 @@ enum GlobstarMode {
 fn is_globstar_component(component: &PatternWord) -> bool {
 	component.iter().all(|piece| matches!(piece, PatternPiece::Pattern(_)))
 		&& component.iter().map(|piece| piece.as_str()).collect::<String>() == "**"
+}
+
+/// True for the empty component between two slashes (or after a final one).
+fn is_empty_component(component: &PatternWord) -> bool {
+	component.iter().all(|piece| piece.as_str().is_empty())
 }
 
 /// Stops expansion with [`error::ErrorKind::Interrupted`] once the run is
@@ -331,6 +336,27 @@ impl Pattern {
 			vec![working_dir.to_path_buf()]
 		};
 
+		// Under `globstar`, bash reads a run of slashes after `**` as one
+		// (`**//` is `**/`), and `**//**` as `**/**`. A single slash between
+		// `**` and a pattern component still counts: `**//x` takes `**/` as
+		// its directory part (see `GlobstarMode::Dirs`).
+		if options.globstar {
+			let mut kept: Vec<PatternWord> = Vec::with_capacity(components.len());
+			for component in components {
+				let after_globstar_slash = kept.len() >= 2
+					&& kept.last().is_some_and(is_empty_component)
+					&& is_globstar_component(&kept[kept.len() - 2]);
+				if after_globstar_slash && is_empty_component(&component) {
+					continue;
+				}
+				if after_globstar_slash && is_globstar_component(&component) {
+					kept.pop();
+				}
+				kept.push(component);
+			}
+			components = kept;
+		}
+
 		// Under `globstar`, what each `**` component matches depends on what
 		// comes before and after it (see `GlobstarMode`); decide it before the
 		// loop consumes the components.
@@ -360,9 +386,11 @@ impl Pattern {
 						// `a1`, `**/sub/**` gives `d1/sub`.
 						let globbed_base = components[..index].iter().any(is_globbed);
 						GlobstarMode::Entries { globbed_base }
-					} else if index + 1 == last_index
-						&& components[last_index].iter().all(|piece| piece.as_str().is_empty())
-					{
+					} else if is_empty_component(&components[index + 1]) {
+						// `**/` ends the pattern, or a slash follows it (`**//x`,
+						// one empty component after the collapse above). Bash takes
+						// `**/` as the directory part either way, so the bases are
+						// the directories `**/` lists.
 						GlobstarMode::Dirs
 					} else {
 						// Bash takes symlinks to directories as bases (one hop, not
@@ -578,6 +606,9 @@ impl Pattern {
 		let mut matches = Vec::new();
 
 		for base in bases {
+			// Each base costs a synchronous probe on the native route, and a
+			// base that is not a directory never reaches the walk's check below.
+			ensure_not_cancelled(cancel)?;
 			if !fs.is_dir(probe_path(fs, &base)).await {
 				continue;
 			}
@@ -1530,6 +1561,66 @@ mod tests {
 		Ok(())
 	}
 
+	/// Under globstar, bash reads a run of slashes after `**` as one slash
+	/// (`**//` is `**/`, `**//**` is `**/**`), and takes `**/` as the
+	/// directory part of `**//x`: its bases are the directories `**/` lists,
+	/// symlinks to directories included and the working directory not. Same
+	/// tree as the test above; expected values are bash 5.2.21's output.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn test_globstar_reads_doubled_slashes_like_bash() -> Result<()> {
+		let scratch = tempfile::tempdir()?;
+		let root = scratch.path();
+		for dir in ["a1/b1", "d1/sub/deep"] {
+			std::fs::create_dir_all(root.join(dir))?;
+		}
+		for file in ["top.rs", "a1/b1/z.rs", "d1/sub/deep/q.rs"] {
+			std::fs::write(root.join(file), "")?;
+		}
+		std::os::unix::fs::symlink("d1", root.join("ld"))?;
+		std::os::unix::fs::symlink("..", root.join("a1/lup"))?;
+		std::os::unix::fs::symlink("../..", root.join("d1/sub/lback"))?;
+		std::os::unix::fs::symlink("top.rs", root.join("lf"))?;
+		std::os::unix::fs::symlink("nowhere", root.join("dang"))?;
+
+		let fs = pi_vfs::Fs::native();
+		let options = FilenameExpansionOptions { globstar: true, ..Default::default() };
+		let expand = async |pattern: &str| {
+			let result = Pattern::from(pattern)
+				.set_extended_globbing(false)
+				.expand(&fs, root, &options)
+				.await?;
+			expect_expanded(result)
+		};
+		let split = |expected: &str| expected.split('|').map(str::to_string).collect::<Vec<_>>();
+
+		let dirs = split("a1/|a1/b1/|a1/lup/|d1/|d1/sub/|d1/sub/deep/|d1/sub/lback/|ld/");
+		assert_eq!(expand("**/").await?, dirs);
+		assert_eq!(expand("**//").await?, dirs);
+		assert_eq!(expand("**///").await?, dirs);
+		assert_eq!(expand("a1/**//").await?, split("a1/|a1/b1/|a1/lup/"));
+		assert_eq!(
+			expand("./**//").await?,
+			split("./|./a1/|./a1/b1/|./a1/lup/|./d1/|./d1/sub/|./d1/sub/deep/|./d1/sub/lback/|./ld/")
+		);
+		// `**//x` searches under every directory `**/` lists: links count,
+		// the working directory does not (no `top.rs`).
+		let link_tree = split("a1/b1/z.rs|a1/lup/top.rs|d1/sub/deep/q.rs|d1/sub/lback/top.rs");
+		assert_eq!(expand("**//*.rs").await?, link_tree);
+		assert_eq!(expand("**///*.rs").await?, link_tree);
+		assert_eq!(expand("**//**//*.rs").await?, link_tree);
+		assert_eq!(expand("**//sub").await?, split("d1/sub|ld/sub"));
+		assert_eq!(expand("**//lf").await?, split("a1/lup/lf|d1/sub/lback/lf"));
+		assert_eq!(expand("a1/**//*.rs").await?, split("a1/b1/z.rs|a1/lup/top.rs"));
+		// `**//**` is `**/**`.
+		assert_eq!(
+			expand("**//**").await?,
+			split("a1|a1/b1|a1/b1/z.rs|a1/lup|d1|d1/sub|d1/sub/deep|d1/sub/deep/q.rs|d1/sub/lback|dang|ld|lf|top.rs")
+		);
+
+		Ok(())
+	}
+
 	/// Two `**` components with a component between them give overlapping bases,
 	/// and bash prints one word for every way the pattern reaches a path, so a
 	/// path a nested base reaches again appears again. Expected values are bash
@@ -1745,6 +1836,90 @@ mod tests {
 				"`{pattern}`: unexpected error: {err}"
 			);
 		}
+
+		Ok(())
+	}
+
+	/// Serves `files://`, one directory of 10,000 files, counts the probes of
+	/// those files, and cancels `cancel` on the first one.
+	#[derive(Debug)]
+	struct FileBases {
+		cancel: tokio_util::sync::CancellationToken,
+		probes: std::sync::atomic::AtomicUsize,
+	}
+
+	impl FileBases {
+		fn is_root(path: &Path) -> bool {
+			path.to_string_lossy().trim_start_matches("files://").trim_matches('/').is_empty()
+		}
+	}
+
+	#[async_trait::async_trait]
+	impl pi_vfs::FileSystem for FileBases {
+		async fn open(
+			&self,
+			_path: &Path,
+			_options: &pi_vfs::OpenOptions,
+		) -> std::io::Result<pi_vfs::File> {
+			Err(pi_vfs::unsupported("open"))
+		}
+
+		async fn metadata(&self, path: &Path) -> std::io::Result<pi_vfs::Metadata> {
+			let kind = if Self::is_root(path) {
+				pi_vfs::FileKind::Dir
+			} else {
+				self.probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+				self.cancel.cancel();
+				pi_vfs::FileKind::File
+			};
+			Ok(pi_vfs::Metadata::new(
+				pi_vfs::FileType::from_kind(kind),
+				0,
+				pi_vfs::Permissions::from_mode(0o644),
+			))
+		}
+
+		async fn read_dir(&self, path: &Path) -> std::io::Result<pi_vfs::ReadDir> {
+			let entries: Vec<_> = if Self::is_root(path) {
+				(0..10_000)
+					.map(|i| {
+						let name = format!("f{i}");
+						Ok(pi_vfs::DirEntry::new(
+							pi_vfs::child_path(path, std::ffi::OsStr::new(&name)),
+							name.into(),
+							Some(pi_vfs::FileType::from_kind(pi_vfs::FileKind::File)),
+						))
+					})
+					.collect()
+			} else {
+				Vec::new()
+			};
+			Ok(pi_vfs::ReadDir::from_entries(entries))
+		}
+	}
+
+	/// `*/**` makes every file of a wide directory a `**` base, and each base
+	/// is probed before the walk starts. None of them is a directory, so the
+	/// walk never runs; the cancellation must still stop the probes.
+	#[tokio::test]
+	async fn test_globstar_stops_probing_bases_when_cancelled() -> Result<()> {
+		let cancel = tokio_util::sync::CancellationToken::new();
+		let tree = std::sync::Arc::new(FileBases {
+			cancel: cancel.clone(),
+			probes: std::sync::atomic::AtomicUsize::new(0),
+		});
+		let fs = pi_vfs::Fs::new(tree.clone());
+		let options =
+			FilenameExpansionOptions { globstar: true, cancel: Some(cancel), ..Default::default() };
+
+		let result = Pattern::from("files://*/**")
+			.set_extended_globbing(false)
+			.expand(&fs, Path::new("/"), &options)
+			.await;
+
+		let err = result.expect_err("`files://*/**` finished despite the cancellation");
+		assert!(matches!(err.kind(), error::ErrorKind::Interrupted), "unexpected error: {err}");
+		assert_eq!(tree.probes.load(std::sync::atomic::Ordering::SeqCst), 1, "base probes");
 
 		Ok(())
 	}
