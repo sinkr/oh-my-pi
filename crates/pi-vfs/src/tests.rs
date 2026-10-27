@@ -698,6 +698,64 @@ fn fifo_this_process_cannot_write_still_opens_on_connect_and_observes_the_token(
 	assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
 }
 
+/// An async whole-file read of a host file under a token can wait without
+/// yielding: `Fs::read` for a FIFO's writer that never comes,
+/// `File::read_to_end_async` for data from a writer that connected and never
+/// writes. On a current-thread runtime the task that cancels the token then
+/// never ran, so the read never ended. Both end at the token now.
+#[cfg(unix)]
+#[test]
+fn async_whole_file_reads_end_at_the_token_on_a_current_thread_runtime() {
+	use std::sync::mpsc;
+	let dir = TempDir::new("fifo-current-thread");
+	let fifo = dir.0.join("fifo");
+	BlockingFs::native()
+		.make_node(&fifo, crate::NodeKind::Fifo, 0o600)
+		.unwrap();
+
+	for idle_writer in [false, true] {
+		let token = CancellationToken::new();
+		let writer = idle_writer.then(|| {
+			let path = fifo.clone();
+			std::thread::spawn(move || std::fs::OpenOptions::new().write(true).open(path).unwrap())
+		});
+		let (done_tx, done_rx) = mpsc::channel();
+		let (path, task_token) = (fifo.clone(), token.clone());
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let result = runtime.block_on(async move {
+				let fs = Fs::native().with_cancellation(task_token.clone());
+				tokio::spawn(async move {
+					tokio::time::sleep(Duration::from_millis(200)).await;
+					task_token.cancel();
+				});
+				if idle_writer {
+					fs.open(&path)
+						.await?
+						.read_to_end_async(&mut Vec::new())
+						.await
+				} else {
+					fs.read(&path).await.map(|contents| contents.len())
+				}
+			});
+			let _ = done_tx.send(result);
+		});
+		let result = done_rx.recv_timeout(Duration::from_secs(5));
+		// Ends a read that ignored the runtime's cancellation.
+		token.cancel();
+		if let Some(writer) = writer {
+			drop(writer.join().unwrap());
+		}
+		let err = result
+			.unwrap_or_else(|_| panic!("idle_writer={idle_writer}: the read ignored its token"))
+			.unwrap_err();
+		assert!(is_cancelled(&err), "idle_writer={idle_writer}: {err}");
+	}
+}
+
 /// A FIFO opened non-blocking (`dd iflag=nonblock`) must read without
 /// waiting. On Linux such a FIFO with no writer reports no readiness, so a
 /// read that first waited for readiness blocked until the token fired

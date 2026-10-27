@@ -14,7 +14,7 @@ use crate::{
 	error::unsupported,
 	metadata::Metadata,
 	native,
-	runtime::{CloseTicket, CloseTracker, Scope, block_on, park_on},
+	runtime::{CloseTicket, CloseTracker, Scope, block_on, offload, park_on},
 	types::{FileId, FileTime, Permissions},
 };
 
@@ -621,17 +621,39 @@ impl File {
 		}
 	}
 
+	/// A host file bound to a token is read off the runtime worker (see
+	/// [`offload`]): the read never yields while it reads (`/dev/zero` never
+	/// ends) or waits for data, so on the worker it would hold the very task
+	/// that cancels it.
 	pub async fn read_to_end_async(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
 		match &self.repr {
-			Repr::Native(file) => self.read_host(file, |reader| reader.read_to_end(buf)),
+			Repr::Native(file) => match &self.read_cancel {
+				Some(cancel) => {
+					let (file, cancel) = (file.try_clone()?, cancel.clone());
+					let (bytes, result) = offload(move || {
+						let mut bytes = Vec::new();
+						let result = HostReader { file: &file, cancel: &cancel }.read_to_end(&mut bytes);
+						Ok((bytes, result))
+					})
+					.await?;
+					if buf.is_empty() {
+						*buf = bytes;
+					} else {
+						buf.extend_from_slice(&bytes);
+					}
+					result
+				},
+				None => host(file).read_to_end(buf),
+			},
 			Repr::Virtual(shared) => shared.guard(read_to_end_handle(shared.handle(), buf)).await,
 		}
 	}
 
+	/// See [`Self::read_to_end_async`].
 	pub async fn read_to_string_async(&self, buf: &mut String) -> io::Result<usize> {
 		match &self.repr {
-			Repr::Native(file) => self.read_host(file, |reader| reader.read_to_string(buf)),
-			Repr::Virtual(_) => {
+			Repr::Native(file) if self.read_cancel.is_none() => host(file).read_to_string(buf),
+			_ => {
 				let mut bytes = Vec::new();
 				self.read_to_end_async(&mut bytes).await?;
 				append_utf8(buf, bytes)

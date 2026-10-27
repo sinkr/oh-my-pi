@@ -35,7 +35,7 @@ use crate::{
 	options::{CanonicalizeOptions, DirOptions, OpenOptions, TempOptions},
 	path::{is_virtual_path, join_path},
 	provider::FileSystem,
-	runtime::{CloseTracker, Scope, block_on},
+	runtime::{CloseTracker, Scope, block_on, offload},
 	types::{FileId, FileTime, NodeKind, Permissions, StatFs, SymlinkKind},
 };
 
@@ -525,6 +525,18 @@ fn native_read(scope: &Scope, path: &Path) -> io::Result<Vec<u8>> {
 	Ok(contents)
 }
 
+/// [`native_read`] for async callers. Under a cancellable scope the read runs
+/// off the runtime worker (see [`offload`]): it never yields while it reads
+/// (`/dev/zero` never ends) or waits (a FIFO's writer), so on the worker it
+/// would hold the very task that cancels it.
+async fn native_read_async(scope: &Scope, path: &Path) -> io::Result<Vec<u8>> {
+	if scope.cancel.is_none() {
+		return std::fs::read(path);
+	}
+	let (scope, path) = (scope.clone(), path.to_path_buf());
+	offload(move || native_read(&scope, &path)).await
+}
+
 /// Creates a host directory under the facade's creation mask: each directory
 /// it creates gets exactly its requested mode (`0o777` by default) less the
 /// mask, set again after creation as in [`native_open`]. Existing ones keep
@@ -936,7 +948,7 @@ impl Fs {
 	pub async fn read(&self, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
 		let path = path.as_ref();
 		match self.route(path)? {
-			Route::Native => native_read(&self.scope, path),
+			Route::Native => native_read_async(&self.scope, path).await,
 			Route::Provider(provider) => self.guard(provider.read(path)).await,
 			Route::Mounted(file) => {
 				let file = mount_open_async(file, &read_options()).await?;
