@@ -223,7 +223,12 @@ import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
-import { disposeProgramStatus, initProgramStatus, setProgramStatusEnabled } from "../utils/run-status";
+import {
+	disposeProgramStatus,
+	initProgramStatus,
+	resendProgramStatus,
+	setProgramStatusEnabled,
+} from "../utils/run-status";
 import {
 	disposeTerminalTitleState,
 	initTerminalTitleState,
@@ -344,6 +349,7 @@ import type {
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
+	ResumeSessionOptions,
 	SessionPickHandler,
 	ShowStatusOptions,
 	SelectOnlyModelSelectorOptions,
@@ -1340,6 +1346,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#loopConditionAbort: AbortController | undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
+	#pendingLoopIterations = 0;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearGeneration = 0;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
@@ -1639,7 +1646,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
-	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
+	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	// True from `/guided-goal` kickoff until the interview ends: a goal record
 	// appears, a turn makes tool calls (the interview itself is tool-free, so
@@ -1727,6 +1734,39 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #inputController: InputController;
 	readonly #selectorController: SelectorController;
 	readonly #focusController: SessionFocusController;
+	/** Sessions retain this small activity record, not the terminal and its transcript, after the view leaves. */
+	readonly #idleMaintenanceActivity: {
+		target: AgentSession | undefined;
+		ready: boolean;
+		isComposing: boolean;
+		scheduledTurn: ((target: AgentSession) => boolean) | undefined;
+		presentRecap: ((recap: string) => void) | undefined;
+	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
+
+	syncIdleMaintenanceView(target: AgentSession | null = this.viewSession): void {
+		const activity = this.#idleMaintenanceActivity;
+		const previous = activity.target;
+		if (target === null) {
+			activity.target = undefined;
+			activity.ready = false;
+			activity.isComposing = false;
+			activity.scheduledTurn = undefined;
+			activity.presentRecap = undefined;
+			previous?.refreshIdleMaintenance();
+			return;
+		}
+		if (!activity.scheduledTurn) return;
+		activity.target = target;
+		activity.isComposing = this.editor.getText().trim() !== "";
+		target.enableIdleMaintenance({
+			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
+			// Delivered only while unblocked, so `target` is the session on screen.
+			onRecap: recap => activity.presentRecap?.(recap),
+		});
+		if (previous !== target) previous?.refreshIdleMaintenance();
+		target.refreshIdleMaintenance();
+	}
 	get viewSession(): AgentSession {
 		return this.#focusController.target ?? this.session;
 	}
@@ -1851,6 +1891,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
+	#subagentHudKey = "";
 	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
 	#subagentCostHydratedRoot?: string;
 	#mcpStatusOrder: string[] = [];
@@ -2201,6 +2242,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
+		this.#idleMaintenanceActivity.scheduledTurn = target =>
+			target === this.session &&
+			(this.#goalContinuationTimer !== undefined ||
+				this.#pendingGoalContinuationTurns > 0 ||
+				this.#loopAutoSubmitTimer !== undefined ||
+				this.#pendingLoopIterations > 0);
+		this.#idleMaintenanceActivity.presentRecap = recap => this.#eventController.presentIdleRecap(recap);
+		this.syncIdleMaintenanceView();
 
 		// Fresh dialog lifetime: a previous stop (if this mode is ever
 		// re-initialized) left the old controller aborted, and approvals queued
@@ -2396,7 +2445,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showUserMessageSelector();
 					return;
 				case "resume":
-					this.handleResumeSession(action.path).catch((error: unknown) =>
+					this.handleResumeSession(action.path, { followContinuation: true }).catch((error: unknown) =>
 						this.showError(error instanceof Error ? error.message : String(error)),
 					);
 					return;
@@ -2455,6 +2504,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
+		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
+		// Only a frame that actually writes the mark needs a replacement; diff
+		// paints that keep the user bubble must not resend on every update.
+		this.#eventBusUnsubscribers.push(
+			this.ui.addFrameWriteListener(frame => {
+				if (frame.includes("\x1b]133;A\x07")) resendProgramStatus();
+			}),
+		);
 		setTerminalSessionSource({
 			file: () => this.sessionManager.getSessionFile(),
 			cwd: () => this.sessionManager.getCwd(),
@@ -2731,6 +2788,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		this.#idleMaintenanceActivity.ready = true;
+		this.syncIdleMaintenanceView();
 		// Publish native send readiness even when no user input triggers another frame.
 		this.ui.requestRender();
 	}
@@ -3026,8 +3085,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Brief delay so the user has a chance to press Esc between iterations.
 		this.#loopAutoSubmitTimer = setTimeout(() => {
 			this.#loopAutoSubmitTimer = undefined;
-			if (!this.loopModeEnabled || !this.onInputCallback) return;
-			callback();
+			try {
+				if (!this.loopModeEnabled || !this.onInputCallback) return;
+				callback();
+			} finally {
+				this.syncIdleMaintenanceView();
+			}
 		}, 800);
 	}
 
@@ -3035,6 +3098,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#loopAutoSubmitTimer) {
 			clearTimeout(this.#loopAutoSubmitTimer);
 			this.#loopAutoSubmitTimer = undefined;
+			this.syncIdleMaintenanceView();
 		}
 	}
 
@@ -3056,30 +3120,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!prompt) return;
 		this.#goalContinuationTimer = setTimeout(() => {
 			this.#goalContinuationTimer = undefined;
-			if (!this.onInputCallback) return;
-			if (!this.goalModeEnabled || this.goalModePaused) return;
-			// The 800ms timer can outlive the idle window that scheduled it: a
-			// `/goal set` taken via the streaming branch (or any extension/hook
-			// path that starts a turn while we wait) leaves the agent busy. Firing
-			// the continuation now would route through `submitInteractiveInput` →
-			// `promptCustomMessage` with no `streamingBehavior` and resurface
-			// `AgentBusyError`. Drop this tick; `#handleGoalSessionEvent` reschedules
-			// on the next `agent_end`.
-			if (this.#isAutoSubmitBlocked()) return;
-			if (this.#pendingSubmittedInput) return;
-			if (this.editor.getText().trim().length > 0) return;
-			if ((this.editor.pendingImages?.length ?? 0) > 0) return;
-			const latestState = this.session.getGoalModeState();
-			if (!latestState?.enabled || latestState.goal.status !== "active") return;
-			if (this.#goalOpenWorkAllBlocked()) return;
-			this.#pendingGoalContinuationTurns++;
-			this.onInputCallback(
-				this.startPendingSubmission({
-					text: prompt,
-					customType: "goal-continuation",
-					display: false,
-				}),
-			);
+			try {
+				if (!this.onInputCallback) return;
+				if (!this.goalModeEnabled || this.goalModePaused) return;
+				// The 800ms timer can outlive the idle window that scheduled it: a
+				// `/goal set` taken via the streaming branch (or any extension/hook
+				// path that starts a turn while we wait) leaves the agent busy. Firing
+				// the continuation now would route through `submitInteractiveInput` →
+				// `promptCustomMessage` with no `streamingBehavior` and resurface
+				// `AgentBusyError`. Drop this tick; `#handleGoalSessionEvent` reschedules
+				// on the next `agent_end`.
+				if (this.#isAutoSubmitBlocked()) return;
+				if (this.#pendingSubmittedInput) return;
+				if (this.editor.getText().trim().length > 0) return;
+				if ((this.editor.pendingImages?.length ?? 0) > 0) return;
+				const latestState = this.session.getGoalModeState();
+				if (!latestState?.enabled || latestState.goal.status !== "active") return;
+				if (this.#goalOpenWorkAllBlocked()) return;
+				this.#pendingGoalContinuationTurns++;
+				this.onInputCallback(
+					this.startPendingSubmission({
+						text: prompt,
+						customType: "goal-continuation",
+						display: false,
+					}),
+				);
+			} finally {
+				this.syncIdleMaintenanceView();
+			}
 		}, 800);
 	}
 
@@ -3099,6 +3167,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#goalContinuationTimer) {
 			clearTimeout(this.#goalContinuationTimer);
 			this.#goalContinuationTimer = undefined;
+			this.syncIdleMaintenanceView();
 		}
 	}
 
@@ -3132,7 +3201,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.onInputCallback(this.startPendingSubmission({ text: prompt }));
 	}
 
+	/** One loop iteration; while it runs, idle maintenance treats the loop's next turn as scheduled. */
 	async #runLoopIteration(action: "prompt" | "compact" | "reset", prompt: string): Promise<void> {
+		this.#pendingLoopIterations++;
+		try {
+			await this.#loopIteration(action, prompt);
+		} finally {
+			this.#pendingLoopIterations--;
+			this.syncIdleMaintenanceView();
+		}
+	}
+
+	async #loopIteration(action: "prompt" | "compact" | "reset", prompt: string): Promise<void> {
 		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
 		if (this.#isAutoSubmitBlocked()) {
 			this.#deferLoopAutoSubmit(() => {
@@ -3472,6 +3552,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		if (submission.customType !== "goal-continuation") {
 			this.#pendingGoalContinuationTurns = 0;
+			this.syncIdleMaintenanceView();
 		}
 		this.#pendingSubmittedInput = submission;
 		this.#pendingSubmissionPreservesDraft = options?.preserveDraft === true;
@@ -3520,9 +3601,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;
-		if (submission.customType === "goal-continuation") {
-			this.#pendingGoalContinuationTurns = Math.max(0, this.#pendingGoalContinuationTurns - 1);
-		}
+		if (submission.customType === "goal-continuation") this.#releaseGoalContinuationTurn();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(true);
 		}
@@ -3590,6 +3669,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	finishPendingSubmission(input: SubmittedUserInput): void {
+		// A started continuation the session refused or dropped gets no `agent_end` to release its reservation.
+		if (input.customType === "goal-continuation" && input.started && !input.dispatched) {
+			this.#releaseGoalContinuationTurn();
+		}
 		const wasPendingSubmission = this.#pendingSubmittedInput === input;
 		const pendingSubmissionDispose = this.#pendingSubmissionDispose;
 		if (wasPendingSubmission) {
@@ -3609,6 +3692,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#stopLoadingAnimation(true);
 			}
 		}
+	}
+
+	/** Drop one pending goal-continuation reservation, so idle maintenance stops waiting for its turn. */
+	#releaseGoalContinuationTurn(): void {
+		this.#pendingGoalContinuationTurns = Math.max(0, this.#pendingGoalContinuationTurns - 1);
+		this.syncIdleMaintenanceView();
 	}
 
 	#computeEditorMaxHeight(): number {
@@ -3686,10 +3775,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#renderSubagentList();
 			this.ui.requestRender();
 		}
-		if (any("compaction.idleEnabled", "compaction.idleThresholdTokens", "compaction.idleTimeoutSeconds")) {
-			this.#eventController.refreshIdleCompactionTimer();
-		}
-		if (any("recap.enabled", "recap.idleSeconds")) this.#eventController.refreshIdleRecapTimer();
 		if (any("composer.predictions") && !next["composer.predictions"]) {
 			this.#eventController.composerPrediction.cancel();
 		}
@@ -3948,33 +4033,35 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * registry, and the cost segment's subagent-tree spend (local sessions only:
 	 * a collab guest's registry mirrors host transcripts outside this root).
 	 */
-	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
+	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): boolean {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(() => {
-				this.syncRunningSubagentBadge();
+				// Restoring a roster emits one event per agent. Rebuild the badge and
+				// lists once per burst through the observer scheduler.
+				this.#scheduleObserverUiSync("progress");
 			});
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
-		this.statusLine.setRunningSubagents(agentIds);
-		if (this.collabGuest) {
-			this.statusLine.setSubagentTreeCost(0);
-		} else {
+		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
+		let treeCost = 0;
+		if (!this.collabGuest) {
 			const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
 			this.#hydratePersistedSubagentCosts(rootSessionFile);
-			this.statusLine.setSubagentTreeCost(
-				sumSubagentTreeCost({
-					refs: AgentRegistry.global().list(),
-					observers: this.#observerRegistry,
-					rootSessionFile,
-					sessionCosts: this.#subagentSessionCosts,
-				}),
-			);
+			treeCost = sumSubagentTreeCost({
+				refs: AgentRegistry.global().list(),
+				observers: this.#observerRegistry,
+				rootSessionFile,
+				sessionCosts: this.#subagentSessionCosts,
+			});
 		}
-		if (options.requestRender !== false) this.ui.requestRender();
+		const costChanged = this.statusLine.setSubagentTreeCost(treeCost);
+		const changed = agentsChanged || costChanged;
+		if (changed && options.requestRender !== false) this.ui.requestRender();
+		return changed;
 	}
 
 	/**
@@ -4386,22 +4473,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#flushObserverUiSync(): void {
-		this.syncRunningSubagentBadge({ requestRender: false });
-		if (this.#observerUiSyncNeedsTodoReconcile) {
-			this.#observerUiSyncNeedsTodoReconcile = false;
-			this.#reconcileTodosWithSubagents();
-			this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
-			this.#renderTodoList();
-		} else if (this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey) {
+		const badgeChanged = this.syncRunningSubagentBadge({ requestRender: false });
+		let todoChanged = false;
+		if (
+			this.#observerUiSyncNeedsTodoReconcile ||
+			this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey
+		) {
+			if (this.#observerUiSyncNeedsTodoReconcile) {
+				this.#observerUiSyncNeedsTodoReconcile = false;
+				this.#reconcileTodosWithSubagents();
+				this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
+			}
 			// Progress-only ticks (10 Hz while subagents run) cannot change the
 			// todo phases or their persisted visibility — re-syncing would also
-			// re-arm the auto-clear timer so it could never fire. Only the HUD's
-			// subagent highlight depends on them, so repaint just when the active
-			// descriptions change.
+			// re-arm the auto-clear timer so it could never fire. The HUD and
+			// transcript todo cards still need repainting when the active
+			// descriptions change, even if the HUD itself is hidden.
 			this.#renderTodoList();
+			todoChanged = true;
 		}
-		this.#renderSubagentList();
-		this.ui.requestRender();
+		const hudChanged = this.#renderSubagentList();
+		if (badgeChanged || todoChanged || hudChanged) this.ui.requestRender();
 	}
 
 	#cancelObserverUiSyncTimer(): void {
@@ -4734,17 +4826,23 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * appear and advance, so a repaint is armed for when the marker first shows
 	 * and then once a second while a listed agent stays mid-call.
 	 */
-	#renderSubagentList(): void {
+	#renderSubagentList(): boolean {
 		this.#cancelSubagentPreviewTick();
 		const view = this.#buildSubagentHudView();
 		if (!view) {
-			this.subagentContainer.clear();
-			return;
+			const changed = this.subagentContainer.children.length > 0;
+			if (changed) this.subagentContainer.clear();
+			this.#subagentHudKey = "";
+			return changed;
 		}
+		this.#armSubagentPreviewTick(view.tickMs);
+		const key = JSON.stringify([view.lines, view.order, view.toggleRow]);
+		if (key === this.#subagentHudKey && this.subagentContainer.children.length > 0) return false;
+		this.#subagentHudKey = key;
 		const hud = this.subagentContainer.children[0];
 		if (hud instanceof SubagentHudComponent) hud.update(view.lines, view.order, view.toggleRow);
 		else this.subagentContainer.addChild(new SubagentHudComponent(view.lines, view.order, view.toggleRow));
-		this.#armSubagentPreviewTick(view.tickMs);
+		return true;
 	}
 
 	/** Inputs for one HUD paint; undefined when the HUD is off or nothing is running. */
@@ -4880,6 +4978,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.#scheduleGoalContinuation();
+		this.syncIdleMaintenanceView();
 	}
 
 	async #applyPlanModeModel(): Promise<void> {
@@ -4991,6 +5090,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					await this.session.restoreNonMCPToolPresentation(
 						previousPresentation.enabled,
 						previousPresentation.mounted,
+						previousPresentation.registered,
 					);
 				}
 			} finally {
@@ -5022,6 +5122,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#previousGoalContinuationActivity = undefined;
 			this.#goalSuppressNextContinuation = false;
 			this.#cancelGoalContinuation();
+			this.syncIdleMaintenanceView();
 			this.#updateGoalModeStatus();
 		}
 
@@ -5198,6 +5299,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planModePreviousToolPresentation = {
 			enabled: previousTools.filter(name => !isMCPToolName(name)),
 			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+			registered: this.session.getAllToolNames(),
 		};
 		this.planModePlanFilePath = planFilePath;
 		this.planModeEnabled = true;
@@ -5319,6 +5421,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				await this.session.restoreNonMCPToolPresentation(
 					previousPresentation.enabled,
 					previousPresentation.mounted,
+					previousPresentation.registered,
 				);
 			}
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
@@ -5456,6 +5559,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#previousGoalContinuationActivity = undefined;
 		this.#goalSuppressNextContinuation = false;
 		this.#cancelGoalContinuation();
+		this.syncIdleMaintenanceView();
 		this.#updateGoalModeStatus();
 		if (!options?.silent) {
 			if (options?.reason === "completed") {
@@ -5908,6 +6012,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
 			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
 			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+			registered: this.session.getAllToolNames(),
 		};
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
@@ -5978,7 +6083,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const executionTools = previousPresentation.enabled.includes("read")
 			? previousPresentation.enabled
 			: [...previousPresentation.enabled, "read"];
-		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted);
+		await this.session.restoreNonMCPToolPresentation(
+			executionTools,
+			previousPresentation.mounted,
+			previousPresentation.registered,
+		);
 		this.session.setPlanReferencePath(options.planFilePath);
 		try {
 			const autosaved = await autosaveApprovedPlan({
@@ -7191,6 +7300,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.syncIdleMaintenanceView(null);
 		this.#hidePlanReview();
 		this.#appearanceRefreshRequest = undefined;
 		// Settle any pending approval prompt as dismissed (deny). The
@@ -8510,8 +8620,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showSessionSelector(source, onSelect);
 	}
 
-	async handleResumeSession(sessionPath: string): Promise<void> {
-		await this.#selectorController.handleResumeSession(sessionPath);
+	async handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void> {
+		await this.#selectorController.handleResumeSession(sessionPath, options);
 	}
 
 	handleSessionDeleteCommand(): Promise<void> {
