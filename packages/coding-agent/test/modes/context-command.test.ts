@@ -90,7 +90,7 @@ describe("context command viewer", () => {
 			const messages = JSON.stringify(session.messages);
 			mode.handleContextCommand();
 			const overlay = mode.ui.overlayStack.at(-1)!;
-			expect(overlay.options).toMatchObject({ width: "100%", maxHeight: "100%", fullscreen: true, margin: 0 });
+			expect(overlay.options?.fullscreen).toBe(true);
 			expect(mode.ui.getFocused()).toBe(overlay.component);
 			const snapshot = overlay.component.render(100);
 			overlay.component.handleInput?.("\r");

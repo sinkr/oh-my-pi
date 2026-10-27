@@ -4,7 +4,7 @@
  * Extends the base AgentMessage type with coding-agent specific message types,
  * and provides a transformer to convert them to LLM-compatible messages.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isProviderRefusalMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	isUserInterruptAbort,
 	isCustomMessageContent,
@@ -1219,7 +1219,9 @@ export interface ContextViewMessage {
  * and array conversion caches. Steering messages show the envelope
  * {@link wrapSteeringForModel} sends (sharing its wrapper cache); it maps
  * one-to-one, so source indices hold. Mirrors the {@link convertToLlm} loop
- * through {@link convertMessageAt}.
+ * through {@link convertMessageAt}, then drops API-level provider refusals
+ * like the send path's `filterProviderReplayMessages`, since they are never
+ * replayed.
  *
  * Kept separate from `convertToLlm` because the viewer needs source indices:
  * reporting them from `convertToLlm` would add a per-message callback and
@@ -1231,6 +1233,7 @@ export function convertMessagesForContextView(messages: AgentMessage[]): Context
 	const result: ContextViewMessage[] = [];
 	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
 		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
+			if (message.role === "assistant" && isProviderRefusalMessage(message)) continue;
 			result.push({ message, sourceIndex, convertedIndex: result.length });
 		}
 	}

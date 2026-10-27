@@ -35,12 +35,12 @@ export function safeLine(value: string): string {
 	return safeText(value).replace(/\n/g, " ");
 }
 
-/** Token label of an entry or group: `—` for a grouped entry, `N/A · Interrupted`, else `N tokens` (unscaled estimate). */
+/** Token label of an entry or group: `—` for a grouped entry, `N/A · Interrupted`, else `N token(s)` (unscaled estimate). */
 export function tokenEstimate(item: ContextViewEntry | ContextThinkingGroup): string {
 	// A grouped entry shares its group's estimate, which the group heading shows.
 	if ("thinkingGroup" in item && item.thinkingGroup) return "—";
 	if (item.interrupted) return "N/A · Interrupted";
-	return `${item.tokens.toLocaleString("en-US")} tokens`;
+	return `${item.tokens.toLocaleString("en-US")} ${item.tokens === 1 ? "token" : "tokens"}`;
 }
 
 /** `[label] N tokens` as ANSI. */

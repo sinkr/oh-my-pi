@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
 	buildReplanTitleContext,
@@ -246,6 +246,22 @@ describe("convertMessagesForContextView", () => {
 			expect(Array.isArray(content) && content.some(block => block.type === "image")).toBe(true);
 		}
 		expect(convertMessagesForContextView([])).toEqual([]);
+	});
+
+	it("omits provider refusals the send path drops, keeping source indices of later messages", () => {
+		const refusal: AssistantMessage = {
+			...settledAssistant("refused output"),
+			stopReason: "error",
+			stopDetails: { type: "refusal" },
+		};
+		const messages: AgentMessage[] = [userMessage("question", 1), refusal, userMessage("again", 3)];
+
+		const converted = convertMessagesForContextView(messages);
+		expect(converted.map(({ sourceIndex, convertedIndex }) => [sourceIndex, convertedIndex])).toEqual([
+			[0, 0],
+			[2, 1],
+		]);
+		expect(converted.map(entry => entry.message)).toEqual(filterProviderReplayMessages(convertToLlm(messages)));
 	});
 
 	it("honors neighboring continuity markers without replacing either production cache", () => {

@@ -210,20 +210,31 @@ export function invalidateToolSchemaMetadata(tools: ToolSchemaSource): void {
 export interface ToolSchemaFragments {
 	/** Name, description, wire schema JSON, then rendered examples; fields that cannot be serialized are omitted. */
 	readonly fragments: string[];
+	/** `fragments` with the schema JSON indented for reading; present only when a display indent was requested. */
+	readonly display?: string[];
 	/** Why serialization stopped; the schema or examples after that point are missing from `fragments`. */
 	readonly schemaError?: string;
 }
 
-/** Provider-visible text of one tool definition; `indent` only formats the schema JSON. */
-export function toolSchemaFragments(tool: ContextTool, indent?: number): ToolSchemaFragments {
+/**
+ * Provider-visible text of one tool definition. `displayIndent` additionally
+ * returns `display`, the same fragments with the schema JSON indented, from
+ * the same schema conversion.
+ */
+export function toolSchemaFragments(tool: ContextTool, displayIndent?: number): ToolSchemaFragments {
 	// Extension-supplied tools may carry a non-string name/description or a
 	// parameters value whose wire schema stringifies to `undefined` (e.g. a
 	// callable schema that escaped normalization). A non-string fragment is
 	// fatal inside the native tokenizer, so only real strings are kept.
 	const { name, description, parameters } = tool;
 	const fragments: string[] = [];
-	if (typeof name === "string") fragments.push(name);
-	if (typeof description === "string") fragments.push(description);
+	const display: string[] | undefined = displayIndent === undefined ? undefined : [];
+	const push = (wire: string, shown: string = wire): void => {
+		fragments.push(wire);
+		display?.push(shown);
+	};
+	if (typeof name === "string") push(name);
+	if (typeof description === "string") push(description);
 	try {
 		const wireTool: AiTool = {
 			name,
@@ -231,16 +242,18 @@ export function toolSchemaFragments(tool: ContextTool, indent?: number): ToolSch
 			parameters: parameters as AiTool["parameters"],
 			examples: tool.examples,
 		};
-		const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {}, null, indent);
-		if (typeof wireJson === "string") fragments.push(wireJson);
+		const wireSchema = toolWireSchema(wireTool) ?? {};
+		const wireJson = JSON.stringify(wireSchema);
+		if (typeof wireJson === "string")
+			push(wireJson, display ? JSON.stringify(wireSchema, null, displayIndent) : wireJson);
 		// The agent loop appends rendered examples to the wire description.
 		const examplesBlock = renderToolExamples(wireTool);
-		if (examplesBlock) fragments.push(examplesBlock);
+		if (examplesBlock) push(examplesBlock);
 	} catch (error) {
 		// Schema may contain functions or cycles.
-		return { fragments, schemaError: error instanceof Error ? error.message : String(error) };
+		return { fragments, display, schemaError: error instanceof Error ? error.message : String(error) };
 	}
-	return { fragments };
+	return { fragments, display };
 }
 
 /**

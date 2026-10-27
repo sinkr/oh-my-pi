@@ -129,17 +129,15 @@ function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuild
 	for (const [index, tool] of session.agent.state.tools.entries()) {
 		const categoryId = session.hasBuiltInTool(tool.name) ? "built-in-tools" : "custom-tools";
 		// Count the compact wire text; show the same fragments with an indented schema.
-		const tokens =
-			session.model?.toolSchemasInContext === false
-				? 0
-				: session.agent.tokenizer.countTokens(toolSchemaFragments(tool).fragments);
-		const { fragments, schemaError } = toolSchemaFragments(tool, 2);
-		if (schemaError !== undefined) fragments.push(`Schema unavailable: ${schemaError}`);
+		const { fragments, display, schemaError } = toolSchemaFragments(tool, 2);
+		const tokens = session.model?.toolSchemasInContext === false ? 0 : session.agent.tokenizer.countTokens(fragments);
+		const shown = display ?? fragments;
+		if (schemaError !== undefined) shown.push(`Schema unavailable: ${schemaError}`);
 		const source = toolSourcesByName.get(tool.name);
 		appendEntry(state, categoryId, {
 			id: `${categoryId}/${index}`,
 			label: tool.name,
-			text: fragments.join("\n\n"),
+			text: shown.join("\n\n"),
 			info: source?.source ?? "unknown",
 			path: source?.path,
 			tokens,
