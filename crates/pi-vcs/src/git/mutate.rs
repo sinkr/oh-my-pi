@@ -720,31 +720,7 @@ impl GitRepo {
 		};
 
 		for relative in dirty_tracked.iter().chain(&untracked).chain(&staged) {
-			let relative = relative.to_path_lossy();
-			let src = self.root().join(&relative);
-			let dst = path.join(&relative);
-			match fs::symlink_metadata(&src) {
-				Ok(meta) if meta.file_type().is_symlink() => {
-					remove_existing(&dst)?;
-					if let Some(parent) = dst.parent() {
-						fs::create_dir_all(parent)?;
-					}
-					copy_symlink(&src, &dst)?;
-				},
-				Ok(meta) if meta.is_file() => {
-					remove_existing(&dst)?;
-					if let Some(parent) = dst.parent() {
-						fs::create_dir_all(parent)?;
-					}
-					fs::copy(&src, &dst)?;
-				},
-				Ok(_) => {},
-				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-					remove_existing(&dst)?;
-					prune_empty_parents(path, dst.parent(), &BTreeSet::new())?;
-				},
-				Err(err) => return Err(err.into()),
-			}
+			copy_worktree_path(self.root(), path, relative.as_bstr())?;
 		}
 		let Some(mut index) = source_index else {
 			return Ok(());
@@ -790,7 +766,25 @@ impl GitRepo {
 		let linked = Self::require(path)?;
 		let linked_repo = linked.gix()?;
 		let mut current = load_index_or_empty(&linked_repo, "git worktree add")?;
+		// Backends may clone entire subtrees atomically. Apply the same
+		// nonrelocatable-directory policy to every backend's disposable copy,
+		// independently of Git's ignore rules.
+		let excluded = prune_nonrelocatable_clone_dirs(path)?;
 		if keep_changes {
+			// Environment artifacts are never portable, but tracked edits
+			// beneath an excluded directory still belong to the user.
+			if !excluded.is_empty() {
+				for entry in current.entries() {
+					let relative = entry.path(&current);
+					if relative
+						.to_path_lossy()
+						.ancestors()
+						.any(|parent| excluded.contains(parent))
+					{
+						copy_worktree_path(self.root(), path, relative)?;
+					}
+				}
+			}
 			// The clone already mirrors the source's live tree and the copied
 			// index carries its staged state. Only the stat cache is stale
 			// (new inodes); refresh it for entries the source reports clean so
@@ -819,6 +813,16 @@ impl GitRepo {
 		);
 
 		let mut write = write_paths;
+		if !excluded.is_empty() {
+			write.extend(target.entries().iter().filter_map(|entry| {
+				let relative = entry.path(&target);
+				relative
+					.to_path_lossy()
+					.ancestors()
+					.any(|parent| excluded.contains(parent))
+					.then(|| relative.to_owned())
+			}));
+		}
 		write.extend(
 			dirty_tracked
 				.iter()
@@ -1804,6 +1808,74 @@ fn collect_clone_reconciliation_paths(
 		}
 	}
 	Ok((dirty_tracked, untracked))
+}
+
+/// Drop source-bound environments from a fresh clone, never following
+/// symlinks or walking Git metadata. Return the removed directory paths so
+/// target-tracked entries can be checked out even when both indexes agree.
+fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
+	let mut excluded = BTreeSet::new();
+	let mut pending = vec![root.to_path_buf()];
+	while let Some(dir) = pending.pop() {
+		let marked = dir.join("pyvenv.cfg").is_file() || dir.join("CMakeCache.txt").is_file();
+		if marked && dir != root {
+			remove_existing(&dir)?;
+			excluded.insert(
+				dir.strip_prefix(root)
+					.expect("cloned directory is under root")
+					.to_path_buf(),
+			);
+			continue;
+		}
+		for entry in fs::read_dir(&dir)? {
+			let entry = entry?;
+			if entry.file_name() == ".git" {
+				continue;
+			}
+			let path = entry.path();
+			if marked {
+				remove_existing(&path)?;
+			} else if entry.file_type()?.is_dir() {
+				pending.push(path);
+			}
+		}
+		if marked {
+			excluded.insert(PathBuf::new());
+		}
+	}
+	Ok(excluded)
+}
+
+/// Carry one live source path without following symlinks, including a
+/// deletion. Used both by ordinary-checkout seeding and by tracked files
+/// restored after clone exclusions.
+fn copy_worktree_path(source: &Path, target: &Path, relative: &gix::bstr::BStr) -> Result<()> {
+	let relative = relative.to_path_lossy();
+	let src = source.join(&relative);
+	let dst = target.join(&relative);
+	match fs::symlink_metadata(&src) {
+		Ok(meta) if meta.file_type().is_symlink() => {
+			remove_existing(&dst)?;
+			if let Some(parent) = dst.parent() {
+				fs::create_dir_all(parent)?;
+			}
+			copy_symlink(&src, &dst)?;
+		},
+		Ok(meta) if meta.is_file() => {
+			remove_existing(&dst)?;
+			if let Some(parent) = dst.parent() {
+				fs::create_dir_all(parent)?;
+			}
+			fs::copy(&src, &dst)?;
+		},
+		Ok(_) => {},
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+			remove_existing(&dst)?;
+			prune_empty_parents(target, dst.parent(), &BTreeSet::new())?;
+		},
+		Err(err) => return Err(err.into()),
+	}
+	Ok(())
 }
 
 fn git_metadata_path(path: &Path) -> Cow<'_, str> {
