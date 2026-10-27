@@ -85,7 +85,7 @@ Most operations return a text result built by `buildTextResult()` in `packages/c
 6. PR diffs use `pr://<N>/diff` (changed files), `pr://<N>/diff/<i>` (one file, 1-indexed), or `pr://<N>/diff/all` (full unified diff) — see [read](read.md). All variants share the `pr-diff` cache row; a fresh fetch normally runs `gh pr diff`, with a files-API fallback for oversized aggregate diffs.
 7. `pr_checkout` resolves PR metadata first, then enters `withRepoLock()` (`packages/coding-agent/src/utils/repo-lock.ts`) before any git mutation so parallel checkout calls for the same primary repo do not race on shared `.git` state.
 8. `pr_push` reads PR head metadata back from git branch config, derives a refspec, pushes with `repository.push()` (`@oh-my-pi/pi-natives/vcs`), then invalidates the cached `pr://` rows for the pushed PR via `invalidateAllForNumber()` so the next `pr://` read reflects the push.
-9. `pr_create` shells out once, then best-effort re-reads the created PR for a richer summary.
+9. `pr_create` shells out once, then best-effort fetches only the created PR's summary metadata.
 10. `run_watch` chooses either run mode (`run` supplied) or commit mode (`run` omitted), polls GitHub Actions APIs every 3 seconds for the first minute and every 15 seconds after that, emits streaming updates, and may save a full failed-log artifact before returning.
 11. Final text goes through `toolResult().text(...)`; if `session.allocateOutputArtifact()` returns a slot, failed-log text is persisted with `Bun.write()`.
 
@@ -125,12 +125,13 @@ Single-issue and single-PR reads live in the `issue://<N>` / `pr://<N>` URL sche
 | Optional fields | `repo`, `title`, `body`, `base`, `head`, `draft`, `fill`, `reviewer[]`, `assignee[]`, `label[]` |
 | `gh` command | `gh pr create ...` with flags assembled from provided fields |
 | Batching | None |
-| Output | `# Created Pull Request ...` summary with URL, state, draft flag, base/head, author, created time, labels, optional body. `sourceUrl` is the created PR URL. |
+| Output | `# Created Pull Request ...` summary with URL, state, draft flag, base/head, author, created time, and labels. The body is not echoed. `sourceUrl` is the created PR URL. |
 
 Branches:
 - `fill && (title || body !== undefined)` throws.
 - Non-empty `body` is written under a temp dir `gh-pr-body-*` in `os.tmpdir()`, passed as `--body-file`, then removed in `finally`.
-- After creation, the tool parses the returned URL and best-effort runs `gh pr view <number> --repo <repo> --json <GH_PR_FIELDS_NO_COMMENTS>`; failures there are swallowed.
+- After creation, the tool parses the returned URL and best-effort runs `gh pr view <number> --repo <repo> --json <GH_PR_CREATE_FIELDS>`, requesting only the summary fields above, not bodies, files, or reviews. Lookup failure still returns the creation URL and available input metadata.
+- `xd://github` creation results retain only `op` and `repo` in dispatch renderer arguments, not the body or other execution-only fields. The full validated body still reaches `gh pr create` unchanged; the original tool-call input remains in history. Read `pr://<N>` explicitly to retrieve the body.
 
 ### `pr_checkout`
 
