@@ -539,7 +539,7 @@ describe("pr://.../diff family", () => {
 			"github.cache.hardTtlSec": 10,
 		});
 		const router = InternalUrlRouter.instance();
-		const aged = Date.now() - 60_000;
+		const fetchedAt = Date.now();
 		const authKey = resolveGithubCacheAuthKey();
 		expect(authKey).toBeDefined();
 		const parsed = parsePrUnifiedDiff(oldDiff);
@@ -547,17 +547,18 @@ describe("pr://.../diff family", () => {
 			retainPrDiffGeneration({
 				repo: "owner/example",
 				number: 77,
-				fetchedAt: aged,
+				fetchedAt,
 				rendered: oldDiff,
 				files: parsed.files,
 				cacheAuthKey: authKey,
 			}),
-		).toBe(aged);
+		).toBe(fetchedAt);
 
-		await expect(router.resolve(`pr://owner/example/77/diff/1?at=${aged}`, { settings })).rejects.toThrow(
+		vi.spyOn(Date, "now").mockReturnValue(fetchedAt + 60_000);
+		await expect(router.resolve(`pr://owner/example/77/diff/1?at=${fetchedAt}`, { settings })).rejects.toThrow(
 			/not available/,
 		);
-		expect(getCachedGeneration("owner/example", "pr-diff", 77, false, aged, authKey)).toBeNull();
+		expect(getCachedGeneration("owner/example", "pr-diff", 77, false, fetchedAt, authKey)).toBeNull();
 		expect(textSpy).not.toHaveBeenCalled();
 	});
 

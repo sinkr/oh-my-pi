@@ -16,6 +16,7 @@ import {
 	getCached,
 	getCachedGeneration,
 	getOrFetchView,
+	getRetainedGeneration,
 	openDb,
 	putCached,
 	resetForTests as resetCacheForTests,
@@ -528,54 +529,51 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(generations?.c).toBe(0);
 	});
 
-	it("does not rewrite a published generation on a fresh cache hit", async () => {
-		const settings = Settings.isolated({
-			"github.cache.softTtlSec": 300,
-			"github.cache.hardTtlSec": 86400,
-		});
+	it("keeps a published generation when a different diff reuses its timestamp", () => {
 		const fetchedAt = Date.now();
-		retainCachedGeneration({
-			repo: TEST_REPO,
-			kind: "pr-diff",
-			number: 91,
-			includeComments: false,
-			payload: { files: [] },
-			rendered: "original-diff",
-			fetchedAt,
-		});
-		putCached({
-			repo: TEST_REPO,
-			kind: "pr-diff",
-			number: 91,
-			includeComments: false,
-			payload: { files: [] },
-			rendered: "original-diff",
-			fetchedAt,
-		});
-		openDb()
-			?.query(
-				"UPDATE github_view_cache_generation SET rendered = ? WHERE kind = ? AND number = ? AND fetched_at = ?",
-			)
-			.run("sentinel-diff", "pr-diff", 91, fetchedAt);
+		const retain = (rendered: string) =>
+			retainCachedGeneration({
+				repo: TEST_REPO,
+				kind: "pr-diff",
+				number: 91,
+				includeComments: false,
+				payload: { files: [] },
+				rendered,
+				fetchedAt,
+			});
 
-		const fetchFresh = vi.fn(async () => ({
-			rendered: "should-not-fetch",
-			sourceUrl: undefined,
-			payload: { files: [] },
-		}));
-		const result = await getOrFetchView({
-			repo: TEST_REPO,
-			kind: "pr-diff",
-			number: 91,
-			includeComments: false,
-			fetchFresh,
-			settings,
-		});
+		expect(retain("first-diff")).toBe(fetchedAt);
+		expect(retain("second-diff")).toBe(fetchedAt + 1);
+		expect(retain("first-diff")).toBe(fetchedAt);
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 91, false, fetchedAt)?.rendered).toBe("first-diff");
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 91, false, fetchedAt + 1)?.rendered).toBe("second-diff");
+	});
 
-		expect(result.status).toBe("fresh");
-		expect(result.rendered).toBe("original-diff");
-		expect(fetchFresh).not.toHaveBeenCalled();
-		expect(getCachedGeneration(TEST_REPO, "pr-diff", 91, false, fetchedAt)?.rendered).toBe("sentinel-diff");
+	it("counts pinned retention from when the generation was retained, not fetched", () => {
+		const settings = Settings.isolated({ "github.cache.hardTtlSec": 3600 });
+		const now = Date.now();
+		// A stale live row /review pins near the end of its hard TTL.
+		const fetchedAt = now - 3500_000;
+		expect(
+			retainCachedGeneration({
+				repo: TEST_REPO,
+				kind: "pr-diff",
+				number: 92,
+				includeComments: false,
+				payload: { files: [] },
+				rendered: "pinned-diff",
+				fetchedAt,
+			}),
+		).toBe(fetchedAt);
+
+		vi.spyOn(Date, "now").mockReturnValue(now + 600_000);
+		expect(getRetainedGeneration(TEST_REPO, "pr-diff", 92, false, fetchedAt, undefined, settings)?.rendered).toBe(
+			"pinned-diff",
+		);
+
+		vi.spyOn(Date, "now").mockReturnValue(now + 3700_000);
+		expect(getRetainedGeneration(TEST_REPO, "pr-diff", 92, false, fetchedAt, undefined, settings)).toBeNull();
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 92, false, fetchedAt)).toBeNull();
 	});
 
 	it("treats past-hard-TTL rows as cache misses (fetcher runs)", async () => {

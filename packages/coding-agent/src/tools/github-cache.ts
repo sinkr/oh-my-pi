@@ -17,7 +17,8 @@
  *     Cache writes do not. A published generation is insert-only: a later
  *     snapshot that collides on the same millisecond gets a new id.
  *   Past hard TTL → treat as miss and fetch fresh. Pinned generation reads
- *     use that same hard TTL and the cache kill switch.
+ *     use that same hard TTL, counted from when `/review` retained the
+ *     snapshot, and honor the cache kill switch.
  */
 
 import { Database } from "bun:sqlite";
@@ -134,13 +135,14 @@ export function openDb(): Database | null {
 				number           INTEGER NOT NULL,
 				include_comments INTEGER NOT NULL,
 				fetched_at       INTEGER NOT NULL,
+				retained_at      INTEGER NOT NULL,
 				payload          TEXT    NOT NULL,
 				rendered         TEXT    NOT NULL,
 				source_url       TEXT,
 				PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
 			);
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_fetched ON github_view_cache(fetched_at);
-			CREATE INDEX IF NOT EXISTS idx_github_view_cache_generation_fetched ON github_view_cache_generation(fetched_at);
+			CREATE INDEX IF NOT EXISTS idx_github_view_cache_generation_retained ON github_view_cache_generation(retained_at);
 			PRAGMA user_version = 4;
 		`);
 		protectDbFiles(dbPath);
@@ -161,7 +163,7 @@ function evictExpired(db: Database, hardTtlMs: number): void {
 	try {
 		const cutoff = Date.now() - hardTtlMs;
 		db.query("DELETE FROM github_view_cache WHERE fetched_at < ?").run(cutoff);
-		db.query("DELETE FROM github_view_cache_generation WHERE fetched_at < ?").run(cutoff);
+		db.query("DELETE FROM github_view_cache_generation WHERE retained_at < ?").run(cutoff);
 	} catch (err) {
 		logger.debug("github cache: eviction failed", { err: String(err) });
 	}
@@ -395,8 +397,10 @@ function isSqliteConstraint(err: unknown): boolean {
  * so that refresh cannot retarget a file index. Does not write the live row.
  *
  * A published id is never overwritten. Storing the same snapshot again returns
- * its existing id. A different snapshot that lands on the same millisecond gets
- * the next free id, which the caller must publish.
+ * its existing id and restarts its retention clock. A different snapshot that
+ * lands on the same millisecond gets the next free id, which the caller must
+ * publish. Retention runs from `retained_at` (when `/review` saved it), not from
+ * `fetched_at`, so a stale live row pinned by `/review` keeps its full hard TTL.
  * Returns that id, or null when the database is unavailable.
  */
 export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): number | null {
@@ -407,6 +411,7 @@ export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): n
 	const includeComments = input.includeComments ? 1 : 0;
 	const payloadJson = JSON.stringify(input.payload);
 	let fetchedAt = input.fetchedAt ?? Date.now();
+	const retainedAt = Date.now();
 	try {
 		for (let step = 0; step < MAX_GENERATION_ID_STEPS; step++) {
 			const existing = db
@@ -416,14 +421,19 @@ export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): n
 				.get(payloadJson, input.rendered, authKey, repo, input.kind, input.number, includeComments, fetchedAt) as
 				| { same: number }
 				| undefined;
-			if (existing?.same === 1) return fetchedAt;
+			if (existing?.same === 1) {
+				db.query(
+					"UPDATE github_view_cache_generation SET retained_at = ? WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
+				).run(retainedAt, authKey, repo, input.kind, input.number, includeComments, fetchedAt);
+				return fetchedAt;
+			}
 			if (existing) {
 				fetchedAt += 1;
 				continue;
 			}
 			try {
 				db.query(
-					"INSERT INTO github_view_cache_generation (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					"INSERT INTO github_view_cache_generation (auth_key, repo, kind, number, include_comments, fetched_at, retained_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 				).run(
 					authKey,
 					repo,
@@ -431,6 +441,7 @@ export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): n
 					input.number,
 					includeComments,
 					fetchedAt,
+					retainedAt,
 					payloadJson,
 					input.rendered,
 					input.sourceUrl ?? null,
@@ -454,6 +465,11 @@ export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): n
 	}
 }
 
+/** A generation stored by {@link retainCachedGeneration}, with the time it was saved. */
+export interface CachedGeneration<T = unknown> extends CachedView<T> {
+	retainedAt: number;
+}
+
 /** Read a pr-diff generation stored by {@link retainCachedGeneration}. */
 export function getCachedGeneration<T = unknown>(
 	repo: string,
@@ -462,15 +478,17 @@ export function getCachedGeneration<T = unknown>(
 	includeComments: boolean,
 	fetchedAt: number,
 	authKey: string = DEFAULT_CACHE_AUTH_KEY,
-): CachedView<T> | null {
+): CachedGeneration<T> | null {
 	const db = openDb();
 	if (!db) return null;
 	try {
 		const row = db
 			.query(
-				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
+				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, retained_at, payload, rendered, source_url FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
 			)
-			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0, fetchedAt) as Row | undefined;
+			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0, fetchedAt) as
+			| (Row & { retained_at: number })
+			| undefined;
 		if (!row) return null;
 		let payload: T;
 		try {
@@ -486,6 +504,7 @@ export function getCachedGeneration<T = unknown>(
 			number: row.number,
 			includeComments: row.include_comments === 1,
 			fetchedAt: row.fetched_at,
+			retainedAt: row.retained_at,
 			payload,
 			rendered: row.rendered,
 			sourceUrl: row.source_url ?? undefined,
@@ -516,8 +535,9 @@ function deleteCachedGeneration(
 }
 
 /**
- * Read one immutable generation, enforcing the cache kill switch and hard TTL.
- * An expired generation is deleted. Does not read or refresh the live row.
+ * Read one immutable generation, enforcing the cache kill switch and hard TTL
+ * (measured from when the generation was retained). An expired generation is
+ * deleted. Does not read or refresh the live row.
  */
 export function getRetainedGeneration<T = unknown>(
 	repo: string,
@@ -527,7 +547,7 @@ export function getRetainedGeneration<T = unknown>(
 	fetchedAt: number,
 	authKey: string = DEFAULT_CACHE_AUTH_KEY,
 	settings?: Settings,
-): CachedView<T> | null {
+): CachedGeneration<T> | null {
 	const ttl = resolveCacheTtl(settings);
 	// Pinned-only sessions never enter `getOrFetchView`, so the sweep has to
 	// run here too. Disabled lookups sweep as well; they just refuse the read.
@@ -535,16 +555,16 @@ export function getRetainedGeneration<T = unknown>(
 	if (!ttl.enabled) return null;
 	const row = getCachedGeneration<T>(repo, kind, number, includeComments, fetchedAt, authKey);
 	if (!row) return null;
-	if (Date.now() - row.fetchedAt > ttl.hardMs) {
+	if (Date.now() - row.retainedAt > ttl.hardMs) {
 		deleteCachedGeneration(repo, kind, number, includeComments, fetchedAt, authKey);
 		return null;
 	}
 	return row;
 }
 
-export function putCached<T = unknown>(input: PutCachedInput<T>): number | null {
+export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 	const db = openDb();
-	if (!db) return null;
+	if (!db) return;
 	try {
 		const fetchedAt = input.fetchedAt ?? Date.now();
 		const payloadJson = JSON.stringify(input.payload);
@@ -562,10 +582,8 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): number | null 
 			input.sourceUrl ?? null,
 		);
 		protectDbFiles(getGithubCacheDbPath());
-		return fetchedAt;
 	} catch (err) {
 		logger.debug("github cache: write failed", { err: String(err) });
-		return null;
 	}
 }
 

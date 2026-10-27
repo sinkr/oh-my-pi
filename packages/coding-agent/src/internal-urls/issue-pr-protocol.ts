@@ -394,7 +394,7 @@ function loadPinnedPrDiff(repo: string, number: number, fetchedAt: number, setti
 	const pinned = getPinnedPrDiff({ repo, number, fetchedAt, settings });
 	if (!pinned) {
 		throw new Error(
-			`pr://${repo}/${number}/diff?at=${fetchedAt} is not available. The pinned diff expired; run /review again.`,
+			`pr://${repo}/${number}/diff?at=${fetchedAt} is not available: the pinned snapshot expired, the GitHub cache is disabled, or it was saved under another GitHub account. Run /review again.`,
 		);
 	}
 	return pinned;
