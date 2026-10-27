@@ -178,6 +178,25 @@ describe("ExtensionUiController Ask dialog input", () => {
 		});
 	});
 
+	it("keeps image-looking pasted text literal in an image-enabled custom answer", async () => {
+		const harness = makeHarness();
+		const pending = harness.controller.showAskDialog(
+			[{ id: "answer", question: "Choose several?", options: [{ label: "Alpha" }], multi: true }],
+			{ acceptImages: true },
+		);
+		harness.handleInput("\x1b[B");
+		harness.handleInput("\r");
+		harness.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
+		expect(harness.getPrompt().acceptsImages).toBe(true);
+		harness.handleInput("\r");
+		await Promise.resolve();
+		harness.handleInput("\r");
+		expect(await pending).toMatchObject({
+			kind: "submit",
+			results: [{ id: "answer", selectedOptions: [], customInput: "/tmp/shot.png" }],
+		});
+	});
+
 	it("discards a cancelled prompt's late paste after a new custom editor opens", async () => {
 		const harness = makeHarness();
 		const clipboard = Promise.withResolvers<string>();
@@ -661,13 +680,11 @@ describe("ExtensionUiController tool approval", () => {
 		expect(harness.editorContainer.children).toHaveLength(2);
 	});
 
-	it("attaches pasted images to the steer: clipboard and image-path pastes reach the composer, later keys wait", async () => {
+	it("routes clipboard images to the composer and waits for them before inserting later literal path text", async () => {
 		const harness = makeHarness();
 		const clipboard = Promise.withResolvers<boolean>();
 		const onPasteImage = vi.fn(() => clipboard.promise);
-		const onPasteImagePath = vi.fn();
 		harness.editor.onPasteImage = onPasteImage;
-		harness.editor.onPasteImagePath = onPasteImagePath;
 		void harness.controller.showCollabAwareApproval(prompt);
 		// Image-only clipboard paste: the terminal sends an empty bracketed paste.
 		harness.handleInput("\x1b[200~\x1b[201~");
@@ -681,7 +698,8 @@ describe("ExtensionUiController tool approval", () => {
 		expect(harness.editor.getText()).toBe("x");
 		harness.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
 		await Promise.resolve();
-		expect(onPasteImagePath).toHaveBeenCalledWith("/tmp/shot.png");
+		expect(harness.editor.getText()).toContain("/tmp/shot.png");
+		expect(onPasteImage).toHaveBeenCalledTimes(1);
 	});
 
 	it("sends a steer whose Enter arrived in a separate read while its image was still landing", async () => {

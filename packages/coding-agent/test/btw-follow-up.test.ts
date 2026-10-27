@@ -908,6 +908,7 @@ describe("BTW follow-up lifecycle", () => {
 function composer(
 	onFollowUp: (record: BtwHistoryRecord, question: string) => Promise<boolean>,
 	extra: readonly BtwHistoryRecord[] = [],
+	onPasteImage?: () => Promise<unknown>,
 ) {
 	const record: BtwHistoryRecord = {
 		id: "composer-root",
@@ -928,6 +929,7 @@ function composer(
 		onCancel,
 		canFollowUp: () => true,
 		onFollowUp,
+		onPasteImage,
 		requestRender: vi.fn(),
 		getHeight: () => 30,
 	});
@@ -936,6 +938,38 @@ function composer(
 }
 
 describe("BTW follow-up composer", () => {
+	it.each(["/tmp/shot.png", "file:///tmp/shot.png", "/tmp/My Screenshot.png"])(
+		"keeps a bracketed image path literal: %s",
+		async text => {
+			const followUp = vi.fn(async (_record: BtwHistoryRecord, _question: string) => true);
+			const onPasteImage = vi.fn(async () => true);
+			const h = composer(followUp, [], onPasteImage);
+			expect(h.panel.openFollowUp(h.record.id)).toBe(true);
+			expect(h.panel.acceptsImages).toBe(true);
+			h.panel.handleInput(`\x1b[200~${text}\x1b[201~\r`);
+			await drain();
+			expect(onPasteImage).not.toHaveBeenCalled();
+			expect(followUp).toHaveBeenCalledWith(h.record, text, expect.any(AbortSignal), undefined);
+		},
+	);
+
+	it("still reads an image-only clipboard and waits for its attachment before submitting", async () => {
+		const followUp = vi.fn(async (_record: BtwHistoryRecord, _question: string) => true);
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		let finishPaste: ((text: string | undefined) => boolean) | undefined;
+		const onPasteImage = vi.fn(async () => {
+			finishPaste = h.panel.beginPaste();
+		});
+		const h = composer(followUp, [], onPasteImage);
+		expect(h.panel.openFollowUp(h.record.id)).toBe(true);
+		h.panel.handleInput("\x1b[200~\x1b[201~\r");
+		expect(onPasteImage).toHaveBeenCalledTimes(1);
+		expect(followUp).not.toHaveBeenCalled();
+		finishPaste?.(h.panel.attachImage(image));
+		await drain();
+		expect(followUp).toHaveBeenCalledWith(h.record, "[Image #1]", expect.any(AbortSignal), [image]);
+	});
+
 	it("uses Tab for pane navigation and Enter to open, then submit, a follow-up", async () => {
 		const followUp = vi.fn(async () => true);
 		const h = composer(followUp);
