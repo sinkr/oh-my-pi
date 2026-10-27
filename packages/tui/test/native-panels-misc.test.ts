@@ -331,9 +331,8 @@ describe("BtwHistoryPanel native events", () => {
 		expect(history.attachImage(second)).toBeUndefined();
 	});
 
-	it("hands a follow-up's pasted image path and empty paste to the host, and types other pastes", () => {
+	it("keeps a follow-up's pasted image path literal and hands only an empty paste to the host", () => {
 		const onPasteImage = vi.fn(async () => true);
-		const onPasteImagePath = vi.fn(async (_path: string) => {});
 		const history = new BtwHistoryPanel({
 			records: [record("a", "first question")],
 			onClose: () => {},
@@ -342,18 +341,17 @@ describe("BtwHistoryPanel native events", () => {
 			canFollowUp: () => true,
 			onFollowUp: async () => true,
 			onPasteImage,
-			onPasteImagePath,
 			requestRender: () => {},
 			getHeight: () => 30,
 		});
 		history.handleInput("f");
 		history.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
+		expect(onPasteImage).not.toHaveBeenCalled();
 		history.handleInput("\x1b[200~\x1b[201~");
 		history.handleInput("\x1b[200~plain words\x1b[201~");
-		expect(onPasteImagePath).toHaveBeenCalledWith("/tmp/shot.png");
 		expect(onPasteImage).toHaveBeenCalledTimes(1);
 		const input = findNode(history.describe(), node => node.key === "composer")?.c?.[0];
-		expect(input instanceof Input ? input.getValue() : undefined).toBe("plain words");
+		expect(input instanceof Input ? input.getValue() : undefined).toBe("/tmp/shot.pngplain words");
 	});
 
 	it("holds Enter until a follow-up's pasted image loads, and drops a submit whose image failed", () => {
