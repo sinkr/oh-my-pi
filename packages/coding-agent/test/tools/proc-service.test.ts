@@ -241,13 +241,15 @@ describe("proc:// background jobs", () => {
 	it.each([false, true])(
 		"rejects service-only controls for known jobs without claiming they are missing (launch: %s)",
 		async launch => {
-			const client = {
+			const client: DaemonBrokerClient = {
+				projectDir: process.cwd(),
 				onCompletion: () => () => {},
+				close() {},
 				async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
 					if (operation.op === "list") return { op: "list", daemons: [] };
 					throw new Error(`Unexpected broker op ${operation.op}`);
 				},
-			} as unknown as DaemonBrokerClient;
+			};
 			const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 			const manager = new AsyncJobManager({});
 			const pending = Promise.withResolvers<string>();
