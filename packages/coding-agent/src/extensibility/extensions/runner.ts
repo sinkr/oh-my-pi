@@ -1759,10 +1759,18 @@ export class ExtensionRunner {
 					if (stopResult.decision === "block") {
 						return stopResult as RunnerEmitResult<TEvent>;
 					}
-					const hasContinuationContext =
-						(typeof stopResult.additionalContext === "string" && stopResult.additionalContext.length > 0) ||
-						(typeof stopResult.reason === "string" && stopResult.reason.length > 0);
-					if (stopResult.continue === true && hasContinuationContext) result ??= stopResult;
+					const continuationContext = stopResult.additionalContext || stopResult.reason;
+					if (stopResult.continue === true && continuationContext) {
+						if (result) {
+							const prior = result as SessionStopEventResult;
+							result = {
+								continue: true,
+								additionalContext: `${prior.additionalContext || prior.reason}\n\n${continuationContext}`,
+							};
+						} else {
+							result = stopResult;
+						}
+					}
 				}
 			}
 		}
@@ -2234,6 +2242,7 @@ export class ExtensionRunner {
 		prompt: string,
 		images: ImageContent[] | undefined,
 		systemPrompt: string[],
+		reason: BeforeAgentStartEvent["reason"] = "prompt",
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
 		if (!this.hasHandlers("before_agent_start")) return undefined;
 		const ctx = this.createContext();
@@ -2248,6 +2257,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				const event: BeforeAgentStartEvent = {
 					type: "before_agent_start",
+					reason,
 					prompt,
 					images,
 					systemPrompt: currentSystemPrompt,
