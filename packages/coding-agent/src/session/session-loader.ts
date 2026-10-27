@@ -7,8 +7,10 @@ import {
 	isEisdir,
 	isEnoent,
 	isEnotdir,
+	jsonContainerEnd,
 	parseJsonlLenient,
 	peekFile,
+	tryParseJson,
 } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
@@ -232,35 +234,11 @@ function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string |
 	if (records.length === 0) return final ? undefined : HEADER_INCOMPLETE;
 	// A header is an object; anything else is not a session file.
 	if (records[0] !== 0x7b) return undefined;
-	const end = jsonObjectEnd(records);
+	const text = new TextDecoder().decode(records);
+	const end = jsonContainerEnd(text, 0);
 	if (end === -1) return final ? undefined : HEADER_INCOMPLETE;
-	const entry = Bun.JSONL.parseChunk(records.subarray(0, end)).values[0] as FileEntry | undefined;
+	const entry = tryParseJson<FileEntry>(text.slice(0, end)) ?? undefined;
 	return isValidSessionHeader(entry) ? entry.id : undefined;
-}
-
-/**
- * Index just past the JSON object that opens `bytes`, or -1 when it does not
- * close within them. Tracks strings and escapes so braces inside values do not
- * count; UTF-8 continuation bytes never match the ASCII delimiters. Malformed
- * input yields some end the parser then rejects.
- */
-function jsonObjectEnd(bytes: Uint8Array): number {
-	let depth = 0;
-	let inString = false;
-	for (let index = 0; index < bytes.length; index++) {
-		const byte = bytes[index];
-		if (inString) {
-			if (byte === 0x5c) index++;
-			else if (byte === 0x22) inString = false;
-		} else if (byte === 0x22) {
-			inString = true;
-		} else if (byte === 0x7b || byte === 0x5b) {
-			depth++;
-		} else if ((byte === 0x7d || byte === 0x5d) && --depth === 0) {
-			return index + 1;
-		}
-	}
-	return -1;
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
