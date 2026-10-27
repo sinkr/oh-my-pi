@@ -11,6 +11,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { CompactionQueuedMessage } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -75,11 +76,16 @@ describe("flushCompactionQueue failure", () => {
 		return { live, running };
 	}
 
-	function flushContext(live: AgentSession, typed: CompactionQueuedMessage[], showError: (message: string) => void) {
+	function flushContext(
+		live: AgentSession,
+		typed: CompactionQueuedMessage[],
+		showError: (message: string) => void,
+		skillCommands = new Map<string, Skill>(),
+	) {
 		return createInteractiveModeContext({
 			session: live,
 			compactionQueuedMessages: [...typed],
-			skillCommands: new Map(),
+			skillCommands,
 			fileSlashCommands: new Set<string>(),
 			isKnownSlashCommand: () => false,
 			recordLocalSubmission: () => () => {},
@@ -317,6 +323,50 @@ describe("flushCompactionQueue failure", () => {
 		setupFails.resolve();
 		await secondReport.promise;
 		// Nothing is lost: the failed first prompt returns ahead of the message after it.
+		expect(ctx.compactionQueuedMessages).toEqual(typed);
+
+		await live.abort();
+		await running.catch(() => {});
+	});
+
+	it("puts a skill first prompt back when the session drops it after a later message's failure left it out", async () => {
+		const { live, running } = await startStreamingSession();
+		const skillPath = tempDir.join("ship.md");
+		await Bun.write(skillPath, "---\nname: ship\n---\nShip it.\n");
+		const skills = new Map<string, Skill>([
+			[
+				"skill:ship",
+				{ name: "ship", description: "", filePath: skillPath, baseDir: tempDir.path(), source: "test" },
+			],
+		]);
+
+		// The skill prompt is admitted, then dropped before it is sent (as a usage preflight or cost
+		// cap denial does): it resolves `false` instead of rejecting.
+		const dropped = Promise.withResolvers<void>();
+		const promptCustomMessage = vi
+			.spyOn(live, "promptCustomMessage")
+			.mockImplementation(async (_message, options) => {
+				options?.onPromptAdmitted?.();
+				await dropped.promise;
+				return false;
+			});
+		vi.spyOn(live, "steer").mockImplementation(async () => {
+			throw new Error("delivery failed");
+		});
+		const typed: CompactionQueuedMessage[] = [
+			{ text: "/skill:ship now", mode: "steer" },
+			{ text: "typed second", mode: "steer" },
+		];
+		const ctx = flushContext(live, typed, () => {}, skills);
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+		// The later failure left the admitted skill prompt out of the restored batch.
+		expect(ctx.compactionQueuedMessages).toEqual([typed[1]]);
+
+		dropped.resolve();
+		// The flush reacts to the dispatch result before this await resumes.
+		await promptCustomMessage.mock.results[0]?.value;
+		// The skill invocation was never sent, so it returns to the batch instead of being lost.
 		expect(ctx.compactionQueuedMessages).toEqual(typed);
 
 		await live.abort();

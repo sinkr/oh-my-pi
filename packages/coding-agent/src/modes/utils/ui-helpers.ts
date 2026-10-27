@@ -1462,20 +1462,33 @@ export class UiHelpers {
 					this.ctx.updatePendingMessagesDisplay();
 				}
 			};
+			/** Put the first prompt back into the batch, after the slash commands that preceded it. */
+			const putFirstBack = () => {
+				firstLeftOut = false;
+				const current = this.ctx.compactionQueuedMessages;
+				let at = 0;
+				for (let i = 0; i < current.length; i++) if (preCommands.includes(current[i])) at = i + 1;
+				this.ctx.compactionQueuedMessages = [...current.slice(0, at), first, ...current.slice(at)];
+			};
 			const onFirstFailed = (error: unknown) => {
 				firstFailed = true;
 				if (!firstLeftOut) {
 					restoreQueue(error);
 					return;
 				}
-				// A restore left the admitted first prompt out of the batch, but it failed after all:
-				// put it back after the slash commands that preceded it.
-				firstLeftOut = false;
-				const current = this.ctx.compactionQueuedMessages;
-				let at = 0;
-				for (let i = 0; i < current.length; i++) if (preCommands.includes(current[i])) at = i + 1;
-				this.ctx.compactionQueuedMessages = [...current.slice(0, at), first, ...current.slice(at)];
+				// A restore left the admitted first prompt out of the batch, but it failed after all.
+				putFirstBack();
 				reportFailure(1, error);
+			};
+			// A skill prompt the session dropped before sending it (usage preflight, cost cap, an
+			// interrupt) resolves `false` even after admission, and nothing hands a custom prompt
+			// back to the editor: the session does not own it after all, so a restore keeps it in
+			// the batch, or puts it back if one already left it out.
+			const onFirstDropped = () => {
+				firstAdmitted = undefined;
+				if (!firstLeftOut) return;
+				putFirstBack();
+				this.ctx.updatePendingMessagesDisplay();
 			};
 
 			// First prompt is fire-and-forget — its rejection is funneled through
@@ -1493,7 +1506,9 @@ export class UiHelpers {
 								onPromptQueued: onFirstQueued,
 								onPromptAdmitted: onFirstAdmitted,
 							})
-							.catch(onFirstFailed)
+							.then(sent => {
+								if (sent === false) onFirstDropped();
+							}, onFirstFailed)
 					: Promise.resolve();
 			} else {
 				const disposeFirstPrompt = this.ctx.recordLocalSubmission(first.text, first.images?.length ?? 0);
