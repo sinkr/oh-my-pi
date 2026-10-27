@@ -310,6 +310,8 @@ interface AdvisorRetryFallbackState {
 	originalSelector: string;
 	originalThinkingLevel: ThinkingLevel;
 	lastAppliedThinkingLevel: ThinkingLevel;
+	/** Whether the active fallback selector explicitly follows the primary's effort. */
+	autoThinking: boolean;
 	/** Set by a classifier refusal: no cooldown restore until a compaction or new conversation replaces the context. */
 	pinned: boolean;
 }
@@ -524,17 +526,21 @@ export interface SessionAdvisorsHost {
 	sessionId(): string;
 	/** Put an advisor's provider session under the primary session's account pools. */
 	restrictOAuthAccounts(providerSessionId: string): void;
+	/** Whether the owning session is the top-level main session or a spawned subagent (`"main"` when omitted). */
+	agentKind?(): "main" | "sub";
 }
 
 /**
- * One advisor's status-line slice: runtime status plus whether it has
- * finished reviewing the current yield — i.e. it is not going to add any
- * more comments until a new primary turn starts (or an explicit reset).
+ * One advisor's status-line slice: runtime status, whether it has finished
+ * reviewing the current yield, its queued or in-flight review backlog, and
+ * whether the live runtime is parked at the pause boundary.
  */
 export interface AdvisorStatusOverviewEntry {
 	name: string;
 	status: AdvisorRuntimeStatus;
 	yielded: boolean;
+	backlog: number;
+	isPaused: boolean;
 }
 
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
@@ -1092,7 +1098,14 @@ export class SessionAdvisors {
 		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
+		const sessionKind = this.#host.agentKind?.() ?? "main";
 		for (const config of roster) {
+			if (
+				(config.scope === "main" && sessionKind !== "main") ||
+				(config.scope === "subagent" && sessionKind !== "sub")
+			) {
+				continue;
+			}
 			let slug = legacy ? "" : slugifyAdvisorName(config.name);
 			if (slug) {
 				let candidate = slug;
@@ -1228,6 +1241,8 @@ export class SessionAdvisors {
 		const budget = this.#advisorMaxNotesPerUpdate(config);
 		// The service tier is bound at build time, so a `tier.advisor` edit must rebuild.
 		const tier = cfgTierAdvisor.get(this.#host.settings);
+		const scope = config.scope ?? "all";
+		const includeReasoning = config.includeReasoning !== false ? "1" : "0";
 		return [
 			config.name,
 			slug,
@@ -1237,6 +1252,8 @@ export class SessionAdvisors {
 			instructions,
 			budget,
 			tier,
+			scope,
+			includeReasoning,
 		].join("\u001f");
 	}
 
@@ -1571,6 +1588,7 @@ export class SessionAdvisors {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator(),
+				includeReasoning: descriptor.config.includeReasoning,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
@@ -1932,7 +1950,11 @@ export class SessionAdvisors {
 	}
 
 	/** Switch one advisor model while preserving its context and effort invariants. */
-	#setAdvisorModel(advisor: ActiveAdvisor, model: Model, requestedThinkingLevel: ThinkingLevel): ThinkingLevel {
+	#setAdvisorModel(
+		advisor: ActiveAdvisor,
+		model: Model,
+		requestedThinkingLevel: ThinkingLevel | undefined,
+	): ThinkingLevel {
 		const resolvedThinkingLevel = resolveThinkingLevelForModel(model, requestedThinkingLevel);
 		const nextThinkingLevel = resolvedThinkingLevel ?? ThinkingLevel.Inherit;
 		advisor.agent.setModel(model);
@@ -1968,9 +1990,9 @@ export class SessionAdvisors {
 	#retuneAutoThinkingAdvisors(): void {
 		const requested = this.#autoAdvisorThinkingLevel();
 		for (const advisor of this.#advisors) {
-			// A retry-fallback selector pinned its own effort for the fallback
-			// model; the retune resumes once the configured model is restored.
-			if (!advisor.autoThinking || advisor.runtime.disposed || advisor.retryFallback) continue;
+			// Concrete and bare fallback selectors keep their applied effort.
+			const autoThinking = advisor.retryFallback?.autoThinking ?? advisor.autoThinking;
+			if (!autoThinking || advisor.runtime.disposed) continue;
 			const next =
 				resolveThinkingLevelForModel(advisor.model, automaticThinkingLevel(advisor.model, requested)) ??
 				ThinkingLevel.Inherit;
@@ -1978,6 +2000,7 @@ export class SessionAdvisors {
 			advisor.agent.setThinkingLevel(toReasoningEffort(next));
 			advisor.agent.setDisableReasoning(shouldDisableReasoning(next));
 			advisor.thinkingLevel = next;
+			if (advisor.retryFallback) advisor.retryFallback.lastAppliedThinkingLevel = next;
 		}
 	}
 
@@ -2029,8 +2052,8 @@ export class SessionAdvisors {
 		if (!apiKey) return;
 		signal.throwIfAborted();
 
-		// An `auto` advisor skipped the retune while on the fallback: rejoin the
-		// primary's live level now, not the level it had when it fell back.
+		// Rejoin the primary's live level for an auto advisor, or restore the
+		// fixed effort it had before falling back.
 		const thinkingToApply = advisor.autoThinking
 			? this.#autoAdvisorThinkingLevel()
 			: advisor.thinkingLevel === fallback.lastAppliedThinkingLevel
@@ -2188,10 +2211,15 @@ export class SessionAdvisors {
 				signal.throwIfAborted();
 
 				const originalThinkingLevel = advisor.thinkingLevel;
-				const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
+				// A `:auto` fallback entry follows the primary's resolved effort, like an `auto` advisor.
+				const requestedThinkingLevel =
+					selector.thinkingLevel === AUTO_THINKING
+						? automaticThinkingLevel(candidate, this.#autoAdvisorThinkingLevel())
+						: (selector.thinkingLevel ?? originalThinkingLevel);
 				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
 				if (advisor.retryFallback) {
 					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
+					advisor.retryFallback.autoThinking = selector.thinkingLevel === AUTO_THINKING;
 					advisor.retryFallback.pinned ||= primaryRefused;
 				} else {
 					advisor.retryFallback = {
@@ -2199,6 +2227,7 @@ export class SessionAdvisors {
 						originalSelector: currentSelector,
 						originalThinkingLevel,
 						lastAppliedThinkingLevel: nextThinkingLevel,
+						autoThinking: selector.thinkingLevel === AUTO_THINKING,
 						pinned: primaryRefused,
 					};
 				}
@@ -2830,8 +2859,8 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * Lightweight advisor status for the status line: returns just the configured
-	 * flag and per-advisor name/status without computing token/cost breakdowns.
+	 * Lightweight advisor status for the status line and pause screen: the
+	 * configured flag and each advisor's status, yield and pause state, and review backlog.
 	 * Avoids re-tokenizing the advisor transcript on every render frame.
 	 */
 	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
@@ -2839,13 +2868,15 @@ export class SessionAdvisors {
 		// clear on reset() but #advisorStatuses lags until the next build.
 		const liveStatusBySlug = new Map<
 			string,
-			{ status: AdvisorRuntimeStatus; yielded: boolean; canReview: boolean }
+			{ status: AdvisorRuntimeStatus; yielded: boolean; canReview: boolean; backlog: number; isPaused: boolean }
 		>();
 		for (const a of this.#advisors) {
 			liveStatusBySlug.set(a.slug, {
 				status: a.runtime.quotaExhausted ? "quota_exhausted" : a.runtime.failureNotified ? "error" : "running",
+				backlog: a.runtime.backlog,
 				yielded: a.runtime.yielded,
 				canReview: !a.runtime.quotaExhausted && !a.runtime.halted && !a.runtime.disposed,
+				isPaused: a.agent.isPaused,
 			});
 		}
 		const advisors = [...this.#advisorStatuses.entries()].map(([slug, { name, status }]) => {
@@ -2853,6 +2884,8 @@ export class SessionAdvisors {
 			return {
 				name,
 				status: live?.status ?? status,
+				backlog: live?.backlog ?? 0,
+				isPaused: live?.isPaused ?? false,
 				// The eye only closes after the primary itself has yielded: while it
 				// is streaming, an advisor that can still accept review work may
 				// receive (and comment on) new deltas even when its backlog is
