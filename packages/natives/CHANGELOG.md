@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's `find` panicking and writing a native panic report to `~/.omp/logs` when the command reading its output exits early, as in `find . -printf '%p\n' | head -1`, or when its stderr is closed; it now stops quietly, and a failed `-fprintf` write is reported instead of `find: internal error` ([#17079](https://github.com/can1357/oh-my-pi/pull/17079) by [@trukhinyuri](https://github.com/trukhinyuri))
+- Fixed the shell's built-in `grep` and `rg` running the whole agent out of memory on a file with no line breaks, such as a large sparse file: a line over 256 MiB is now reported as `not searched` for that file and the search continues, and a `-f` pattern file over 256 MiB is refused with exit status 2 ([#17108](https://github.com/can1357/oh-my-pi/pull/17108) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the embedded shell's globs keeping matches whose literal tail does not exist: `ls -d DIR/*/` now lists only directories instead of passing every file as `file/`, and `*/name` keeps only matches that contain `name`, as in bash ([#17110](https://github.com/can1357/oh-my-pi/pull/17110) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.13.0] - 2026-10-26
 
 ### Added
