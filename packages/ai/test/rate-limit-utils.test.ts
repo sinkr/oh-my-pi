@@ -91,7 +91,6 @@ function googleRpcRetryInfo429(
 	})}`;
 }
 
-
 describe("parseRateLimitReason", () => {
 	it("classifies Google Quota exceeded as QUOTA_EXHAUSTED", () => {
 		expect(
@@ -369,11 +368,7 @@ describe("parseRateLimitReason", () => {
 	});
 
 	it("classifies structured MODEL_CAPACITY_EXHAUSTED as transient even on quota-worded message", () => {
-		const body = googleRpc429(
-			"MODEL_CAPACITY_EXHAUSTED",
-			"10s",
-			"Resource has been exhausted (e.g. check quota).",
-		);
+		const body = googleRpc429("MODEL_CAPACITY_EXHAUSTED", "10s", "Resource has been exhausted (e.g. check quota).");
 		expect(parseRateLimitReason(body)).toBe("MODEL_CAPACITY_EXHAUSTED");
 		expect(isUsageLimitOutcome(429, body)).toBe(false);
 	});
@@ -576,7 +571,7 @@ describe("parseRateLimitReason", () => {
 		const googleStream = streamGoogle(googleModel, context, { apiKey: "test-key", fetch: sseFetch });
 		const googleResult = await googleStream.result();
 		expect(googleResult.stopReason).toBe("error");
-		expect(parseRateLimitReason(googleResult.errorMessage)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(parseRateLimitReason(googleResult.errorMessage ?? "")).toBe("MODEL_CAPACITY_EXHAUSTED");
 		expect(isUsageLimitOutcome(googleResult.errorStatus, googleResult.errorMessage)).toBe(false);
 
 		// 2. Test streamGoogleGeminiCli
@@ -599,7 +594,7 @@ describe("parseRateLimitReason", () => {
 		const cliResult = await cliStream.result();
 		expect(cliResult.stopReason).toBe("error");
 		expect(cliResult.errorMessage).toBeDefined();
-		expect(parseRateLimitReason(cliResult.errorMessage)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(parseRateLimitReason(cliResult.errorMessage ?? "")).toBe("MODEL_CAPACITY_EXHAUSTED");
 		expect(isUsageLimitOutcome(cliResult.errorStatus, cliResult.errorMessage)).toBe(false);
 	});
 });

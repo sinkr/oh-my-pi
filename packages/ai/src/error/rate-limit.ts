@@ -529,7 +529,6 @@ export function isAccountScopedCapText(message: string): boolean {
 	return ACCOUNT_SCOPED_403_PATTERN.test(message);
 }
 
-
 /**
  * A concurrency cap on a non-billing status is shed-and-backoff, not
  * credential-rotatable. This mirrors the exclusion in {@link isUsageLimitOutcome}
