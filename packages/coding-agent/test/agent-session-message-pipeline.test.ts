@@ -1322,6 +1322,43 @@ describe("AgentSession message pipeline", () => {
 		},
 	);
 
+	it("caches the persisted reply rather than the prediction-only prompt on Anthropic side turns", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const bodies: Array<{
+			messages: Array<{ role: string; content: string | Array<{ cache_control?: unknown }> }>;
+		}> = [];
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [{ role: "user", content: "Fix the issue", timestamp: 1 }, createAssistantMessage("Fixed.")],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (target, context, options) =>
+				streamSimple(target, context, {
+					...options,
+					apiKey: "test-key",
+					fetch: async (_url, init) => {
+						bodies.push(JSON.parse(requestBodyText(init) ?? "{}"));
+						return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
+					},
+				}),
+		});
+		sessions.push(session);
+		await expect(session.runEphemeralTurn({ promptText: "Predict the next user message." })).rejects.toThrow();
+		expect(bodies).toHaveLength(1);
+		const cached = bodies[0].messages.flatMap((message, index) =>
+			Array.isArray(message.content) && message.content.some(block => block.cache_control != null) ? [index] : [],
+		);
+		// The side-only reminder and prediction prompt are absent from the next real turn.
+		expect(cached.filter(index => index >= 1)).toEqual([1]);
+	});
+
 	it.each([
 		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
@@ -1526,7 +1563,10 @@ describe("AgentSession message pipeline", () => {
 			const history = (body: Record<string, unknown>) =>
 				(body.messages as { role: string; content: unknown }[]).slice(0, 2).map(({ role, content }) => ({
 					role,
-					content: JSON.stringify(content).replaceAll(',"cache_control":{"type":"ephemeral"}', ""),
+					content: JSON.stringify(
+						typeof content === "string" ? [{ type: "text", text: content }] : content,
+						(key, value) => (key === "cache_control" ? undefined : value),
+					),
 				}));
 			// Cache keys: tools, system, thinking, top-level effort, and the history before the side prompt.
 			for (const key of ["tools", "system", "thinking", "output_config"]) expect(minimized[key]).toEqual(plain[key]);

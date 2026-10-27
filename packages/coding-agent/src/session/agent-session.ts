@@ -87,6 +87,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
@@ -12500,6 +12501,7 @@ export class AgentSession implements SettingsScope {
 					...streaming,
 					content: preservedBlocks,
 				};
+				markPerCallContextMessage(normalized);
 				const lastMessage = messages.at(-1);
 				if (lastMessage?.role === "assistant") {
 					messages[messages.length - 1] = normalized;
@@ -12508,23 +12510,32 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 		}
-		messages.push({
+		const reminder: AgentMessage = {
 			role: "developer",
 			content: [{ type: "text", text: sideChannelNoToolsReminder }],
 			attribution: "agent",
 			timestamp: Date.now(),
-		});
+		};
+		markPerCallContextMessage(reminder);
+		messages.push(reminder);
 		if (history?.length) {
 			// Detach before the conversion pipeline can await or mutate caller-owned messages.
-			messages.push(...structuredClone(history));
+			const detachedHistory = structuredClone(history);
+			for (const message of detachedHistory) markPerCallContextMessage(message);
+			messages.push(...detachedHistory);
 		}
-		if (imageDescriptionNotice) messages.push(imageDescriptionNotice);
-		messages.push({
+		if (imageDescriptionNotice) {
+			markPerCallContextMessage(imageDescriptionNotice);
+			messages.push(imageDescriptionNotice);
+		}
+		const sidePrompt: AgentMessage = {
 			role: "user",
 			content: [{ type: "text", text: promptText }, ...(images ?? [])],
 			attribution: "agent",
 			timestamp: Date.now(),
-		});
+		};
+		markPerCallContextMessage(sidePrompt);
+		messages.push(sidePrompt);
 		return messages;
 	}
 
