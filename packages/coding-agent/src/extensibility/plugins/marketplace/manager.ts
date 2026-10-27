@@ -780,9 +780,10 @@ export class MarketplaceManager {
 	}
 
 	// Every installed (pluginId, scope) pair whose marketplace catalog still lists the plugin, with the
-	// installed version and the version the catalog publishes now (`to` is undefined when the catalog
-	// declares none, e.g. a remote source readable only after cloning). Same, older and newer versions
-	// all appear; reads only the registries, cached catalogs and local manifests.
+	// installed version and the version a reinstall would record now. A local source that declares no
+	// version gets `installPlugin`'s "0.0.0" fallback; `to` is undefined only for a remote source with
+	// no catalog version (known only after cloning). Same, older and newer versions all appear; reads
+	// only the registries, cached catalogs and local manifests.
 	async listCatalogVersions(): Promise<
 		Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string | undefined }>
 	> {
@@ -818,7 +819,8 @@ export class MarketplaceManager {
 						marketplaceClonePath: this.#resolveMarketplaceRoot(mktEntry),
 						catalogMetadata: catalog.metadata,
 					});
-					catalogVersion = await this.#resolveCatalogVersion(pluginEntry, pluginDir);
+					const resolved = await this.#resolveCatalogVersion(pluginEntry, pluginDir);
+					catalogVersion = resolved ?? (pluginDir ? "0.0.0" : undefined);
 				} catch {
 					continue;
 				}
@@ -849,8 +851,8 @@ export class MarketplaceManager {
 
 	// What `upgradePlugin(pluginId, scope)` (scope given) or `upgradePluginAcrossScopes(pluginId)`
 	// (no scope) would reinstall, one row per scope in the same order, without changing anything.
-	// Throws the errors the real upgrade would throw before it writes. `to` is undefined when the
-	// catalog declares no version (known only after fetching the source).
+	// Throws the errors the real upgrade would throw before it writes. `to` is undefined only when a
+	// remote source declares no catalog version (known only after fetching the source).
 	async previewUpgradePlugin(
 		pluginId: string,
 		scope?: "user" | "project",

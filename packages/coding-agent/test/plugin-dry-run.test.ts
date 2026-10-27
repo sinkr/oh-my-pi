@@ -169,6 +169,17 @@ describe("plugin --dry-run beyond install, uninstall and link", () => {
 		});
 	}
 
+	// A local source that declares no version installs as "0.0.0"; the preview must show that downgrade.
+	test("upgrade <id> --dry-run shows the 0.0.0 fallback of a local plugin with no declared version", async () => {
+		await writeMarketplace(marketplaceDir, "fixmkt", "");
+
+		await runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: { dryRun: true } });
+		expect(logged()).toContain(`Would downgrade ${PLUGIN_ID} (user): 1.0.0 -> 0.0.0`);
+
+		await runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: {} });
+		expect(logged()).toContain(`Upgraded ${PLUGIN_ID} (user) to 0.0.0`);
+	});
+
 	// Tags that are not semver have no known order, so every different tag counts as an upgrade,
 	// and both previews must use that same rule.
 	test("upgrade --dry-run with and without an id agree on a non-semver catalog version", async () => {
