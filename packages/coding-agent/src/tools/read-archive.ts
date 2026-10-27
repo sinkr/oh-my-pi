@@ -47,7 +47,7 @@ interface ResolvedArchiveReadPath {
  * reads from disk. Stream containers buffer the whole archive and RAR/7z keep
  * decoded solid blocks, so caching those would pin up to their in-memory limit.
  */
-const CACHEABLE_ARCHIVE_FORMATS: Partial<Record<ArchiveFormat, true>> = { zip: true, asar: true, iso: true };
+const CACHEABLE_ARCHIVE_FORMATS: Partial<Record<ArchiveFormat, true>> = { tar: true, zip: true, asar: true, iso: true };
 
 interface CachedArchiveReader {
 	reader: ArchiveReader;
