@@ -324,8 +324,7 @@ const GENERATION_NAN_PATTERN = /floating[ _-]?point nan\b.*\bdetected in generat
 // failing request). Kept narrow to these two gateway phrasings so genuine
 // request-validation 400s stay terminal; the retry budget bounds a truly bad
 // payload to maxRetries attempts before it surfaces anyway.
-export const ALIYUN_MM_GATEWAY_PATTERN =
-	/provided url does not appear to be valid|download multimodal file timed out/i;
+export const ALIYUN_MM_GATEWAY_PATTERN = /provided url does not appear to be valid|download multimodal file timed out/i;
 // Anthropic strict-tool grammar too large / schema too complex (400 invalid_request_error).
 // Feature-gated deployments (Azure Foundry, Baseten, …) reject `strict: true`
 // tools outright when the hosted model lacks structured outputs, e.g.
