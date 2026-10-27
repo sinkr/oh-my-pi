@@ -188,8 +188,10 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stderr).toContain("[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
 	});
 
-	it("prints recovery commands once when repeated SIGTERMs stop the process", async () => {
-		const result = await runPostmortemProbe(`
+	it.skipIf(process.platform === "win32")(
+		"prints recovery commands once when repeated SIGTERMs stop the process",
+		async () => {
+			const result = await runPostmortemProbe(`
 			import { postmortem } from "${postmortemModuleUrl}";
 
 			let saved = false;
@@ -212,10 +214,11 @@ describe("postmortem expected cleanup errors", () => {
 			process.kill(process.pid, "SIGTERM");
 		`);
 
-		expect(result.exitCode).toBe(143);
-		expect(result.stderr).toContain("[Stopped by SIGTERM]\n[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
-		expect(result.stderr.split("[Recovery]")).toHaveLength(2);
-	});
+			expect(result.exitCode).toBe(143);
+			expect(result.stderr).toContain("[Stopped by SIGTERM]\n[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
+			expect(result.stderr.split("[Recovery]")).toHaveLength(2);
+		},
+	);
 
 	it("exits after an uncaught exception when terminal stderr is revoked", async () => {
 		const result = await runPostmortemProbe(`
