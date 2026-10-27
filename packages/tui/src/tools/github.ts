@@ -254,7 +254,10 @@ function renderFailedLogs(
 		);
 
 		if (!entry.available || !entry.tail) {
-			lines.push(theme.fg("dim", "  log tail unavailable"));
+			const reason = entry.unavailableReason ? `: ${entry.unavailableReason}` : "";
+			lines.push(
+				theme.fg("dim", truncateVisualWidth(replaceTabs(`  log tail unavailable${reason}`), Math.max(8, width))),
+			);
 			continue;
 		}
 
@@ -463,7 +466,12 @@ function describeWatch(watch: GhRunWatchViewDetails, isError: boolean): NativeTo
 	const failed = (watch.failedLogs ?? []).flatMap((entry): NativeChild[] => {
 		const context = entry.workflowName ? `${entry.workflowName}  #${entry.runId}` : `run #${entry.runId}`;
 		const title = text([span(plainText(entry.jobName), "error"), span(`  ${plainText(context)}`, "muted")]);
-		if (!entry.available || !entry.tail) return [title, noteText("log tail unavailable")];
+		if (!entry.available || !entry.tail) {
+			return [
+				title,
+				noteText(`log tail unavailable${entry.unavailableReason ? `: ${entry.unavailableReason}` : ""}`),
+			];
+		}
 		return [title, ansi(entry.tail, { follow: true, preview: { lines: PREVIEW_LIMITS.OUTPUT_COLLAPSED } })];
 	});
 	return {
@@ -659,6 +667,7 @@ export interface GhRunWatchFailedLogDetails {
 	conclusion?: string;
 	tail?: string;
 	available: boolean;
+	unavailableReason?: string;
 }
 
 /** Live workflow watcher display snapshot. */
@@ -708,6 +717,7 @@ export interface GhFailedJobLog {
 	full?: string;
 	tail?: string;
 	available: boolean;
+	unavailableReason?: string;
 }
 
 /** Choose the terminal conclusion or current job state. */
@@ -770,6 +780,7 @@ export function renderFailedJobLogs(
 			lines.push("```");
 		} else {
 			lines.push(options.mode === "full" ? "Full log unavailable." : "Log tail unavailable.");
+			if (entry.unavailableReason) pushLine(lines, "Reason", entry.unavailableReason);
 		}
 		lines.push("");
 	}
