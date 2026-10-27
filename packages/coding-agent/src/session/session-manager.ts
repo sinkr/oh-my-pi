@@ -3208,6 +3208,18 @@ export class SessionManager {
 		return !!this.#sessionFile && this.#storage.existsSync(this.#sessionFile);
 	}
 
+	/**
+	 * {@link isSessionOnDisk}, counting only what the backing store has
+	 * confirmed. Remote storage publishes asynchronously, so a hint printed
+	 * just before the process exits must not count a write still in flight:
+	 * the exit aborts it and `--resume <id>` would find nothing.
+	 */
+	isSessionConfirmedOnDisk(): boolean {
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile) return false;
+		return this.#storage.existsConfirmedSync?.(sessionFile) ?? this.#storage.existsSync(sessionFile);
+	}
+
 	getArtifactsDir(): string | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
 		return artifactsDirectoryFor(this.#sessionFile);
