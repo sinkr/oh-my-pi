@@ -43,13 +43,13 @@ import {
 	extractUriScheme,
 	type InternalResource,
 	InternalUrlRouter,
-	parseInternalUrl,
 	type SchemeSpec,
 	sessionResolveContext,
 } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { parseInternalUrl } from "../internal-urls/parse";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
