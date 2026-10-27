@@ -71,6 +71,7 @@ fn fixture() -> (TempDir, PathBuf, GitRepo) {
 		("user.email", "test@example.com"),
 		("commit.gpgsign", "false"),
 		("core.autocrlf", "false"),
+		("core.excludesFile", ".git/no-global-excludes"),
 		("core.hooksPath", ".git/hooks"),
 	] {
 		git(&source, &["config", key, value]);
@@ -181,14 +182,25 @@ fn clone_exclusion_keeps_tracked_data_and_keep_changes_state() {
 		);
 		assert_eq!(
 			fs::read_to_string(target.join("tooling/config.txt")).unwrap(),
-			if keep_changes { "staged then edited\n" } else { "committed\n" }
+			if keep_changes {
+				"staged then edited\n"
+			} else {
+				"committed\n"
+			}
 		);
 		assert_eq!(
 			git(&target, &["show", ":tooling/config.txt"]),
 			if keep_changes { "staged" } else { "committed" }
 		);
-		assert_eq!(fs::read_to_string(source.join("tooling/bin/pytest")).unwrap(), "#!/source/python\n");
-		assert_eq!(snapshot(&source), source_before, "source files changed during clone reconciliation");
+		assert_eq!(
+			fs::read_to_string(source.join("tooling/bin/pytest")).unwrap(),
+			"#!/source/python\n"
+		);
+		assert_eq!(
+			snapshot(&source),
+			source_before,
+			"source files changed during clone reconciliation"
+		);
 	}
 }
 
@@ -217,4 +229,134 @@ fn clone_disabled_or_unavailable_uses_an_ordinary_checkout() {
 		assert_eq!(git(&target, &["status", "--porcelain"]), "");
 		assert_eq!(snapshot(&source), source_before);
 	}
+}
+
+#[test]
+fn clone_reconciles_carried_paths_using_target_ignore_rules() {
+	let (temp, source, repo) = fixture();
+	if !clone_works_on(temp.path()) {
+		eprintln!("SKIP: no working clone backend on this filesystem");
+		return;
+	}
+	write(&source, ".gitignore", "node_modules/\ntarget-only/\n");
+	write(&source, "apps/.gitignore", "cache/\ntarget-only/\n");
+	write(&source, "prompt-exports/tracked.txt", "target-tracked\n");
+	git(&source, &["add", "."]);
+	git(&source, &["commit", "-qm", "target ignore rules"]);
+	let target_commit = git(&source, &["rev-parse", "HEAD"]);
+	write(&source, ".gitignore", "node_modules/\nprompt-exports/\n");
+	write(&source, "apps/.gitignore", "cache/\nsource-only/\n");
+	git(&source, &["rm", "-q", "prompt-exports/tracked.txt"]);
+	git(&source, &["add", "."]);
+	git(&source, &["commit", "-qm", "source ignore rules"]);
+	write(&source, "prompt-exports/tracked.txt", "source-ignored collision\n");
+	write(&source, "prompt-exports/note with spaces.md", "source-only ignored\n");
+	write(&source, "target-only/note with spaces.md", "target-only ignored\n");
+	write(&source, "apps/source-only/note.txt", "nested source-only ignored\n");
+	write(&source, "apps/target-only/note.txt", "nested target-only ignored\n");
+	write(&source, "apps/cache/blob", "ignored at both commits\n");
+	let source_before = snapshot(&source);
+	let target = temp.path().join("target");
+	let result = repo
+		.worktree_add(&target, &target_commit, WorktreeAddOptions {
+			detach:       true,
+			clone:        WorktreeClone::Auto,
+			keep_changes: false,
+		})
+		.unwrap();
+	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
+	assert!(!target.join("prompt-exports/note with spaces.md").exists());
+	assert!(!target.join("apps/source-only").exists());
+	for (relative, contents) in [
+		("prompt-exports/tracked.txt", "target-tracked\n"),
+		("target-only/note with spaces.md", "target-only ignored\n"),
+		("apps/target-only/note.txt", "nested target-only ignored\n"),
+		("apps/cache/blob", "ignored at both commits\n"),
+		("node_modules/pkg/index.js", "relocatable cache\n"),
+	] {
+		assert_eq!(fs::read_to_string(target.join(relative)).unwrap(), contents, "{relative}");
+	}
+	assert_eq!(git(&target, &["status", "--porcelain", "--untracked-files=all"]), "");
+	assert_eq!(snapshot(&source), source_before, "target cleanup changed source files");
+}
+
+#[test]
+fn clone_target_cleanup_does_not_discard_keep_changes() {
+	let (temp, source, repo) = fixture();
+	if !clone_works_on(temp.path()) {
+		eprintln!("SKIP: no working clone backend on this filesystem");
+		return;
+	}
+	write(&source, "a.txt", "staged\n");
+	git(&source, &["add", "a.txt"]);
+	write(&source, "a.txt", "staged then edited\n");
+	write(&source, "notes/live note.txt", "untracked work\n");
+	let source_before = snapshot(&source);
+	let source_status = git(&source, &["status", "--porcelain", "--untracked-files=all"]);
+	let target = temp.path().join("target");
+	let result = repo
+		.worktree_add(&target, "HEAD", WorktreeAddOptions {
+			detach:       true,
+			clone:        WorktreeClone::Auto,
+			keep_changes: true,
+		})
+		.unwrap();
+	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
+	assert_eq!(snapshot(&target), source_before);
+	assert_eq!(git(&target, &["status", "--porcelain", "--untracked-files=all"]), source_status);
+	assert_eq!(snapshot(&source), source_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn clone_target_cleanup_keeps_nested_repositories_and_unlinks_only_symlinks() {
+	let (temp, source, repo) = fixture();
+	if !clone_works_on(temp.path()) {
+		eprintln!("SKIP: no working clone backend on this filesystem");
+		return;
+	}
+	let target_commit = git(&source, &["rev-parse", "HEAD"]);
+	write(&source, ".gitignore", "node_modules/\nlinks/\nrepositories/\n");
+	git(&source, &["add", ".gitignore"]);
+	git(&source, &["commit", "-qm", "ignore source-only containers"]);
+	let outside = temp.path().join("outside");
+	write(&outside, "pyvenv.cfg", "external environment\n");
+	write(&outside, "precious.txt", "must not change\n");
+	let nested = source.join("repositories/nested");
+	fs::create_dir_all(&nested).unwrap();
+	git(&nested, &["init", "-q", "-b", "main"]);
+	write(&nested, "data.txt", "nested repository data\n");
+	git(&nested, &["add", "."]);
+	git(&nested, &[
+		"-c",
+		"user.name=Test",
+		"-c",
+		"user.email=test@example.com",
+		"-c",
+		"commit.gpgsign=false",
+		"commit",
+		"-qm",
+		"nested data",
+	]);
+	fs::create_dir(source.join("links")).unwrap();
+	std::os::unix::fs::symlink(&outside, source.join("links/external")).unwrap();
+	let source_before = snapshot(&source);
+	let outside_before = snapshot(&outside);
+	let target = temp.path().join("target");
+	let result = repo
+		.worktree_add(&target, &target_commit, WorktreeAddOptions {
+			detach:       true,
+			clone:        WorktreeClone::Auto,
+			keep_changes: false,
+		})
+		.unwrap();
+	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
+	assert!(target.join("repositories/nested/.git").is_dir());
+	assert_eq!(
+		fs::read_to_string(target.join("repositories/nested/data.txt")).unwrap(),
+		"nested repository data\n"
+	);
+	assert!(!target.join("links").exists(), "source-only symlink was not unlinked");
+	assert_eq!(snapshot(&outside), outside_before, "cleanup followed a symlink outside the clone");
+	assert_eq!(snapshot(&source), source_before);
 }

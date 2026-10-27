@@ -762,14 +762,14 @@ impl GitRepo {
 		let admin = register_worktree(path, &self.info().common_dir, head)?;
 		fs::copy(&source_index, admin.join("index"))?;
 
-		let (dirty_tracked, untracked) = collect_clone_reconciliation_paths(&repo)?;
-		let linked = Self::require(path)?;
-		let linked_repo = linked.gix()?;
-		let mut current = load_index_or_empty(&linked_repo, "git worktree add")?;
+		let (dirty_tracked, _) = collect_clone_reconciliation_paths(&repo)?;
 		// Backends may clone entire subtrees atomically. Apply the same
 		// nonrelocatable-directory policy to every backend's disposable copy,
 		// independently of Git's ignore rules.
 		let excluded = prune_nonrelocatable_clone_dirs(path)?;
+		let linked = Self::require(path)?;
+		let linked_repo = linked.gix()?;
+		let mut current = load_index_or_empty(&linked_repo, "git worktree add")?;
 		if keep_changes {
 			// Environment artifacts are never portable, but tracked edits
 			// beneath an excluded directory still belong to the user.
@@ -804,7 +804,6 @@ impl GitRepo {
 			.into_iter()
 			.partition(|entry_path| target.entry_by_path(entry_path.as_bstr()).is_some());
 		let mut delete = removed;
-		delete.extend(untracked);
 		delete.extend(
 			dirty_tracked
 				.iter()
@@ -895,7 +894,12 @@ impl GitRepo {
 		}
 		target
 			.write(INDEX_WRITE)
-			.map_err(|err| Error::backend("git worktree add", err))
+			.map_err(|err| Error::backend("git worktree add", err))?;
+		// The source can ignore paths that the target does not, and vice
+		// versa. Only now are the target's ignore files and index in place.
+		// Clean this fresh clone through the existing repository-safe walk;
+		// keep target-ignored caches and never enter nested repositories.
+		linked.clean(&CleanOptions::default())
 	}
 
 	/// Resolve the executable hook `name` as git's `find_hook` does: under
@@ -1832,11 +1836,10 @@ fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
 			if entry.file_name() == ".git" {
 				continue;
 			}
-			let path = entry.path();
 			if marked {
-				remove_existing(&path)?;
+				remove_existing(&entry.path())?;
 			} else if entry.file_type()?.is_dir() {
-				pending.push(path);
+				pending.push(entry.path());
 			}
 		}
 		if marked {
