@@ -95,6 +95,7 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 13. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 14. Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
 15. Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
+16. Draft-only dictation frames (`dictation_state`, `dictation_transcript`, `dictation_end`); see [Dictation Sub-Protocol](#dictation-sub-protocol)
 
 Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
@@ -1405,7 +1406,7 @@ connection and the pending `live_start` then fails. `voice` defaults to the
 `live.voice` setting and the response reports the voice used. `instructions`
 replaces the bundled live prompt; it is rendered as a Handlebars template with
 `{{username}}` and `{{firstName}}` of the local OS account. Starting while a
-session is connecting, active, or closing fails.
+session is connecting, active, or closing, or while dictation is active, fails.
 
 `live_stop` responds after the session has stopped and succeeds when none is
 active. `live_mute` sets the microphone mute, or toggles it when `muted` is
@@ -1427,6 +1428,34 @@ Live frames are not session events: `set_event_filter` never drops them.
 
 Closing stdin, or `pi.shutdown()`, stops an active live session before the
 process exits.
+
+## Dictation Sub-Protocol
+
+Draft-only dictation captures from the machine's microphone using the session's
+configured `modelRoles.dictation` speech-to-text engine and `stt.language`.
+It does not submit a prompt, interpret speech submit triggers, or play audio.
+Live voice and dictation are mutually exclusive, including while either starts
+or stops.
+
+- `{ id?, type: "dictation_start", captureId: string }` starts a capture and responds when recording. `captureId` must be a non-blank string of at most 128 UTF-16 code units; the host must choose a unique ID for each capture.
+- `{ id?, type: "dictation_stop" }` stops the microphone and flushes transcription, then responds with `data: { text: string }`. With no capture it succeeds with empty text. A failure returns an error response.
+
+Bundled clients allow 600 seconds for `dictation_start` because a cold speech model may need to download and load. The TypeScript `RpcClient.dictationStart(captureId, timeoutMs)` accepts a caller-selected deadline in milliseconds. A client timeout only stops waiting; it does not cancel the server operation, which could still start the microphone. Send `dictation_stop` (or call `dictationStop()`) to cancel a pending start or stop an active capture.
+
+Stop can be sent while start is pending: it cancels the start, waits for the
+microphone to close, and causes the pending start to fail. The terminal frame
+may arrive before either response, so subscribe before starting and correlate
+by `captureId` rather than response order.
+
+These unsolicited frames bypass `set_event_filter`:
+
+- `{ type: "dictation_state", captureId, state: "starting" | "recording" | "transcribing" }`
+- `{ type: "dictation_transcript", captureId, text }` — full accumulated preview; replace the prior preview for this capture rather than appending it.
+- `{ type: "dictation_end", captureId, text, error? }` — exactly one terminal frame for a started capture, with its accumulated result and an optional error. The stop result and terminal frame describe the same text; insert it only once into the draft that initiated the capture.
+
+Session changes stop and flush dictation before changing sessions. On stdin EOF,
+RPC output failure, or process shutdown, active capture is disposed and the
+microphone is closed without waiting for transcription.
 
 ## Host URI Sub-Protocol
 
@@ -1651,6 +1680,7 @@ Current helper characteristics:
 - Exposes `onPromptResult()`, `onSessionSettled()`, command-availability and subagent listeners, plus extension UI requests
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
 - Drives live voice sessions with `liveStart()`, `liveStop()`, `liveMute()`, and delivers live frames through `onLive()`
+- Drives draft-only speech input with `dictationStart(captureId)`, `dictationStop()`, and `onDictation()`
 - `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
 - Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)` and `getLogoutAccounts(...)` / `logout(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
 
