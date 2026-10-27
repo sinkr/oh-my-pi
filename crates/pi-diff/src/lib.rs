@@ -43,24 +43,22 @@ struct ComponentArena {
 
 impl ComponentArena {
 	fn with_capacity(capacity: usize) -> Self {
-		Self {
-			nodes:     Vec::with_capacity(capacity),
-			free_head: NO_COMPONENT,
-		}
+		Self { nodes: Vec::with_capacity(capacity), free_head: NO_COMPONENT }
 	}
 
 	#[inline]
 	fn alloc(&mut self, count: u32, prev: u32, added: bool, removed: bool) -> u32 {
-		if self.free_head != NO_COMPONENT {
+		if self.free_head == NO_COMPONENT {
+			let idx = self.nodes.len() as u32;
+			self
+				.nodes
+				.push(ComponentNode { count, prev, refs: 1, added, removed });
+			idx
+		} else {
 			let idx = self.free_head;
 			let slot = &mut self.nodes[idx as usize];
 			self.free_head = slot.prev;
 			*slot = ComponentNode { count, prev, refs: 1, added, removed };
-			idx
-		} else {
-			let idx = self.nodes.len() as u32;
-			self.nodes
-				.push(ComponentNode { count, prev, refs: 1, added, removed });
 			idx
 		}
 	}
@@ -137,7 +135,9 @@ fn add_to_path(
 	old_pos_inc: isize,
 ) -> PathState {
 	let last_idx = path.last;
-	let new_last = if last_idx != NO_COMPONENT {
+	let new_last = if last_idx == NO_COMPONENT {
+		arena.alloc(1, NO_COMPONENT, added, removed)
+	} else {
 		let last = arena.nodes[last_idx as usize];
 		if last.added == added && last.removed == removed {
 			if last.refs == 1 {
@@ -151,8 +151,6 @@ fn add_to_path(
 		} else {
 			arena.alloc(1, last_idx, added, removed)
 		}
-	} else {
-		arena.alloc(1, NO_COMPONENT, added, removed)
 	};
 	PathState { old_pos: path.old_pos + old_pos_inc, last: new_last }
 }
@@ -229,10 +227,8 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 					arena.release(rem.last);
 				}
 				let add_path = best[idx + 1].expect("canAdd implies a live addPath");
-				let cloned = PathState {
-					old_pos: add_path.old_pos,
-					last:    arena.clone_ref(add_path.last),
-				};
+				let cloned =
+					PathState { old_pos: add_path.old_pos, last: arena.clone_ref(add_path.last) };
 				add_to_path(&mut arena, cloned, true, false, 0)
 			} else {
 				add_to_path(
