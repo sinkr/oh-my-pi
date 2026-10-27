@@ -26,7 +26,7 @@ const LINKED = "lp";
 const UPGRADE_PREVIEW = `Would upgrade ${PLUGIN_ID} (user): 1.0.0 -> 2.0.0`;
 const CLI_CONFIG: CliConfig = { bin: "omp", version: "0.0.0-test", commands: new Map() };
 
-async function writeMarketplace(dir: string, name: string, version: string): Promise<void> {
+async function writeMarketplace(dir: string, name: string, version: string | undefined): Promise<void> {
 	await Bun.write(
 		path.join(dir, ".claude-plugin", "marketplace.json"),
 		JSON.stringify({
@@ -171,7 +171,9 @@ describe("plugin --dry-run beyond install, uninstall and link", () => {
 
 	// A local source that declares no version installs as "0.0.0"; the preview must show that downgrade.
 	test("upgrade <id> --dry-run shows the 0.0.0 fallback of a local plugin with no declared version", async () => {
-		await writeMarketplace(marketplaceDir, "fixmkt", "");
+		await writeMarketplace(marketplaceDir, "fixmkt", undefined);
+		// The cached catalog keeps the old entry version until the marketplace is updated.
+		await runPluginCommand({ action: "marketplace", args: ["update", "fixmkt"], flags: {} });
 
 		await runPluginCommand({ action: "upgrade", args: [PLUGIN_ID], flags: { dryRun: true } });
 		expect(logged()).toContain(`Would downgrade ${PLUGIN_ID} (user): 1.0.0 -> 0.0.0`);
