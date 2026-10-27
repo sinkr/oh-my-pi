@@ -821,7 +821,9 @@ pub fn read<T: Read>(
 		mut buffer,
 	} = recycled_chunk;
 	if buffer.len() < carry_over.len() {
-		// Separate carry_over and copy them to avoid cost of 0 fill buffer
+		// Separate carry_over and copy them to avoid cost of 0 fill buffer.
+		// Exactly, as `Vec`'s growth would reserve more than the budget counts.
+		buffer.reserve_exact(carry_over.len() - buffer.len());
 		buffer.extend_from_slice(&carry_over[buffer.len()..]);
 	}
 	buffer[..carry_over.len()].copy_from_slice(carry_over);
@@ -940,6 +942,18 @@ fn parse_lines<'a>(
 	fit(&mut line_data.parsed_floats, line_count.saturating_mul(precomputed.floats_per_line));
 	fit(&mut line_data.line_num_floats, if settings.mode == SortMode::Numeric { line_count } else { 0 });
 	fit(&mut line_data.collation_key_ends, if precomputed.fast_locale_collation { line_count } else { 0 });
+	// The collation keys of the previous chunk, whose records could be far
+	// longer, would otherwise keep their arena until this chunk's keys pass
+	// it: the budget counts either the recycled vectors or this chunk's
+	// derived data, not both. The size here is the one the budget counts
+	// (see [`ChunkCost`]); text that expands more under collation grows it.
+	fit(&mut line_data.collation_key_buffer, if precomputed.fast_locale_collation {
+		read.len()
+			.saturating_mul(COLLATION_KEY_BYTES_PER_BYTE)
+			.saturating_add(line_count.saturating_mul(COLLATION_KEY_FIXED_BYTES))
+	} else {
+		0
+	});
 	let mut start = 0usize;
 	let mut index = 0usize;
 	for sep_idx in memchr_iter(separator, read) {
@@ -1047,7 +1061,12 @@ fn read_to_buffer<T: Read>(
 		if buffer.len() == filled {
 			// Doubling, so a large budget is not zero-filled ahead of a small
 			// input; growth within `want` keeps the chunk within its budget.
-			buffer.resize(filled + want.min(filled.max(ALLOC_CHUNK_SIZE)), 0);
+			// `Vec`'s own growth would reserve twice the capacity, which the
+			// budget, counted on the length, does not allow for, so the room
+			// is reserved exactly.
+			let grown = filled + want.min(filled.max(ALLOC_CHUNK_SIZE));
+			buffer.reserve_exact(grown - buffer.len());
+			buffer.resize(grown, 0);
 		}
 		let end = buffer.len().min(filled + want);
 		match file.read(&mut buffer[filled..end]) {
@@ -1330,6 +1349,79 @@ mod tests {
 				"with separator {separator:?}, a chunk held {held} bytes for a budget of {BUDGET}"
 			);
 		}
+	}
+
+	// Failure mode: a buffer that grew past a `Vec` growth boundary reserved
+	// twice its capacity, which the budget, counted on the length, does not
+	// allow for: 1.66 MB of buffer for a 1.1 MB budget.
+	#[test]
+	fn a_growing_buffer_reserves_no_more_than_its_budget() {
+		const BUDGET: usize = 1_100_000;
+		let settings = GlobalSettings::default();
+		let line = [&[b'x'; 99][..], b"\n"].concat();
+		let input = line.repeat(4 * BUDGET / line.len());
+		let mut buffer = vec![0; 8 * 1024];
+		let fill = read_to_buffer(
+			&mut input.as_slice(),
+			&mut iter::empty::<SortResult<&[u8]>>(),
+			&mut buffer,
+			Some((BUDGET, ChunkCost::new(&settings, 0))),
+			0,
+			b'\n',
+			&settings.cancel,
+		)
+		.expect("read");
+		assert!(fill.more, "the input is larger than one chunk");
+		assert!(fill.complete > BUDGET / 4, "a chunk of only {} bytes", fill.complete);
+		let held = buffer.capacity();
+		assert!(held <= BUDGET, "the buffer holds {held} bytes for a budget of {BUDGET}");
+	}
+
+	/// The settings of a sort that compares collation keys, or None where ICU
+	/// has no collator for the locale.
+	fn collating_settings() -> Option<GlobalSettings> {
+		let locale = super::super::Locale::try_from_str("en").expect("locale");
+		let collator =
+			super::super::CollatorBorrowed::try_new((&locale).into(), Default::default()).ok()?;
+		let mut settings = GlobalSettings::default();
+		let key_settings = super::super::KeySettings::from(&settings);
+		settings.selectors = vec![
+			super::super::FieldSelector::new(
+				super::super::KeyPosition { field: 1, char: 1, ignore_blanks: false },
+				None,
+				key_settings,
+			)
+			.expect("the whole line"),
+		];
+		settings.collator = Some(std::sync::Arc::new(collator));
+		settings.init_precomputed();
+		assert!(settings.precomputed.fast_locale_collation);
+		Some(settings)
+	}
+
+	// Failure mode: a chunk of long collated records left the arena of their
+	// collation keys allocated while the next chunk of short records grew
+	// its own vectors. Both held memory at once, but the budget counts the
+	// larger of the two.
+	#[test]
+	fn a_chunk_after_collated_long_records_does_not_keep_their_keys() {
+		const BUDGET: usize = 1 << 20;
+		const RECORDS: usize = 1000;
+		let Some(settings) = collating_settings() else {
+			eprintln!("skipping: ICU has no collator for en");
+			return;
+		};
+		// The arena of a previous chunk of long records.
+		let mut line_data =
+			LineData { collation_key_buffer: Vec::with_capacity(3 * BUDGET / 4), ..Default::default() };
+		// A cancelled parse returns before its first record, which is where
+		// the vectors of this chunk have their size and the arena is largest.
+		settings.cancel.store(true, AtomicOrdering::Relaxed);
+		let read = b"a\n".repeat(RECORDS);
+		parse_lines(&read, &mut Vec::new(), &mut line_data, &mut Vec::new(), RECORDS, b'\n', &settings);
+		let held = line_data.collation_key_buffer.capacity();
+		let counted = read.len() * COLLATION_KEY_BYTES_PER_BYTE + RECORDS * COLLATION_KEY_FIXED_BYTES;
+		assert!(held <= counted, "the keys of {} bytes of records hold {held} bytes, counted {counted}", read.len());
 	}
 
 	// Failure mode: `timeout` waited while a chunk of tens of millions of
