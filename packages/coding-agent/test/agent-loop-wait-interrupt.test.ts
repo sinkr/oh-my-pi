@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { agentLoop, agentPauseGate, type AgentTool, TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import { SpeculativeOperationCoordinator } from "@oh-my-pi/pi-agent-core/speculative-execution";
 import type { AgentEvent, AgentLoopConfig, AgentMessage, AsideMessage } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -57,7 +58,12 @@ describe("agent-loop wait wake delivery", () => {
 	async function run(
 		source: Source,
 		stage: Stage,
-		options: { ordinaryTool?: boolean; alias?: boolean; cancel?: "external" | "after interrupt" } = {},
+		options: {
+			ordinaryTool?: boolean;
+			alias?: boolean;
+			cancel?: "external" | "after interrupt" | "transform" | "claim" | "context" | "stream discard";
+			settledJob?: boolean;
+		} = {},
 	) {
 		const registry = AgentRegistry.global();
 		const inbox: IrcMessage[] = [];
@@ -119,6 +125,10 @@ describe("agent-loop wait wake delivery", () => {
 			} else if (source === "peer") {
 				await IrcBus.global().send({ from: "Peer", to: "Main", body: payload }, { suppressRelay: true });
 			} else {
+				if (options.settledJob) {
+					releaseJob.resolve("settled owned output");
+					await manager.getJob(jobId)?.promise;
+				}
 				parentPending = true;
 			}
 		};
@@ -162,6 +172,53 @@ describe("agent-loop wait wake delivery", () => {
 		const receiver = options.alias ? (alias as AgentTool) : wait;
 		const target = options.ordinaryTool ? ordinary : receiver;
 		const controller = new AbortController();
+		let cancellationReached = false;
+		const cancelBeforeExecute = () => {
+			expect(parentPending).toBe(true);
+			cancellationReached = true;
+			controller.abort("cancelled by user");
+		};
+		const needsCoordinator = options.cancel === "claim" || options.cancel === "stream discard";
+		const marker: AgentTool<typeof schema> = {
+			name: "marker",
+			label: "Marker",
+			description: "Keeps a real speculative coordinator attached to this batch",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						return { kind: "result", result: { content: [], details: {} }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("The marker must use its speculative result");
+			},
+		};
+		if (needsCoordinator) {
+			const claim = SpeculativeOperationCoordinator.prototype.claim;
+			vi.spyOn(SpeculativeOperationCoordinator.prototype, "claim").mockImplementation(
+				async function (this: SpeculativeOperationCoordinator, tool, toolCall, args) {
+					const outcome = await claim.call(this, tool, toolCall, args);
+					if (tool !== wait) return outcome;
+					if (options.cancel === "claim") {
+						cancelBeforeExecute();
+					} else {
+						this.registerStreamSession(toolCall.id, {
+							update() {},
+							finalize() {},
+							commit() {},
+							async discard() {
+								await Promise.resolve();
+								cancelBeforeExecute();
+							},
+						});
+					}
+					return outcome;
+				},
+			);
+		}
 		let pausedBeforeExecute = false;
 		const mock = createMockModel({
 			responses: [
@@ -169,6 +226,7 @@ describe("agent-loop wait wake delivery", () => {
 					if (stage === "queued before execute") agentPauseGate.pause();
 					return {
 						content: [
+							...(needsCoordinator ? [{ type: "toolCall" as const, name: marker.name, arguments: {} }] : []),
 							...(stage === "queued at admission"
 								? [{ type: "toolCall" as const, name: "barrier", arguments: {} }]
 								: []),
@@ -182,6 +240,18 @@ describe("agent-loop wait wake delivery", () => {
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: messages => messages as Message[],
+			speculativeToolExecution: needsCoordinator ? { enabled: true } : undefined,
+			transformToolCallArguments:
+				options.cancel === "transform"
+					? (args, toolName) => {
+							if (toolName === wait.name) cancelBeforeExecute();
+							return args;
+						}
+					: undefined,
+			getToolContext: () => {
+				if (options.cancel === "context" && parentPending) cancelBeforeExecute();
+				return undefined;
+			},
 			hasBackgroundCompletions: () =>
 				source === "background" && completionPending && !manager.isDeliverySuppressed(jobId),
 			hasIrcInterrupts: () => source === "peer" && inbox.length > 0,
@@ -214,7 +284,7 @@ describe("agent-loop wait wake delivery", () => {
 		const events: AgentEvent[] = [];
 		const stream = agentLoop(
 			[userMessage("Wait for the next event")],
-			{ systemPrompt: ["Test"], messages: [], tools: [barrier, target] },
+			{ systemPrompt: ["Test"], messages: [], tools: [marker, barrier, target] },
 			config,
 			controller.signal,
 			mock.stream,
@@ -231,7 +301,7 @@ describe("agent-loop wait wake delivery", () => {
 		expect(results).toHaveLength(1);
 		expect(manager.isJobResultConsumed(foreignId)).toBe(false);
 		if (stage === "queued before execute") expect(pausedBeforeExecute).toBe(true);
-		return { result: results[0], messages, payload, jobId, consumed, execute, ordinaryExecute };
+		return { result: results[0], messages, payload, jobId, consumed, execute, ordinaryExecute, cancellationReached };
 	}
 
 	for (const source of sources) {
@@ -281,6 +351,24 @@ describe("agent-loop wait wake delivery", () => {
 		expect(result.isError).toBe(true);
 		expect(execute).not.toHaveBeenCalled();
 	});
+
+	for (const cancel of ["transform", "claim", "context", "stream discard"] as const) {
+		it(`does not consume a settled job when externally cancelled during ${cancel} after a queued steer`, async () => {
+			const { result, execute, jobId, consumed, cancellationReached } = await run("parent", "queued at admission", {
+				cancel,
+				settledJob: true,
+			});
+			expect(cancellationReached).toBe(true);
+			expect(result.isError).toBe(true);
+			expect(result.result.content).toContainEqual({
+				type: "text",
+				text: expect.stringContaining("cancelled by user"),
+			});
+			expect(execute).not.toHaveBeenCalled();
+			expect(consumed).not.toHaveBeenCalled();
+			expect(manager.isJobResultConsumed(jobId)).toBe(false);
+		});
+	}
 
 	it("drains queued wakes through a renamed proxy rather than recognizing the wait name", async () => {
 		const { result, messages, payload, execute } = await run("background", "queued at admission", { alias: true });

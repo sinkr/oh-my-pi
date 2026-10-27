@@ -3603,17 +3603,19 @@ async function executeToolCalls(
 		let caughtError: unknown;
 		let completedToolExecution = false;
 		let executionStarted = false;
+		const abortBeforeToolExecution = (): boolean => {
+			if (!isToolAborted(record)) return false;
+			result = createToolSignalAbortedResult(signal?.aborted ? signal : record.signal);
+			isError = true;
+			return true;
+		};
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
 				if (!tool) {
 					throw new Error(formatToolNotFoundMessage(toolCall.name, tools, suggestFallbackToolNames?.()));
 				}
-				if (isToolAborted(record)) {
-					result = createToolSignalAbortedResult(signal?.aborted ? signal : record.signal);
-					isError = true;
-					return;
-				}
+				if (abortBeforeToolExecution()) return;
 
 				if (record.prepareError !== undefined) throw record.prepareError;
 				if (record.blocked) {
@@ -3624,6 +3626,9 @@ async function executeToolCalls(
 					record.executionArgs ??
 					(transformToolCallArguments ? transformToolCallArguments(effectiveArgs, toolCall.name) : effectiveArgs);
 				record.args = executionArgs;
+				// A transform or awaited claim can cancel the external run after
+				// a queued wake already fixed the combined signal's reason.
+				if (abortBeforeToolExecution()) return;
 
 				const speculativeOutcome = speculationCoordinator
 					? await speculationCoordinator.claim(tool, toolCall, executionArgs)
@@ -3640,6 +3645,7 @@ async function executeToolCalls(
 				}
 
 				if (!completedToolExecution) {
+					if (abortBeforeToolExecution()) return;
 					// The cooperative steering signal and the passive-context sink
 					// ride the loop-owned ToolCallContext (surfacing as
 					// `ctx.toolCall.*`); the host surfaces the sink on the context it
@@ -3664,9 +3670,12 @@ async function executeToolCalls(
 					} else if (streamSession && !streamSession.contextIndependent) {
 						await streamSession.discard("outer tool context cannot carry stream speculation");
 					}
-					executionStarted = true;
 					let rawResult: unknown;
 					try {
+						// Context construction and stream cleanup can also cancel;
+						// nothing may await or call host code after this final check.
+						if (abortBeforeToolExecution()) return;
+						executionStarted = true;
 						rawResult = await tool.execute(
 							toolCall.id,
 							executionArgs,
@@ -3746,10 +3755,10 @@ async function executeToolCalls(
 		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;
 		const abortedDuringExecution = perToolAborted && isError && !completedToolExecution;
-		if (record.interruptible && interrupted && abortedDuringExecution) {
+		if (record.interruptible && interrupted && abortedDuringExecution && !signal?.aborted) {
 			// Queued steering/asides abort only interruptible tools. An external
-			// user abort can also fail a non-interruptible tool (e.g. cancelled
-			// ask); keep its actual error instead of attributing it to the queue.
+			// user abort takes priority even if a queued interrupt fixed the
+			// combined signal's reason first; keep the actual cancellation error.
 			record.skipped = true;
 			emitToolResult(record, createSkippedToolResult(interruptState.source, executionStarted), true);
 		} else {
