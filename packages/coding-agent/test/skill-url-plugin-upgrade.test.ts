@@ -302,25 +302,29 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(child.skills.some(entry => entry.name === SKILL)).toBe(false);
 	});
 
-	it("a fixed list keeps a skill whose file cannot be checked: only a missing file counts as gone", async () => {
-		// Every stat of a path below a regular file fails with ENOTDIR, not ENOENT.
-		const notADirectory = path.join(tempDir, "not-a-directory");
-		fs.writeFileSync(notADirectory, "");
-		const unchecked = {
-			name: "unchecked-skill",
-			description: "A skill whose file cannot be checked.",
-			filePath: path.join(notADirectory, "SKILL.md"),
-			baseDir: notADirectory,
-			source: "custom:user",
-		};
-		const parent = await startSession();
-		const child = await startSession({ skills: [...parent.skills, unchecked] });
+	// Windows reports ENOENT for a path below a regular file, so there is no "cannot be checked" case there.
+	it.skipIf(process.platform === "win32")(
+		"a fixed list keeps a skill whose file cannot be checked: only a missing file counts as gone",
+		async () => {
+			// Every stat of a path below a regular file fails with ENOTDIR, not ENOENT.
+			const notADirectory = path.join(tempDir, "not-a-directory");
+			fs.writeFileSync(notADirectory, "");
+			const unchecked = {
+				name: "unchecked-skill",
+				description: "A skill whose file cannot be checked.",
+				filePath: path.join(notADirectory, "SKILL.md"),
+				baseDir: notADirectory,
+				source: "custom:user",
+			};
+			const parent = await startSession();
+			const child = await startSession({ skills: [...parent.skills, unchecked] });
 
-		installPluginVersion("2.0.0", "1.0.0");
+			installPluginVersion("2.0.0", "1.0.0");
 
-		expect(await readText(child, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
-		expect(child.skills.some(entry => entry.name === "unchecked-skill")).toBe(true);
-	});
+			expect(await readText(child, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+			expect(child.skills.some(entry => entry.name === "unchecked-skill")).toBe(true);
+		},
+	);
 
 	it("an upgrade that keeps the old version's directory moves a running session to the new version", async () => {
 		const session = await startSession();
