@@ -208,7 +208,7 @@ export async function generateFileMentionMessages(
 	const files: FileMentionMessage["files"] = [];
 
 	for (const filePath of filePaths) {
-		if (options?.signal?.aborted) break;
+		if (options?.signal?.aborted) return [];
 		const resolved = await resolveMentionPath(filePath, cwd);
 		if (!resolved) {
 			continue;
@@ -307,7 +307,7 @@ export async function generateFileMentionMessages(
 			if (CONVERTIBLE_EXTENSIONS.has(ext)) {
 				const result = await convertFileWithMarkit(absolutePath, options?.signal);
 				if (options?.signal?.aborted) {
-					break;
+					return [];
 				}
 				if (result.ok && result.content.trim().length > 0) {
 					const { output, lineCount } = buildTextOutput(result.content);
@@ -346,11 +346,12 @@ export async function generateFileMentionMessages(
 			}
 			files.push({ path: resolvedPath, content: output, lineCount });
 		} catch {
+			if (options?.signal?.aborted) return [];
 			// File doesn't exist or isn't readable - skip silently
 		}
 	}
 
-	if (files.length === 0) return [];
+	if (options?.signal?.aborted || files.length === 0) return [];
 
 	const message: FileMentionMessage = {
 		role: "fileMention",

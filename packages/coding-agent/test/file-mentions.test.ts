@@ -6,22 +6,25 @@ import { EditStore } from "@oh-my-pi/pi-natives";
 import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
 import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const tempDirs: string[] = [];
 let originalAgentDir: string | undefined;
+let originalOmpProfile: string | undefined;
+let originalPiProfile: string | undefined;
 
 beforeEach(async () => {
 	originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	originalOmpProfile = process.env.OMP_PROFILE;
+	originalPiProfile = process.env.PI_PROFILE;
 	const agentDir = await createTempDir();
 	setAgentDir(agentDir);
 });
 
 afterEach(async () => {
-	if (originalAgentDir === undefined) {
-		delete process.env.PI_CODING_AGENT_DIR;
-	} else {
-		process.env.PI_CODING_AGENT_DIR = originalAgentDir;
-	}
+	restoreEnvValue("PI_CODING_AGENT_DIR", originalAgentDir);
+	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+	restoreEnvValue("PI_PROFILE", originalPiProfile);
 	__resetDirsFromEnvForTests();
 	for (const dir of tempDirs.splice(0, tempDirs.length)) {
 		await removeWithRetries(dir);
@@ -175,8 +178,9 @@ describe("generateFileMentionMessages path resolution", () => {
 		expect(snapshotStore.headHash(path.join(cwd, "table.xlsx"))).toBeNull();
 	});
 
-	test("skips convertible document conversion when signal is already aborted", async () => {
+	test("drops earlier mentions when signal aborts before or during convertible document conversion", async () => {
 		const cwd = await createTempDir();
+		await Bun.write(path.join(cwd, "first.txt"), "first file");
 		const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 		const REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 		const xlsxBytes = await encodeArchive("zip", [
@@ -194,8 +198,17 @@ describe("generateFileMentionMessages path resolution", () => {
 		await Bun.write(path.join(cwd, "aborted.xlsx"), xlsxBytes);
 
 		const controller = new AbortController();
-		controller.abort();
-		const messages = await generateFileMentionMessages(["aborted.xlsx"], cwd, {
+		const snapshotStore = new EditStore();
+		const origRecord = snapshotStore.recordSnapshot.bind(snapshotStore);
+		snapshotStore.recordSnapshot = (filePath: string, content: string) => {
+			const tag = origRecord(filePath, content);
+			controller.abort();
+			return tag;
+		};
+
+		const messages = await generateFileMentionMessages(["first.txt", "aborted.xlsx"], cwd, {
+			useHashLines: true,
+			snapshotStore,
 			signal: controller.signal,
 		});
 
