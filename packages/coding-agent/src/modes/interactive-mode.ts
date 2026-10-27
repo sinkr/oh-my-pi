@@ -349,6 +349,7 @@ import type {
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
+	ResumeSessionOptions,
 	SessionPickHandler,
 	ShowStatusOptions,
 	SelectOnlyModelSelectorOptions,
@@ -1644,7 +1645,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
-	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
+	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	// True from `/guided-goal` kickoff until the interview ends: a goal record
 	// appears, a turn makes tool calls (the interview itself is tool-free, so
@@ -1856,6 +1857,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
+	#subagentHudKey = "";
 	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
 	#subagentCostHydratedRoot?: string;
 	#mcpStatusOrder: string[] = [];
@@ -2401,7 +2403,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showUserMessageSelector();
 					return;
 				case "resume":
-					this.handleResumeSession(action.path).catch((error: unknown) =>
+					this.handleResumeSession(action.path, { followContinuation: true }).catch((error: unknown) =>
 						this.showError(error instanceof Error ? error.message : String(error)),
 					);
 					return;
@@ -3961,33 +3963,35 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * registry, and the cost segment's subagent-tree spend (local sessions only:
 	 * a collab guest's registry mirrors host transcripts outside this root).
 	 */
-	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
+	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): boolean {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(() => {
-				this.syncRunningSubagentBadge();
+				// Restoring a roster emits one event per agent. Rebuild the badge and
+				// lists once per burst through the observer scheduler.
+				this.#scheduleObserverUiSync("progress");
 			});
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
-		this.statusLine.setRunningSubagents(agentIds);
-		if (this.collabGuest) {
-			this.statusLine.setSubagentTreeCost(0);
-		} else {
+		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
+		let treeCost = 0;
+		if (!this.collabGuest) {
 			const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
 			this.#hydratePersistedSubagentCosts(rootSessionFile);
-			this.statusLine.setSubagentTreeCost(
-				sumSubagentTreeCost({
-					refs: AgentRegistry.global().list(),
-					observers: this.#observerRegistry,
-					rootSessionFile,
-					sessionCosts: this.#subagentSessionCosts,
-				}),
-			);
+			treeCost = sumSubagentTreeCost({
+				refs: AgentRegistry.global().list(),
+				observers: this.#observerRegistry,
+				rootSessionFile,
+				sessionCosts: this.#subagentSessionCosts,
+			});
 		}
-		if (options.requestRender !== false) this.ui.requestRender();
+		const costChanged = this.statusLine.setSubagentTreeCost(treeCost);
+		const changed = agentsChanged || costChanged;
+		if (changed && options.requestRender !== false) this.ui.requestRender();
+		return changed;
 	}
 
 	/**
@@ -4399,22 +4403,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#flushObserverUiSync(): void {
-		this.syncRunningSubagentBadge({ requestRender: false });
-		if (this.#observerUiSyncNeedsTodoReconcile) {
-			this.#observerUiSyncNeedsTodoReconcile = false;
-			this.#reconcileTodosWithSubagents();
-			this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
-			this.#renderTodoList();
-		} else if (this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey) {
+		const badgeChanged = this.syncRunningSubagentBadge({ requestRender: false });
+		let todoChanged = false;
+		if (
+			this.#observerUiSyncNeedsTodoReconcile ||
+			this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey
+		) {
+			if (this.#observerUiSyncNeedsTodoReconcile) {
+				this.#observerUiSyncNeedsTodoReconcile = false;
+				this.#reconcileTodosWithSubagents();
+				this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
+			}
 			// Progress-only ticks (10 Hz while subagents run) cannot change the
 			// todo phases or their persisted visibility — re-syncing would also
-			// re-arm the auto-clear timer so it could never fire. Only the HUD's
-			// subagent highlight depends on them, so repaint just when the active
-			// descriptions change.
+			// re-arm the auto-clear timer so it could never fire. The HUD and
+			// transcript todo cards still need repainting when the active
+			// descriptions change, even if the HUD itself is hidden.
 			this.#renderTodoList();
+			todoChanged = true;
 		}
-		this.#renderSubagentList();
-		this.ui.requestRender();
+		const hudChanged = this.#renderSubagentList();
+		if (badgeChanged || todoChanged || hudChanged) this.ui.requestRender();
 	}
 
 	#cancelObserverUiSyncTimer(): void {
@@ -4747,17 +4756,23 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * appear and advance, so a repaint is armed for when the marker first shows
 	 * and then once a second while a listed agent stays mid-call.
 	 */
-	#renderSubagentList(): void {
+	#renderSubagentList(): boolean {
 		this.#cancelSubagentPreviewTick();
 		const view = this.#buildSubagentHudView();
 		if (!view) {
-			this.subagentContainer.clear();
-			return;
+			const changed = this.subagentContainer.children.length > 0;
+			if (changed) this.subagentContainer.clear();
+			this.#subagentHudKey = "";
+			return changed;
 		}
+		this.#armSubagentPreviewTick(view.tickMs);
+		const key = JSON.stringify([view.lines, view.order, view.toggleRow]);
+		if (key === this.#subagentHudKey && this.subagentContainer.children.length > 0) return false;
+		this.#subagentHudKey = key;
 		const hud = this.subagentContainer.children[0];
 		if (hud instanceof SubagentHudComponent) hud.update(view.lines, view.order, view.toggleRow);
 		else this.subagentContainer.addChild(new SubagentHudComponent(view.lines, view.order, view.toggleRow));
-		this.#armSubagentPreviewTick(view.tickMs);
+		return true;
 	}
 
 	/** Inputs for one HUD paint; undefined when the HUD is off or nothing is running. */
@@ -5004,6 +5019,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					await this.session.restoreNonMCPToolPresentation(
 						previousPresentation.enabled,
 						previousPresentation.mounted,
+						previousPresentation.registered,
 					);
 				}
 			} finally {
@@ -5211,6 +5227,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planModePreviousToolPresentation = {
 			enabled: previousTools.filter(name => !isMCPToolName(name)),
 			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+			registered: this.session.getAllToolNames(),
 		};
 		this.planModePlanFilePath = planFilePath;
 		this.planModeEnabled = true;
@@ -5332,6 +5349,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				await this.session.restoreNonMCPToolPresentation(
 					previousPresentation.enabled,
 					previousPresentation.mounted,
+					previousPresentation.registered,
 				);
 			}
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
@@ -5921,6 +5939,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
 			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
 			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+			registered: this.session.getAllToolNames(),
 		};
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
@@ -5991,7 +6010,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const executionTools = previousPresentation.enabled.includes("read")
 			? previousPresentation.enabled
 			: [...previousPresentation.enabled, "read"];
-		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted);
+		await this.session.restoreNonMCPToolPresentation(
+			executionTools,
+			previousPresentation.mounted,
+			previousPresentation.registered,
+		);
 		this.session.setPlanReferencePath(options.planFilePath);
 		try {
 			const autosaved = await autosaveApprovedPlan({
@@ -8523,8 +8546,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showSessionSelector(source, onSelect);
 	}
 
-	async handleResumeSession(sessionPath: string): Promise<void> {
-		await this.#selectorController.handleResumeSession(sessionPath);
+	async handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void> {
+		await this.#selectorController.handleResumeSession(sessionPath, options);
 	}
 
 	handleSessionDeleteCommand(): Promise<void> {
