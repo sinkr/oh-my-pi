@@ -120,7 +120,6 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { loadRuntimeIdentity } from "./session/runtime-identity";
 import {
-	findRecentSessionContinuation,
 	findSessionContinuation,
 	resolveResumableSession,
 	type SessionContinuation,
@@ -1320,7 +1319,10 @@ export async function createSessionManager(
 		if (!match) {
 			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
 		}
-		const continuation = await findSessionContinuation(match.session.path);
+		// An id that matched only the file name asks for the session that name records.
+		const continuation = await findSessionContinuation(match.session.path, undefined, {
+			matchedByFileName: !match.session.id.toLowerCase().startsWith(sessionArg.toLowerCase()),
+		});
 		if (continuation) options.onSessionContinuation?.(continuation);
 		const session = continuation?.session ?? match.session;
 		if (match.scope === "local") {
@@ -1357,7 +1359,9 @@ export async function createSessionManager(
 	}
 	if (parsed.continue) {
 		return await forkIfMovedAway(
-			await continueRecentSession(cwd, parsed.sessionDir, options.onSessionContinuation),
+			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
+				onSessionContinuation: options.onSessionContinuation,
+			}),
 			parsed.sessionDir,
 		);
 	}
@@ -1373,7 +1377,9 @@ export async function createSessionManager(
 	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
 	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
 		const manager = await forkIfMovedAway(
-			await continueRecentSession(cwd, parsed.sessionDir, options.onSessionContinuation),
+			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
+				onSessionContinuation: options.onSessionContinuation,
+			}),
 			parsed.sessionDir,
 		);
 		if (manager.getEntries().length > 0) {
@@ -1383,33 +1389,6 @@ export async function createSessionManager(
 	}
 	// Default case (new session) returns undefined, SDK will create one
 	return undefined;
-}
-
-/**
- * {@link SessionManager.continueRecent}, then the copy of that session's
- * conversation to resume when it went on in another file. The terminal's
- * record of its last session names a file the way `--resume` does
- * ({@link findSessionContinuation}). Without one the pick goes by file time,
- * and a process writes its exit record or an idle cache refresh long after its
- * last turn, so the pick can be any copy ({@link findRecentSessionContinuation}).
- */
-async function continueRecentSession(
-	cwd: string,
-	sessionDir: string | undefined,
-	onSessionContinuation: ((continuation: SessionContinuation) => void) | undefined,
-): Promise<SessionManager> {
-	const recent = await SessionManager.continueRecent(cwd, sessionDir);
-	const recentFile = recent.getSessionFile();
-	// The terminal's own last session was chosen, as a named file is: keep it when both copies went on.
-	const continuation = !recentFile
-		? undefined
-		: recent.continuedFromBreadcrumb
-			? await findSessionContinuation(recentFile)
-			: await findRecentSessionContinuation(recentFile);
-	if (!continuation) return recent;
-	onSessionContinuation?.(continuation);
-	await recent.close();
-	return await SessionManager.open(continuation.session.path, sessionDir);
 }
 
 /** Discover APPEND_SYSTEM.md file if no CLI append system prompt was provided */

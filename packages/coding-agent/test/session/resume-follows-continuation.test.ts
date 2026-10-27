@@ -267,8 +267,9 @@ async function movedOffSession(
  */
 async function divergedWithContinuationWrittenLast(
 	tempDir: TempDir,
+	createdSession?: string,
 ): Promise<{ original: string; continuation: string }> {
-	const original = await createSession(tempDir);
+	const original = createdSession ?? (await createSession(tempDir));
 	const holder = await Holder.resume(tempDir, original);
 	let continuation: string;
 	try {
@@ -633,6 +634,90 @@ describe("--resume of a session that continued in a sibling file", () => {
 			expect(manager?.getSessionFile()).toBe(original);
 		} finally {
 			await manager?.close();
+		}
+	}, 30_000);
+
+	it("follows the continuation when the asked-for file no longer reads as a session", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const { original, continuation } = await movedOffSession(tempDir);
+		// Conflict recovery leaves a file that no longer reads as its session as it found it.
+		await Bun.write(original, "not a session journal\n");
+
+		const followed: SessionContinuation[] = [];
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings, undefined, {
+			onSessionContinuation: c => followed.push(c),
+		});
+		try {
+			expect(manager?.getSessionFile()).toBe(continuation);
+			expect(followed.map(c => ({ from: c.from, to: c.session.path, copies: c.copies }))).toEqual([
+				{ from: original, to: continuation, copies: 2 },
+			]);
+		} finally {
+			await manager?.close();
+		}
+	}, 30_000);
+
+	it("follows the continuation of the id a replaced file is named for, and resumes that file by path as what it holds", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const { original, continuation } = await movedOffSession(tempDir);
+		const sessionId = await readSessionHeaderId(original);
+		if (!sessionId) throw new Error("Expected a session id");
+		// Another session's journal now sits at the original's path.
+		using otherDir = TempDir.createSync("@omp-resume-continuation-other-");
+		const other = await createSession(otherDir);
+		await Bun.write(original, await Bun.file(other).text());
+		const otherId = await readSessionHeaderId(original);
+		expect(otherId).not.toBe(sessionId);
+
+		const byId = await createSessionManager(resumeArgs(sessionId, tempDir.path()), tempDir.path(), stubSettings);
+		try {
+			expect(byId?.getSessionFile()).toBe(continuation);
+		} finally {
+			await byId?.close();
+		}
+		const byPath = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
+		try {
+			expect(byPath?.getSessionFile()).toBe(original);
+			expect(byPath?.getSessionId()).toBe(otherId);
+		} finally {
+			await byPath?.close();
+		}
+	}, 30_000);
+
+	it("continues an original with a name of its own when it has the newest turn and its continuation was written last", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		// A session resumed by path keeps writing a file of any name.
+		const named = tempDir.join("current.jsonl");
+		await fs.rename(await createSession(tempDir), named);
+		const { original } = await divergedWithContinuationWrittenLast(tempDir, named);
+		await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
+
+		const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(original);
+		} finally {
+			await manager?.close();
+		}
+		const switchedTo: string[] = [];
+		await openRpcSession(rpcHost(switchedTo), tempDir.path());
+		expect(switchedTo).toEqual([original]);
+	}, 30_000);
+
+	it("opens the continuation from SessionManager.continueRecent itself, for SDK callers", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const { original, continuation } = await movedOffSession(tempDir);
+
+		const followed: SessionContinuation[] = [];
+		const manager = await SessionManager.continueRecent(tempDir.path(), tempDir.path(), undefined, {
+			onSessionContinuation: c => followed.push(c),
+		});
+		try {
+			expect(manager.getSessionFile()).toBe(continuation);
+			expect(followed.map(c => ({ from: c.from, to: c.session.path }))).toEqual([
+				{ from: original, to: continuation },
+			]);
+		} finally {
+			await manager.close();
 		}
 	}, 30_000);
 });

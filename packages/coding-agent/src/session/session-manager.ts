@@ -83,9 +83,12 @@ import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity
 import {
 	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
+	findRecentSessionContinuation,
+	findSessionContinuation,
 	isEmptySession,
 	listAllSessions,
 	listSessions,
+	type SessionContinuation,
 	type SessionInfo,
 } from "./session-listing";
 import {
@@ -913,7 +916,6 @@ export class SessionManager {
 	/** Bumped by in-place entry updates, which a {@link SessionBodyStamp} cannot otherwise see. */
 	#bodyRevision = 0;
 	#sessionFile: string | undefined;
-	#continuedFromBreadcrumb = false;
 	#header!: SessionHeader;
 	#titleUpdatedAt = "";
 	#hasTitleSlot = true;
@@ -4399,11 +4401,24 @@ export class SessionManager {
 			seanceSource: header.seanceSource,
 		};
 	}
-	/** Continue the most recent session, or create a new one if none exists. */
+	/**
+	 * Continue the most recent session, or create a new one if none exists.
+	 *
+	 * When the chosen session's conversation went on in another file (it moved
+	 * off its file; see `findSessionContinuation`), this opens the copy to
+	 * resume instead and reports it to `onSessionContinuation`. The session the
+	 * terminal's record of its last session names was chosen, as a file named
+	 * to `--resume` is, so it is kept when it has turns its continuation lacks
+	 * ({@link findSessionContinuation}). Without that record the pick goes by
+	 * file time, and a process writes its exit record or an idle cache refresh
+	 * long after its last turn, so the pick can be any copy
+	 * ({@link findRecentSessionContinuation}).
+	 */
 	static async continueRecent(
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
+		options: { onSessionContinuation?: (continuation: SessionContinuation) => void } = {},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const resolvedCwd = path.resolve(cwd);
@@ -4505,21 +4520,21 @@ export class SessionManager {
 		}
 
 		if (chosenSession === undefined) chosenSession = await findMostRecentNonEmptySession(dir, storage);
+		if (chosenSession) {
+			const fromBreadcrumb = !!breadcrumb && path.resolve(chosenSession) === path.resolve(breadcrumb.sessionFile);
+			const continuation = fromBreadcrumb
+				? await findSessionContinuation(chosenSession, storage)
+				: await findRecentSessionContinuation(chosenSession, storage);
+			if (continuation) {
+				options.onSessionContinuation?.(continuation);
+				chosenSession = continuation.session.path;
+			}
+		}
 
 		const manager = new SessionManager(cwd, dir, true, storage);
 		if (chosenSession) await manager.setSessionFile(chosenSession);
 		else manager.#resetToNewSession();
-		manager.#continuedFromBreadcrumb =
-			!!breadcrumb && !!chosenSession && path.resolve(chosenSession) === path.resolve(breadcrumb.sessionFile);
 		return manager;
-	}
-
-	/**
-	 * Set by {@link continueRecent} when the session it opened is the one the
-	 * terminal's record of its last session names, not a pick by write time.
-	 */
-	get continuedFromBreadcrumb(): boolean {
-		return this.#continuedFromBreadcrumb;
 	}
 
 	/** Create an in-memory session (no file persistence). */
