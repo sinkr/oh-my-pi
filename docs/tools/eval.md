@@ -68,10 +68,12 @@ Compaction receives a bounded live-kernel snapshot with environment and successf
 
 | Token | Runtime | Setting/default | Environment override | Additional prerequisite |
 | --- | --- | --- | --- | --- |
-| `py` | retained IPython-style Python kernel | `eval.py=true` | `PI_PY` | usable configured Python interpreter/kernel |
+| `py` | retained IPython-style Python kernel | `eval.py=true` | `PI_PY` | working Python 3.8+ on PATH or configured with `python.interpreter` |
 | `js` | retained Bun worker VM | `eval.js=true` | `PI_JS` | bundled JS runtime |
 
-When at least one runtime is enabled, disabled runtimes are removed from the session-scoped wire schema and model prompt. A requested unavailable runtime raises `ToolError`; the tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
+Disabled runtimes are removed from the session-scoped wire schema and model prompt. After a definitive failed Python probe, the next schema, description, and prelude also omit `py`; synchronous schema reads never run a probe. A successful explicit availability refresh restores Python, while changes to PATH, active environment, cwd, or the configured interpreter invalidate the advertised snapshot. Cancelled or deadline-limited probes do not establish permanent unavailability. Explicit Python calls retry failed probes, so a repaired interpreter can be picked up without restarting.
+
+A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
 
 `eval.autoProvision=true` lets the first `%bun add` create the managed JavaScript package environment; turning it off requires an existing environment or `%environment project`. Package installation pauses the compute watchdog but has its own ten-minute deadline and remains cancellable.
 

@@ -46,7 +46,7 @@ import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
-import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
+import { type EvalBackendsAllowance, resolveAdvertisedEvalBackends, resolveEvalBackends } from "./eval-backends";
 import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
@@ -91,8 +91,9 @@ function describeLanguageField(langs: readonly EvalLanguageToken[]): string {
 /** One-line discovery summary listing the runtimes available this session. */
 function summarizeEvalLanguages(langs: readonly EvalLanguageToken[]): string {
 	const names = langs.map(lang => EVAL_LANGUAGE_NAME[lang]);
-	const list = names.length > 0 ? joinWithOr(names) : "Python or JavaScript";
-	return `Execute ${list} in persistent kernels; load scripts or install packages`;
+	return names.length > 0
+		? `Execute ${joinWithOr(names)} in persistent kernels; load scripts or install packages`
+		: "No eval runtimes are currently available";
 }
 
 /** Resolved-allowance → enabled language tokens, preserving display order. */
@@ -140,7 +141,7 @@ export type EvalCellInput = EvalToolParams;
  * Build a session-scoped copy of the eval schema whose `language` enum and field
  * descriptions advertise only the runtimes enabled for this session. Disabled
  * backends never reach the model: the wire schema, BM25 discovery corpus, and
- * tool description stay in lockstep with {@link resolveEvalBackends}. The static
+ * tool description stay in lockstep with {@link resolveAdvertisedEvalBackends}. The static
  * {@link evalSchema} (full union) remains the type-level source of truth.
  */
 function buildEvalSchema(langs: readonly EvalLanguageToken[], maxTimeout?: number): typeof evalSchema {
@@ -305,8 +306,8 @@ async function resolveBackend(
 		throwIfAborted(probeOpts?.signal);
 		if (!availability.ok) {
 			const remedy = allowJs
-				? 'Python backend is unavailable in this session. Pass language: "js" or install the python kernel.'
-				: 'Python backend is unavailable in this session. Install the python kernel to use language: "py".';
+				? 'Python backend is unavailable in this session. Pass language: "js", or provide a working Python 3.8+ on PATH (or set python.interpreter).'
+				: 'Python backend is unavailable in this session. Provide a working Python 3.8+ on PATH (or set python.interpreter) to use language: "py".';
 			const reason = availability.reason
 				? truncateToWidth(
 						replaceTabs(sanitizeText(shortenEmbeddedPaths(availability.reason))).replaceAll("\n", " "),
@@ -365,7 +366,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	#descriptionOptions(): EvalToolDescriptionOptions {
 		const session = this.session;
 		if (!session) return {};
-		const backends = resolveEvalBackends(session);
+		const backends = resolveAdvertisedEvalBackends(session);
 		const depthAllowsSpawning = canSpawnAtDepth(
 			cfgTaskMaxRecursionDepth.get(session.settings),
 			session.taskDepth ?? 0,
@@ -405,7 +406,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	get parameters(): typeof evalSchema {
 		const langs = this.#enabledLanguages();
 		const maxTimeout = this.session ? cfgToolsMaxTimeout.get(this.session.settings) : undefined;
-		if ((langs.length === 0 || langs.length === EVAL_LANGUAGE_ORDER.length) && !maxTimeout) return evalSchema;
+		if (langs.length === EVAL_LANGUAGE_ORDER.length && !maxTimeout) return evalSchema;
 		const key = `${langs.join(",")}:${maxTimeout ?? 0}`;
 		if (this.#paramsKey !== key) {
 			this.#cachedParams = buildEvalSchema(langs, maxTimeout);
@@ -455,10 +456,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 	/**
 	 * Languages enabled for this session, in display order. Detached tools (no
-	 * session) fall back to the shipped defaults (py/js; rb/jl are opt-in).
+	 * session) fall back to the shipped defaults (py/js). Synchronous reads use
+	 * only definitive memoized probes, never blocking runtime discovery.
 	 */
 	#enabledLanguages(): EvalLanguageToken[] {
-		return this.session ? enabledEvalLanguages(resolveEvalBackends(this.session)) : ["py", "js"];
+		return this.session ? enabledEvalLanguages(resolveAdvertisedEvalBackends(this.session)) : ["py", "js"];
 	}
 
 	constructor(
