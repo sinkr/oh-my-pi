@@ -276,7 +276,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 - `parseReadUrlTarget()` accepts `http://`, `https://`, or `www.` targets.
 - Plain URL reads call `executeReadUrl()` in `packages/coding-agent/src/tools/fetch.ts`.
-- `:raw` means raw HTML/body fallback path; plain URL reads prefer rendered/reader-friendly output.
+- `:raw` returns the response body without a transport header or whitespace normalization; URL, Content-Type, Method, and notes remain in structured details. Plain URL reads prefer rendered/reader-friendly output and keep the transport header below.
 - `:N`, `:A-B`, `:A+C`, and comma-separated multi-ranges do not refetch when cached output is usable. They page over cached output from the prior or current URL render.
 - URL render pipeline in `renderUrl()`:
    1. normalize scheme (`https://` added for bare `www.`)
@@ -286,7 +286,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    5. handle JSON directly, feeds via feed parser, plain text directly
    6. for HTML and non-raw mode, try markdown alternates, `URL.md`, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
    7. fall back to raw body text/html
-- URL output is wrapped with a small header:
+- Non-raw whole-URL output is wrapped with a small header; line selectors address body lines, not these header rows. Raw URL artifacts and search materialization use the same unwrapped body coordinates:
 
 ```text
 URL: ...
