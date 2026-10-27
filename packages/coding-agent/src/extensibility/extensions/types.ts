@@ -1358,13 +1358,15 @@ export interface PlanReviewResolvedEvent {
 /**
  * An explicit, idempotent mode transition. Requesting a state that already holds succeeds with
  * `changed: false`. No transition submits a prompt; send one separately (e.g. `pi.sendUserMessage`).
- * Plan `exit` leaves plan mode fully without approving the plan or deleting its draft.
+ * Plan `exit` leaves plan mode fully without approving the plan or deleting its draft. Loop `prompt`
+ * sets the text repeated after each turn ends (otherwise the user's next typed prompt); on an active
+ * loop it replaces that text, and on a paused loop `enter` resumes it.
  */
 export type SessionModeRequest =
 	| { mode: "plan" | "vibe"; action: "enter" | "exit" }
 	| { mode: "goal"; action: "enter"; objective: string; tokenBudget?: number }
 	| { mode: "goal"; action: "pause" | "resume" | "drop" }
-	| { mode: "loop"; action: "enter"; limit?: LoopLimitConfig; condition?: LoopConditionConfig }
+	| { mode: "loop"; action: "enter"; prompt?: string; limit?: LoopLimitConfig; condition?: LoopConditionConfig }
 	| { mode: "loop"; action: "exit" };
 
 /** Detached snapshot of the built-in session modes. `paused` states come from the slash commands or a goal pause. */
@@ -1376,10 +1378,11 @@ export interface SessionModeState {
 }
 
 /**
- * Outcome of `ctx.sessionModes.set()`. `busy`: a turn, compaction, or another `set()` is running, the
- * session is still restoring its saved modes at startup, or a completed goal is still being torn down —
- * retry once idle. `conflict`: another mode blocks this one (exit it first). `disabled`: a setting
- * gates the mode (`plan.enabled` / `goal.enabled`). `invalid_request`: malformed or not applicable now.
+ * Outcome of `ctx.sessionModes.set()`. `busy`: a turn, compaction, or another mode transition is
+ * running, the session is still restoring its saved modes (startup or a session switch), or a
+ * completed goal is still being torn down — retry once idle. `conflict`: another mode blocks this one
+ * (exit it first). `disabled`: a setting gates it (`extensionHandlers.modeControl`, `plan.enabled`,
+ * `goal.enabled`). `invalid_request`: malformed or not applicable now.
  */
 export type SessionModeResult =
 	| { ok: true; changed: boolean; state: SessionModeState }

@@ -349,6 +349,7 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 			// Cannot be decremented, so the loop would never end.
 			{ mode: "loop", action: "enter", limit: { kind: "iterations", iterations: 1e20 } },
 			{ mode: "loop", action: "enter", condition: { command: "", until: true } },
+			{ mode: "loop", action: "enter", prompt: "  " },
 			{ mode: "goal", action: "resume" },
 			{ mode: "turbo", action: "enter" },
 		]) {
@@ -360,6 +361,81 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 			goal: { status: "inactive" },
 			loop: { status: "inactive" },
 		});
+	});
+
+	it("refuses every transition when extension mode control is turned off, while state stays readable", async () => {
+		const { modes } = await tui(undefined, { "extensionHandlers.modeControl": false });
+		expect(refusal(await modes.set({ mode: "plan", action: "enter" }))).toBe("disabled");
+		expect(refusal(await modes.set({ mode: "loop", action: "exit" }))).toBe("disabled");
+		expect(modes.getState().plan.status).toBe("inactive");
+	});
+
+	it("reports a session switch once it settles and refuses transitions while it runs", async () => {
+		const seenMidSwitch: boolean[] = [];
+		const live: { session?: AgentSession } = {};
+		const { session, modes, events } = await tui(pi => {
+			pi.on("mode_changed", () => {
+				seenMidSwitch.push(live.session!.isSessionTransitioning);
+			});
+		});
+		live.session = session;
+		await session.prompt("hello");
+		await session.waitForIdle();
+		changed(await modes.set({ mode: "plan", action: "enter" }));
+		const planSession = session.sessionFile!;
+
+		// A request racing the switch is refused instead of landing in either session.
+		const switching = session.newSession();
+		expect(refusal(await modes.set({ mode: "vibe", action: "enter" }))).toBe("busy");
+		await switching;
+		await Bun.sleep(0);
+		expect(modes.getState().vibe.status).toBe("inactive");
+
+		changed(await modes.set({ mode: "plan", action: "enter" }));
+		await Bun.sleep(0);
+		events.length = 0;
+		seenMidSwitch.length = 0;
+		// Plan → plan: restore clears plan mode and re-enters it; neither step is reported.
+		await session.switchSession(planSession);
+		await Bun.sleep(0);
+		expect(events).toEqual([]);
+		expect(modes.getState().plan.status).toBe("active");
+
+		// Plan → none: reported once, after the switch, so the handler can act on it.
+		await session.newSession();
+		await Bun.sleep(0);
+		expect(events.map(event => [event.previous.plan.status, event.state.plan.status])).toEqual([
+			["active", "inactive"],
+		]);
+		expect(seenMidSwitch).toEqual([false]);
+		expect(changed(await modes.set({ mode: "vibe", action: "enter" }))).toBe(true);
+	});
+
+	it("repeats an extension's loop prompt after the turn it sent, and resumes a paused loop", async () => {
+		const { session, mode, modes } = await tui(pi => {
+			pi.registerCommand("grind", {
+				description: "loop a prompt",
+				handler: async (args, ctx) => {
+					const entered = await ctx.sessionModes!.set({ mode: "loop", action: "enter", prompt: args });
+					if (!entered.ok) throw new Error(entered.message);
+					pi.sendUserMessage(args);
+				},
+			});
+		});
+		// The TUI sits idle waiting for input while the extension's turn runs.
+		const nextInput = mode.getUserInput();
+		await session.prompt("/grind polish the docs");
+		await session.waitForIdle();
+		// The loop's next iteration resolves the pending input with the extension's prompt.
+		expect(await nextInput).toMatchObject({ text: "polish the docs" });
+
+		mode.pauseLoop();
+		expect(modes.getState().loop.status).toBe("paused");
+		expect(changed(await modes.set({ mode: "loop", action: "enter" }))).toBe(true);
+		expect(modes.getState().loop.status).toBe("active");
+		expect(
+			refusal(await modes.set({ mode: "loop", action: "enter", limit: { kind: "iterations", iterations: 2 } })),
+		).toBe("invalid_request");
 	});
 
 	it("is absent outside the TUI so headless extensions can detect it", async () => {

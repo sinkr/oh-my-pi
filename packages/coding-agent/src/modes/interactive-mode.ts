@@ -422,6 +422,7 @@ import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
+import { cfgExtensionHandlersModeControl } from "../extensibility/settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
 import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
@@ -1355,6 +1356,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#modeSetInFlight = false;
 	/** Open mode transitions; `mode_changed` waits until the outermost one settles. */
 	#modeChangeHolds = 0;
+	/** A `mode_changed` report is waiting for the running session switch to settle. */
+	#modeChangeAwaitsSessionTransition = false;
 	/** False until init() has restored the journaled modes; before that the state is not yet the session's. */
 	#modesRestored = false;
 	readonly sessionModes: ExtensionSessionModes = {
@@ -2695,6 +2698,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (event.type === "config_warnings_changed") {
 					this.#syncConfigWarningHeader();
 				}
+				// A turn the TUI did not submit (an extension message, a background job) leaves
+				// getUserInput pending, so arm the loop's next iteration here instead.
+				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
@@ -3468,10 +3474,21 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Report a committed mode change. Every mode status refresh calls this, so slash commands, the
 	 * goal tool, and session restore report alongside `ctx.sessionModes.set()`. Goal accounting is
-	 * not part of the state, so usage ticks never fire it.
+	 * not part of the state, so usage ticks never fire it. During a session switch the report waits
+	 * until the switch settles, so handlers see the destination's restored modes, never the cleared
+	 * intermediate state, and may call `set()` from the handler.
 	 */
 	#notifyModeChanged(): void {
 		if (this.#modeChangeHolds > 0) return;
+		if (this.session.isSessionTransitioning) {
+			if (this.#modeChangeAwaitsSessionTransition) return;
+			this.#modeChangeAwaitsSessionTransition = true;
+			void this.session.waitForSessionTransition().then(() => {
+				this.#modeChangeAwaitsSessionTransition = false;
+				this.#notifyModeChanged();
+			});
+			return;
+		}
 		const state = this.#getSessionModeState();
 		const key = JSON.stringify(state);
 		if (key === this.#reportedModeKey) return;
@@ -3483,7 +3500,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * Defer `mode_changed` until a multi-step transition settles: goal entry/exit flips mode flags
-	 * from `goal_updated` before the goal tool is activated or the prior tools are restored.
+	 * from `goal_updated` before the goal tool is activated or the prior tools are restored, and
+	 * session restore clears every mode before re-entering the saved one.
 	 */
 	#holdModeChanges(): Disposable {
 		this.#modeChangeHolds++;
@@ -3502,10 +3520,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			message,
 			state: this.#getSessionModeState(),
 		});
+		if (!cfgExtensionHandlersModeControl.get(this.session.settings)) {
+			return refuse("disabled", "Extension mode control is disabled in settings (extensionHandlers.modeControl).");
+		}
 		// Refuse rather than queue: a call from a handler of this transition's own events would deadlock.
-		if (this.#modeSetInFlight) return refuse("busy", "Another mode transition is running; retry after it settles.");
-		if (!this.#modesRestored) {
-			return refuse("busy", "The session's saved modes are still being restored; retry once startup finishes.");
+		if (this.#modeSetInFlight || this.#modeChangeHolds > 0) {
+			return refuse("busy", "Another mode transition is running; retry after it settles.");
+		}
+		if (!this.#modesRestored || this.session.isSessionTransitioning) {
+			return refuse("busy", "The session's saved modes are still being restored; retry after the switch settles.");
 		}
 		if (this.session.getGoalModeState()?.mode === "exiting") {
 			return refuse("busy", "The completed goal is still being torn down; retry after its `mode_changed`.");
@@ -3516,7 +3539,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.isBusyForSnapshot) {
 			return refuse("busy", "The session is busy with a turn or compaction; retry once it is idle.");
 		}
-		const before = this.#reportedModeKey;
+		const before = JSON.stringify(this.#getSessionModeState());
 		this.#modeSetInFlight = true;
 		const hold = this.#holdModeChanges();
 		try {
@@ -3525,7 +3548,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#modeSetInFlight = false;
 			hold[Symbol.dispose]();
 		}
-		return { ok: true, changed: this.#reportedModeKey !== before, state: this.#getSessionModeState() };
+		const state = this.#getSessionModeState();
+		return { ok: true, changed: JSON.stringify(state) !== before, state };
 	}
 
 	/**
@@ -3611,6 +3635,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (request.action === "exit") return this.loopModeEnabled ? async () => this.disableLoopMode() : undefined;
 				if (request.action !== "enter") break;
 				const { limit, condition } = request;
+				const prompt = typeof request.prompt === "string" ? request.prompt.trim() : request.prompt;
+				if (prompt !== undefined && (typeof prompt !== "string" || !prompt)) {
+					return invalid("Loop prompt must be a non-empty string.");
+				}
 				const validLimit =
 					limit === undefined ||
 					(limit?.kind === "iterations" && Number.isSafeInteger(limit.iterations) && limit.iterations > 0) ||
@@ -3626,10 +3654,23 @@ export class InteractiveMode implements InteractiveModeContext {
 					return invalid("Loop condition needs a non-empty `command` and a boolean `until`.");
 				}
 				if (this.loopModeEnabled) {
-					if (limit === undefined && condition === undefined) return undefined;
-					return invalid("Loop mode is already active; exit it before changing its bounds.");
+					if (limit !== undefined || condition !== undefined) {
+						return invalid("Loop mode is already active; exit it before changing its bounds.");
+					}
+					if (prompt !== undefined && (prompt !== this.loopPrompt || this.loopModePaused)) {
+						return async () => this.setLoopPrompt(prompt);
+					}
+					if (!this.loopModePaused) return undefined;
+					// A paused loop resumes waiting: the next prompt becomes its body again.
+					return async () => {
+						this.loopModePaused = false;
+						this.#syncLoopModeStatus();
+					};
 				}
-				return async () => this.#enableLoopMode(limit, condition, false);
+				return async () => {
+					this.#enableLoopMode(limit, condition, prompt !== undefined);
+					if (prompt !== undefined) this.setLoopPrompt(prompt);
+				};
 			}
 		}
 		return invalid("Unknown mode or action.");
@@ -5374,6 +5415,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		// Report only the restored result, not the cleared state in between.
+		using _hold = this.#holdModeChanges();
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		this.#guidedGoalInterviewActive = false;
