@@ -189,10 +189,17 @@ export function extractFileMentions(text: string): string[] {
  * Generate a FileMentionMessage containing the contents of mentioned files.
  * Returns empty array if no files could be read.
  */
+export interface FileMentionOptions {
+	autoResizeImages?: boolean;
+	useHashLines?: boolean;
+	snapshotStore?: EditStore;
+	signal?: AbortSignal;
+}
+
 export async function generateFileMentionMessages(
 	filePaths: string[],
 	cwd: string,
-	options?: { autoResizeImages?: boolean; useHashLines?: boolean; snapshotStore?: EditStore },
+	options?: FileMentionOptions,
 ): Promise<FileMentionMessage[]> {
 	if (filePaths.length === 0) return [];
 
@@ -201,6 +208,7 @@ export async function generateFileMentionMessages(
 	const files: FileMentionMessage["files"] = [];
 
 	for (const filePath of filePaths) {
+		if (options?.signal?.aborted) break;
 		const resolved = await resolveMentionPath(filePath, cwd);
 		if (!resolved) {
 			continue;
@@ -297,7 +305,10 @@ export async function generateFileMentionMessages(
 			}
 			const ext = path.extname(absolutePath).toLowerCase();
 			if (CONVERTIBLE_EXTENSIONS.has(ext)) {
-				const result = await convertFileWithMarkit(absolutePath);
+				const result = await convertFileWithMarkit(absolutePath, options?.signal);
+				if (options?.signal?.aborted) {
+					break;
+				}
 				if (result.ok && result.content.trim().length > 0) {
 					const { output, lineCount } = buildTextOutput(result.content);
 					files.push({ path: resolvedPath, content: output, lineCount });
