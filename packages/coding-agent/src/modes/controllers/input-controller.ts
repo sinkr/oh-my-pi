@@ -58,6 +58,7 @@ import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui
 import { vocalizer } from "../../tts/vocalizer";
 import {
 	copyToClipboard,
+	isClipboardTerminalLocal,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
@@ -90,6 +91,9 @@ import { cfgHideThinkingBlock } from "../../session/settings";
 
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
 const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
+
+const REMOTE_CLIPBOARD_STATUS =
+	"Clipboard here belongs to the SSH host — use your terminal's paste shortcut to paste from your machine";
 
 /**
  * Slash commands that may carry secrets in their arguments should never be
@@ -273,10 +277,13 @@ export class InputController {
 			readImage: typeof readImageFromClipboard;
 			readText: typeof readTextFromClipboard;
 			readMacFileUrls?: typeof readMacFileUrlsFromClipboard;
+			/** False when the readable clipboard is not the terminal's (SSH); omitted means local. */
+			isTerminalLocal?: typeof isClipboardTerminalLocal;
 		} = {
 			readImage: readImageFromClipboard,
 			readText: readTextFromClipboard,
 			readMacFileUrls: readMacFileUrlsFromClipboard,
+			isTerminalLocal: isClipboardTerminalLocal,
 		},
 	) {}
 
@@ -2399,9 +2406,16 @@ export class InputController {
 		};
 	}
 
+	/**
+	 * Over SSH the readable clipboard is the remote host's, not the one the user copied into, so a
+	 * paste key the terminal forwarded instead of pasting must not read it.
+	 */
+	#clipboardIsTerminalLocal(): boolean {
+		return this.clipboard.isTerminalLocal?.() ?? true;
+	}
+
 	async #tryPasteClipboardImage(sink: ImagePasteSink): Promise<boolean> {
-		const env = process.env;
-		if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return false;
+		if (!this.#clipboardIsTerminalLocal()) return false;
 		try {
 			const image = await this.clipboard.readImage();
 			if (!image) return false;
@@ -2490,6 +2504,10 @@ export class InputController {
 	}
 
 	async handleImagePaste(): Promise<boolean> {
+		if (!this.#clipboardIsTerminalLocal()) {
+			this.ctx.showStatus(REMOTE_CLIPBOARD_STATUS);
+			return false;
+		}
 		let finishPaste: ((text: string | undefined) => boolean) | undefined;
 		let promptPaste: PromptImagePaste | undefined;
 		try {
@@ -2608,6 +2626,10 @@ export class InputController {
 	}
 
 	async handleClipboardTextRawPaste(): Promise<void> {
+		if (!this.#clipboardIsTerminalLocal()) {
+			this.ctx.showStatus(REMOTE_CLIPBOARD_STATUS);
+			return;
+		}
 		try {
 			const text = await this.clipboard.readText();
 			if (text) {
