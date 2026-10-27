@@ -210,8 +210,9 @@ export async function readSessionHeaderId(filePath: string): Promise<string | un
 
 /**
  * The header id from a file's leading bytes, past the optional title slot
- * line. Parses only the first record. {@link HEADER_INCOMPLETE} when that
- * record runs past `prefix` and `final` is false (more of the file can be read).
+ * line. Parses only the first record, which may span lines (a pretty-printed
+ * header). {@link HEADER_INCOMPLETE} when that record runs past `prefix` and
+ * `final` is false (more of the file can be read).
  */
 function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string | undefined | typeof HEADER_INCOMPLETE {
 	let records = prefix;
@@ -228,12 +229,38 @@ function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string |
 		start++;
 	}
 	records = records.subarray(start);
-	const end = records.indexOf(0x0a);
-	if (end === -1 && !final) return HEADER_INCOMPLETE;
-	const entry = Bun.JSONL.parseChunk(end === -1 ? records : records.subarray(0, end + 1)).values[0] as
-		| FileEntry
-		| undefined;
+	if (records.length === 0) return final ? undefined : HEADER_INCOMPLETE;
+	// A header is an object; anything else is not a session file.
+	if (records[0] !== 0x7b) return undefined;
+	const end = jsonObjectEnd(records);
+	if (end === -1) return final ? undefined : HEADER_INCOMPLETE;
+	const entry = Bun.JSONL.parseChunk(records.subarray(0, end)).values[0] as FileEntry | undefined;
 	return isValidSessionHeader(entry) ? entry.id : undefined;
+}
+
+/**
+ * Index just past the JSON object that opens `bytes`, or -1 when it does not
+ * close within them. Tracks strings and escapes so braces inside values do not
+ * count; UTF-8 continuation bytes never match the ASCII delimiters. Malformed
+ * input yields some end the parser then rejects.
+ */
+function jsonObjectEnd(bytes: Uint8Array): number {
+	let depth = 0;
+	let inString = false;
+	for (let index = 0; index < bytes.length; index++) {
+		const byte = bytes[index];
+		if (inString) {
+			if (byte === 0x5c) index++;
+			else if (byte === 0x22) inString = false;
+		} else if (byte === 0x22) {
+			inString = true;
+		} else if (byte === 0x7b || byte === 0x5b) {
+			depth++;
+		} else if ((byte === 0x7d || byte === 0x5d) && --depth === 0) {
+			return index + 1;
+		}
+	}
+	return -1;
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
