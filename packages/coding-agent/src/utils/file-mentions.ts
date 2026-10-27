@@ -26,6 +26,7 @@ import {
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, resizeImage } from "./image-resize";
 import { VideoError, buildVideoContactSheetPng, formatVideoDetails, probeVideo, videoMimeForPath } from "./video";
+import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "./markit";
 import { createVideoPreviewImage, isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 
 /** Regex to match @filepath patterns in text */
@@ -292,6 +293,23 @@ export async function generateFileMentionMessages(
 					byteSize: stat.size,
 					skippedReason: "tooLarge",
 				});
+				continue;
+			}
+			const ext = path.extname(absolutePath).toLowerCase();
+			if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+				const result = await convertFileWithMarkit(absolutePath);
+				if (result.ok && result.content.trim().length > 0) {
+					const { output, lineCount } = buildTextOutput(result.content);
+					files.push({ path: resolvedPath, content: output, lineCount });
+				} else {
+					const reason = result.error || `cannot read ${ext} file`;
+					files.push({
+						path: resolvedPath,
+						content: `(skipped auto-read: ${reason})`,
+						byteSize: stat.size,
+						skippedReason: "binary",
+					});
+				}
 				continue;
 			}
 			if (await isProbablyBinary(absolutePath)) {
