@@ -879,10 +879,11 @@ export interface FindSessionContinuationOptions {
  * replaced under that session, which went on in a sibling and left the file
  * as it found it (`SessionPersistenceNotice` reason `replaced`). The file
  * then holds none of that conversation, so the copies that continue the
- * session its name records are followed instead, and the file is never the
- * one resumed. This applies when the file no longer reads as a session at
+ * session its name records are followed instead, and the file itself is
+ * never returned. This applies when the file no longer reads as a session at
  * all, and, with `matchedByFileName`, when it holds another session; a file
- * named by path that holds another session resumes as that session.
+ * named by path that holds another session resumes as that session. A file
+ * without a generated name records no session id, so it is never taken as replaced.
  *
  * A continuation is named `<move time>_<id>.jsonl` and moves only after the
  * session it continues was created, so only files named after that creation
@@ -947,6 +948,36 @@ export async function findSessionContinuation(
 		replaced,
 	});
 	return { session: newest, from: target, copies: count };
+}
+
+/**
+ * For `--resume <id>` that matched no listed session: the copy to resume of a
+ * session whose file, found by `idPrefix` in its generated name, no longer
+ * reads as a session (it was replaced; see {@link findSessionContinuation}).
+ * The session listing skips such a file, but the copies that continue it
+ * still name its id. Looks in `sessionDir` (else `cwd`'s default session
+ * directory) and, without `sessionDir`, in every project directory, as
+ * {@link resolveResumableSession} does.
+ */
+export async function findUnlistedSessionContinuation(
+	idPrefix: string,
+	cwd: string,
+	sessionDir?: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<SessionContinuation | undefined> {
+	const prefix = idPrefix.toLowerCase();
+	if (!/^[\w-]+$/.test(prefix)) return undefined;
+	const localDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
+	for (const scope of sessionDir ? ["local"] : ["local", "global"]) {
+		const files =
+			scope === "local" ? storage.listFilesSync(localDir, `*_${prefix}*.jsonl`) : await findSessionFiles(prefix);
+		for (const file of files) {
+			if (!parseSessionFileName(file)?.id.startsWith(prefix)) continue;
+			const continuation = await findSessionContinuation(file, storage, { matchedByFileName: true });
+			if (continuation) return continuation;
+		}
+	}
+	return undefined;
 }
 
 /**

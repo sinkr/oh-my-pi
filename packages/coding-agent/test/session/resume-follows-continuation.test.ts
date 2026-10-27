@@ -637,25 +637,30 @@ describe("--resume of a session that continued in a sibling file", () => {
 		}
 	}, 30_000);
 
-	it("follows the continuation when the asked-for file no longer reads as a session", async () => {
-		using tempDir = TempDir.createSync("@omp-resume-continuation-");
-		const { original, continuation } = await movedOffSession(tempDir);
-		// Conflict recovery leaves a file that no longer reads as its session as it found it.
-		await Bun.write(original, "not a session journal\n");
+	for (const by of ["path", "id"]) {
+		it(`follows the continuation when the asked-for file no longer reads as a session, resumed by ${by}`, async () => {
+			using tempDir = TempDir.createSync("@omp-resume-continuation-");
+			const { original, continuation } = await movedOffSession(tempDir);
+			const sessionId = await readSessionHeaderId(original);
+			if (!sessionId) throw new Error("Expected a session id");
+			// Conflict recovery leaves a file that no longer reads as its session as it found it.
+			await Bun.write(original, "not a session journal\n");
 
-		const followed: SessionContinuation[] = [];
-		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings, undefined, {
-			onSessionContinuation: c => followed.push(c),
-		});
-		try {
-			expect(manager?.getSessionFile()).toBe(continuation);
-			expect(followed.map(c => ({ from: c.from, to: c.session.path, copies: c.copies }))).toEqual([
-				{ from: original, to: continuation, copies: 2 },
-			]);
-		} finally {
-			await manager?.close();
-		}
-	}, 30_000);
+			const followed: SessionContinuation[] = [];
+			const args = by === "id" ? resumeArgs(sessionId, tempDir.path()) : resumeArgs(original);
+			const manager = await createSessionManager(args, tempDir.path(), stubSettings, undefined, {
+				onSessionContinuation: c => followed.push(c),
+			});
+			try {
+				expect(manager?.getSessionFile()).toBe(continuation);
+				expect(followed.map(c => ({ from: c.from, to: c.session.path, copies: c.copies }))).toEqual([
+					{ from: original, to: continuation, copies: 2 },
+				]);
+			} finally {
+				await manager?.close();
+			}
+		}, 30_000);
+	}
 
 	it("follows the continuation of the id a replaced file is named for, and resumes that file by path as what it holds", async () => {
 		using tempDir = TempDir.createSync("@omp-resume-continuation-");

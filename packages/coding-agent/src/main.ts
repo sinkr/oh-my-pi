@@ -121,6 +121,7 @@ import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } fr
 import { loadRuntimeIdentity } from "./session/runtime-identity";
 import {
 	findSessionContinuation,
+	findUnlistedSessionContinuation,
 	resolveResumableSession,
 	type SessionContinuation,
 	type SessionInfo,
@@ -1316,44 +1317,30 @@ export async function createSessionManager(
 			return await forkIfMovedAway(manager, parsed.sessionDir);
 		}
 		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
-		if (!match) {
+		// An id that matched only the file name asks for the session that name records. A file
+		// that no longer reads as a session is not listed, but the copies that continue it still name its id.
+		const continuation = match
+			? await findSessionContinuation(match.session.path, undefined, {
+					matchedByFileName: !match.session.id.toLowerCase().startsWith(sessionArg.toLowerCase()),
+				})
+			: await findUnlistedSessionContinuation(sessionArg, cwd, parsed.sessionDir);
+		const session = continuation?.session ?? match?.session;
+		if (!session) {
 			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
 		}
-		// An id that matched only the file name asks for the session that name records.
-		const continuation = await findSessionContinuation(match.session.path, undefined, {
-			matchedByFileName: !match.session.id.toLowerCase().startsWith(sessionArg.toLowerCase()),
-		});
 		if (continuation) options.onSessionContinuation?.(continuation);
-		const session = continuation?.session ?? match.session;
-		if (match.scope === "local") {
-			const moveResult = await moveMissingCwdSessionIfNeeded(
-				sessionArg,
-				session,
-				cwd,
-				parsed.sessionDir,
-				askToMoveSession,
-			);
-			if (moveResult.status === "moved") {
-				return await forkIfMovedAway(moveResult.manager, parsed.sessionDir);
-			}
-			if (moveResult.status === "declined") {
-				return undefined;
-			}
+		const moveResult = await moveMissingCwdSessionIfNeeded(
+			sessionArg,
+			session,
+			cwd,
+			parsed.sessionDir,
+			askToMoveSession,
+		);
+		if (moveResult.status === "moved") {
+			return await forkIfMovedAway(moveResult.manager, parsed.sessionDir);
 		}
-		if (match.scope === "global") {
-			const moveResult = await moveMissingCwdSessionIfNeeded(
-				sessionArg,
-				session,
-				cwd,
-				parsed.sessionDir,
-				askToMoveSession,
-			);
-			if (moveResult.status === "moved") {
-				return await forkIfMovedAway(moveResult.manager, parsed.sessionDir);
-			}
-			if (moveResult.status === "declined") {
-				return undefined;
-			}
+		if (moveResult.status === "declined") {
+			return undefined;
 		}
 		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
 	}

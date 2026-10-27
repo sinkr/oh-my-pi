@@ -66,7 +66,7 @@ For `SessionInfo` list entries:
 
 ## `--continue` resolution and terminal breadcrumb preference
 
-`SessionManager.continueRecent(cwd, sessionDir?)` resolves the target in this order:
+`SessionManager.continueRecent(cwd, sessionDir?, storage?, { onSessionContinuation? })` resolves the target in this order:
 
 1. Read terminal-scoped breadcrumb (`~/.omp/agent/terminal-sessions/<terminal-id>`)
 2. Validate the breadcrumb. A materialized target is usable; a missing target is usable only when its optional third line is `fresh`, denoting a lazily-unmaterialized `/new` boundary.
@@ -75,6 +75,7 @@ For `SessionInfo` list entries:
 5. If the breadcrumb's cwd differs, no longer exists, and no genuine current-cwd session takes precedence, re-root only when its recorded device/inode matches the current directory (`open` + `moveTo`). A deleted, unmounted, or cross-filesystem-moved project is not positive evidence of a rename.
 6. Otherwise use a breadcrumb whose cwd matches current cwd (and is within an explicit `sessionDir`, when supplied); for a cwd mismatch use the newest non-empty current-bucket session.
 7. Without a usable breadcrumb, choose the newest non-empty session by mtime; if none exists, create a new session.
+8. When the chosen session (including one re-rooted in step 5) went on in another file of its directory (a sibling whose header names it in `continuationOf`), open that copy instead and report it to `onSessionContinuation`. The session a breadcrumb names keeps the `--resume` rule (`findSessionContinuation`); a pick by mtime uses `findRecentSessionContinuation`, which looks at the linked copies in both directions.
 
 Terminal ID derivation prefers TTY path and falls back to env-based identifiers (`ZELLIJ_PANE_ID`, `TMUX_PANE`, `CMUX_SURFACE_ID`, `KITTY_WINDOW_ID`, `WEZTERM_PANE`, `TERM_SESSION_ID`, `WT_SESSION`). Zellij IDs also include `ZELLIJ_SESSION_NAME` when present, with path separators normalized.
 

@@ -4491,11 +4491,17 @@ export class SessionManager {
 					// Anchor at the gone breadcrumb cwd so the moveTo below relocates the
 					// session: open() now falls back to the launch cwd for a missing
 					// recorded cwd, which would no-op moveTo when it equals `cwd`.
-					const manager = await SessionManager.open(breadcrumb.sessionFile, undefined, storage, {
-						initialCwd: breadcrumbCwd,
-					});
+					// The breadcrumb names this session, as a file named to `--resume` is named.
+					const continuation = await findSessionContinuation(breadcrumb.sessionFile, storage);
+					const manager = await SessionManager.open(
+						continuation?.session.path ?? breadcrumb.sessionFile,
+						undefined,
+						storage,
+						{ initialCwd: breadcrumbCwd },
+					);
 					try {
 						await manager.moveTo(cwd, sessionDir);
+						if (continuation) options.onSessionContinuation?.(continuation);
 						return manager;
 					} catch (err) {
 						if (!(err instanceof SessionMoveRefusedError)) throw err;
