@@ -1367,13 +1367,12 @@ async function renderUrl(
 	// HTML extraction) and returns the response body verbatim. Binary-oriented branches
 	// above already ran because raw isn't useful for binary payloads.
 	if (raw) {
-		const output = finalizeOutput(rawContent);
 		return {
 			url,
 			finalUrl,
 			contentType: mime,
 			method: "raw",
-			content: output,
+			content: rawContent,
 			fetchedAt,
 			truncated,
 			notes,
@@ -1738,7 +1737,7 @@ export async function fetchReadUrl(
 		const cutNote = `Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`;
 		result = { ...result, notes: [...result.notes, cutNote] };
 	}
-	const output = buildUrlReadOutput(result, result.content);
+	const output = buildUrlReadOutput(result, result.content, raw);
 	const artifact = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
 
 	return {
@@ -1750,6 +1749,7 @@ export async function fetchReadUrl(
 			finalUrl: result.finalUrl,
 			contentType: result.contentType,
 			method: result.method,
+			raw: raw || undefined,
 			truncated: Boolean(result.truncated),
 			notes: result.notes,
 		},
@@ -1773,7 +1773,8 @@ export async function materializeReadUrlToFile(
 	return { path: contentPath, details: entry.details };
 }
 
-function buildUrlReadOutput(result: FetchRenderResult, content: string): string {
+function buildUrlReadOutput(result: FetchRenderResult, content: string, raw: boolean): string {
+	if (raw) return content;
 	let output = "";
 	output += `URL: ${result.finalUrl}\n`;
 	output += `Content-Type: ${result.contentType}\n`;
