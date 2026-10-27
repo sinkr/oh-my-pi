@@ -154,7 +154,9 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Archive paths normalize `/`, drop `.` segments, and reject `..`.
 - Directory reads list immediate children; files show `name` plus ` (size)` when size > 0.
 - Directory listing default limit is `500` entries in `readArchiveDirectory()`.
-- File entries are UTF-8 decoded. Non-UTF-8 entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
+- Selected PDF entries use the same Markdown conversion as ordinary PDF files, including line, multi-range, tail, and raw selectors. The read identity retains both the archive and member path and is immutable.
+- PDF page-image reads such as `a.zip:folder/sample document.pdf:page2.png` render only the selected member through Chromium. Its bounded temporary PDF is removed after success, failure, or cancellation; archive paths are never unpacked into the working directory.
+- Other file entries are UTF-8 decoded. Unsupported binary entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
 - Text archive entries reuse the normal in-memory pagination/anchoring path.
 
 ### Executables and IDA databases
