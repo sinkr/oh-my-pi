@@ -225,6 +225,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Explicit JSON selectors also work on backups (`config.json.bak`, dated suffixes) and extensionless files. Existing literal filenames containing `?` win over selectors; raster image questions, SVG `:img` questions, and PDF-page questions keep their image route. Invalid JSON reports a JSON parse error.
 - Modifier-only selectors (`?limit=2`, `?offset=1`, `?raw=true`, `?compact=true`) and empty `q=`/`query=` use the identity filter `.`. Unknown-only query strings are not JSON selectors.
 - One leading UTF-8 BOM is accepted per JSON input, including JSONL. U+FEFF inside strings and raw-input (`jq -R`) bytes remain unchanged; malformed JSON still reports a parse error.
+- `ssh://HOST/tmp/data.json?q=.items&limit=2` resolves the bare SSH file URI and runs the same JSON renderer locally on its bounded text. The 1 MiB SSH ceiling still applies. Filters never enter the remote shell, `%3F` still names a literal `?`, and unsupported URL parameters remain errors. Temporary query input is owned and removed on success, failure, or cancellation; trailing line selectors address query output.
 
 ### Documents
 

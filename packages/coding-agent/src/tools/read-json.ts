@@ -12,6 +12,7 @@ import {
 	parseHeifImageMimeType,
 	parseImageMetadata,
 	sanitizeText,
+	TempDir,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import type { ToolSession } from "../sdk";
@@ -364,6 +365,13 @@ export interface ResolvedJsonReadPath {
 	suffixResolution?: { from: string; to: string };
 }
 
+/** An already-bounded virtual text resource, queried locally without exposing scratch paths. */
+export interface ResolvedJsonReadResource {
+	url: string;
+	content: string;
+	selector: JsonSelector;
+}
+
 /**
  * Resolves `file?q=…` to an existing non-image file, falling back to a unique
  * workspace suffix match; null when the path is not a JSON query or no file exists.
@@ -413,27 +421,38 @@ export async function resolveJsonReadPath(
 /** Runs a resolved JSON query and renders it as a read result; `lineSelector` slices the output. */
 export async function readJson(
 	session: ToolSession,
-	resolvedJsonPath: ResolvedJsonReadPath,
+	resolvedJsonPath: ResolvedJsonReadPath | ResolvedJsonReadResource,
 	lineSelector?: string,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadToolDetails>> {
 	throwIfAborted(signal);
 
+	const file = "absolutePath" in resolvedJsonPath ? resolvedJsonPath : undefined;
+	const resource = "url" in resolvedJsonPath ? resolvedJsonPath : undefined;
 	const details: ReadToolDetails = {
-		resolvedPath: resolvedJsonPath.absolutePath,
-		suffixResolution: resolvedJsonPath.suffixResolution,
+		resolvedPath: file?.absolutePath,
+		suffixResolution: file?.suffixResolution,
 	};
 
-	const queryOutput = await executeJsonQuery(resolvedJsonPath.absolutePath, resolvedJsonPath.selector, signal);
+	let queryOutput: string;
+	if ("url" in resolvedJsonPath) {
+		await using scratch = await TempDir.create("@omp-read-json-");
+		const inputPath = scratch.join("input.json");
+		await Bun.write(inputPath, resolvedJsonPath.content);
+		queryOutput = await executeJsonQuery(inputPath, resolvedJsonPath.selector, signal);
+	} else {
+		queryOutput = await executeJsonQuery(resolvedJsonPath.absolutePath, resolvedJsonPath.selector, signal);
+	}
 
-	const output = prependSuffixResolutionNotice(queryOutput, resolvedJsonPath.suffixResolution);
+	const output = prependSuffixResolutionNotice(queryOutput, file?.suffixResolution);
 
 	if (lineSelector) {
 		const parsedSel = parseSel(lineSelector);
 		if (parsedSel.kind !== "none") {
 			return buildInMemorySelectorResult(session, output, parsedSel, {
 				details,
-				sourcePath: resolvedJsonPath.absolutePath,
+				sourcePath: file?.absolutePath,
+				sourceInternal: resource?.url,
 				entityLabel: "JSON query output",
 				immutable: true,
 			});
@@ -442,9 +461,9 @@ export async function readJson(
 
 	const truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES });
 	details.truncation = truncation.truncated ? toReadTruncationStats(truncation) : undefined;
-	const resultBuilder = toolResult<ReadToolDetails>(details)
-		.text(truncation.content)
-		.sourcePath(resolvedJsonPath.absolutePath);
+	const resultBuilder = toolResult<ReadToolDetails>(details).text(truncation.content);
+	if (resource) resultBuilder.sourceInternal(resource.url);
+	else if (file) resultBuilder.sourcePath(file.absolutePath);
 	if (truncation.truncated) {
 		resultBuilder.truncation(truncation, { direction: "head" });
 	}
