@@ -134,6 +134,8 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
       - raw mode suppresses both
 - Prefix format in hashline mode is a `[PATH#TAG]` header followed by `LINE:TEXT`, e.g. `[src/foo.ts#0A1B]` and `41:def alpha():`, from the session snapshot store plus `formatNumberedLine()` / `formatHashlineHeader()`.
 - The `edit`/hashline path consumes that header plus bare line numbers later; the four-hex tag is a content-derived hash of the whole normalized file, resolvable through the session snapshot store that recorded it. Immutable sources and `:raw` intentionally suppress hashline headers.
+- Raw comma ranges join the selected source lines with a single newline, without elision rows. Finite raw ranges omit the terminal newline and have no continuation footer when satisfied; open-ended ranges reaching EOF retain the terminal newline. Actual byte/line ceilings still carry truncation diagnostics. Conflict markers remain source text in raw reads: registration and `conflictCount` are retained, while conflict instructions move to `details.notes` instead of the body.
+- Raw out-of-bounds selections contribute no source text; skipped-range and single-line bounds diagnostics remain in `details.notes`. Repeated raw reads also keep loop hints in `details.notes`, and recovered paths stay in `details.suffixResolution` without a body prefix. `details.raw` carries the resolved mode to these shared notice emitters, including when a literal filename resembles a selector.
 
 ### Directory listings
 
@@ -279,7 +281,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 - `parseReadUrlTarget()` accepts `http://`, `https://`, or `www.` targets.
 - Plain URL reads call `executeReadUrl()` in `packages/coding-agent/src/tools/fetch.ts`.
-- `:raw` means raw HTML/body fallback path; plain URL reads prefer rendered/reader-friendly output.
+- `:raw` returns the response body without a transport header or whitespace normalization; URL, Content-Type, Method, and notes remain in structured details. Plain URL reads prefer rendered/reader-friendly output and keep the transport header below.
 - `:N`, `:A-B`, `:A+C`, and comma-separated multi-ranges do not refetch when cached output is usable. They page over cached output from the prior or current URL render.
 - URL render pipeline in `renderUrl()`:
    1. normalize scheme (`https://` added for bare `www.`)
@@ -289,7 +291,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    5. handle JSON directly, feeds via feed parser, plain text directly
    6. for HTML and non-raw mode, try markdown alternates, `URL.md`, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
    7. fall back to raw body text/html
-- URL output is wrapped with a small header:
+- Non-raw whole-URL output is wrapped with a small header; line selectors address body lines, not these header rows. Raw URL artifacts and search materialization use the same unwrapped body coordinates:
 
 ```text
 URL: ...
