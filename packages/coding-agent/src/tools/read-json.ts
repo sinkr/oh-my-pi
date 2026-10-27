@@ -6,7 +6,14 @@ import { Shell } from "@oh-my-pi/pi-natives";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { DEFAULT_MAX_LINES, truncateHead, truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
+import {
+	IMAGE_METADATA_HEADER_BYTES,
+	isEnoent,
+	parseHeifImageMimeType,
+	parseImageMetadata,
+	sanitizeText,
+} from "@oh-my-pi/pi-utils";
+import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import type { ToolSession } from "../sdk";
 import { quotePosixArgument } from "../utils/shell-quote";
 import { resolveReadPath } from "./path-utils";
@@ -21,7 +28,6 @@ import { parseSel } from "./read-selector";
 import { throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
-const JSON_FILE_PATTERN = /\.(?:jsonl?|ndjson)$/i;
 const DEFAULT_JSON_QUERY_LIMIT = 100;
 const MAX_JSON_QUERY_LIMIT = 1000;
 const MAX_QUERY_CAPTURE_CHARS = 5 * 1024 * 1024;
@@ -55,14 +61,14 @@ export interface JsonSelector {
 type JqStop = "capture-cap" | "page-full";
 
 /**
- * Splits `file.json?q=…` at its first `?`; null unless the text before it names
- * a `.json`, `.jsonl`, or `.ndjson` file. jq filters may contain `?`, paths rarely do.
+ * Splits a selector target at its first `?`, independently of the file extension.
+ * Admission still requires recognized parameters and an existing non-image file.
  */
 export function splitJsonQueryTarget(readPath: string): { jsonPath: string; queryString: string } | null {
 	const queryIndex = readPath.indexOf("?");
 	if (queryIndex === -1) return null;
 	const jsonPath = readPath.slice(0, queryIndex);
-	return JSON_FILE_PATTERN.test(jsonPath) ? { jsonPath, queryString: readPath.slice(queryIndex + 1) } : null;
+	return { jsonPath, queryString: readPath.slice(queryIndex + 1) };
 }
 
 /**
@@ -357,7 +363,7 @@ export interface ResolvedJsonReadPath {
 }
 
 /**
- * Resolves `file.json?q=…` to an existing file, falling back to a unique
+ * Resolves `file?q=…` to an existing non-image file, falling back to a unique
  * workspace suffix match; null when the path is not a JSON query or no file exists.
  */
 export async function resolveJsonReadPath(
@@ -372,9 +378,17 @@ export async function resolveJsonReadPath(
 	if (!selector) return null;
 
 	const absolutePath = resolveReadPath(target.jsonPath, session.cwd);
+	const resolved = async (filePath: string): Promise<boolean> => {
+		const stat = await Bun.file(filePath).stat();
+		if (!stat.isFile()) return false;
+		return peekFile(
+			filePath,
+			IMAGE_METADATA_HEADER_BYTES,
+			header => !parseImageMetadata(header) && !parseHeifImageMimeType(header),
+		);
+	};
 	try {
-		const stat = await Bun.file(absolutePath).stat();
-		return stat.isFile() ? { absolutePath, selector } : null;
+		return (await resolved(absolutePath)) ? { absolutePath, selector } : null;
 	} catch (error) {
 		if (!isNotFoundError(error) || isRemoteMountPath(absolutePath)) return null;
 	}
@@ -382,8 +396,7 @@ export async function resolveJsonReadPath(
 	const suffixMatch = await findSuffixMatchCached(session, suffixCache, target.jsonPath, signal);
 	if (!suffixMatch) return null;
 	try {
-		const stat = await Bun.file(suffixMatch.absolutePath).stat();
-		if (!stat.isFile()) return null;
+		if (!(await resolved(suffixMatch.absolutePath))) return null;
 	} catch (error) {
 		if (isNotFoundError(error)) return null;
 		throw error;

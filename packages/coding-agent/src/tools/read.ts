@@ -792,7 +792,8 @@ export function splitImageQuestionTarget(readPath: string): { path: string; ques
 		if (!scheme || !InternalUrlRouter.instance().spec(scheme)?.imageQuestion) return { path: readPath };
 	}
 	if (parseSqlitePathCandidates(readPath).length > 0) return { path: readPath };
-	if (splitJsonQueryTarget(readPath)) return { path: readPath };
+	const jsonTarget = splitJsonQueryTarget(readPath);
+	if (jsonTarget && /\.(?:jsonl?|ndjson)$/i.test(jsonTarget.jsonPath)) return { path: readPath };
 
 	const queryIndex = readPath.indexOf("?");
 	if (queryIndex === -1) return { path: readPath };
@@ -1753,7 +1754,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
 		);
 		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
-		const imageQuestion = splitImageQuestionTarget(readPath);
+		// Filesystem-backed reads choose JSON versus image questions after resolving
+		// the literal file and sniffing its content, not from its final extension.
+		const scheme = extractUriScheme(readPath);
+		const imageQuestion =
+			!scheme || scheme === "local" || scheme === "artifact"
+				? { path: readPath }
+				: splitImageQuestionTarget(readPath);
 		readPath = imageQuestion.path;
 		const question = imageQuestion.question;
 
@@ -1863,7 +1870,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const {
 			located,
-			question,
 			questionPath,
 			signal,
 			onBufferedFile,
@@ -1871,6 +1877,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			lexicalAbsolutePath,
 			toolContext,
 		} = options;
+		let { question } = options;
 		const rawImages = toolContext?.rawImages === true;
 		const immutable = located?.spec.immutable === true;
 		const displayMode = resolveFileDisplayMode(this.session, { immutable });
@@ -1885,11 +1892,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// POSIX filenames containing selector-looking suffixes win over structured
 		// archive / sqlite / unsupported PDF-image dispatch. A located URL's selector
 		// stays separate so it cannot be mistaken for part of the resolved path.
-		const literalSplit = located
+		let literalSplit = located
 			? { path: readPath, sel: located.sel }
 			: await splitPathAndSelPreferringLiteral(readPath, this.session.cwd);
 		const rawPathIsLiteral =
-			!located && literalSplit.sel === undefined && splitPathAndSel(readPath).sel !== undefined;
+			!located &&
+			literalSplit.sel === undefined &&
+			(splitPathAndSel(readPath).sel !== undefined ||
+				(readPath.includes("?") && (await probeLiteralPathExists(readPath, this.session.cwd)) !== "missing"));
 
 		let pdfImageRead: PdfImageReadTarget | null = null;
 
@@ -1922,9 +1932,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				located && (jsonScheme === "local" || jsonScheme === "artifact")
 					? `${literalSplit.path}${located.url.slice(jsonQuery)}`
 					: literalSplit.path;
-			const jsonPath = await resolveJsonReadPath(this.session, jsonReadPath, suffixCache, signal);
+			const jsonPath =
+				located && jsonQuery < 0
+					? null
+					: await resolveJsonReadPath(this.session, jsonReadPath, suffixCache, signal);
 			if (jsonPath) {
 				return readJson(this.session, jsonPath, literalSplit.sel, signal);
+			}
+
+			// JSON admission has ruled out this target (for example, raster image
+			// bytes or an SVG/PDF image selector). Preserve the existing vision route.
+			const questionTarget = splitJsonQueryTarget(located?.url ?? readPath);
+			const imageQuestion = questionTarget ? new URLSearchParams(questionTarget.queryString).get("q") : null;
+			if (questionTarget && imageQuestion) {
+				question = imageQuestion;
+				if (!located) {
+					readPath = questionTarget.jsonPath;
+					literalSplit = await splitPathAndSelPreferringLiteral(readPath, this.session.cwd);
+				}
 			}
 
 			// `bin:main`, `bin:imports`, `bin:main:10-40`: an executable/IDB prefix

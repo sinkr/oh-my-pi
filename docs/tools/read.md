@@ -222,6 +222,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 ### JSON queries
 
 - `file.json?q=<jq filter>` runs the embedded jq interpreter. `raw=true` returns unquoted strings; `compact=true` keeps values on one line. `offset` and `limit` page array elements or whole JSONL results with a continuation hint.
+- Explicit JSON selectors also work on backups (`config.json.bak`, dated suffixes) and extensionless files. Existing literal filenames containing `?` win over selectors; raster image questions, SVG `:img` questions, and PDF-page questions keep their image route. Invalid JSON reports a JSON parse error.
 
 - One leading UTF-8 BOM is accepted per JSON input, including JSONL. U+FEFF inside strings and raw-input (`jq -R`) bytes remain unchanged; malformed JSON still reports a parse error.
 
