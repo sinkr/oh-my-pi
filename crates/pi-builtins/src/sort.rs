@@ -2114,6 +2114,7 @@ fn merge_without_limit<M: MergeInput + 'static, F: Iterator<Item = SortResult<M>
 		request_sender,
 		prev: None,
 		reader_join_handle,
+		join_on_cancel: !M::MAY_BLOCK,
 	})
 }
 /// The struct on the reader thread representing an input file
@@ -2188,6 +2189,9 @@ struct FileMerger<'a> {
 	request_sender:     Sender<(usize, RecycledChunk)>,
 	prev:               Option<PreviousLine>,
 	reader_join_handle: JoinHandle<SortResult<()>>,
+	/// Whether a merge that stops early waits for the reader thread to close
+	/// its inputs (see [`MergeInput::MAY_BLOCK`]).
+	join_on_cancel:     bool,
 }
 
 impl FileMerger<'_> {
@@ -2206,21 +2210,33 @@ impl FileMerger<'_> {
 		// The readers stop at cancellation, which would pass for the end of
 		// the input and a merge that succeeded.
 		let cancelled = || settings.cancel.load(AtomicOrdering::Relaxed);
-		while !cancelled()
-			&& self
-				.write_next(settings, out)
-				.map_err(|error| SortError::WriteFailed {
-					path: OsString::from("standard output"),
-					error,
-				})?
-		{}
+		let written = loop {
+			if cancelled() {
+				break Ok(());
+			}
+			match self.write_next(settings, out) {
+				Ok(true) => {},
+				Ok(false) => break Ok(()),
+				Err(error) => {
+					break Err(SortError::WriteFailed { path: OsString::from("standard output"), error });
+				},
+			}
+		};
 		drop(self.request_sender);
-		if cancelled() {
-			// Not joined: the reader thread stops at its next request, or when
-			// it finds the merge's receivers gone.
-			return Err(SortError::Cancelled);
+		if written.is_ok() && !cancelled() {
+			return self.reader_join_handle.join().unwrap();
 		}
-		self.reader_join_handle.join().unwrap()
+		// Stopped early. Without the receivers, a reader waiting to hand over
+		// a chunk stops too, and closes its inputs: a `--compress-program`
+		// child is waited for and its temporary file removed before `sort`
+		// returns and its temporary directory goes.
+		drop(self.heap);
+		drop(self.prev);
+		if self.join_on_cancel {
+			let _ = self.reader_join_handle.join();
+		}
+		written?;
+		Err(SortError::Cancelled)
 	}
 
 	fn write_next(
@@ -2337,6 +2353,10 @@ pub trait ClosedTmpFile {
 /// A pre-sorted input for merging.
 pub trait MergeInput: Send {
 	type InnerRead: Read;
+	/// Whether a read can wait on another writer indefinitely, as from a
+	/// pipe or a terminal. A merge that stops early waits for its reader
+	/// thread to close the inputs only when no read can.
+	const MAY_BLOCK: bool;
 	/// Cleans this `MergeInput` up.
 	/// Implementations may delete the backing file.
 	fn finished_reading(self) -> SortResult<()>;
@@ -2399,6 +2419,9 @@ impl ClosedTmpFile for ClosedPlainTmpFile {
 }
 impl MergeInput for PlainTmpMergeInput {
 	type InnerRead = File;
+
+	// A temporary file of our own.
+	const MAY_BLOCK: bool = false;
 
 	fn finished_reading(self) -> SortResult<()> {
 		// we ignore failures to delete the temporary file,
@@ -2557,6 +2580,10 @@ impl ClosedTmpFile for ClosedCompressedTmpFile {
 impl MergeInput for CompressedTmpMergeInput {
 	type InnerRead = ChildStdout;
 
+	// The decompressor reads a temporary file of our own, so it writes until
+	// that ends or its output closes.
+	const MAY_BLOCK: bool = false;
+
 	fn finished_reading(self) -> SortResult<()> {
 		// Explicitly close stdout before waiting on the child process.
 		#[allow(clippy::drop_non_drop)]
@@ -2581,12 +2608,71 @@ pub struct PlainMergeInput<R: Read + Send> {
 impl<R: Read + Send> MergeInput for PlainMergeInput<R> {
 	type InnerRead = R;
 
+	// `sort -m`'s own inputs: a pipe or a terminal can wait forever.
+	const MAY_BLOCK: bool = true;
+
 	fn finished_reading(self) -> SortResult<()> {
 		Ok(())
 	}
 
 	fn as_read(&mut self) -> &mut Self::InnerRead {
 		&mut self.inner
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		io::Cursor,
+		sync::{
+			Arc,
+			atomic::{AtomicUsize, Ordering as Atomic},
+		},
+		time::Duration,
+	};
+
+	use super::*;
+
+	/// A temporary file whose cleanup takes a while, as a decompressor's
+	/// exit can.
+	struct SlowCleanup {
+		inner:  Cursor<Vec<u8>>,
+		closed: Arc<AtomicUsize>,
+	}
+
+	impl MergeInput for SlowCleanup {
+		type InnerRead = Cursor<Vec<u8>>;
+
+		const MAY_BLOCK: bool = false;
+
+		fn finished_reading(self) -> SortResult<()> {
+			thread::sleep(Duration::from_millis(100));
+			self.closed.fetch_add(1, Atomic::SeqCst);
+			Ok(())
+		}
+
+		fn as_read(&mut self) -> &mut Self::InnerRead {
+			&mut self.inner
+		}
+	}
+
+	// Failure mode: a merge cancelled part way returned before its reader
+	// thread closed the inputs, so `--compress-program` decompressors outlived
+	// `sort` and its temporary directory.
+	#[test]
+	fn a_cancelled_merge_closes_its_inputs_before_it_returns() {
+		const FILES: usize = 4;
+		let settings = GlobalSettings::default();
+		let closed = Arc::new(AtomicUsize::new(0));
+		// Many read chunks per file, so every input is still open at the cancel.
+		let lines: Vec<u8> = (0..20_000).flat_map(|n| format!("{n:08}\n").into_bytes()).collect();
+		let files = (0..FILES)
+			.map(|_| Ok(SlowCleanup { inner: Cursor::new(lines.clone()), closed: Arc::clone(&closed) }));
+		let merger = merge_without_limit(files, &settings).expect("merger");
+		settings.cancel.store(true, AtomicOrdering::Relaxed);
+		let result = merger.write_all_to(&settings, &mut io::sink());
+		assert!(matches!(result, Err(SortError::Cancelled)), "{result:?}");
+		assert_eq!(closed.load(Atomic::SeqCst), FILES, "inputs still open when the merge returned");
 	}
 }
 
