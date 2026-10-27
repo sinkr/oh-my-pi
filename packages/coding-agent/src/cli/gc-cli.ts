@@ -1981,8 +1981,16 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 		);
 	}
 	if (options.apply) {
-		result.probeFailure = await compressProbeFailure(sessionsRoot, method);
-		if (result.probeFailure !== undefined) return result;
+		// Without it, a volume that ignores the request would still copy and verify every candidate.
+		try {
+			if (!(await compressionWorks(sessionsRoot, method))) {
+				result.probeFailure = `${method} compression stored a compressible probe file uncompressed`;
+				return result;
+			}
+		} catch (error) {
+			result.errors.push(`compression probe: ${errorMessage(error)}`);
+			return result;
+		}
 	}
 	const sessions = await listActiveSessions(sessionsRoot);
 	result.scanned = sessions.length;
@@ -2032,20 +2040,6 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 		}
 	}
 	return result;
-}
-
-/**
- * Why `method` would store nothing compressed under `sessionsRoot`, or
- * undefined when a probe file compresses there. Without it a volume that
- * ignores the request would still copy and verify every candidate.
- */
-async function compressProbeFailure(sessionsRoot: string, method: CompressMethod): Promise<string | undefined> {
-	try {
-		if (await compressionWorks(sessionsRoot, method)) return undefined;
-		return `${method} compression stored a compressible probe file uncompressed`;
-	} catch (error) {
-		return `compression probe failed: ${errorMessage(error)}`;
-	}
 }
 
 async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpointResult> {

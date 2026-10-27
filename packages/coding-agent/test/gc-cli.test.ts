@@ -10,7 +10,7 @@ import {
 	GC_AUTO_COMPRESS_LOG,
 	scheduleGcAutoCompress,
 } from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
-import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
+import { collectGcErrors, type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -2839,6 +2839,23 @@ describe("runGcCommand session compression", () => {
 
 		expect(result.compress).toMatchObject({ supported: true, scanned: 0, wouldCompress: 0, compressed: 0 });
 		expect(result.compress?.probeFailure).toContain("stored a compressible probe file uncompressed");
+		expect(await snapshot(file)).toEqual(before);
+	});
+
+	test.skipIf(!supported)("--apply reports a probe that throws as a gc error and leaves sessions alone", async () => {
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+		const probe = spyOn(gcCompress, "compressionWorks").mockRejectedValue(new Error("EACCES: sessions dir"));
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+		} finally {
+			probe.mockRestore();
+		}
+
+		expect(result.compress).toMatchObject({ scanned: 0, compressed: 0 });
+		expect(result.compress?.probeFailure).toBeUndefined();
+		expect(collectGcErrors(result)).toEqual(["compress: compression probe: EACCES: sessions dir"]);
 		expect(await snapshot(file)).toEqual(before);
 	});
 
