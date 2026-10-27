@@ -4,8 +4,16 @@
 
 ### Fixed
 
+- Fixed a revoked or rejected GitHub Copilot credential continuing to show its last cached usage quota instead of being dropped ([#17081](https://github.com/can1357/oh-my-pi/issues/17081))
+- Fixed Devin requests compressing the request body on the UI thread, which briefly froze the TUI on long conversations; requests under 1 KiB are now sent uncompressed
+
+## [18.13.1] - 2026-10-27
+
+### Fixed
+
 - Codex accounts whose spend cap is used up are no longer picked through credit overage or from usage cached before the upgrade ([#16973](https://github.com/can1357/oh-my-pi/pull/16973) by [@DusKing1](https://github.com/DusKing1))
 - Fixed Codex capacity 429s (`turn_rate_limit_exceeded`, "Codex is at capacity") reporting "Try again in ~N min" from the plan's usage-window reset, which made retries wait hours instead of the response's Retry-After ([#17087](https://github.com/can1357/oh-my-pi/pull/17087) by [@H4vC](https://github.com/H4vC))
+- Fixed OAuth logins shared by several processes being disabled with `invalid_grant` when they refreshed at the same time or one of them quit mid-refresh ([#17128](https://github.com/can1357/oh-my-pi/pull/17128) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.0] - 2026-10-26
 

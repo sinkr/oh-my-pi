@@ -168,6 +168,14 @@ export interface SessionStorage {
 	confirmWrites?(path: string): Promise<void>;
 	ensureDirSync(dir: string): void;
 	existsSync(path: string): boolean;
+	/**
+	 * Whether the backing store has confirmed `path` exists. {@link existsSync}
+	 * on a deferring backend also reports queued, unconfirmed writes; a check
+	 * that must not outlive an aborted publish (an exit-time resume hint) uses
+	 * this instead. In-body backends omit it: their {@link existsSync} already
+	 * reports confirmed state.
+	 */
+	existsConfirmedSync?(path: string): boolean;
 	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void;
 	/**
 	 * Streaming {@link writeTextSync}: publishes the concatenation of `lines`
