@@ -1293,7 +1293,11 @@ export class UiHelpers {
 		if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 	}
 
-	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
+	/** Deliver one compaction-queued message; `onQueued` receives what it pushes onto the session queues. */
+	async #deliverQueuedMessage(
+		message: CompactionQueuedMessage,
+		onQueued: (queued: readonly AgentMessage[]) => void,
+	): Promise<void> {
 		const builtin = await executeBuiltinSlashCommand(message.text, {
 			ctx: this.ctx,
 			input: message.images ? { images: message.images } : undefined,
@@ -1306,6 +1310,7 @@ export class UiHelpers {
 			const forwarded = await this.ctx.session.prompt(builtin, {
 				streamingBehavior: message.mode,
 				images: message.images,
+				onPromptQueued: onQueued,
 			});
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
@@ -1315,11 +1320,13 @@ export class UiHelpers {
 				propagateErrors: true,
 				queueOnly: true,
 				images: message.images,
+				onPromptQueued: onQueued,
 			})
 		) {
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
+			// No `streamingBehavior`: this prompt never queues (a busy session rejects it).
 			const forwarded = await this.ctx.session.prompt(message.text);
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
@@ -1328,8 +1335,8 @@ export class UiHelpers {
 			message.text,
 			() =>
 				message.mode === "followUp"
-					? this.ctx.session.followUp(message.text, message.images)
-					: this.ctx.session.steer(message.text, message.images),
+					? this.ctx.session.followUp(message.text, message.images, { onPromptQueued: onQueued })
+					: this.ctx.session.steer(message.text, message.images, { onPromptQueued: onQueued }),
 			{ imageCount: message.images?.length ?? 0 },
 		);
 	}
@@ -1364,12 +1371,14 @@ export class UiHelpers {
 		const queuedMessages = [...(this.ctx.compactionQueuedMessages as CompactionQueuedMessage[])];
 		this.ctx.compactionQueuedMessages = [] as CompactionQueuedMessage[];
 		this.ctx.updatePendingMessagesDisplay();
-		// On failure the batch goes back to the compaction queue, so the input this flush queued
-		// must leave the session queue; what was queued before it (an extension's message, input
-		// sent while compacting through other paths) stays queued, and so does input queued after
-		// the flush finished delivering (the first prompt can fail after that, asynchronously).
-		const queuedBeforeFlush = this.ctx.session.queuedMessageMark();
-		let queuedByFlush: ReadonlySet<AgentMessage> | undefined;
+		// On failure the batch goes back to the compaction queue, so the messages this flush pushed
+		// onto the session queues must leave them. Only those: what other sources queue (an
+		// extension's message, input sent through other paths), before, during or after the flush,
+		// stays queued.
+		const deliveredByFlush: AgentMessage[] = [];
+		const onDelivered = (queued: readonly AgentMessage[]) => {
+			deliveredByFlush.push(...queued);
+		};
 		let restored = false;
 		// The fire-and-forget first prompt belongs to the session once admitted (queued, or its turn
 		// started): a restore then leaves it out of the batch, and keeps its queued messages, instead
@@ -1395,11 +1404,7 @@ export class UiHelpers {
 			if (restored) return;
 			restored = true;
 			firstLeftOut = firstAdmitted !== undefined && !firstFailed;
-			this.ctx.session.dropUserInputQueuedSince(
-				queuedBeforeFlush,
-				queuedByFlush,
-				firstLeftOut ? new Set(firstAdmitted) : undefined,
-			);
+			this.ctx.session.dropQueuedMessages(firstLeftOut ? deliveredByFlush : [...deliveredByFlush, ...firstQueued]);
 			const batch = firstLeftOut ? queuedMessages.filter(message => message !== firstPrompt) : queuedMessages;
 			this.ctx.compactionQueuedMessages = batch;
 			reportFailure(batch.length, error);
@@ -1408,7 +1413,7 @@ export class UiHelpers {
 		try {
 			if (options?.willRetry) {
 				for (const message of queuedMessages) {
-					await this.#deliverQueuedMessage(message);
+					await this.#deliverQueuedMessage(message, onDelivered);
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				return;
@@ -1423,7 +1428,7 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					await this.#deliverQueuedMessage(message);
+					await this.#deliverQueuedMessage(message, onDelivered);
 				}
 				return;
 			}
@@ -1437,7 +1442,7 @@ export class UiHelpers {
 				// preCommands are all slash commands; #deliverQueuedMessage handles
 				// that branch (no local-submission marking needed since slash
 				// commands don't generate a matching user message_start).
-				await this.#deliverQueuedMessage(message);
+				await this.#deliverQueuedMessage(message, onDelivered);
 			}
 
 			const onFirstQueued = (queued: readonly AgentMessage[]) => {
@@ -1450,7 +1455,7 @@ export class UiHelpers {
 				// already started leaves the batch instead.
 				if (!restored || firstLeftOut) return;
 				if (firstAdmitted.length > 0) {
-					this.ctx.session.dropUserInputQueuedSince(new Set(), new Set(firstAdmitted));
+					this.ctx.session.dropQueuedMessages(firstAdmitted);
 				} else {
 					firstLeftOut = true;
 					this.ctx.compactionQueuedMessages = this.ctx.compactionQueuedMessages.filter(m => m !== first);
@@ -1506,15 +1511,14 @@ export class UiHelpers {
 			}
 
 			for (const message of rest) {
-				await this.#deliverQueuedMessage(message);
+				await this.#deliverQueuedMessage(message, onDelivered);
 				// The first prompt failed while the rest was still being delivered: the whole batch is
 				// back in the compaction queue, so take back what was delivered since and stop.
 				if (restored) {
-					this.ctx.session.dropUserInputQueuedSince(queuedBeforeFlush);
+					this.ctx.session.dropQueuedMessages(deliveredByFlush);
 					return;
 				}
 			}
-			queuedByFlush = this.ctx.session.queuedMessageMark();
 			this.ctx.updatePendingMessagesDisplay();
 			// The dispatch above bypasses `getUserInput`, so nothing would schedule
 			// the next loop iteration for a prompt queued during compaction.

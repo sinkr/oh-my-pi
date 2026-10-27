@@ -9018,6 +9018,7 @@ export class AgentSession implements SettingsScope {
 			timestamp: submittedAt,
 			attribution: options?.attribution,
 			rawText: text,
+			onPromptQueued: options?.onPromptQueued,
 		});
 	}
 
@@ -9043,6 +9044,7 @@ export class AgentSession implements SettingsScope {
 				timestamp: submittedAt,
 				attribution: options?.attribution,
 				rawText: text,
+				onPromptQueued: options?.onPromptQueued,
 			});
 			return;
 		}
@@ -9060,7 +9062,7 @@ export class AgentSession implements SettingsScope {
 			: undefined;
 		this.#allowQueuedMessageDrainRetry();
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-		this.agent.followUp({
+		const directive: AgentMessage = {
 			role: "developer",
 			content,
 			attribution: options.attribution ?? "agent",
@@ -9069,7 +9071,9 @@ export class AgentSession implements SettingsScope {
 			// behind a busy turn): replay uses the marker to clear the preceding
 			// user's prompt anchor, matching the live agent_start clear.
 			synthetic: true,
-		});
+		};
+		this.agent.followUp(directive);
+		options.onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -10216,44 +10220,17 @@ export class AgentSession implements SettingsScope {
 		return this.takeQueuedMessage(text, queue) !== undefined;
 	}
 
-	/** The messages queued right now, as an opaque mark for {@link dropUserInputQueuedSince}. */
-	queuedMessageMark(): ReadonlySet<AgentMessage> {
-		return new Set([...this.agent.peekSteeringQueue(), ...this.agent.peekFollowUpQueue()]);
-	}
-
 	/**
-	 * Remove the user input queued after `mark` (from {@link queuedMessageMark}) and, when given,
-	 * still present in `until` (a later mark), together with the hidden companions right before
-	 * it. Everything else stays queued: messages already queued at `mark`, messages queued after
-	 * `until`, and agent or extension work that is not user input (with an agent-attributed
-	 * prompt's companions). A caller takes back a batch whose delivery failed by marking before
-	 * delivery and after it; user input another source queued between the two marks cannot be
-	 * told apart from the batch: it is removed with the batch and is not restored. Messages in
-	 * `keep` always stay queued: input the caller has handed over to the session after all, such
-	 * as a prompt it already sent.
+	 * Remove exactly `messages` from the steering and follow-up queues; everything else queued
+	 * stays. A caller takes back what it queued (the groups reported by `onPromptQueued`) without
+	 * touching what other sources queued meanwhile. A message no longer queued (already delivered,
+	 * or removed before) is skipped.
 	 */
-	dropUserInputQueuedSince(
-		mark: ReadonlySet<AgentMessage>,
-		until?: ReadonlySet<AgentMessage>,
-		keep?: ReadonlySet<AgentMessage>,
-	): void {
-		const callers = (message: AgentMessage): boolean =>
-			!mark.has(message) && !keep?.has(message) && (until === undefined || until.has(message));
-		const keepFrom = (queue: readonly AgentMessage[]): AgentMessage[] => {
-			const kept: AgentMessage[] = [];
-			let companions: AgentMessage[] = [];
-			for (const message of queue) {
-				if (callers(message) && isHiddenUserCompanion(message)) {
-					companions.push(message);
-					continue;
-				}
-				// Companions go with the message they precede.
-				if (!callers(message) || !isUserAuthoredQueuedMessage(message)) kept.push(...companions, message);
-				companions = [];
-			}
-			return kept;
-		};
-		this.agent.replaceQueues(keepFrom(this.agent.peekSteeringQueue()), keepFrom(this.agent.peekFollowUpQueue()));
+	dropQueuedMessages(messages: Iterable<AgentMessage>): void {
+		const dropped = new Set(messages);
+		if (dropped.size === 0) return;
+		const kept = (queue: readonly AgentMessage[]): AgentMessage[] => queue.filter(message => !dropped.has(message));
+		this.agent.replaceQueues(kept(this.agent.peekSteeringQueue()), kept(this.agent.peekFollowUpQueue()));
 		this.#reconcileQueuedMessageDrain();
 	}
 

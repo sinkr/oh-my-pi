@@ -1,9 +1,9 @@
 /**
  * Contract: when delivering the messages typed during compaction fails, the batch goes back to
- * the compaction queue and the input that flush queued leaves the session queue. Messages that
- * were queued in the session before the flush (an extension's prompt, for example), and messages
- * queued after the flush finished delivering, stay queued; they are never discarded with the
- * failed batch.
+ * the compaction queue and the messages that flush queued leave the session queue. Messages other
+ * sources queued in the session (an extension's prompt, for example) stay queued whether they
+ * arrived before the flush, while it was delivering, or after it finished; they are never
+ * discarded with the failed batch.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -97,9 +97,9 @@ describe("flushCompactionQueue failure", () => {
 		// The second typed message fails to deliver.
 		const steer = live.steer.bind(live);
 		let steers = 0;
-		vi.spyOn(live, "steer").mockImplementation(async (text, images) => {
+		vi.spyOn(live, "steer").mockImplementation(async (text, images, options) => {
 			if (++steers === 2) throw new Error("delivery failed");
-			return steer(text, images);
+			return steer(text, images, options);
 		});
 		const typed: CompactionQueuedMessage[] = [
 			{ text: "typed one", mode: "steer" },
@@ -166,10 +166,10 @@ describe("flushCompactionQueue failure", () => {
 		const steer = live.steer.bind(live);
 		const steerStarted = Promise.withResolvers<void>();
 		const steerRelease = Promise.withResolvers<void>();
-		vi.spyOn(live, "steer").mockImplementation(async (text, images) => {
+		vi.spyOn(live, "steer").mockImplementation(async (text, images, options) => {
 			steerStarted.resolve();
 			await steerRelease.promise;
-			return steer(text, images);
+			return steer(text, images, options);
 		});
 		const typed: CompactionQueuedMessage[] = [
 			{ text: "typed first", mode: "steer" },
@@ -189,6 +189,73 @@ describe("flushCompactionQueue failure", () => {
 		// to be sent now and again on the next flush.
 		expect(ctx.compactionQueuedMessages).toEqual(typed);
 		expect(live.getQueuedMessages().steering).toEqual([]);
+
+		await live.abort();
+		await running.catch(() => {});
+	});
+
+	it("keeps an extension prompt queued while the flush was delivering when a later delivery fails", async () => {
+		const { live, running } = await startStreamingSession();
+
+		// While the first typed message is being delivered, an extension queues its own prompt;
+		// then the second typed message fails to deliver.
+		const steer = live.steer.bind(live);
+		let steers = 0;
+		vi.spyOn(live, "steer").mockImplementation(async (text, images, options) => {
+			if (++steers === 2) throw new Error("delivery failed");
+			await live.sendUserMessage("from the extension", { deliverAs: "followUp" });
+			return steer(text, images, options);
+		});
+		const typed: CompactionQueuedMessage[] = [
+			{ text: "typed one", mode: "steer" },
+			{ text: "typed two", mode: "steer" },
+		];
+		const ctx = flushContext(live, typed, () => {});
+
+		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: true });
+
+		// The flush takes back only what it queued itself.
+		expect(ctx.compactionQueuedMessages).toEqual(typed);
+		expect(live.getQueuedMessages().steering).toEqual([]);
+		expect(live.getQueuedMessages().followUp).toEqual(["from the extension"]);
+
+		await live.abort();
+		await running.catch(() => {});
+	});
+
+	it("keeps an extension prompt queued during the rest delivery when the first prompt fails", async () => {
+		const { live, running } = await startStreamingSession();
+
+		// The first typed prompt fails while the second typed message is still being delivered,
+		// and an extension queues its own prompt in that window.
+		vi.spyOn(live, "prompt").mockImplementation(async () => {
+			throw new Error("No API key found");
+		});
+		const steer = live.steer.bind(live);
+		const steerStarted = Promise.withResolvers<void>();
+		const steerRelease = Promise.withResolvers<void>();
+		vi.spyOn(live, "steer").mockImplementation(async (text, images, options) => {
+			steerStarted.resolve();
+			await steerRelease.promise;
+			return steer(text, images, options);
+		});
+		const typed: CompactionQueuedMessage[] = [
+			{ text: "typed first", mode: "steer" },
+			{ text: "typed second", mode: "steer" },
+		];
+		const reported = Promise.withResolvers<void>();
+		const ctx = flushContext(live, typed, () => reported.resolve());
+
+		const flushing = new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
+		await steerStarted.promise;
+		await reported.promise;
+		await live.sendUserMessage("from the extension", { deliverAs: "followUp" });
+		steerRelease.resolve();
+		await flushing;
+
+		expect(ctx.compactionQueuedMessages).toEqual(typed);
+		expect(live.getQueuedMessages().steering).toEqual([]);
+		expect(live.getQueuedMessages().followUp).toEqual(["from the extension"]);
 
 		await live.abort();
 		await running.catch(() => {});
