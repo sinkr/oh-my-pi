@@ -391,8 +391,7 @@ describe("date-cwd-reminder", () => {
 		});
 
 		it("keeps the main conversation's bytes when another conversation's request runs between two of its own", () => {
-			// An advisor and the session's side requests share the main loop's provider
-			// transform, and each sends its own history through this injector.
+			// A side request can send a history of its own through the main loop's transform.
 			const injector = new DateCwdReminderInjector();
 			const first: Message = { role: "user", content: "first", timestamp: 1 };
 			const main = injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
@@ -428,7 +427,7 @@ describe("date-cwd-reminder", () => {
 				"2026-08-15",
 				"/work",
 			);
-			// An advisor request runs before the compaction's first request.
+			// A side request with a history of its own runs before the compaction's first request.
 			injector.transform(
 				{ systemPrompt: ["advisor"], messages: [{ role: "user", content: "review", timestamp: 10 }] },
 				"2026-08-15",
@@ -449,10 +448,10 @@ describe("date-cwd-reminder", () => {
 		// stamped `Date.now()`, on every request until the run ends.
 		for (const { advisor: advisorRequests, label } of [
 			{ advisor: "none", label: "" },
-			// The advisor's state sits between the main conversation's: the predecessor is not the newest state.
-			{ advisor: "every", label: " with an advisor request before each request" },
-			// The advisor's state ages behind ten main requests, more than the injector keeps conversations for.
-			{ advisor: "once", label: " with one advisor request ten requests back" },
+			// The side request's state sits between the main conversation's: the predecessor is not the newest state.
+			{ advisor: "every", label: " with a side request before each request" },
+			// The side request's state ages behind ten main requests, more than the injector keeps conversations for.
+			{ advisor: "once", label: " with one side request ten requests back" },
 		] as const) {
 			it(`keeps a first turn a context hook re-creates under a new timestamp${label}`, () => {
 				const injector = new DateCwdReminderInjector();
@@ -580,6 +579,61 @@ describe("date-cwd-reminder", () => {
 			expect(wire(rolled.messages).at(-1)).toBe(
 				JSON.stringify(["developer", renderDateCwdReminder("2026-08-15", "/work")]),
 			);
+		});
+
+		it("tells the model the date again after a branch back to before the turn that carried it", () => {
+			const injector = new DateCwdReminderInjector();
+			const first: Message = { role: "user", content: "first", timestamp: 1 };
+			const assistant = createAssistantMessage("a");
+			injector.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
+			const carrier: Message = { role: "user", content: "second", timestamp: 20 };
+			const rolled = injector.transform(
+				{ systemPrompt: ["system"], messages: [first, assistant, carrier] },
+				"2026-08-15",
+				"/work",
+			);
+			// `/branch` back to before `second`: the new turn replaces it.
+			const replacement: Message = { role: "user", content: "instead", timestamp: 30 };
+			const branched = injector.transform(
+				{ systemPrompt: ["system"], messages: [first, assistant, replacement] },
+				"2026-08-15",
+				"/work",
+			);
+
+			const newDate = renderDateCwdReminder("2026-08-15", "/work");
+			expect(rolled.messages[2]?.content).toBe(`${newDate}\n\nsecond`);
+			expect(branched.messages[0]?.content).toBe(rolled.messages[0]!.content);
+			expect(branched.messages[2]?.content).toBe(`${newDate}\n\ninstead`);
+		});
+
+		it("continues a compacted fork from its own state, not from the fork used last", () => {
+			// Two forks share the turns before their branch point. Each is compacted, and the
+			// user returns to the first fork and compacts it again before its next request.
+			const injector = new DateCwdReminderInjector();
+			const first: Message = { role: "user", content: "first", timestamp: 1 };
+			const shared: Message = { role: "user", content: "shared", timestamp: 3 };
+			const forkTurn: Message = { role: "user", content: "fork turn", timestamp: 5 };
+			const assistant = createAssistantMessage("a");
+			const forkAssistant = createAssistantMessage("b");
+			injector.transform({ systemPrompt: ["system"], messages: [first, assistant, shared] }, "2026-08-14", "/work");
+			const rolled = injector.transform(
+				{ systemPrompt: ["system"], messages: [first, assistant, shared, forkAssistant, forkTurn] },
+				"2026-08-15",
+				"/work",
+			);
+			const compacted = (summary: string, timestamp: number, tail: Message[]) =>
+				injector.transform(
+					{ systemPrompt: ["system"], messages: [{ role: "user", content: summary, timestamp }, ...tail] },
+					"2026-08-15",
+					"/work",
+				);
+			compacted("fork one summary", 10, [shared, forkAssistant, forkTurn]);
+			// The other fork, branched after `shared`, is compacted and used.
+			compacted("fork two summary", 11, [shared, { role: "user", content: "other fork", timestamp: 7 }]);
+			const again = compacted("fork one summary again", 20, [shared, forkAssistant, forkTurn]);
+
+			expect(rolled.messages[4]?.content).toBe(`${renderDateCwdReminder("2026-08-15", "/work")}\n\nfork turn`);
+			expect(again.messages[3]?.content).toBe(rolled.messages[4]!.content);
 		});
 	});
 });

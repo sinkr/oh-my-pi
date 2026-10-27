@@ -68,9 +68,9 @@ interface RootState {
 }
 
 /**
- * How many conversations the injector keeps state for. A session interleaves its
- * own requests with its advisors', which carry their own history, and each
- * compaction starts another conversation; the oldest is forgotten first.
+ * How many conversations the injector keeps state for. Each compaction or branch
+ * switch starts another conversation, and a side request through the main loop's
+ * transform can send a history of its own; the oldest is forgotten first.
  */
 const MAX_ROOTS = 8;
 
@@ -88,10 +88,12 @@ const MAX_ROOTS = 8;
  * first sent with. The key leaves content out, so a turn whose content a later
  * request rewrites (a newly redacted secret, a clamped image) stays the same turn.
  *
- * One session sends more than one conversation through the same injector: an
- * advisor shares the main loop's provider transform and carries its own
- * history. State is therefore held per conversation root, so a request for one
- * conversation leaves the reminders of the others alone.
+ * One injector can see more than one conversation: a compaction or a branch
+ * switch starts another history, and a side request goes through the main
+ * loop's transform. State is therefore held per conversation root, so a request
+ * for one conversation leaves the reminders of the others alone. Each advisor
+ * has an injector of its own: two advisors can start their histories with turns
+ * that share a key, so a root key alone cannot tell them apart.
  */
 export class DateCwdReminderInjector {
 	#states = new Map<string, RootState>();
@@ -168,22 +170,28 @@ export class DateCwdReminderInjector {
 	}
 
 	/**
-	 * The conversation a request with an unserved first turn continues: the most
-	 * recent one that sent any of this request's turns. A compaction keeps the end
-	 * of the history it summarises, so its state is the one to inherit, and it is
-	 * not always the last conversation served: an advisor request can sit between
-	 * a conversation's last request before a compaction and its first after it.
+	 * The conversation a request with an unserved first turn continues: the one
+	 * that sent the most of this request's turns, the most recent on a tie. A
+	 * compaction keeps the end of the history it summarises, so its state is the one
+	 * to inherit, and it is not always the last conversation served: forks share
+	 * the turns before their branch point, so the fork used last can share some of
+	 * a compaction's retained turns with it while the compacted fork shares them all.
 	 */
 	#predecessorOf(keys: string[]): { root: string; state: RootState } | undefined {
-		const present = new Set(keys);
-		const entries = [...this.#states.entries()];
-		for (let index = entries.length - 1; index >= 0; index--) {
-			const [root, state] = entries[index]!;
-			for (const key of present) {
-				if (state.seen.has(key) || state.injections.has(key)) return { root, state };
+		let best: { root: string; state: RootState } | undefined;
+		let bestShared = 0;
+		for (const [root, state] of this.#states) {
+			let shared = 0;
+			for (const key of keys) {
+				if (state.seen.has(key) || state.injections.has(key)) shared++;
+			}
+			// `>=`: the map runs oldest to newest, so a tie goes to the most recent.
+			if (shared > 0 && shared >= bestShared) {
+				best = { root, state };
+				bestShared = shared;
 			}
 		}
-		return undefined;
+		return best;
 	}
 
 	/**
@@ -192,7 +200,7 @@ export class DateCwdReminderInjector {
 	 * conversation it continues shares with this one keep the reminders they were
 	 * sent with, or their bytes change under signed thinking; its other turns are
 	 * left out. That conversation keeps its own state, because a later request can
-	 * return to it: an advisor request does not end the turn that asked for it.
+	 * return to it: a branch switch can go back to the history before a compaction.
 	 *
 	 * A first turn equal to the one the conversation it continues started with is
 	 * that turn again under a new timestamp: a context hook that inserts its own
