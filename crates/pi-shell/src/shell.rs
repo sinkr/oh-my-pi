@@ -6350,6 +6350,72 @@ mod tests {
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "out\nf1=orig\n"));
 	}
 
+	/// A later redirection of a descriptor that a deferred FIFO redirection
+	/// sets (`>f >/dev/null`), or a duplication, move or close of it, made
+	/// every deferred redirection in the parent after all: the parent opened
+	/// the FIFO and waited for its reader, the next command, so the shell
+	/// never returned. The child now makes them all, in the order written.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn later_redirects_of_a_deferred_descriptor_stay_in_the_child() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					"/bin/echo replaced >f >/dev/null & cat <f; wait; echo \"replace=$?\"\n",
+					"/bin/echo closed 3>f >&3 3>&- & cat <f; wait\n",
+					"/bin/echo moved 3>f 1>&3- & cat <f; wait\n",
+					"/bin/echo both >f &>/dev/null & cat <f; wait; echo \"both=$?\"\n",
+					"/bin/echo descriptor >f >/dev/stdout & cat <f; wait",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!(
+			(result.exit_code, output.as_str()),
+			(Some(0), "replace=0\nclosed\nmoved\nboth=0\ndescriptor\n")
+		);
+	}
+
+	/// A deferred duplication reads the descriptor this process holds, so the
+	/// null device that stands in for a deferred descriptor must not take its
+	/// place: `>f 1>&3 3>/dev/null` sent the output to the null device, the
+	/// move `>f 1>&4-` lost it, and so did the swap idiom.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deferred_duplications_read_the_descriptors_the_parent_holds() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = time::timeout(
+			Duration::from_secs(10),
+			run_command_capture(
+				concat!(
+					"{ /bin/echo dup3 >f 1>&3 3>/dev/null & cat <f; wait; } 3>out3; cat out3\n",
+					"{ /bin/echo moved4 >f 1>&4- & cat <f; wait; } 4>out4; cat out4\n",
+					"/bin/echo sw 2>f 3>&1 1>&2 2>&3 3>&- & cat <f; wait",
+				),
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "dup3\nmoved4\nsw\n"));
+	}
+
 	/// Runs `command` on a dedicated single-worker runtime and fails after five
 	/// seconds. The deadline lives on the calling thread, so it still fires when
 	/// a builtin blocks the runtime's only worker.

@@ -129,20 +129,33 @@ pub struct ExecutionParameters {
 /// not wait for it, as bash does not: bash opens it in the forked child. The
 /// child runs these through `/bin/sh -c 'exec "$@" …'` and becomes the
 /// command, so `$!`, `wait`, `kill` and `jobs` see its real pid.
+///
+/// Once one redirection is deferred, each later one that sets or reads a
+/// descriptor a deferred one sets or reads is deferred too, so the child makes
+/// them all in the order written: in `/bin/echo x >f >/dev/null &` the second
+/// open replaces the first in the child, and the parent never opens the FIFO.
 #[derive(Clone)]
 pub(crate) enum DeferredRedirect {
 	/// `fd OP path`; `options` reopen it in the parent if the redirections
 	/// must be made there after all.
 	Open { fd: ShellFd, op: &'static str, path: String, options: pi_vfs::OpenOptions },
-	/// `fd>&from`, where `from` is set by an earlier deferred redirection.
+	/// `fd>&from`.
 	Duplicate { fd: ShellFd, from: ShellFd },
+	/// `fd>&-`.
+	Close { fd: ShellFd },
 }
 
 impl DeferredRedirect {
+	/// The descriptor this redirection sets.
 	const fn fd(&self) -> ShellFd {
 		match self {
-			Self::Open { fd, .. } | Self::Duplicate { fd, .. } => *fd,
+			Self::Open { fd, .. } | Self::Duplicate { fd, .. } | Self::Close { fd } => *fd,
 		}
+	}
+
+	/// Whether this redirection sets or reads `fd`.
+	const fn touches(&self, fd: ShellFd) -> bool {
+		self.fd() == fd || matches!(self, Self::Duplicate { from, .. } if *from == fd)
 	}
 }
 
@@ -156,9 +169,40 @@ impl ExecutionParameters {
 		&self.deferred_redirects
 	}
 
-	/// Whether a deferred redirection sets `fd`.
-	fn defers(&self, fd: ShellFd) -> bool {
+	/// Whether the child sets `fd` itself, so what this process holds there is
+	/// not what the command reads or writes.
+	pub(crate) fn sets_deferred(&self, fd: ShellFd) -> bool {
 		self.deferred_redirects.iter().any(|redirect| redirect.fd() == fd)
+	}
+
+	/// Whether a deferred redirection sets or reads `fd`, so a later
+	/// redirection of `fd` must be made after it.
+	fn touches_deferred(&self, fd: ShellFd) -> bool {
+		self.deferred_redirects.iter().any(|redirect| redirect.touches(fd))
+	}
+
+	/// Whether a deferred redirection reads `fd` before any of them sets it, so
+	/// the child's duplication (or the parent's, if they are made there after
+	/// all) takes the descriptor this process holds now: `>f 1>&2 2>err` and
+	/// the move `>f 1>&3-` each read fd 2 or 3 as it is before `2>err` or the
+	/// close of fd 3.
+	fn reads_deferred_source(&self, fd: ShellFd) -> bool {
+		self.deferred_redirects
+			.iter()
+			.find(|redirect| redirect.touches(fd))
+			.is_some_and(|redirect| matches!(redirect, DeferredRedirect::Duplicate { from, .. } if *from == fd))
+	}
+
+	/// Leaves `redirect` for the child. The null device stands in for its
+	/// descriptor here until then, except where a deferred duplication still
+	/// reads the descriptor this process holds.
+	fn defer(&mut self, redirect: DeferredRedirect) -> Result<(), error::Error> {
+		let fd = redirect.fd();
+		if !self.reads_deferred_source(fd) {
+			self.open_files.set_fd(fd, openfiles::null()?);
+		}
+		self.deferred_redirects.push(redirect);
+		Ok(())
 	}
 
 	/// Leaves the end of this context unreported once its token has fired:
@@ -2202,22 +2246,23 @@ pub(crate) async fn setup_redirect(
 
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
-					if let Some(op) = deferred_open_operator(kind)
-						&& params.defer_fifo_redirects
-						&& fd_num <= MAX_DEFERRED_FD
-						&& is_native_fifo(shell, &expanded_file_path)
-						&& let Some(path) = expanded_file_path.to_str()
-					{
-						params.deferred_redirects.push(DeferredRedirect::Open {
-							fd: fd_num,
+					let follows = params.touches_deferred(fd_num);
+					if params.defer_fifo_redirects
+						&& let Some(op) = deferred_open_operator(kind)
+						&& let Some(redirect) = child_open(
+							shell,
+							fd_num,
 							op,
-							path: path.to_owned(),
-							options,
-						});
-						params.open_files.set_fd(fd_num, openfiles::null()?);
+							&expanded_file_path,
+							&options,
+							follows,
+							// Opening a FIFO for reading and writing never waits.
+							!matches!(kind, ast::IoFileRedirectKind::ReadAndWrite),
+						) {
+						params.defer(redirect)?;
 						return Ok(());
 					}
-					if params.defers(fd_num) {
+					if follows {
 						materialize_deferred_redirects(shell, params).await?;
 					}
 
@@ -2248,12 +2293,12 @@ pub(crate) async fn setup_redirect(
 
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
-					if params.defers(*fd) && fd_num <= MAX_DEFERRED_FD {
-						params.deferred_redirects.push(DeferredRedirect::Duplicate { fd: fd_num, from: *fd });
-						params.open_files.set_fd(fd_num, openfiles::null()?);
+					let touched = params.touches_deferred(fd_num) || params.touches_deferred(*fd);
+					if touched && fd_num <= MAX_DEFERRED_FD && *fd <= MAX_DEFERRED_FD {
+						params.defer(DeferredRedirect::Duplicate { fd: fd_num, from: *fd })?;
 						return Ok(());
 					}
-					if params.defers(fd_num) || params.defers(*fd) {
+					if touched {
 						materialize_deferred_redirects(shell, params).await?;
 					}
 
@@ -2296,23 +2341,32 @@ pub(crate) async fn setup_redirect(
 						false
 					};
 
-					if !dash
-						&& fd_num <= MAX_DEFERRED_FD
-						&& let Ok(source_fd_num) = expanded.parse::<ShellFd>()
-						&& params.defers(source_fd_num)
-					{
-						params.deferred_redirects.push(DeferredRedirect::Duplicate {
-							fd:   fd_num,
-							from: source_fd_num,
-						});
-						params.open_files.set_fd(fd_num, openfiles::null()?);
-						return Ok(());
+					let source = (!expanded.is_empty() && expanded.chars().all(|c| c.is_ascii_digit()))
+						.then(|| expanded.parse::<ShellFd>().ok())
+						.flatten();
+					let touched = params.touches_deferred(fd_num)
+						|| source.is_some_and(|source| params.touches_deferred(source));
+					if touched && fd_num <= MAX_DEFERRED_FD {
+						// The child makes it after the deferred redirections: a
+						// duplication, a move (`N>&M-`, which `sh` spells `N>&M M>&-`)
+						// or a close (`N>&-`).
+						match source {
+							Some(from) if from <= MAX_DEFERRED_FD => {
+								params.defer(DeferredRedirect::Duplicate { fd: fd_num, from })?;
+								if dash {
+									params.defer(DeferredRedirect::Close { fd: from })?;
+								}
+								return Ok(());
+							},
+							None if dash && expanded.is_empty() => {
+								params.defer(DeferredRedirect::Close { fd: fd_num })?;
+								return Ok(());
+							},
+							_ => {},
+						}
 					}
-					if params.defers(fd_num)
-						|| expanded.parse::<ShellFd>().is_ok_and(|source| params.defers(source))
-					{
-						// A move (`N>&M-`) or close of a deferred descriptor is made in the
-						// parent, with every deferred redirection before it.
+					// `>&file` defers through `setup_redirect_output_and_error_to`.
+					if touched && (source.is_some() || dash && expanded.is_empty()) {
 						materialize_deferred_redirects(shell, params).await?;
 					}
 
@@ -2363,7 +2417,7 @@ pub(crate) async fn setup_redirect(
 
 							let fd_num =
 								specified_fd_num.unwrap_or_else(|| get_default_fd_for_redirect_kind(kind));
-							if params.defers(fd_num) || params.defers(substitution_fd) {
+							if params.touches_deferred(fd_num) || params.touches_deferred(substitution_fd) {
 								materialize_deferred_redirects(shell, params).await?;
 							}
 
@@ -2392,7 +2446,7 @@ pub(crate) async fn setup_redirect(
 			};
 
 			let f = setup_open_file_with_contents(io_here_doc.as_str())?;
-			if params.defers(fd_num) {
+			if params.touches_deferred(fd_num) {
 				materialize_deferred_redirects(shell, params).await?;
 			}
 
@@ -2407,7 +2461,7 @@ pub(crate) async fn setup_redirect(
 			expanded_word.push('\n');
 
 			let f = setup_open_file_with_contents(expanded_word.as_str())?;
-			if params.defers(fd_num) {
+			if params.touches_deferred(fd_num) {
 				materialize_deferred_redirects(shell, params).await?;
 			}
 
@@ -2442,25 +2496,26 @@ async fn setup_redirect_output_and_error_to(
 		.truncate(!append)
 		.append(append);
 
+	let follows =
+		params.touches_deferred(OpenFiles::STDOUT_FD) || params.touches_deferred(OpenFiles::STDERR_FD);
 	if params.defer_fifo_redirects
-		&& is_native_fifo(shell, &abs_file_path)
-		&& let Some(path) = abs_file_path.to_str()
-	{
-		params.deferred_redirects.push(DeferredRedirect::Open {
-			fd:      OpenFiles::STDOUT_FD,
-			op:      if append { ">>" } else { ">" },
-			path:    path.to_owned(),
-			options: file_options,
-		});
-		params.deferred_redirects.push(DeferredRedirect::Duplicate {
+		&& let Some(redirect) = child_open(
+			shell,
+			OpenFiles::STDOUT_FD,
+			if append { ">>" } else { ">" },
+			&abs_file_path,
+			&file_options,
+			follows,
+			true,
+		) {
+		params.defer(redirect)?;
+		params.defer(DeferredRedirect::Duplicate {
 			fd:   OpenFiles::STDERR_FD,
 			from: OpenFiles::STDOUT_FD,
-		});
-		params.open_files.set_fd(OpenFiles::STDOUT_FD, openfiles::null()?);
-		params.open_files.set_fd(OpenFiles::STDERR_FD, openfiles::null()?);
+		})?;
 		return Ok(());
 	}
-	if params.defers(OpenFiles::STDOUT_FD) || params.defers(OpenFiles::STDERR_FD) {
+	if follows {
 		materialize_deferred_redirects(shell, params).await?;
 	}
 
@@ -2482,16 +2537,56 @@ async fn setup_redirect_output_and_error_to(
 	Ok(())
 }
 
-/// The `sh` operator a deferred FIFO open of `kind` replays; `None` for kinds
-/// whose open never waits (`<>`) or that are not plain opens.
+/// The `sh` operator that repeats an open of `kind` in the child; `None` for
+/// kinds that are not plain opens.
 const fn deferred_open_operator(kind: &ast::IoFileRedirectKind) -> Option<&'static str> {
 	match kind {
 		ast::IoFileRedirectKind::Read => Some("<"),
 		ast::IoFileRedirectKind::Write | ast::IoFileRedirectKind::Clobber => Some(">"),
 		ast::IoFileRedirectKind::Append => Some(">>"),
-		ast::IoFileRedirectKind::ReadAndWrite
-		| ast::IoFileRedirectKind::DuplicateInput
-		| ast::IoFileRedirectKind::DuplicateOutput => None,
+		ast::IoFileRedirectKind::ReadAndWrite => Some("<>"),
+		ast::IoFileRedirectKind::DuplicateInput | ast::IoFileRedirectKind::DuplicateOutput => None,
+	}
+}
+
+/// What a background external command's child does in place of this process
+/// opening `path` on `fd` with the `sh` operator `op` (see
+/// [`DeferredRedirect`]), or `None` when this process opens it.
+///
+/// With `follows`, the open sets or reads a descriptor that a deferred
+/// redirection sets or reads, so the child makes it after that one, if it
+/// can: a descriptor path as the duplication it names, any other host path as
+/// the same open. Only this process can open a provider path or the terminal,
+/// or report an exclusive create (`noclobber`) of an existing file; nor can
+/// `sh` set a descriptor above 9. Without `follows`, the open is deferred only
+/// when it would wait for a FIFO's other end (`may_wait`: it is not
+/// read-write).
+fn child_open(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	fd: ShellFd,
+	op: &'static str,
+	path: &Path,
+	options: &pi_vfs::OpenOptions,
+	follows: bool,
+	may_wait: bool,
+) -> Option<DeferredRedirect> {
+	if fd > MAX_DEFERRED_FD {
+		return None;
+	}
+	let open = || {
+		path.to_str()
+			.map(|path| DeferredRedirect::Open { fd, op, path: path.to_owned(), options: options.clone() })
+	};
+	if !follows {
+		return if may_wait && is_native_fifo(shell, path) { open() } else { None };
+	}
+	match openfiles::DescriptorPath::parse(path) {
+		Some(openfiles::DescriptorPath::Fd(from)) => {
+			(from <= MAX_DEFERRED_FD).then_some(DeferredRedirect::Duplicate { fd, from })
+		},
+		Some(openfiles::DescriptorPath::Terminal) => None,
+		None if options.is_create_new() || !shell.filesystem().is_native_local(path) => None,
+		None => open(),
 	}
 }
 
@@ -2540,6 +2635,9 @@ pub(crate) async fn materialize_deferred_redirects(
 					.try_clone()?;
 				params.open_files.set_fd(fd, file);
 			},
+			DeferredRedirect::Close { fd } => {
+				params.open_files.remove_fd(fd);
+			},
 		}
 	}
 	Ok(())
@@ -2559,6 +2657,9 @@ pub(crate) fn deferred_redirect_script(redirects: &[DeferredRedirect]) -> String
 			},
 			DeferredRedirect::Duplicate { fd, from } => {
 				let _ = write!(script, " {fd}>&{from}");
+			},
+			DeferredRedirect::Close { fd } => {
+				let _ = write!(script, " {fd}>&-");
 			},
 		}
 	}

@@ -859,10 +859,13 @@ pub(crate) async fn execute_external_command(
 		.collect::<Vec<_>>();
 
 	// Before we lose ownership of the open files, figure out if stdin will be a
-	// terminal.
-	let child_stdin_is_terminal = context
-		.try_fd(openfiles::OpenFiles::STDIN_FD)
-		.is_some_and(|f| f.is_terminal());
+	// terminal. A deferred redirection of fd 0 is made in the child before the
+	// command runs (see `interp::DeferredRedirect`), so what this process holds
+	// there, which can still be its terminal, is not the command's input.
+	let child_stdin_is_terminal = !context.params.sets_deferred(openfiles::OpenFiles::STDIN_FD)
+		&& context
+			.try_fd(openfiles::OpenFiles::STDIN_FD)
+			.is_some_and(|f| f.is_terminal());
 
 	// Figure out if we should be setting up a new process group.
 	let new_pg = matches!(context.params.process_group_policy, ProcessGroupPolicy::NewProcessGroup);
