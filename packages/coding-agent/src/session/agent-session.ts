@@ -9318,13 +9318,12 @@ export class AgentSession implements SettingsScope {
 		// Publish the complete group without yielding: removal owns contiguous companions.
 		// The session-agent notice rides via prependMessages (from prompt()),
 		// so it arrives alongside the user message in the same turn (#14093).
-		const queuedGroup: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
-		if (imageDescriptionNotice) queuedGroup.push(imageDescriptionNotice);
+		let userMessage: AgentMessage;
 		if (mode === "followUp") {
 			for (const notice of prependMessages) this.agent.followUp(notice);
 			for (const notice of attachmentSourceNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-			const userMessage: AgentMessage = {
+			userMessage = {
 				role: "user",
 				content,
 				attribution,
@@ -9332,12 +9331,11 @@ export class AgentSession implements SettingsScope {
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.followUp(userMessage);
-			queuedGroup.push(userMessage);
 		} else {
 			for (const notice of prependMessages) this.agent.steer(notice);
 			for (const notice of attachmentSourceNotices) this.agent.steer(notice);
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
-			const userMessage: AgentMessage = {
+			userMessage = {
 				role: "user",
 				content,
 				steering: true,
@@ -9346,7 +9344,6 @@ export class AgentSession implements SettingsScope {
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.steer(userMessage);
-			queuedGroup.push(userMessage);
 			// Wake any listener parked on steering arrival (the ACP permission
 			// gate): the message is on the queue now, so its wait ends even
 			// though the streaming boundary poll has not run yet. The whole
@@ -9360,7 +9357,13 @@ export class AgentSession implements SettingsScope {
 				userMessage,
 			]);
 		}
-		options?.onPromptQueued?.(queuedGroup);
+		// The optional call skips building the group when no caller asked for it.
+		options?.onPromptQueued?.([
+			...prependMessages,
+			...attachmentSourceNotices,
+			...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
+			userMessage,
+		]);
 		options?.onPromptAdmitted?.();
 		// joinActiveTurn admission must never start an autonomous turn: the
 		// live run owns delivery, and an idle queue stays put until the host
