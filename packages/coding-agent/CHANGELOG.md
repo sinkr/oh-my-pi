@@ -4,9 +4,9 @@
 
 ### Fixed
 
-- Fixed Esc on a busy session (and RPC `abort_and_restore_queue`) silently discarding queued messages from extensions and agents, such as `pi.sendMessage` steer/follow-up cards and agent-attributed prompts; they now appear in the transcript without restarting the run and reach the model with your next prompt
-- Fixed a failed delivery of messages typed during compaction discarding other queued messages, such as an extension's prompt queued before compaction ended; messages queued before that delivery started or after it finished now stay queued
-- Fixed a failed delivery of messages typed during compaction sending the first of them twice: once now and again with the retried batch
+- Fixed Esc on a busy session (and RPC `abort_and_restore_queue`) silently discarding queued messages from extensions and agents, such as `pi.sendMessage` steer/follow-up cards and agent-attributed prompts; they now appear in the transcript without restarting the run and reach the model with your next prompt ([#17161](https://github.com/can1357/oh-my-pi/pull/17161) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a failed delivery of messages typed during compaction discarding other queued messages, such as an extension's prompt queued before compaction ended; messages queued before that delivery started or after it finished now stay queued ([#17161](https://github.com/can1357/oh-my-pi/pull/17161) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a failed delivery of messages typed during compaction sending the first of them twice: once now and again with the retried batch ([#17161](https://github.com/can1357/oh-my-pi/pull/17161) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.1] - 2026-10-27
 
