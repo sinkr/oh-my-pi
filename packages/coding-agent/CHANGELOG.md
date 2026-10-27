@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed implicit interactive `autoResume` failing every launch when a saved model cannot be restored and model fallback is disabled: startup now warns and opens a fresh session without carrying over the old history or cache identity, while preserving the original `--max-time` deadline. Explicit resume and headless model-restoration restrictions remain unchanged ([#17043](https://github.com/can1357/oh-my-pi/issues/17043)).
+
 ## [18.13.1] - 2026-10-27
 
 ### Added
