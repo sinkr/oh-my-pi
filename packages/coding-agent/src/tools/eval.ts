@@ -179,6 +179,8 @@ export interface EvalToolDescriptionOptions {
 	inlineTopics?: boolean;
 	/** Whether missing runtimes and environments may be provisioned automatically. */
 	autoProvision?: boolean;
+	/** Canonical and wire names currently accepted by the session tool bridge. */
+	toolNames?: readonly string[];
 }
 
 function evalTemplateContext(options: EvalToolDescriptionOptions) {
@@ -226,6 +228,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 	return prompt.render(evalDescription, {
 		...evalTemplateContext(options),
 		preludes,
+		toolNames: options.toolNames,
 		inlineTopics: options.inlineTopics ? Object.values(getEvalDocTopics(options)).join("\n\n") : undefined,
 	});
 }
@@ -360,6 +363,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
+			toolNames: session.getEvalBridgeToolNames?.(),
 		};
 	}
 

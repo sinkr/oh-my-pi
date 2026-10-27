@@ -36,6 +36,7 @@ await tool.<name>(args) — session tool; `args` is its parameter object
 ```
 {{/if}}
 {{/ifAll}}
+{{#if toolNames}}Session tool names: {{#each toolNames}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}}.{{/if}}
 </prelude>
 
 {{#if inlineTopics}}
