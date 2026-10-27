@@ -816,6 +816,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							? new AIError.GeminiCliApiError(message, chunk.error.code)
 							: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "runtime" });
 					}
+					const responseData = chunk.response;
 					if (!responseData) continue;
 					if (responseData.responseId) lastResponseId = responseData.responseId;
 					if (!responseData.candidates?.length && responseData.promptFeedback?.blockReason) {

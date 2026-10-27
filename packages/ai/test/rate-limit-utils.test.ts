@@ -4,13 +4,11 @@ import { classify, Flag, is, isUsageLimit, retriable } from "@oh-my-pi/pi-ai/err
 import {
 	calculateRateLimitBackoffMs,
 	is402BillingCapBody,
-	isAccountScopedQuotaExhausted,
 	isConcurrencyCapExclusion,
 	isOpaqueStatusBody,
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
-	parseGoogleRpcRateLimitReason,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
@@ -578,9 +576,8 @@ describe("parseRateLimitReason", () => {
 		const googleStream = streamGoogle(googleModel, context, { apiKey: "test-key", fetch: sseFetch });
 		const googleResult = await googleStream.result();
 		expect(googleResult.stopReason).toBe("error");
-		expect(googleResult.errorMessage).toBeDefined();
-		expect(parseGoogleRpcRateLimitReason(googleResult.errorMessage!)).toBe("MODEL_CAPACITY_EXHAUSTED");
-		expect(isAccountScopedQuotaExhausted(googleResult.errorMessage!)).toBe(false);
+		expect(parseRateLimitReason(googleResult.errorMessage)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(googleResult.errorStatus, googleResult.errorMessage)).toBe(false);
 
 		// 2. Test streamGoogleGeminiCli
 		const cliModel: Model<"google-gemini-cli"> = buildModel({
@@ -602,8 +599,8 @@ describe("parseRateLimitReason", () => {
 		const cliResult = await cliStream.result();
 		expect(cliResult.stopReason).toBe("error");
 		expect(cliResult.errorMessage).toBeDefined();
-		expect(parseGoogleRpcRateLimitReason(cliResult.errorMessage!)).toBe("MODEL_CAPACITY_EXHAUSTED");
-		expect(isAccountScopedQuotaExhausted(cliResult.errorMessage!)).toBe(false);
+		expect(parseRateLimitReason(cliResult.errorMessage)).toBe("MODEL_CAPACITY_EXHAUSTED");
+		expect(isUsageLimitOutcome(cliResult.errorStatus, cliResult.errorMessage)).toBe(false);
 	});
 });
 

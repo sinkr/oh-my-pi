@@ -158,7 +158,7 @@ function parseJsonBody(errorMessage: string): Record<string, unknown> | undefine
  * Cloud Code Assist prefixes the JSON with its HTTP error label, so accept an
  * embedded top-level object as well as a raw JSON body.
  */
-export function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | undefined {
+function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | undefined {
 	const body = parseJsonBody(errorMessage);
 	const error = asRecord(body?.error);
 	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
@@ -529,15 +529,6 @@ export function isAccountScopedCapText(message: string): boolean {
 	return ACCOUNT_SCOPED_403_PATTERN.test(message);
 }
 
-/**
- * Whether an error message represents a terminal account-scoped quota exhaustion
- * (rotatable/burn-credential) rather than transient capacity or rate limit.
- */
-export function isAccountScopedQuotaExhausted(errorMessage: string): boolean {
-	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
-	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
-	return isQuotaExhaustedReason(parseRateLimitReason(errorMessage));
-}
 
 /**
  * A concurrency cap on a non-billing status is shed-and-backoff, not
