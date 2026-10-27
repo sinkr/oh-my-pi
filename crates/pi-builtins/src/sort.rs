@@ -131,7 +131,18 @@ fn available_memory_hint() -> Option<usize> {
 		(Some(system), Some(cgroup)) => Some(system.min(cgroup)),
 		(system, cgroup) => system.or(cgroup),
 	};
-	system.map(|bytes| clamp_hint(bytes / 4))
+	system.map(memory_hint)
+}
+
+/// A quarter of the `available` bytes, in the range the automatic size
+/// keeps. The smallest size it keeps, 512 KiB, is for a machine with memory
+/// to spare: where a quarter of what is available is less than that, the
+/// two chunks of that minimum take all of the memory instead of a quarter
+/// of it, and cross it below about 512 KiB. So the quarter stands there,
+/// down to no buffer at all.
+fn memory_hint(available: u128) -> usize {
+	let quarter = available / 4;
+	clamp_hint(quarter).min(usize::try_from(quarter).unwrap_or(usize::MAX))
 }
 
 fn system_available_memory() -> Option<u128> {
@@ -382,6 +393,21 @@ mod tests {
 		assert_eq!(meminfo_available_bytes(old), Some((524_288 + 10_240 + 2_097_152) * 1024));
 	}
 
+	// Failure mode: the smallest automatic size, 512 KiB, was kept where a
+	// quarter of the memory available was less than that, so in a cgroup
+	// with a few hundred KiB of headroom the two chunks crossed its limit.
+	#[test]
+	fn the_memory_hint_keeps_a_small_cgroup_limit() {
+		const KIB: u128 = 1024;
+		// 400 KiB of headroom: a quarter of it, not the 512 KiB minimum.
+		assert_eq!(memory_hint(400 * KIB), 100 * 1024);
+		// Nothing left: no buffer. Each chunk still takes two records.
+		assert_eq!(memory_hint(0), 0);
+		// The minimum applies again where a quarter reaches it.
+		assert_eq!(memory_hint(2 * 1024 * KIB), 512 * 1024);
+		assert_eq!(memory_hint(8 * 1024 * KIB), 2 * 1024 * 1024);
+	}
+
 	fn write_files(dir: &Path, files: &[(&str, &str)]) {
 		std::fs::create_dir_all(dir).unwrap();
 		for (name, contents) in files {
@@ -588,6 +614,9 @@ use super::{
 };
 
 const ALLOC_CHUNK_SIZE: usize = 64 * 1024;
+/// A read asks for at least this much, also where the budget is smaller: a
+/// chunk takes at least two records, whatever its budget says.
+const MIN_READ_SIZE: usize = 4 * 1024;
 /// Collation sort keys measured at most 2.5 bytes per input byte (upper
 /// case, punctuation, invalid UTF-8) plus 6 bytes of level separators.
 const COLLATION_KEY_BYTES_PER_BYTE: usize = 3;
@@ -827,6 +856,11 @@ pub fn read<T: Read>(
 		buffer.extend_from_slice(&carry_over[buffer.len()..]);
 	}
 	buffer[..carry_over.len()].copy_from_slice(carry_over);
+	let start_offset = carry_over.len();
+	// The buffer holds those bytes now, so the reader's copy of them goes
+	// back to the allocator instead of staying beside the chunk it reads.
+	carry_over.clear();
+	carry_over.shrink_to_fit();
 	let budget = budget.map(|budget| {
 		let recycled = lines.capacity() * size_of::<Line>()
 			+ selections.capacity() * size_of::<&[u8]>()
@@ -842,11 +876,14 @@ pub fn read<T: Read>(
 		next_files,
 		&mut buffer,
 		budget,
-		carry_over.len(),
+		start_offset,
 		separator,
 		&settings.cancel,
 	)?;
-	carry_over.clear();
+	// The bytes read past this chunk's end wait for the next one, in a copy
+	// of exactly their size: the reader holds it while the chunk is sorted.
+	let carried = fill.filled - fill.complete;
+	fit(carry_over, carried);
 	carry_over.extend_from_slice(&buffer[fill.complete..fill.filled]);
 	if budget.is_some() {
 		// The buffer keeps the length of the largest chunk so far; a chunk of
@@ -1042,13 +1079,19 @@ fn read_to_buffer<T: Read>(
 			Some((budget, cost)) => cost.room(budget, buffer.len(), filled, separators),
 			None => buffer.len() - filled,
 		};
+		// What a read asks for at least. Bytes read into buffer the chunk
+		// already holds cost only the records they add, so a chunk that
+		// recycled a full buffer and its record vectors starts with a few
+		// bytes of room and would otherwise read the whole buffer a few
+		// bytes per `read` call. What a read takes past the chunk's end
+		// waits for the next chunk, so it asks for no more than one chunk's
+		// budget, and never for less than `MIN_READ_SIZE`.
+		let step = match budget {
+			Some((budget, _)) => ALLOC_CHUNK_SIZE.min(budget.max(MIN_READ_SIZE)),
+			None => ALLOC_CHUNK_SIZE,
+		};
 		let want = if room > 0 {
-			// Bytes read into buffer the chunk already holds cost only the
-			// records they add, so take at least `ALLOC_CHUNK_SIZE` of it at a
-			// time: a chunk that recycled a full buffer and its record vectors
-			// starts with a few bytes of room and would otherwise read the
-			// whole buffer a few bytes per `read` call.
-			room.max(ALLOC_CHUNK_SIZE.min(buffer.len() - filled))
+			room.max(step.min(buffer.len() - filled))
 		} else if separators >= 2 {
 			// The chunk is full. The separator ends the last whole line, so
 			// it is not carried over.
@@ -1056,7 +1099,7 @@ fn read_to_buffer<T: Read>(
 			return Ok(Fill { complete, filled, separators, more: true });
 		} else {
 			// We need to read more lines.
-			ALLOC_CHUNK_SIZE
+			step
 		};
 		if buffer.len() == filled {
 			// Doubling, so a large budget is not zero-filled ahead of a small
@@ -1375,6 +1418,58 @@ mod tests {
 		assert!(fill.complete > BUDGET / 4, "a chunk of only {} bytes", fill.complete);
 		let held = buffer.capacity();
 		assert!(held <= BUDGET, "the buffer holds {held} bytes for a budget of {BUDGET}");
+	}
+
+	// Failure mode: a chunk that recycled a large buffer read up to 64 KiB
+	// past its own end, whatever the budget, and the reader held those bytes
+	// in a copy of its own beside the chunk, at a capacity it kept from the
+	// largest copy so far.
+	#[test]
+	fn the_bytes_carried_past_a_chunk_stay_under_its_budget() {
+		const BUDGET: usize = 16 * 1024;
+		let settings = GlobalSettings::default();
+		let (sender, receiver) = flume::bounded::<Chunk>(1);
+		// A long line, so the chunks after it recycle a buffer with room to
+		// read far past their own end.
+		let mut input = vec![b'x'; 300_000];
+		input.push(b'\n');
+		input.extend(b"ab\n".repeat(8 * BUDGET));
+		let mut input = input.as_slice();
+		let mut carry_over = Vec::new();
+		let mut largest = 0;
+		let mut recycled = RecycledChunk::new(8 * 1024);
+		loop {
+			let more = read(
+				&sender,
+				recycled,
+				Some(BUDGET),
+				&mut carry_over,
+				&mut input,
+				&mut iter::empty::<SortResult<&[u8]>>(),
+				b'\n',
+				&settings,
+			)
+			.expect("read");
+			let Ok(chunk) = receiver.try_recv() else { break };
+			assert_eq!(
+				carry_over.capacity(),
+				carry_over.len(),
+				"the carried bytes keep {} bytes for {} of them",
+				carry_over.capacity(),
+				carry_over.len()
+			);
+			// A line longer than the budget is carried whole, as a chunk
+			// takes at least two lines; the records after it are not.
+			if carry_over.len() < 100_000 {
+				largest = largest.max(carry_over.capacity());
+			}
+			recycled = chunk.recycle();
+			if !more {
+				break;
+			}
+		}
+		assert!(largest > 0, "no bytes were ever carried");
+		assert!(largest <= BUDGET, "a chunk carried {largest} bytes past a budget of {BUDGET}");
 	}
 
 	/// The settings of a sort that compares collation keys, or None where ICU
