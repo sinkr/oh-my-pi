@@ -459,6 +459,8 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	/** The skill rediscovery in flight, shared by concurrent misses (see {@link shareSkillRediscovery}). */
+	#skillsRediscovery: Promise<readonly Skill[]> | undefined;
 	/**
 	 * Prompt surface committed by the last system-prompt rebuild. The
 	 * provider-visible system prompt is deliberately byte-stable across
@@ -581,6 +583,29 @@ export class SessionTools {
 	/** Skills currently rendered into the system prompt. */
 	get skills(): Skill[] {
 		return this.#skills;
+	}
+
+	/** Whether {@link refreshSkills} rediscovers the list; false when it was fixed at creation (a subagent's). */
+	get skillsReloadable(): boolean {
+		return this.#skillsReloadable;
+	}
+
+	/** Stores a re-pointed fixed skill list (see `rediscoverSkills`) and refreshes prompt metadata. */
+	async replaceSkills(skills: readonly Skill[]): Promise<void> {
+		this.#skills = [...skills];
+		if (this.#host.agentKind() === "main") {
+			setActiveSkills(this.#skills);
+		}
+		await this.refreshBaseSystemPrompt();
+		this.#host.notifyCommandMetadataChanged();
+	}
+
+	/** Runs `rediscover`, or joins the rediscovery already in flight, so concurrent misses share one pass. */
+	shareSkillRediscovery(rediscover: () => Promise<readonly Skill[]>): Promise<readonly Skill[]> {
+		this.#skillsRediscovery ??= rediscover().finally(() => {
+			this.#skillsRediscovery = undefined;
+		});
+		return this.#skillsRediscovery;
 	}
 
 	/** Diagnostics produced while loading the current skills. */
