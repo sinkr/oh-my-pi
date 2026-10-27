@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed plugin skill upgrades failing after a name collision when the plugin cache is reached through a symlink, including macOS path aliases; rediscovery still requires the original plugin's identity.
+
 ## [18.13.2] - 2026-10-27
 
 ### Added

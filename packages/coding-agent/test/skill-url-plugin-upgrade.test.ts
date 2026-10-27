@@ -415,33 +415,42 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		await expect(session.buildUserSkillPrompt(skill, { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
 	});
 
-	it("an upgrade that leaves another plugin's same-named skill the bare name still serves the new version", async () => {
-		writeRegistryWithCollidingPlugin("1.0.0");
-		const session = await startSession();
-		const skill = session.skills.find(entry => entry.name === SKILL)!;
-		const child = await startSession({ skills: session.skills });
-		// A tool session copied before the upgrade keeps the old list in `context.skills`.
-		const toolSession = { skills: session.skills, skillRediscoveryHost: () => session.skillRediscoveryHost() };
-		const context = { skills: session.skills, session: toolSession as unknown as ToolSession };
-		const handler = new SkillProtocolHandler();
+	it.each(["directory", "symlink"])(
+		"an upgrade that leaves another plugin's same-named skill the bare name still serves the new version (%s cache)",
+		async cacheKind => {
+			writeRegistryWithCollidingPlugin("1.0.0");
+			const session = await startSession();
+			const skill = session.skills.find(entry => entry.name === SKILL)!;
+			const child = await startSession({ skills: session.skills });
+			// A tool session copied before the upgrade keeps the old list in `context.skills`.
+			const toolSession = { skills: session.skills, skillRediscoveryHost: () => session.skillRediscoveryHost() };
+			const context = { skills: session.skills, session: toolSession as unknown as ToolSession };
+			const handler = new SkillProtocolHandler();
 
-		installPluginVersion("2.0.0", "1.0.0");
-		writeRegistryWithCollidingPlugin("2.0.0", true);
+			installPluginVersion("2.0.0", "1.0.0");
+			if (cacheKind === "symlink") {
+				// Exercise differing registered-root and discovered-file spellings on every platform.
+				const realPluginDir = path.join(makeExtraDir("pi-skill-upgrade-real-cache-"), "2.0.0");
+				fs.renameSync(pluginDir("2.0.0"), realPluginDir);
+				fs.symlinkSync(realPluginDir, pluginDir("2.0.0"), process.platform === "win32" ? "junction" : "dir");
+			}
+			writeRegistryWithCollidingPlugin("2.0.0", true);
 
-		// The first lookup rediscovers; the second finds the session's list moved on.
-		for (let attempt = 0; attempt < 2; attempt++) {
-			const resource = await handler.resolve(parseInternalUrl(`skill://${SKILL}/notes.md`), context);
-			expect(resource.content).toContain("Notes of version 2.0.0.");
-		}
-		// The rediscovery gave the other plugin's skill the bare name; the upgraded one is namespaced.
-		expect(session.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(otherPluginDir())).toBe(true);
-		const built = await session.buildUserSkillPrompt(skill, { args: "" });
-		expect(built.message).toContain("Body of version 2.0.0.");
-		// A fixed list re-points the entry under the name it already lists, so later reads by that name keep working.
-		for (let attempt = 0; attempt < 2; attempt++) {
-			expect(await readText(child, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
-		}
-	});
+			// The first lookup rediscovers; the second finds the session's list moved on.
+			for (let attempt = 0; attempt < 2; attempt++) {
+				const resource = await handler.resolve(parseInternalUrl(`skill://${SKILL}/notes.md`), context);
+				expect(resource.content).toContain("Notes of version 2.0.0.");
+			}
+			// The rediscovery gave the other plugin's skill the bare name; the upgraded one is namespaced.
+			expect(session.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(otherPluginDir())).toBe(true);
+			const built = await session.buildUserSkillPrompt(skill, { args: "" });
+			expect(built.message).toContain("Body of version 2.0.0.");
+			// A fixed list re-points the entry under the name it already lists, so later reads by that name keep working.
+			for (let attempt = 0; attempt < 2; attempt++) {
+				expect(await readText(child, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
+			}
+		},
+	);
 
 	it("a new version that gives the skill's name to another folder serves that folder, not the renamed old one", async () => {
 		const session = await startSession();

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getProjectDir, isEnoent, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isEnoent, parseFrontmatter, prompt, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
 	MANAGED_SKILLS_PROVIDER_ID,
@@ -700,13 +700,18 @@ export function findStaleSkillStandIn(
 	skills: readonly Skill[],
 ): Skill | undefined {
 	const staleRoot = registeredPluginRootOf(stale.filePath);
-	const staleRelativePath = staleRoot && path.relative(staleRoot.root, stale.filePath);
+	const staleRelativePath = staleRoot && relativePathWithinRoot(staleRoot.root, stale.filePath);
 	let samePath: Skill | undefined;
 	for (const candidate of skills) {
 		const candidateRoot = registeredPluginRootOf(candidate.filePath);
 		if (candidateRoot?.pluginId !== staleRoot?.pluginId) continue;
 		if (candidate.name === stale.name) return candidate;
-		if (candidateRoot && staleRelativePath === path.relative(candidateRoot.root, candidate.filePath)) {
+		// Registered roots include realpath aliases, while discovery may keep the lexical file path.
+		if (
+			candidateRoot &&
+			staleRelativePath != null &&
+			staleRelativePath === relativePathWithinRoot(candidateRoot.root, candidate.filePath)
+		) {
 			samePath ??= candidate;
 		}
 	}
