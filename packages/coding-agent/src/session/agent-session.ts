@@ -424,6 +424,7 @@ import {
 	type PrewalkRestartResult,
 } from "./prewalk";
 import {
+	IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
 	isHiddenUserCompanion,
@@ -12476,8 +12477,8 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Build a message snapshot for an ephemeral side-channel turn. Includes the
 	 * in-flight streaming assistant reply, detached side history, and the current
-	 * prompt after the no-tools reminder. A keyed conversation may replay its
-	 * history and prompt on the next follow-up, so those messages stay cacheable.
+	 * prompt after the no-tools reminder. A keyed conversation can cache its
+	 * replayable side history up to the first regenerated vision description.
 	 */
 	#buildEphemeralSnapshot(
 		promptText: string,
@@ -12525,17 +12526,24 @@ export class AgentSession implements SettingsScope {
 		};
 		markPerCallContextMessage(reminder);
 		messages.push(reminder);
+		// A regenerated vision description can change between keyed follow-ups.
+		// No breakpoint after it can be read by the next request.
+		let volatileSuffix = false;
 		if (history?.length) {
 			// Detach before the conversion pipeline can await or mutate caller-owned messages.
 			const detachedHistory = structuredClone(history);
-			if (!conversationKey) {
-				for (const message of detachedHistory) markPerCallContextMessage(message);
+			for (const message of detachedHistory) {
+				if (message.role === "custom" && message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE) {
+					volatileSuffix = true;
+				}
+				if (!conversationKey || volatileSuffix) markPerCallContextMessage(message);
 			}
 			messages.push(...detachedHistory);
 		}
 		if (imageDescriptionNotice) {
 			markPerCallContextMessage(imageDescriptionNotice);
 			messages.push(imageDescriptionNotice);
+			volatileSuffix = true;
 		}
 		const sidePrompt: AgentMessage = {
 			role: "user",
@@ -12543,7 +12551,7 @@ export class AgentSession implements SettingsScope {
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
-		if (!conversationKey) markPerCallContextMessage(sidePrompt);
+		if (!conversationKey || volatileSuffix) markPerCallContextMessage(sidePrompt);
 		messages.push(sidePrompt);
 		return messages;
 	}

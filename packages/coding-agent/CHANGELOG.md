@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Anthropic composer predictions now cache the persisted conversation prefix; `/btw` follow-ups also reuse cached topic history ([#17186](https://github.com/can1357/oh-my-pi/issues/17186))
+- Anthropic composer predictions now cache the persisted conversation prefix; `/btw` follow-ups reuse stable topic history without caching regenerated image descriptions ([#17186](https://github.com/can1357/oh-my-pi/issues/17186))
 
 ## [18.13.1] - 2026-10-27
 
