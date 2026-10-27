@@ -142,11 +142,11 @@ Flow:
 1. fetch current-folder sessions via `SessionManager.listForPicker(currentCwd, currentSessionDir)`; the all-projects list remains lazy even when folder scope is empty
 2. present `SessionSelectorComponent` as a fullscreen alternate-screen overlay via `ctx.ui.showOverlay` (anchored top-left at full size; the transcript underneath is untouched), wired with lazy all-project loading (`loadAllSessions`), a `history.db` prompt matcher, deletion, pinned-session markers, and a current-session marker
 3. callbacks:
-   - select -> lock picker input and call `handleResumeSession(sessionPath)`; on success hide the overlay and restore editor focus, a recoverable pre-switch failure unlocks the picker and keeps it open
+   - select -> lock picker input and call `handleResumeSession(sessionPath, { followContinuation: true })`; on success hide the overlay and restore editor focus, a recoverable pre-switch failure unlocks the picker and keeps it open
    - cancel -> hide overlay, restore editor focus, rerender
    - exit -> hide overlay, then `ctx.shutdown()`
 
-`/resume <id-prefix>` resolves local then global matches and switches directly. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
+`/resume <id-prefix>` resolves local then global matches, follows `findSessionContinuation` from the match to the copy with the newest turn, and switches to it. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
 
 ## Session selector component behavior
 
@@ -194,7 +194,7 @@ The recorded model resolves as in startup resume: the first role/default candida
 
 ## UI state rebuild after interactive switch
 
-`SelectorController.handleResumeSession` invokes `switchSession` first. If it returns `false`, the selector stops before applying any new-session UI updates and leaves the existing session/UI unchanged. After a successful switch, it:
+`SelectorController.handleResumeSession` invokes `switchSession` first (with `followContinuation`, on the copy `findSessionContinuation` picks). If it returns `false`, the selector stops before applying any new-session UI updates and leaves the existing session/UI unchanged. After a successful switch, it:
 
 - stop loading animation
 - clear status container

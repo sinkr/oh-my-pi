@@ -426,12 +426,12 @@ Without an argument:
 
 1. Opens the session selector populated via `SessionManager.listForPicker(currentCwd, currentSessionDir)`. Pinned sessions come first; untitled, prompt-less zero-turn stubs are hidden unless pinned. The picker always opens in current-folder scope; the empty state invites Tab into all-projects instead of auto-switching.
 2. Tab toggles to all-projects scope, lazily loading and caching `SessionManager.listAllForPicker()`.
-3. On selection, `SelectorController.handleResumeSession(sessionPath)` calls `session.switchSession(sessionPath)`. If the switch is rejected, it returns `false` and the selector stops without applying the new-session UI state.
+3. On selection, `SelectorController.handleResumeSession(sessionPath, { followContinuation: true })` first follows `findSessionContinuation` to the copy with the newest turn (see CLI `--resume <value>`), then calls `session.switchSession(<that path>)`. If the switch is rejected, it returns `false` and the selector stops without applying the new-session UI state.
 4. After a successful switch, UI clears/rebuilds chat and todos, then reports `Resumed session` (or `Resumed session in <dir>` when the resumed session belongs to another project, in which case the process cwd and cwd-derived caches are re-pointed via `applyCwdChange`).
 
 With an argument:
 
-- `/resume <id>` resolves an id/filename prefix with local-first, then global fallback and switches directly to the matched file; an unknown value reports `Session "<value>" not found`.
+- `/resume <id>` resolves an id/filename prefix with local-first, then global fallback, follows `findSessionContinuation` from the matched file to the copy with the newest turn (see CLI `--resume <value>`), and switches to it; an unknown value reports `Session "<value>" not found`.
 - `/resume @claude` and `/resume @codex` open a foreign-session picker. Selecting one converts and persists it under a fresh OMP session identity, then switches to that new session.
 
 ## CLI `--resume`
