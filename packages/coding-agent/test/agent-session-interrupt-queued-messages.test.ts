@@ -155,6 +155,72 @@ describe("AgentSession editor-restoring interrupt", () => {
 		expect(request.indexOf("next prompt")).toBeGreaterThan(card2);
 	});
 
+	it("records the messages ahead of a prompt that another source started while the interrupt settled", async () => {
+		const { session, sessionManager, mock, streamStarted } = await createParkedSession([
+			{ content: ["answered"] },
+			{ content: ["never seen"] },
+		]);
+		const running = session.prompt("first task");
+		await streamStarted;
+		await session.sendCustomMessage(
+			{ customType: "peer-card", content: "withdrawn peer card", display: true },
+			{ deliverAs: "followUp" },
+		);
+
+		// Once the stopped run has settled, and before the abort records what it withdrew, a new
+		// prompt is admitted and held in its setup, where the agent is not yet streaming.
+		const setupReached = Promise.withResolvers<void>();
+		const setupRelease = Promise.withResolvers<void>();
+		const registry = session.modelRegistry;
+		const getApiKey = registry.getApiKey.bind(registry);
+		registry.getApiKey = async (...args) => {
+			registry.getApiKey = getApiKey;
+			setupReached.resolve();
+			await setupRelease.promise;
+			return getApiKey(...args);
+		};
+		const agentWaitForIdle = session.agent.waitForIdle.bind(session.agent);
+		let next: Promise<boolean> | undefined;
+		session.agent.waitForIdle = async () => {
+			session.agent.waitForIdle = agentWaitForIdle;
+			await agentWaitForIdle();
+			await running.catch(() => {});
+			expect(session.isStreaming).toBe(false);
+			next = session.prompt("next prompt");
+			await setupReached.promise;
+			// Admitted (the session counts it as in flight), but the agent has not started streaming.
+			expect(session.isStreaming).toBe(true);
+			expect(session.agent.state.isStreaming).toBe(false);
+		};
+
+		session.clearQueue({ forInterrupt: true });
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+
+		// The prompt in setup has sent nothing yet, so the card is recorded now, not queued behind it.
+		expect(session.agent.state.isStreaming).toBe(false);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+		expect(persistedTranscript(sessionManager)).toEqual([
+			"user: first task",
+			"custom/peer-card: withdrawn peer card",
+		]);
+
+		setupRelease.resolve();
+		expect(await next).toBe(true);
+		await session.waitForIdle();
+
+		// That prompt is the next turn: it carries the card ahead of its own text, as a prompt sent
+		// after the interrupt settled does, and no extra model call runs on the card.
+		expect(mock.calls).toHaveLength(2);
+		const request = JSON.stringify(mock.calls[1]!.context.messages);
+		expect(request.indexOf("withdrawn peer card")).toBeGreaterThan(-1);
+		expect(request.indexOf("next prompt")).toBeGreaterThan(request.indexOf("withdrawn peer card"));
+		expect(persistedTranscript(sessionManager)).toEqual([
+			"user: first task",
+			"custom/peer-card: withdrawn peer card",
+			"user: next prompt",
+		]);
+	});
+
 	it("hands back each typed message separately and keeps an agent-attributed prompt as its own message", async () => {
 		const { session, sessionManager, mock, streamStarted } = await createParkedSession();
 		const running = session.prompt("first task");

@@ -10963,8 +10963,10 @@ export class AgentSession implements SettingsScope {
 			// arrived via AdviseTool routing mid-abort and were parked hidden in
 			// #pendingNextTurnMessages while the turn was still tearing down. Other deferred
 			// next-turn context (non-advisor) stays queued, in order. A turn another source
-			// started during the awaits above (an idle triggerTurn send, an IRC wake) must not
-			// get them spliced into its live stream: they ride that turn as follow-ups instead.
+			// started during the awaits above (an idle triggerTurn send, an IRC wake) that is
+			// already streaming must not get them spliced into its live stream: they ride that
+			// turn as follow-ups instead. A prompt still in its setup has sent nothing yet, so
+			// recording them now puts them ahead of it, as for any later prompt.
 			const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
 			if (parkedAdvisorCards.length > 0) {
 				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
