@@ -121,7 +121,7 @@ import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } fr
 import { loadRuntimeIdentity } from "./session/runtime-identity";
 import {
 	findSessionContinuation,
-	findUnlistedSessionContinuation,
+	resolveResumeTarget,
 	resolveResumableSession,
 	type SessionContinuation,
 	type SessionInfo,
@@ -1316,18 +1316,11 @@ export async function createSessionManager(
 			// A copy whose conversation moved to another machine continues as a fork.
 			return await forkIfMovedAway(manager, parsed.sessionDir);
 		}
-		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
-		// An id that matched only the file name asks for the session that name records. A file
-		// that no longer reads as a session is not listed, but the copies that continue it still name its id.
-		const continuation = match
-			? await findSessionContinuation(match.session.path, undefined, {
-					matchedByFileName: !match.session.id.toLowerCase().startsWith(sessionArg.toLowerCase()),
-				})
-			: await findUnlistedSessionContinuation(sessionArg, cwd, parsed.sessionDir);
-		const session = continuation?.session ?? match?.session;
-		if (!session) {
+		const target = await resolveResumeTarget(sessionArg, cwd, parsed.sessionDir);
+		if (!target) {
 			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
 		}
+		const { session, continuation } = target;
 		if (continuation) options.onSessionContinuation?.(continuation);
 		const moveResult = await moveMissingCwdSessionIfNeeded(
 			sessionArg,

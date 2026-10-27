@@ -950,25 +950,62 @@ export async function findSessionContinuation(
 	return { session: newest, from: target, copies: count };
 }
 
+/** The session a resume key names, and the copy of its conversation to open (see {@link resolveResumeTarget}). */
+export interface ResumeTarget {
+	/** The copy to open: `match`, or the copy its conversation went on in. */
+	session: SessionInfo;
+	/** Set when `session` is not the session the key named; the caller reports it to the user. */
+	continuation?: SessionContinuation;
+}
+
 /**
- * For `--resume <id>` that matched no listed session: the copy to resume of a
+ * The session file a resume key (an id or filename prefix) opens:
+ * {@link resolveResumableSession}, then the copy of that conversation to
+ * resume ({@link findSessionContinuation}). `undefined` when nothing matches.
+ *
+ * A key that matched only a file's name asks for the session that name
+ * records, so a file that now holds another session is followed to the copies
+ * that continue the named one. A file that no longer reads as a session is
+ * not listed at all; it is found here by its generated name, in the same
+ * scopes the listing searched.
+ */
+export async function resolveResumeTarget(
+	sessionArg: string,
+	cwd: string,
+	sessionDir?: string,
+	options: ResolveResumableSessionOptions = {},
+): Promise<ResumeTarget | undefined> {
+	const match = await resolveResumableSession(sessionArg, cwd, sessionDir, new FileSessionStorage(), options);
+	const continuation = match
+		? await findSessionContinuation(match.session.path, undefined, {
+				matchedByFileName: !match.session.id.toLowerCase().startsWith(sessionArg.toLowerCase()),
+			})
+		: await findUnlistedSessionContinuation(sessionArg, cwd, sessionDir, options);
+	const session = continuation?.session ?? match?.session;
+	return session ? { session, continuation } : undefined;
+}
+
+/**
+ * For a resume key that matched no listed session: the copy to resume of a
  * session whose file, found by `idPrefix` in its generated name, no longer
  * reads as a session (it was replaced; see {@link findSessionContinuation}).
  * The session listing skips such a file, but the copies that continue it
  * still name its id. Looks in `sessionDir` (else `cwd`'s default session
- * directory) and, without `sessionDir`, in every project directory, as
- * {@link resolveResumableSession} does.
+ * directory) and then, when the global fallback applies, in every project
+ * directory, as {@link resolveResumableSession} does.
  */
-export async function findUnlistedSessionContinuation(
+async function findUnlistedSessionContinuation(
 	idPrefix: string,
 	cwd: string,
-	sessionDir?: string,
+	sessionDir: string | undefined,
+	options: ResolveResumableSessionOptions,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<SessionContinuation | undefined> {
 	const prefix = idPrefix.toLowerCase();
 	if (!/^[\w-]+$/.test(prefix)) return undefined;
 	const localDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
-	for (const scope of sessionDir ? ["local"] : ["local", "global"]) {
+	const globalToo = !sessionDir || options.allowGlobalFallback === true;
+	for (const scope of globalToo ? ["local", "global"] : ["local"]) {
 		const files =
 			scope === "local" ? storage.listFilesSync(localDir, `*_${prefix}*.jsonl`) : await findSessionFiles(prefix);
 		for (const file of files) {
