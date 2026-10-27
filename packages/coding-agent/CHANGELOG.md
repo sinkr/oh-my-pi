@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- LM Studio decision models can now serve the `judge` role (`modelRoles.judge: lm-studio/<model>`); they answer over LM Studio's `/v1/decisions` endpoint instead of being offered as chat models
+
 ## [18.13.1] - 2026-10-27
 
 ### Added
