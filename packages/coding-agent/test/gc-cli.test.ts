@@ -2826,23 +2826,46 @@ describe("runGcCommand session compression", () => {
 		60_000,
 	);
 
-	test.skipIf(!supported)(
-		"a volume whose compression shrinks nothing is probed once a day and its sessions are left alone",
-		async () => {
-			const { file } = await writeIdleSession(Bun.randomUUIDv7());
-			const before = await snapshot(file);
-			const probe = spyOn(gcCompress, "compressionWorks").mockResolvedValue(false);
-			try {
-				expect(await scheduleGcAutoCompress(root)).toBeUndefined();
-				expect(await scheduleGcAutoCompress(root)).toBeUndefined();
-				expect(probe).toHaveBeenCalledTimes(1);
-			} finally {
-				probe.mockRestore();
-			}
-			expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped:");
-			expect(await snapshot(file)).toEqual(before);
-		},
-	);
+	test.skipIf(!supported)("--apply on a volume whose compression shrinks nothing leaves sessions alone", async () => {
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+		const probe = spyOn(gcCompress, "compressionWorks").mockResolvedValue(false);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+		} finally {
+			probe.mockRestore();
+		}
+
+		expect(result.compress).toMatchObject({ supported: true, scanned: 0, wouldCompress: 0, compressed: 0 });
+		expect(result.compress?.probeFailure).toContain("stored a compressible probe file uncompressed");
+		expect(await snapshot(file)).toEqual(before);
+	});
+
+	test("omp gc --compress --apply fails when the compression probe cannot run", async () => {
+		// A supported volume, but no sessions directory to hold the probe's scratch dir.
+		const volume = spyOn(gcCompress, "compressMethod").mockResolvedValue("ntfs");
+		try {
+			await runCli(["gc", "--agent-dir", root, "--compress", "--apply"]);
+		} finally {
+			volume.mockRestore();
+		}
+
+		const stderr = stderrWrites.join("");
+		expect(process.exitCode).toBe(1);
+		expect(stderr).toContain("GC completed with 1 error:");
+		expect(stderr).toContain("compress: compression probe: ENOENT");
+		expect(writes.join("")).not.toContain("compress skipped");
+	});
+
+	test("the compression probe throws when the compression tool fails instead of reporting no compression", async () => {
+		// The other platform's tool is absent here, so its batch reports a command failure.
+		const absentTool = process.platform === "win32" ? "apfs" : "ntfs";
+
+		await expect(gcCompress.compressionWorks(root, absentTool)).rejects.toThrow(
+			absentTool === "apfs" ? "ditto exited" : "compact exited",
+		);
+	});
 
 	test.skipIf(supported)("the background run never starts without filesystem compression", async () => {
 		const { file } = await writeIdleSession(Bun.randomUUIDv7());
