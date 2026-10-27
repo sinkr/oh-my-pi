@@ -2567,6 +2567,7 @@ export class AgentSession implements SettingsScope {
 			restrictOAuthAccounts: providerSessionId => this.#accountPoolScope?.restrict(providerSessionId),
 			agentKind: () => this.#agentKind,
 		};
+		const sharedTransformProviderContext = config.transformProviderContext;
 		this.#advisors = new SessionAdvisors(advisorsHost, {
 			enabled: cfgAdvisorEnabled.get(this.settings),
 			tools: config.advisorTools,
@@ -2582,7 +2583,9 @@ export class AgentSession implements SettingsScope {
 			configs: config.advisorConfigs,
 			configWarnings: config.advisorConfigWarnings,
 			streamFn: config.advisorStreamFn,
-			transformProviderContext: config.transformProviderContext,
+			createTransformProviderContext:
+				config.createAdvisorTransformProviderContext ??
+				(sharedTransformProviderContext ? () => sharedTransformProviderContext : undefined),
 		});
 
 		const maintenanceHost: SessionMaintenanceHost = {
@@ -2650,9 +2653,8 @@ export class AgentSession implements SettingsScope {
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
 			buildLiveProviderContext: async (summarized, retained, signal, model) => {
 				// compact() rebuilds the previous summary message; send the live
-				// agent's own one. Conversion caches and the shared date/cwd reminder
-				// key on message identity, so a copy would re-root the reminder state
-				// the live turns depend on and re-render the bytes they sent.
+				// agent's own one. Conversion caches key on message identity, so a
+				// copy would re-render the bytes the live turns already sent.
 				const liveSummary = this.agent.state.messages[0];
 				const first = summarized[0];
 				const history =
