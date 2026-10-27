@@ -84,6 +84,8 @@ export class ContextViewer implements Component {
 	/** Attributed usage when it can be drawn against the window (meter and map). */
 	readonly #drawableAllocation: ReadonlyMap<ContextViewCategory, number> | undefined;
 	readonly #meter: readonly NativeNode[] | undefined;
+	/** Dim notes under the legend: the scaling note when rows are attributed, then Snapcompact diagnostics. */
+	readonly #overviewNotes: readonly string[];
 	readonly #modelLabel: string;
 
 	// Navigation.
@@ -155,6 +157,12 @@ export class ContextViewer implements Component {
 		const window = breakdown.contextWindow;
 		const allocation = allocateUsage(data.categories, breakdown.usedTokens);
 		this.#drawableAllocation = window > 0 && Number.isFinite(window) ? allocation : undefined;
+		this.#overviewNotes = [
+			...(allocation
+				? ["Category totals split Used by estimated share; the entries inside may not add up to them."]
+				: []),
+			...contextSnapcompactLines(breakdown),
+		];
 		const drawable = this.#drawableAllocation;
 		this.#meter = drawable
 			? describeContextMeter({
@@ -442,7 +450,7 @@ export class ContextViewer implements Component {
 		const legendLines = this.#overviewSelection.items.map(item =>
 			legendLine(item, this.#overviewSelection.selectedKey === item.key, Math.max(0, listWidth - 1)),
 		);
-		for (const line of contextSnapcompactLines(this.#data.breakdown))
+		for (const line of this.#overviewNotes)
 			legendLines.push(...wrapTextWithAnsi(theme.fg("dim", line), Math.max(1, listWidth - 1)));
 		this.#overviewScroll.setHeight(height);
 		this.#overviewScroll.setLines(legendLines);
@@ -599,7 +607,7 @@ export class ContextViewer implements Component {
 		const map = mapAllocation ? mapGeometry(this.#bodyWidth, this.#bodyRows) : undefined;
 		const body: NativeNode[] = [
 			mapAllocation && map ? row([this.#describeMap(mapAllocation, map), list], { gap: "lg" }) : list,
-			...contextSnapcompactLines(this.#data.breakdown).map(line => text([span(line, "dim")], { wrap: "word" })),
+			...this.#overviewNotes.map(line => text([span(line, "dim")], { wrap: "word" })),
 		];
 		const head = meter ?? this.#summary().map(line => text([span(line, "dim")], { wrap: "word" }));
 		return [...head, node("col", { grow: 1, min: { h: 0 } }, body, "overview")];
