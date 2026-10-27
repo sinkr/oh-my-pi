@@ -4977,6 +4977,9 @@
 				},
 				"timeout": {
 					"type": "integer"
+				},
+				"secret": {
+					"type": "boolean"
 				}
 			},
 			"required": [

@@ -717,6 +717,7 @@ export type RpcExtensionUIRequest =
 			title: string;
 			placeholder?: string;
 			timeout?: number;
+			secret?: boolean;
 	  }
 	| {
 			type: "extension_ui_request";
