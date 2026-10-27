@@ -40,9 +40,9 @@ type IdleWrite = "warm" | "compact";
  * Another live omp process that resumed `sessionFile`. Commands, one per line:
  * `append <text>` writes a user turn (the first write makes it the file's
  * owner); `warm` records the usage of an idle cache refresh; `compact` writes
- * an idle compaction and the eval-state snapshot that follows it; `exit`
- * records the `session_exit` marker every omp process appends on its way out,
- * then closes.
+ * an idle compaction and the eval-state snapshot that follows it; `clear`
+ * records the reset boundary `/clear` leaves; `exit` records the
+ * `session_exit` marker every omp process appends on its way out, then closes.
  */
 class Holder {
 	readonly #child: Bun.Subprocess<"pipe", "pipe", "pipe">;
@@ -78,6 +78,8 @@ class Holder {
 				'	} else if (line === "compact") {',
 				'		manager.appendCompaction("summary", undefined, manager.getLeafId(), 0);',
 				`		manager.appendMessage({ role: "custom", customType: ${JSON.stringify(EVAL_STATE_CONTEXT_TYPE)}, content: "eval state", display: false, attribution: "agent", timestamp: Date.now() });`,
+				'	} else if (line === "clear") {',
+				"		manager.appendResetBoundary();",
 				"	} else {",
 				'		manager.appendMessage({ role: "user", content: line.slice("append ".length), timestamp: Date.now() });',
 				"	}",
@@ -123,6 +125,13 @@ class Holder {
 	/** Make one write that is not a turn; returns the file it was saved to. */
 	async idle(write: IdleWrite): Promise<string> {
 		this.#child.stdin.write(`${write}\n`);
+		this.#child.stdin.flush();
+		return this.#nextLine();
+	}
+
+	/** Record a `/clear`; returns the file it was saved to. */
+	async clear(): Promise<string> {
+		this.#child.stdin.write("clear\n");
 		this.#child.stdin.flush();
 		return this.#nextLine();
 	}
@@ -183,17 +192,40 @@ async function createSession(tempDir: TempDir): Promise<string> {
 	return sessionFile;
 }
 
-/** Resume `sessionFile` while another process owns it and write one turn: the session moves to a sibling. */
-async function continueElsewhere(sessionFile: string, sessionDir: string, text: string): Promise<string> {
+/**
+ * Resume `sessionFile` while another process owns it and write once (a user
+ * turn with text `write`, or the given write): the session moves to a sibling.
+ */
+async function continueElsewhere(
+	sessionFile: string,
+	sessionDir: string,
+	write: string | ((manager: SessionManager) => void),
+): Promise<string> {
 	const manager = await open(sessionFile, sessionDir);
 	const notices: SessionPersistenceNotice[] = [];
 	manager.onPersistenceNotice(notice => notices.push(notice));
-	manager.appendMessage(userTurn(text));
+	if (typeof write === "string") manager.appendMessage(userTurn(write));
+	else write(manager);
 	await manager.close();
 	const sibling = manager.getSessionFile();
 	if (!sibling) throw new Error("Expected the session to save somewhere");
 	expect(notices).toEqual([{ reason: "open-elsewhere", from: sessionFile, to: sibling }]);
 	return sibling;
+}
+
+/**
+ * Grow the header of `sessionFile` past the 4 KB prefix the session listing
+ * reads, the way many recorded moves (`previousSessionFiles`) do.
+ */
+async function inflateHeader(sessionFile: string): Promise<void> {
+	const lines = (await Bun.file(sessionFile).text()).split("\n");
+	const index = lines.findIndex(line => line.includes('"type":"session"'));
+	const header = JSON.parse(lines[index]);
+	header.previousSessionFiles = Array.from({ length: 40 }, (_, i) =>
+		path.join(path.dirname(sessionFile), `moved-${i}`.padEnd(120, "x"), path.basename(sessionFile)),
+	);
+	lines[index] = JSON.stringify(header);
+	await Bun.write(sessionFile, lines.join("\n"));
 }
 
 /**
@@ -204,8 +236,9 @@ async function continueElsewhere(sessionFile: string, sessionDir: string, text: 
 async function movedOffSession(
 	tempDir: TempDir,
 	idleAfterMove?: IdleWrite,
+	createdSession?: string,
 ): Promise<{ original: string; continuation: string }> {
-	const original = await createSession(tempDir);
+	const original = createdSession ?? (await createSession(tempDir));
 	const holder = await Holder.resume(tempDir, original);
 	let continuation: string;
 	try {
@@ -363,6 +396,105 @@ describe("--resume of a session that continued in a sibling file", () => {
 		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
 		try {
 			expect(manager?.getSessionFile()).toBe(original);
+		} finally {
+			await manager?.close();
+		}
+	}, 30_000);
+
+	it("resumes the continuation when all it did after the move was a /clear", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const holder = await Holder.resume(tempDir, original);
+		let continuation: string;
+		try {
+			await holder.append("holder turn");
+			await Bun.sleep(5);
+			continuation = await continueElsewhere(original, tempDir.path(), manager => manager.appendResetBoundary());
+			await Bun.sleep(5);
+		} finally {
+			await holder.exit();
+		}
+
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(continuation);
+		} finally {
+			await manager?.close();
+		}
+	}, 30_000);
+
+	it("keeps the asked-for file when its own process ran /clear after the continuation", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const holder = await Holder.resume(tempDir, original);
+		try {
+			await holder.append("holder turn");
+			await Bun.sleep(5);
+			await continueElsewhere(original, tempDir.path(), "continued turn");
+			await Bun.sleep(5);
+			expect(await holder.clear()).toBe(original);
+		} finally {
+			await holder.exit();
+		}
+
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(original);
+		} finally {
+			await manager?.close();
+		}
+	}, 30_000);
+
+	it("stops at a middle copy whose own process went on after the next copy was made", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const original = await createSession(tempDir);
+		const first = await Holder.resume(tempDir, original);
+		let middle: string;
+		try {
+			await first.append("first holder turn");
+			await Bun.sleep(5);
+			middle = await continueElsewhere(original, tempDir.path(), "middle turn");
+		} finally {
+			await first.exit();
+		}
+		const second = await Holder.resume(tempDir, middle);
+		let last: string;
+		try {
+			expect(await second.append("second holder turn")).toBe(middle);
+			await Bun.sleep(5);
+			last = await continueElsewhere(middle, tempDir.path(), "last turn");
+			await Bun.sleep(5);
+			expect(await second.append("second holder kept going")).toBe(middle);
+			await Bun.sleep(5);
+		} finally {
+			await second.exit();
+		}
+		const writer = await open(last, tempDir.path());
+		writer.appendMessage(userTurn("last copy wrote last"));
+		await writer.close();
+		expect(writer.getSessionFile()).toBe(last);
+
+		const followed: SessionContinuation[] = [];
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings, undefined, {
+			onSessionContinuation: c => followed.push(c),
+		});
+		try {
+			expect(manager?.getSessionFile()).toBe(middle);
+			expect(followed.map(c => ({ to: c.session.path, copies: c.copies }))).toEqual([{ to: middle, copies: 2 }]);
+		} finally {
+			await manager?.close();
+		}
+	}, 30_000);
+
+	it("follows the continuation of a session whose header outgrew the listing prefix", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const created = await createSession(tempDir);
+		await inflateHeader(created);
+		const { original, continuation } = await movedOffSession(tempDir, undefined, created);
+
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(continuation);
 		} finally {
 			await manager?.close();
 		}

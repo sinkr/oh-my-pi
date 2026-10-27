@@ -1277,12 +1277,23 @@ export class SessionManager {
 		this.#sessionId = mintSessionId();
 		this.#taskSiblingCandidate = undefined;
 		const to = path.join(path.dirname(from), `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		// The marker goes before the carried-over fields: the session listing
+		// reads only the first 4 KB of a file, and a header grows with them.
+		const {
+			type: _type,
+			id: _id,
+			timestamp: _timestamp,
+			parentSession: _parent,
+			continuationOf: _of,
+			...carried
+		} = this.#header;
 		this.#header = {
-			...this.#header,
+			type: "session",
 			id: this.#sessionId,
 			timestamp,
 			parentSession: previousSessionId,
 			continuationOf: previousSessionId,
+			...carried,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 		};
 		this.#closeWriterEventually();

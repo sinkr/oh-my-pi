@@ -56,9 +56,10 @@ export function formatPersistenceNotice(notice: SessionPersistenceNotice): strin
 export function formatSessionContinuationNotice(continuation: SessionContinuation): string {
 	const from = shortenPath(continuation.from);
 	const to = shortenPath(continuation.session.path);
+	// A session moves off its file for every SessionPersistenceNotice reason, not only another process's hold.
 	const message =
 		continuation.copies > 2
-			? `Session ${from} went on in ${continuation.copies - 1} other files while other omp processes held it; resuming the one with the newest turn, ${to}.`
-			: `Session ${from} went on in ${to} while another omp process held it; resuming ${to}.`;
+			? `Session ${from} went on in ${continuation.copies - 1} other files; resuming the one with the newest turn, ${to}.`
+			: `Session ${from} went on in ${to}; resuming ${to}.`;
 	return replaceTabs(sanitizeText(message)).replace(/[\r\n]+/g, " ");
 }

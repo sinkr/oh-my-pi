@@ -9,6 +9,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
+import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
@@ -727,7 +728,10 @@ export interface SessionContinuation {
 	session: SessionInfo;
 	/** The session file that was asked for. */
 	from: string;
-	/** Copies of the conversation in the directory, `from` and `session` included. */
+	/**
+	 * Copies `from`'s conversation went on in, `from` and `session` included;
+	 * a copy left behind by one that went on after it does not count.
+	 */
 	copies: number;
 }
 
@@ -735,9 +739,10 @@ export interface SessionContinuation {
 const ACTIVITY_TAIL_BYTES = 65_536;
 
 /**
- * Entry types that carry turns of the conversation. Everything else a process
- * appends can land long after the last turn without adding one: the
- * `session_exit` record every exiting process writes, the usage of cache
+ * Entry types that move the conversation: its turns, and the reset boundary
+ * `/clear` leaves, after which a resume rebuilds no earlier turn. Everything
+ * else a process appends can land long after the last turn without moving it:
+ * the `session_exit` record every exiting process writes, the usage of cache
  * refreshes sent while idle, an idle compaction (it only summarizes entries
  * every copy already holds), settings changes, labels and extension state.
  */
@@ -745,6 +750,7 @@ const CONVERSATION_ENTRY_TYPES: Record<string, true> = {
 	message: true,
 	custom_message: true,
 	branch_summary: true,
+	reset_boundary: true,
 };
 
 /** The newest conversation entry of a session file. */
@@ -805,21 +811,22 @@ async function lastActivity(session: SessionInfo, storage: SessionStorage): Prom
 
 /** True when the session file at `file` holds an entry with id `id`. */
 async function holdsEntry(file: string, id: string, storage: SessionStorage): Promise<boolean> {
-	let text: string;
+	let found = false;
 	try {
-		text = await storage.readText(file);
+		await visitEntriesFromFile(
+			file,
+			entry => {
+				// The header's id is the session's, never an entry's.
+				if (entry.type === "session" || entry.id !== id) return;
+				found = true;
+				return false;
+			},
+			storage,
+		);
 	} catch {
 		return false;
 	}
-	const needle = JSON.stringify(id);
-	for (const line of text.split("\n")) {
-		if (line.charCodeAt(0) !== 123 || !line.includes(needle)) continue;
-		try {
-			const entry: { id?: unknown } = JSON.parse(line);
-			if (entry.id === id) return true;
-		} catch {}
-	}
-	return false;
+	return found;
 }
 
 /**
@@ -838,15 +845,16 @@ function sessionFileCreatedAt(file: string): number {
  * `sessionPath` itself is the copy to resume.
  *
  * A session that cannot keep writing its file (another live omp process
- * holds it) continues in a sibling whose header names the old session in
- * `continuationOf`, and that sibling can move on the same way. Resuming the
+ * holds it, or the file changed under it) continues in a sibling whose
+ * header names the old session in `continuationOf`, and that sibling can
+ * move on the same way. Resuming the
  * old file again would revive the conversation as it was before the move,
  * so resume follows those links and takes the copy with the newest turn,
- * keeping `sessionPath` on a tie. A copy is followed only when it holds the
- * newest turn of `sessionPath`: when `sessionPath` itself went on after the
- * move (its own process kept writing it), both copies hold turns the other
- * lacks and `sessionPath` stays the one resumed. Forks never set
- * `continuationOf`, so a deliberate fork is never followed.
+ * keeping `sessionPath` on a tie. A link is followed only when the copy holds
+ * the newest turn of the copy it continues: when that copy went on after the
+ * move (its own process kept writing it), both hold turns the other lacks,
+ * so the one it continues stays the one resumed, as `sessionPath` would.
+ * Forks never set `continuationOf`, so a deliberate fork is never followed.
  *
  * A continuation is named `<move time>_<id>.jsonl` and moves only after the
  * session it continues was created, so only files named after that creation
@@ -872,22 +880,33 @@ export async function findSessionContinuation(
 		else continuations.set(session.continuationOf, [session]);
 	}
 	if (!continuations.has(start.id)) return undefined;
+	const activities = new Map<string, SessionActivity>();
+	const activityOf = async (copy: SessionInfo): Promise<SessionActivity> => {
+		let activity = activities.get(copy.path);
+		if (!activity) {
+			activity = await lastActivity(copy, storage);
+			activities.set(copy.path, activity);
+		}
+		return activity;
+	};
 	const copies = [start];
 	const seen = new Set([start.path]);
 	for (let i = 0; i < copies.length; i++) {
-		for (const next of continuations.get(copies[i].id) ?? []) {
+		const children = continuations.get(copies[i].id);
+		if (!children) continue;
+		const { id: newestTurn } = await activityOf(copies[i]);
+		for (const next of children) {
 			if (seen.has(next.path)) continue;
 			seen.add(next.path);
+			if (newestTurn !== undefined && !(await holdsEntry(next.path, newestTurn, storage))) continue;
 			copies.push(next);
 		}
 	}
-	const startActivity = await lastActivity(start, storage);
 	let newest = start;
-	let newestTime = startActivity.time;
+	let newestTime = (await activityOf(start)).time;
 	for (const copy of copies.slice(1)) {
-		const { time } = await lastActivity(copy, storage);
+		const { time } = await activityOf(copy);
 		if (time <= newestTime) continue;
-		if (startActivity.id !== undefined && !(await holdsEntry(copy.path, startActivity.id, storage))) continue;
 		newest = copy;
 		newestTime = time;
 	}
