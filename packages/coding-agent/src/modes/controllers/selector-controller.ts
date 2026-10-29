@@ -76,7 +76,7 @@ import type { SessionEntry, SessionTreeNode } from "../../session/session-entrie
 import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
-import { getDefaultSessionStorage } from "../../session/session-storage";
+import { FileSessionStorage, getDefaultSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
