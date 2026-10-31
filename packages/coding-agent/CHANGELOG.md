@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Integrated the local patch stack with OMP 18.14.2, preserving session picker pin controls, normalized plugin paths, and configured judge timeout fallbacks alongside account-rejection recovery.
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
