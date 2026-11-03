@@ -758,6 +758,9 @@ export async function listAllSessionsForPicker(
 	pinnedIds: ReadonlySet<string>,
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<PickerListing> {
+	if (!(storage instanceof FileSessionStorage)) {
+		return settledListing(filterSessionsForPicker(await listAllSessions(storage, sessionsRoot), pinnedIds));
+	}
 	let files: string[];
 	try {
 		files = await scanBucketFiles(sessionsRoot, "*.jsonl");

@@ -9,7 +9,7 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { listAllSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { listAllSessions, listAllSessionsForPicker } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
@@ -187,7 +187,33 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		expect(sessions.map(session => session.path).sort()).toEqual(
 			managers.map(manager => manager.getSessionFile() as string).sort(),
 		);
+		const listing = await listAllSessionsForPicker(storage, new Set(), root);
+		expect(listing.sessions).toEqual(sessions);
+		expect(await listing.complete).toBe(listing.sessions);
 		await client.end();
+	});
+
+	it("all-project SQL picker retains named and pinned empties without filesystem discovery", async () => {
+		const client = new SQL("sqlite::memory:");
+		try {
+			const storage = await SqlSessionStorage.create({ client });
+			const root = virtualDir(`/sessions/${crypto.randomUUID()}`);
+			for (const id of ["hidden", "pinned", "named"]) {
+				const entries = [
+					{ type: "title", title: id === "named" ? "SQL title" : "" },
+					{ type: "session", version: 3, id, cwd: "/cwd", timestamp: "2026-01-01T00:00:00.000Z" },
+				];
+				storage.writeTextSync(`${root}/${id}/${id}.jsonl`, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+			}
+			await storage.drain();
+
+			const listing = await listAllSessionsForPicker(storage, new Set(["pinned"]), root);
+			expect(listing.sessions.map(session => session.id).sort()).toEqual(["named", "pinned"]);
+			expect(listing.sessions.find(session => session.id === "named")?.title).toBe("SQL title");
+			expect(await listing.complete).toBe(listing.sessions);
+		} finally {
+			await client.end();
+		}
 	});
 
 	it("persists entries and a title racing the first SQL write without reporting a conflict", async () => {

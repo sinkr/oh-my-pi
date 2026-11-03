@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved SQL-backed sessions in the two-pass all-project resume picker, including named and pinned empty sessions, while retaining indexed-title loading for file-backed sessions.
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
