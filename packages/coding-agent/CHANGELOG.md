@@ -205,6 +205,9 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
+### Fixed
+
+- Preserved SQL-backed sessions in the two-pass all-project resume picker, including named and pinned empty sessions, while retaining indexed-title loading for file-backed sessions.
 
 ## [18.16.0] - 2026-11-02
 
