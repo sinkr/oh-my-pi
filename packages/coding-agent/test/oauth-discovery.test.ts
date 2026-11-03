@@ -33,15 +33,15 @@ describe("mcp oauth discovery", () => {
 				const endpoints =
 					format === "standard"
 						? {
-								authorization_endpoint: "https://auth.example.com/authorize",
-								token_endpoint: "https://auth.example.com/token",
-							}
+							authorization_endpoint: "https://auth.example.com/authorize",
+							token_endpoint: "https://auth.example.com/token",
+						}
 						: {
-								oauth: {
-									authorization_url: "https://auth.example.com/authorize",
-									token_url: "https://auth.example.com/token",
-								},
-							};
+							oauth: {
+								authorization_url: "https://auth.example.com/authorize",
+								token_url: "https://auth.example.com/token",
+							},
+						};
 				return Response.json({
 					resource: "https://mcp.example.com/mcp",
 					scopes_supported: ["mcp.read"],
@@ -76,17 +76,17 @@ describe("mcp oauth discovery", () => {
 			return Response.json(
 				format === "standard"
 					? {
-							authorization_endpoint: authorizationUrl,
-							token_endpoint: tokenUrl,
-							scopes_supported: ["mcp.read"],
-						}
+						authorization_endpoint: authorizationUrl,
+						token_endpoint: tokenUrl,
+						scopes_supported: ["mcp.read"],
+					}
 					: {
-							[format]: {
-								authorization_url: authorizationUrl,
-								token_url: tokenUrl,
-								scopes_supported: ["mcp.read"],
-							},
+						[format]: {
+							authorization_url: authorizationUrl,
+							token_url: tokenUrl,
+							scopes_supported: ["mcp.read"],
 						},
+					},
 			);
 		});
 
@@ -114,19 +114,19 @@ describe("mcp oauth discovery", () => {
 				const metadata =
 					format === "standard"
 						? {
-								authorization_endpoint: "https://www.figma.com/oauth",
-								token_endpoint: "https://api.figma.com/v1/oauth/token",
+							authorization_endpoint: "https://www.figma.com/oauth",
+							token_endpoint: "https://api.figma.com/v1/oauth/token",
+							client_id: "figma-client-id",
+							scopes_supported: ["file_read", "file_write"],
+						}
+						: {
+							oauth: {
+								authorization_url: "https://www.figma.com/oauth",
+								token_url: "https://api.figma.com/v1/oauth/token",
 								client_id: "figma-client-id",
 								scopes_supported: ["file_read", "file_write"],
-							}
-						: {
-								oauth: {
-									authorization_url: "https://www.figma.com/oauth",
-									token_url: "https://api.figma.com/v1/oauth/token",
-									client_id: "figma-client-id",
-									scopes_supported: ["file_read", "file_write"],
-								},
-							};
+							},
+						};
 				return Response.json(metadata);
 			}
 
@@ -813,8 +813,8 @@ describe("RFC 9728 path-inserted protected resource", () => {
 			await expect(discovery).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
 			await expect(discovery).rejects.toThrow(
 				"Could not discover OAuth endpoints: authorization server https://gw.example/slack " +
-					"(advertised by https://gw.example/.well-known/oauth-protected-resource/slack/mcp) " +
-					"returned metadata with issuer https://gw.example (RFC 8414 §3.3 requires an exact match).",
+				"(advertised by https://gw.example/.well-known/oauth-protected-resource/slack/mcp) " +
+				"returned metadata with issuer https://gw.example (RFC 8414 §3.3 requires an exact match).",
 			);
 		}
 
@@ -957,6 +957,46 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			authorizationUrl: "https://auth.example.com/oauth/authorize",
 			issuerUrl: "https://auth.example.com/",
 			tokenUrl: "https://auth.example.com/oauth/token",
+		});
+	});
+
+	it("accepts origin-root AS metadata whose issuer is path-scoped to the resource URL", async () => {
+		// FastMCP mounted at /mcp: protected resource metadata advertises the origin
+		// root (`https://api.example.com`), but the AS metadata at the origin root declares
+		// the path-scoped issuer `https://api.example.com/mcp/` matching the resource.
+		const serverUrl = "https://api.example.com/mcp/";
+		const prUrl = "https://api.example.com/.well-known/oauth-protected-resource/mcp";
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			if (url === prUrl) {
+				return Response.json({
+					resource: serverUrl,
+					authorization_servers: ["https://api.example.com/"],
+					scopes_supported: ["openid", "profile", "email"],
+				});
+			}
+			if (url === "https://api.example.com/.well-known/oauth-authorization-server") {
+				return Response.json({
+					issuer: "https://api.example.com/mcp/",
+					authorization_endpoint: "https://api.example.com/mcp/authorize",
+					token_endpoint: "https://api.example.com/mcp/token",
+					registration_endpoint: "https://api.example.com/mcp/register",
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(serverUrl, undefined, prUrl, {
+			fetch: fetchImpl,
+		});
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://api.example.com/mcp/authorize",
+			issuerUrl: "https://api.example.com/mcp/",
+			tokenUrl: "https://api.example.com/mcp/token",
+			registrationUrl: "https://api.example.com/mcp/register",
+			scopes: "openid profile email",
+			resource: serverUrl,
 		});
 	});
 });
