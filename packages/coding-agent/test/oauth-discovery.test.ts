@@ -997,6 +997,46 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			tokenUrl: "https://auth.example.com/oauth/token",
 		});
 	});
+
+	it("accepts origin-root AS metadata whose issuer is path-scoped to the resource URL", async () => {
+		// FastMCP mounted at /mcp: protected resource metadata advertises the origin
+		// root (`https://api.example.com`), but the AS metadata at the origin root declares
+		// the path-scoped issuer `https://api.example.com/mcp/` matching the resource.
+		const serverUrl = "https://api.example.com/mcp/";
+		const prUrl = "https://api.example.com/.well-known/oauth-protected-resource/mcp";
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			if (url === prUrl) {
+				return Response.json({
+					resource: serverUrl,
+					authorization_servers: ["https://api.example.com/"],
+					scopes_supported: ["openid", "profile", "email"],
+				});
+			}
+			if (url === "https://api.example.com/.well-known/oauth-authorization-server") {
+				return Response.json({
+					issuer: "https://api.example.com/mcp/",
+					authorization_endpoint: "https://api.example.com/mcp/authorize",
+					token_endpoint: "https://api.example.com/mcp/token",
+					registration_endpoint: "https://api.example.com/mcp/register",
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(serverUrl, undefined, prUrl, {
+			fetch: fetchImpl,
+		});
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://api.example.com/mcp/authorize",
+			issuerUrl: "https://api.example.com/mcp/",
+			tokenUrl: "https://api.example.com/mcp/token",
+			registrationUrl: "https://api.example.com/mcp/register",
+			scopes: "openid profile email",
+			resource: serverUrl,
+		});
+	});
 });
 
 describe("bounded discovery fetches", () => {
