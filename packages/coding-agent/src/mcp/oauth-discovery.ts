@@ -345,14 +345,46 @@ function normalizeIssuerUrl(value: string): string | undefined {
  *     today's permissive behavior), or
  *   - the issuer matches `baseUrl` after trailing-slash normalization.
  */
-function issuerMatchesBase(metadataIssuer: unknown, baseUrl: string): boolean {
+function issuerMatchesBase(
+	metadataIssuer: unknown,
+	baseUrl: string,
+	resourceContext?: { serverUrl?: string; resource?: string },
+): boolean {
 	if (typeof metadataIssuer !== "string" || !metadataIssuer.trim()) {
 		return true;
 	}
 	const normalizedIssuer = normalizeIssuerUrl(metadataIssuer);
 	const normalizedBase = normalizeIssuerUrl(baseUrl);
 	if (!normalizedIssuer || !normalizedBase) return true;
-	return normalizedIssuer === normalizedBase;
+	if (normalizedIssuer === normalizedBase) return true;
+
+	// When an authorization server advertised by protected-resource metadata
+	// reports an issuer that matches the resource URL or server URL (e.g. an AS
+	// advertised as the origin root `https://api.example.com` whose metadata
+	// carries the path-scoped issuer `https://api.example.com/mcp/`), accept it
+	// as long as they share the same origin.
+	if (resourceContext) {
+		try {
+			const issuerUrl = new URL(normalizedIssuer);
+			const baseUrlObj = new URL(normalizedBase);
+			if (issuerUrl.origin === baseUrlObj.origin) {
+				const normalizedServer = resourceContext.serverUrl
+					? normalizeIssuerUrl(resourceContext.serverUrl)
+					: undefined;
+				const normalizedResource = resourceContext.resource
+					? normalizeIssuerUrl(resourceContext.resource)
+					: undefined;
+				if (
+					(normalizedServer && normalizedIssuer === normalizedServer) ||
+					(normalizedResource && normalizedIssuer === normalizedResource)
+				) {
+					return true;
+				}
+			}
+		} catch {}
+	}
+
+	return false;
 }
 
 /**
@@ -644,7 +676,9 @@ export async function discoverOAuthEndpoints(
 							base.issuerCandidate &&
 							(path === "/.well-known/oauth-authorization-server" ||
 								path === "/.well-known/openid-configuration");
-						const issuerOk = requireIssuerMatch ? issuerMatchesBase(metadata.issuer, base.url) : true;
+						const issuerOk = requireIssuerMatch
+							? issuerMatchesBase(metadata.issuer, base.url, { serverUrl, resource: protectedResource })
+							: true;
 						if (!issuerOk && base.advertisedBy && !issuerRejections.has(base.url)) {
 							issuerRejections.set(base.url, {
 								authServer: base.url,
