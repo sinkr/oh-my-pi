@@ -203,7 +203,10 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 					{ type: "title", title: id === "named" ? "SQL title" : "" },
 					{ type: "session", version: 3, id, cwd: "/cwd", timestamp: "2026-01-01T00:00:00.000Z" },
 				];
-				storage.writeTextSync(`${root}/${id}/${id}.jsonl`, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+				storage.writeTextSync(
+					`${root}/${id}/${id}.jsonl`,
+					`${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`,
+				);
 			}
 			await storage.drain();
 
