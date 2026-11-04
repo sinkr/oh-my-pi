@@ -324,30 +324,40 @@ async function runSplitCommit(
 	process.stdout.write("● Creating split commits...\n");
 	const stagedDiff = await repo.diffText({ cached: true, binary: true });
 	await repo.unstage([]);
-	for (const [position, commitIndex] of order.entries()) {
-		const commit = plan.commits[commitIndex];
-		await repo.stageHunks(commit.changes, stagedDiff);
-		const analysis: ConventionalAnalysis = {
-			type: commit.type,
-			scope: commit.scope,
-			details: commit.details,
-			issueRefs: commit.issueRefs,
-		};
-		const message = formatCommitMessage(analysis, commit.summary);
-		try {
-			await repo.commitCreate(message, {});
-		} catch (error) {
-			if (vcs.isVcsError(error)) {
-				const stagedNow = await repo.changedFiles({ cached: true });
-				abortOnGitFailure(
-					`Commit ${position + 1} of ${order.length} failed`,
-					error,
-					`${position} of ${order.length} commits created; ${stagedNow.length} file(s) remain staged. No changes were lost.`,
-				);
+	const prevSplitEnv = process.env.OMP_COMMIT_SPLIT;
+	process.env.OMP_COMMIT_SPLIT = "1";
+	try {
+		for (const [position, commitIndex] of order.entries()) {
+			const commit = plan.commits[commitIndex];
+			await repo.stageHunks(commit.changes, stagedDiff);
+			const analysis: ConventionalAnalysis = {
+				type: commit.type,
+				scope: commit.scope,
+				details: commit.details,
+				issueRefs: commit.issueRefs,
+			};
+			const message = formatCommitMessage(analysis, commit.summary);
+			try {
+				await repo.commitCreate(message, {});
+			} catch (error) {
+				if (vcs.isVcsError(error)) {
+					const stagedNow = await repo.changedFiles({ cached: true });
+					abortOnGitFailure(
+						`Commit ${position + 1} of ${order.length} failed`,
+						error,
+						`${position} of ${order.length} commits created; ${stagedNow.length} file(s) remain staged. No changes were lost.`,
+					);
+				}
+				throw error;
 			}
-			throw error;
+			await repo.unstage([]);
 		}
-		await repo.unstage([]);
+	} finally {
+		if (prevSplitEnv === undefined) {
+			delete process.env.OMP_COMMIT_SPLIT;
+		} else {
+			process.env.OMP_COMMIT_SPLIT = prevSplitEnv;
+		}
 	}
 	process.stdout.write("Split commits created.\n");
 	if (ctx.push) await pushOrAbort(ctx.cwd);
