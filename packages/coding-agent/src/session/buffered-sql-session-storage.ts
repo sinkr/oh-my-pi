@@ -28,6 +28,19 @@ import type { SessionTitleUpdate } from "./session-title-slot";
 import { SqlSessionStorage } from "./sql-session-storage";
 import type { SqlSessionStorageClient, SqlSessionStorageTransaction } from "./sql-session-storage";
 
+/**
+ * The shared store holds rows written by macOS (`/Users/<u>`) and Linux (`/home/<u>`)
+ * hosts. A sessions dir under one home root also lists the same relative dir under the
+ * other, so sessions synced from a peer host are discoverable locally.
+ */
+function crossHostPrefixes(dir: string): string[] {
+	const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+	const match = /^\/(Users|home)\/([^/]+)\//.exec(prefix);
+	if (!match) return [prefix];
+	const peerRoot = match[1] === "Users" ? "home" : "Users";
+	return [prefix, `/${peerRoot}/${match[2]}/${prefix.slice(match[0].length)}`];
+}
+
 export interface BufferedSqlSessionStorageOptions {
 	cachePath: string;
 	createClient: () => SqlSessionStorageClient | Promise<SqlSessionStorageClient>;
@@ -253,7 +266,7 @@ export class BufferedSqlSessionStorage implements SessionStorage {
 		if (interval > 0) {
 			// sync() reports both local and remote failures; consume its already-reported rejection.
 			storage.#timer = setInterval(() => {
-				void storage.sync().catch(() => {});
+				void storage.sync().catch(() => { });
 			}, interval);
 			storage.#timer.unref();
 		}
@@ -389,15 +402,18 @@ export class BufferedSqlSessionStorage implements SessionStorage {
 	}
 	listFilesSync(dir: string, pattern: string): string[] {
 		this.#assertOpen();
-		const prefix = dir.endsWith("/") ? dir : `${dir}/`;
 		const glob = new Bun.Glob(pattern);
-		return this.#all<{ path: string }>(
-			"SELECT path FROM buffer_files WHERE present = 1 AND substr(path, 1, ?) = ?",
-			prefix.length,
-			prefix,
-		)
-			.map(file => file.path)
-			.filter(file => glob.match(file.slice(prefix.length)));
+		const files: string[] = [];
+		for (const prefix of crossHostPrefixes(dir)) {
+			for (const file of this.#all<{ path: string }>(
+				"SELECT path FROM buffer_files WHERE present = 1 AND substr(path, 1, ?) = ?",
+				prefix.length,
+				prefix,
+			)) {
+				if (glob.match(file.path.slice(prefix.length))) files.push(file.path);
+			}
+		}
+		return files;
 	}
 	writeTextSync(file: string, content: string, options?: SessionStorageWriteOptions): void {
 		this.#replace(file, content, options);
@@ -696,10 +712,10 @@ export class BufferedSqlSessionStorage implements SessionStorage {
 			const prefix = artifacts ? `${file.slice(0, -6).replace(/\/$/, "")}/` : undefined;
 			const files = prefix
 				? this.#all<Pick<CacheFile, "path" | "present" | "size" | "mtime">>(
-						"SELECT path, present, size, mtime FROM buffer_files WHERE present = 1 AND substr(path, 1, ?) = ?",
-						prefix.length,
-						prefix,
-					)
+					"SELECT path, present, size, mtime FROM buffer_files WHERE present = 1 AND substr(path, 1, ?) = ?",
+					prefix.length,
+					prefix,
+				)
 				: [];
 			const expected = [
 				this.#expected(file),
@@ -1075,7 +1091,7 @@ export class BufferedSqlSessionStorage implements SessionStorage {
 			.finally(() => {
 				if (this.#syncing === pending) this.#syncing = undefined;
 			})
-			.catch(() => {});
+			.catch(() => { });
 		return pending;
 	}
 	async #sync(): Promise<void> {
@@ -1198,7 +1214,7 @@ export class BufferedSqlSessionStorage implements SessionStorage {
 			errors.push(error);
 		}
 		// Pending remote work remains in the outbox; close never demands connectivity.
-		if (this.#syncing) await this.#syncing.catch(() => {});
+		if (this.#syncing) await this.#syncing.catch(() => { });
 		await Promise.allSettled(this.#reads);
 		for (const writer of this.#writers) {
 			try {
@@ -1272,9 +1288,9 @@ class BufferedWriter implements SessionStorageWriter {
 			this.#check();
 			const operation = this.#pending
 				? this.#pending.then(() => {
-						if (this.#error) throw this.#error;
-						return this.#storage._appendForWriter(this.#path, line);
-					})
+					if (this.#error) throw this.#error;
+					return this.#storage._appendForWriter(this.#path, line);
+				})
 				: this.#storage._appendForWriter(this.#path, line);
 			if (!operation) return Promise.resolve();
 			const pending = operation.catch(error => {
@@ -1285,7 +1301,7 @@ class BufferedWriter implements SessionStorageWriter {
 				.finally(() => {
 					if (this.#pending === pending) this.#pending = undefined;
 				})
-				.catch(() => {});
+				.catch(() => { });
 			return pending;
 		} catch (error) {
 			return Promise.reject(this.#fail(error));
@@ -1296,7 +1312,7 @@ class BufferedWriter implements SessionStorageWriter {
 		if (this.#pending) throw new Error("Session writer has asynchronous work in progress; await flush()");
 	}
 	async flush(): Promise<void> {
-		if (this.#pending) await this.#pending.catch(() => {});
+		if (this.#pending) await this.#pending.catch(() => { });
 		if (this.#error) throw this.#error;
 	}
 	isOpen(): boolean {
