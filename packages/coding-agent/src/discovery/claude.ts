@@ -28,6 +28,7 @@ import {
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
+	isHomeCwd,
 	loadFilesFromDir,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -99,10 +100,12 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		...(userClaudeJson ? [{ path: userClaudeJson, level: "user" as const }] : []),
 		...(userMcpJson ? [{ path: userMcpJson, level: "user" as const }] : []),
 	];
-	const projectPaths = [
-		{ path: projectMcpJson, level: "project" as const },
-		{ path: projectMcpJsonAlt, level: "project" as const },
-	];
+	const projectPaths = isHomeCwd(ctx)
+		? []
+		: [
+				{ path: projectMcpJson, level: "project" as const },
+				{ path: projectMcpJsonAlt, level: "project" as const },
+			];
 
 	const allPaths = [...userPaths, ...projectPaths];
 	const contents = await Promise.all(allPaths.map(({ path }) => readFile(path)));
@@ -553,7 +556,7 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 
 	const projectBase = getProjectClaude(ctx);
 	const projectSettingsJson = path.join(projectBase, "settings.json");
-	const projectContent = await readFile(projectSettingsJson);
+	const projectContent = isHomeCwd(ctx) ? null : await readFile(projectSettingsJson);
 	if (projectContent) {
 		const data = tryParseJson<Record<string, unknown>>(projectContent);
 		if (data) {
