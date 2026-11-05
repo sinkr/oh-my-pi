@@ -35,6 +35,7 @@ import {
 	buildExtensionModuleItems,
 	createSourceMeta,
 	discoverExtensionModulePaths,
+	isHomeCwd,
 	loadFilesFromDir,
 	mergeLoadResults,
 	SOURCE_PATHS,
@@ -111,7 +112,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 	const [userConfig, projectConfig] = await Promise.all([
 		userConfigPath ? loadTomlConfig(ctx, userConfigPath) : Promise.resolve(null),
-		loadTomlConfig(ctx, projectConfigPath),
+		isHomeCwd(ctx) ? Promise.resolve(null) : loadTomlConfig(ctx, projectConfigPath),
 	]);
 
 	const items: MCPServer[] = [];
@@ -488,7 +489,7 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 
 	const [userConfig, projectConfig] = await Promise.all([
 		userConfigPath ? loadTomlConfig(ctx, userConfigPath) : Promise.resolve(null),
-		loadTomlConfig(ctx, projectConfigPath),
+		isHomeCwd(ctx) ? Promise.resolve(null) : loadTomlConfig(ctx, projectConfigPath),
 	]);
 
 	const items: Settings[] = [];
