@@ -1,13 +1,11 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { Markdown } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import typesDescriptionPrompt from "../../commit/prompts/types-description.md" with { type: "text" };
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
-import { getMarkdownTheme } from "@oh-my-pi/pi-tui/theme";
 import { createAgentSession } from "../../sdk";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
@@ -16,7 +14,6 @@ import agentUserPrompt from "./prompts/session-user.md" with { type: "text" };
 import agentSystemPrompt from "./prompts/system.md" with { type: "text" };
 import type { CommitAgentState } from "./state";
 import { createCommitTools } from "./tools";
-
 export interface CommitAgentInput {
 	cwd: string;
 	model: Model<Api>;
@@ -45,7 +42,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		types_description: typesDescription,
 	});
 	const state: CommitAgentState = { diffText: input.diffText };
-	const spawns = "sonic";
+	const spawns = "";
 	const tools = createCommitTools({
 		cwd: input.cwd,
 		authStorage: input.authStorage,
@@ -54,9 +51,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		spawns,
 		state,
 		changelogTargets: input.changelogTargets,
-		enableAnalyzeFiles: true,
 	});
-
 	const { session } = await createAgentSession({
 		cwd: input.cwd,
 		sessionManager: input.sessionManager ?? SessionManager.inMemory(input.cwd),
@@ -75,7 +70,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		toolNames: tools.map(tool => tool.name),
 		restrictToolNames: true,
 		allowRestrictedCustomTools: true,
-		contextFiles: input.contextFiles,
+		contextFiles: [],
 		disableExtensionDiscovery: true,
 		skills: [],
 		promptTemplates: [],
@@ -126,10 +121,6 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 					const assistantMessage = event.message as { stopReason?: string; errorMessage?: string };
 					if (assistantMessage.stopReason === "error" && assistantMessage.errorMessage) {
 						process.stdout.write(`● Error: ${assistantMessage.errorMessage}\n`);
-					}
-					const messageText = extractMessageText(event.message?.content ?? []);
-					if (messageText) {
-						writeAssistantMessage(messageText);
 					}
 				}
 				break;
@@ -200,34 +191,6 @@ function extractMessagePreview(content: Array<{ type: string; text?: string }>):
 	if (textBlocks.length === 0) return null;
 	const combined = textBlocks.join(" ").replace(/\s+/g, " ").trim();
 	return truncateToolArg(combined);
-}
-
-function extractMessageText(content: Array<{ type: string; text?: string }>): string | null {
-	const textBlocks = content
-		.filter(block => block.type === "text" && typeof block.text === "string")
-		.map(block => block.text ?? "")
-		.filter(value => value.trim().length > 0);
-	if (textBlocks.length === 0) return null;
-	return textBlocks.join("\n").trim();
-}
-
-function writeAssistantMessage(message: string): void {
-	const lines = renderMarkdownLines(message);
-	if (lines.length === 0) return;
-	let firstContentIndex = lines.findIndex(line => line.trim().length > 0);
-	if (firstContentIndex === -1) {
-		firstContentIndex = 0;
-	}
-	for (const [index, line] of lines.entries()) {
-		const prefix = index === firstContentIndex ? "● " : "  ";
-		process.stdout.write(`${`${prefix}${line}`.trimEnd()}\n`);
-	}
-}
-
-function renderMarkdownLines(message: string): readonly string[] {
-	const width = Math.max(40, process.stdout.columns ?? 100);
-	const markdown = new Markdown(message, 0, 0, getMarkdownTheme());
-	return markdown.render(width);
 }
 
 function formatToolLabel(toolName: string): string {
