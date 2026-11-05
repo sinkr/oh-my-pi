@@ -1,8 +1,7 @@
 import * as path from "node:path";
-import { createInterface } from "node:readline/promises";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { $env, getProjectDir, isEnoent, prompt } from "@oh-my-pi/pi-utils";
+import { $env, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { applyChangelogProposals } from "../../commit/changelog";
 import { detectChangelogBoundaries } from "../../commit/changelog/detect";
 import { parseUnreleasedSection } from "../../commit/changelog/parse";
@@ -11,17 +10,15 @@ import { resolvePrimaryModel } from "../../commit/model-selection";
 import type { CommitCommandArgs, ConventionalAnalysis, NumstatEntry } from "../../commit/types";
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
-import { discoverAuthStorage, discoverContextFiles, loadCliExtensionProviders } from "../../sdk";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../../sdk";
 import type { AuthStorage } from "../../session/auth-storage";
 import { abortOnGitFailure, pushOrAbort } from "../execute";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
 import { assignLockFilesToPlan } from "./lock-files";
-import splitConfirmPrompt from "./prompts/split-confirm.md" with { type: "text" };
 import type { CommitAgentState, CommitProposal, FileChange, SplitCommitPlan } from "./state";
 import { computeDependencyOrder } from "./topo-sort";
 import { detectTrivialChange } from "./trivial";
-
 interface CommitExecutionContext {
 	cwd: string;
 	dryRun: boolean;
@@ -81,9 +78,8 @@ async function runAgenticCommitWithAuth(
 	if (!args.noChangelog) {
 		process.stdout.write("● Detecting changelog targets...\n");
 	}
-	const [changelogBoundaries, contextFiles, numstat, diff] = await Promise.all([
+	const [changelogBoundaries, numstat, diff] = await Promise.all([
 		args.noChangelog ? [] : detectChangelogBoundaries(cwd, stagedFiles),
-		discoverContextFiles(cwd),
 		repo
 			.numstat({ cached: true })
 			.then(entries =>
@@ -100,19 +96,6 @@ async function runAgenticCommitWithAuth(
 		} else {
 			process.stdout.write("  └─ (none found)\n");
 		}
-	}
-
-	process.stdout.write("● Discovering context files...\n");
-
-	const contextMdFiles = contextFiles.filter(
-		file => file.path.endsWith("AGENTS.md") || file.path.endsWith("CLAUDE.md"),
-	);
-	if (contextMdFiles.length > 0) {
-		for (const file of contextMdFiles) {
-			process.stdout.write(`  └─ ${file.path}\n`);
-		}
-	} else {
-		process.stdout.write("  └─ (none found)\n");
 	}
 	const forceFallback = $env.PI_COMMIT_TEST_FALLBACK?.toLowerCase() === "true";
 	if (forceFallback) {
@@ -160,7 +143,6 @@ async function runAgenticCommitWithAuth(
 			modelRegistry,
 			authStorage,
 			userContext: args.context,
-			contextFiles,
 			changelogTargets,
 			requireChangelog: !args.noChangelog && changelogTargets.length > 0,
 			diffText: diff,
@@ -310,12 +292,6 @@ async function runSplitCommit(
 		}
 		return;
 	}
-
-	if (!(await confirmSplitCommitPlan(plan))) {
-		process.stdout.write("Split commit aborted by user.\n");
-		return;
-	}
-
 	const order = computeDependencyOrder(plan.commits);
 	if ("error" in order) {
 		throw new Error(order.error);
@@ -373,21 +349,6 @@ function appendFilesToLastCommit(plan: SplitCommitPlan, files: string[]): void {
 		planned.add(file);
 	}
 }
-
-async function confirmSplitCommitPlan(plan: SplitCommitPlan): Promise<boolean> {
-	if (!process.stdin.isTTY || !process.stdout.isTTY) {
-		return true;
-	}
-	const rl = createInterface({ input: process.stdin, output: process.stdout });
-	try {
-		const splitConfirmQuestion = prompt.render(splitConfirmPrompt, { count: plan.commits.length });
-		const answer = await rl.question(splitConfirmQuestion);
-		return ["y", "yes"].includes(answer.trim().toLowerCase());
-	} finally {
-		rl.close();
-	}
-}
-
 function formatWarnings(warnings: string[]): string {
 	return `Warnings:\n${warnings.map(warning => `- ${warning}`).join("\n")}\n`;
 }
