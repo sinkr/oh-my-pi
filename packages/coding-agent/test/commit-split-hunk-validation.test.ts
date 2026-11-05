@@ -136,4 +136,50 @@ describe("split_commit hunk selector validation", () => {
 			"packages/coding-agent/CHANGELOG.md",
 		);
 	});
+
+	it("accepts lockfiles in overview.excludedFiles and docs commits on scripts", async () => {
+		vi.spyOn(vcs, "requireGit").mockReturnValue({
+			diffText: async () => STAGED_DIFF,
+		} as unknown as VcsGitRepo);
+		const state: CommitAgentState = {
+			overview: {
+				files: [".pi/agent/npm/package.json", "bin/aerospace-toggle.sh"],
+				excludedFiles: [".pi/agent/npm/package-lock.json"],
+				stat: "",
+				numstat: [],
+				scopeCandidates: "",
+				isWideScope: false,
+			},
+		};
+		const tool = createSplitCommitTool("/repo", state, []);
+
+		const result = await tool.execute(
+			"split-commit",
+			{
+				commits: [
+					{
+						changes: [
+							{ path: ".pi/agent/npm/package.json", kind: "all" },
+							{ path: ".pi/agent/npm/package-lock.json", kind: "all" },
+						],
+						type: "chore",
+						scope: "deps",
+						summary: "Bump Pi extensions",
+					},
+					{
+						changes: [{ path: "bin/aerospace-toggle.sh", kind: "all" }],
+						type: "docs",
+						scope: "aerospace",
+						summary: "Document external toggle hotkey and reload behavior.",
+					},
+				],
+			},
+			undefined,
+			{} as never,
+		);
+
+		expect(result.details.valid).toBe(true);
+		expect(result.details.errors).toEqual([]);
+		expect(state.splitProposal?.commits[1]?.summary).toBe("Document external toggle hotkey and reload behavior");
+	});
 });
