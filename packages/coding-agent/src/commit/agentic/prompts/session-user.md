@@ -22,4 +22,4 @@ May remove listed entries via propose_changelog `deletions`.
 {{/each}}
 {{/if}}
 
-Inspect staged changes: git_* tools. Deeper per-file summaries: call analyze_files. Finish: propose_commit | split_commit.
+Inspect staged changes with git_* tools and finish immediately with propose_commit.
