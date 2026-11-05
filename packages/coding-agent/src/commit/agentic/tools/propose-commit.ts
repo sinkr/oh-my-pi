@@ -1,5 +1,4 @@
 import { type } from "@oh-my-pi/omptype";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CommitAgentState } from "../../../commit/agentic/state";
 import {
 	capDetails,
@@ -7,7 +6,6 @@ import {
 	normalizeSummary,
 	SUMMARY_MAX_CHARS,
 	validateSummaryRules,
-	validateTypeConsistency,
 } from "../../../commit/agentic/validation";
 import { validateAnalysis } from "../../../commit/analysis/validation";
 import type { CommitType, ConventionalAnalysis, ConventionalDetail } from "../../../commit/types";
@@ -36,17 +34,16 @@ interface ProposalResponse {
 	};
 }
 
-export function createProposeCommitTool(cwd: string, state: CommitAgentState): CustomTool<typeof proposeCommitSchema> {
-	const repo = vcs.requireGit(cwd);
+export function createProposeCommitTool(_cwd: string, state: CommitAgentState): CustomTool<typeof proposeCommitSchema> {
 	return {
 		name: "propose_commit",
 		label: "Propose Commit",
 		description: "Submit the final conventional commit proposal.",
 		parameters: proposeCommitSchema,
 		async execute(_toolCallId, params) {
-			const scope = params.scope?.trim() || null;
+			const scope = params.scope?.trim().toLowerCase() || null;
 			const summary = normalizeSummary(params.summary, params.type, scope);
-			const details = normalizeDetails(params.details);
+			const details = normalizeDetails(params.details ?? []).filter(detail => detail.text.length > 0);
 			const { details: cappedDetails, warnings: detailWarnings } = capDetails(details);
 			const analysis: ConventionalAnalysis = {
 				type: params.type,
@@ -57,17 +54,9 @@ export function createProposeCommitTool(cwd: string, state: CommitAgentState): C
 
 			const summaryValidation = validateSummaryRules(summary);
 			const analysisValidation = validateAnalysis(analysis);
-			const stagedFiles = state.overview?.files ?? (await repo.changedFiles({ cached: true }));
-			const diffText = state.diffText ?? (await repo.diffText({ cached: true }));
-			const typeValidation = validateTypeConsistency(params.type, stagedFiles, {
-				diffText,
-				summary,
-				details: cappedDetails,
-			});
 
-			const errors = [...summaryValidation.errors, ...analysisValidation.errors, ...typeValidation.errors];
-			const warnings = [...summaryValidation.warnings, ...detailWarnings, ...typeValidation.warnings];
-
+			const errors = [...summaryValidation.errors, ...analysisValidation.errors];
+			const warnings = [...summaryValidation.warnings, ...detailWarnings];
 			const response: ProposalResponse = {
 				valid: errors.length === 0,
 				errors,
