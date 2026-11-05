@@ -13,8 +13,8 @@ import {
 import { validateScope } from "../../../commit/analysis/validation";
 import { normalizeDetails } from "../../../commit/utils";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
+import { assignLockFilesToPlan, EXCLUDED_LOCK_FILES } from "../lock-files";
 import { commitTypeSchema, detailSchema } from "./schemas.js";
-
 const fileChangeSchema = type({ path: "string", kind: "'all'" })
 	.or({ path: "string", kind: "'indices'", indices: "number[]" })
 	.or({ path: "string", kind: "'lines'", start: "number", end: "number" });
@@ -53,18 +53,21 @@ export function createSplitCommitTool(
 		description: "Propose multiple atomic commits for unrelated changes.",
 		parameters: splitCommitSchema,
 		async execute(_toolCallId, params) {
-			const stagedFiles = state.overview?.files ?? (await repo.changedFiles({ cached: true }));
-			const stagedSet = new Set(stagedFiles);
+			const visibleFiles = state.overview?.files ?? (await repo.changedFiles({ cached: true }));
+			const excludedFiles = state.overview?.excludedFiles ?? [];
+			const allStagedFiles = [...visibleFiles, ...excludedFiles];
+			const stagedSet = new Set(allStagedFiles);
+			const requiredFiles = visibleFiles.filter(file => !EXCLUDED_LOCK_FILES.has(file.split("/").pop() ?? file));
 			const changelogSet = new Set(changelogTargets);
 			const usedFiles = new Set<string>();
 			const errors: string[] = [];
 			const warnings: string[] = [];
-			const diffText = await repo.diffText({ cached: true });
+			const diffText = state.diffText ?? (await repo.diffText({ cached: true }));
 
 			const commits: SplitCommitGroup[] = params.commits.map((commit, index) => {
-				const scope = commit.scope?.trim() || null;
+				const scope = commit.scope?.trim().toLowerCase() || null;
 				const summary = normalizeSummary(commit.summary, commit.type, scope);
-				const detailInput = normalizeDetails(commit.details ?? []);
+				const detailInput = normalizeDetails(commit.details ?? []).filter(detail => detail.text.length > 0);
 				const detailResult = capDetails(detailInput);
 				warnings.push(...detailResult.warnings.map(warning => `Commit ${index + 1}: ${warning}`));
 				const issueRefs = commit.issue_refs ?? [];
@@ -135,7 +138,7 @@ export function createSplitCommitTool(
 				}
 			}
 
-			for (const file of stagedFiles) {
+			for (const file of requiredFiles) {
 				if (!usedFiles.has(file)) {
 					errors.push(`Staged file missing from split plan: ${file}`);
 				}
@@ -154,9 +157,9 @@ export function createSplitCommitTool(
 
 			if (response.valid) {
 				response.proposal = { commits, warnings };
+				assignLockFilesToPlan(response.proposal, allStagedFiles);
 				state.splitProposal = response.proposal;
 			}
-
 			const text = JSON.stringify(
 				{
 					...response,
