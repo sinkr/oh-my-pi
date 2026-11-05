@@ -512,6 +512,7 @@
 ### Fixed
 
 - Preserved SQL-backed sessions in the two-pass all-project resume picker, including named and pinned empty sessions, while retaining indexed-title loading for file-backed sessions.
+- Stopped Codex and Claude discovery from re-reading `~/.codex/config.toml`, `~/.claude/mcp.json` and `~/.claude/settings.json` as project-scope MCP servers and settings when OMP is started from the home directory. This bypassed user-source opt-in and injected every user-level MCP server into the session.
 
 ## [18.16.0] - 2026-11-02
 

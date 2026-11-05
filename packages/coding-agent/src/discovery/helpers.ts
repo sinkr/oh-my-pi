@@ -1057,6 +1057,16 @@ export function isUserConfigRoot(root: string): boolean {
 }
 
 /**
+ * True when the working directory is the home directory. `~/.codex` and
+ * `~/.claude` are then the user config roots, not project config, so providers
+ * must not re-read them as project scope (that bypasses user-source opt-in and
+ * injects every user-level MCP server and setting into the session).
+ */
+export function isHomeCwd(ctx: { cwd: string; home: string }): boolean {
+	return normalizePathForComparison(ctx.cwd) === normalizePathForComparison(ctx.home);
+}
+
+/**
  * An inactive default user layout (`<configDirName>/agent/`) is not a project anchor above a git
  * root or without a repo. `configDirName` is the project config dir the caller would load from.
  */
