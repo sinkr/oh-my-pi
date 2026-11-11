@@ -7,7 +7,6 @@ import { acquireFileLock, tryAcquireFileLock } from "@oh-my-pi/pi-utils/file-loc
 import type { FileLockHandle } from "@oh-my-pi/pi-utils/file-lock";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import { isAssistantMessageLine } from "./session-entries";
 import { moveSessionPlaceholder, removeSessionPlaceholder } from "./session-placeholder";
 import type {
 	SessionStorage,
@@ -628,8 +627,10 @@ export class BufferedSqlSessionStorage implements SessionStorage {
 		}
 		return [decoder.decode(head), decoder.decode(tail)];
 	}
-	async hasAssistantTurn(file: string): Promise<boolean> {
-		return (await this.readText(file)).split("\n").some(isAssistantMessageLine);
+	async scanLines(file: string, visit: (line: string) => boolean): Promise<void> {
+		for (const line of (await this.readText(file)).split("\n")) {
+			if (visit(line)) return;
+		}
 	}
 	async updateSessionTitle(file: string, update: SessionTitleUpdate): Promise<void> {
 		this.#assertOpen();
