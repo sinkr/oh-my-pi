@@ -13,6 +13,8 @@
  * Binds loopback only: anything that can reach this port can drive the
  * user's logged-in browser.
  */
+import { homedir } from "node:os";
+import * as path from "node:path";
 import { macOSFrontApp } from "@oh-my-pi/pi-natives";
 import { parseFlag } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
@@ -46,17 +48,22 @@ export interface RelayServerOptions {
  * Calls run one at a time: Chrome profiles that load the same folder share its files, and a later call finds them
  * already current.
  */
-function extensionUpdaterFor(dir: string): RelayBridgeExtensionUpdater {
+function extensionUpdaterFor(dirs: string | string[]): RelayBridgeExtensionUpdater {
+	const dirList = Array.isArray(dirs) ? dirs : [dirs];
 	let queue: Promise<unknown> = Promise.resolve();
 	const update = async (extensionId: string) => {
-		if ((await unpackedExtensionId(dir)) !== extensionId) return false;
-		if (isOlderOmpVersion(VERSION, await installedRelayExtensionVersion(dir))) return false;
-		await writeRelayExtension(dir, VERSION);
-		return true;
+		for (const dir of dirList) {
+			if ((await unpackedExtensionId(dir)) === extensionId) {
+				if (isOlderOmpVersion(VERSION, await installedRelayExtensionVersion(dir))) return false;
+				await writeRelayExtension(dir, VERSION);
+				return true;
+			}
+		}
+		return false;
 	};
 	return extensionId => {
 		const result = queue.then(() => update(extensionId));
-		queue = result.catch(() => {});
+		queue = result.catch(() => { });
 		return result;
 	};
 }
@@ -115,10 +122,17 @@ function isWsAuthority(raw: string): boolean {
 
 /** Start the relay server on 127.0.0.1. Throws if the port is taken. */
 export function startRelayServer(opts: RelayServerOptions): RelayServer {
-	const log = opts.log ?? (() => {});
+	const log = opts.log ?? (() => { });
 	const group =
 		opts.group === false ? null : opts.group === true || opts.group === undefined ? DEFAULT_GROUP : opts.group;
-	const updateExtension = extensionUpdaterFor(opts.extensionDir ?? defaultRelayExtensionDir());
+	const defaultDir = defaultRelayExtensionDir();
+	const baseDir = path.join(homedir(), ".omp", "browser-relay", "extension");
+	const candidateDirs = opts.extensionDir
+		? [opts.extensionDir]
+		: defaultDir === baseDir
+			? [defaultDir]
+			: [defaultDir, baseDir];
+	const updateExtension = extensionUpdaterFor(candidateDirs);
 	const bridge = new RelayBridge({ log, group, updateExtension });
 	const sockets = new Set<RelayWebSocket>();
 	const startedAt = Date.now();
