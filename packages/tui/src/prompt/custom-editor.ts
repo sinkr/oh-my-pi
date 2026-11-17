@@ -354,6 +354,25 @@ function extractWholeTextAttachmentPath(text: string): string | undefined {
 		: undefined;
 }
 
+/**
+ * Same shape as {@link extractBracketedImagePastePaths} but operates on a
+ * payload that has already been stripped of the `\x1b[200~` / `\x1b[201~`
+ * markers — used by the assembled-paste router in {@link CustomEditor.handleInput}
+ * so split bracketed pastes get the same attachment-path detection as single-chunk ones.
+ *
+ * When the segment splitter fails (an unescaped space in a real path breaks
+ * its every-segment-is-a-path invariant), falls back to
+ * {@link extractWholeTextAttachmentPath}, so a dropped macOS screenshot
+ * (`Screenshot 2026-06-25 at 1.23.45 PM.png`) attaches as an image instead of
+ * degrading to literal text (#6578).
+ */
+export function extractImagePastePathsFromText(text: string): string[] | undefined {
+	const paths = extractPastePathsFromText(text);
+	if (paths !== undefined) return paths.every(isPreviewableAttachmentPath) ? paths : undefined;
+	const wholePath = extractWholeTextAttachmentPath(text);
+	return wholePath ? [wholePath] : undefined;
+}
+
 /** What a bracketed paste into an image-accepting prompt means. */
 export type ImagePaste =
 	/** Empty: the terminal's cue that the clipboard holds an image. */

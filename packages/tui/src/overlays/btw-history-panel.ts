@@ -23,6 +23,7 @@ import {
 } from "./btw-history";
 import { BtwInjectAnswer, type BtwInjectState, describeBtwInjectAnswer } from "./btw-inject";
 import { compactImageAttachments, formatVisionMarker } from "../prompt/composer-attachments";
+import { OrderedPastes } from "../prompt/ordered-pastes";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
