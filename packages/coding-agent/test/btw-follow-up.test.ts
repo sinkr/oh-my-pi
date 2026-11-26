@@ -578,20 +578,17 @@ describe("BTW follow-up lifecycle", () => {
 		expect(panel.text(120)).not.toContain("🎙");
 	});
 
-	it("attaches an image path pasted into the history follow-up and types what it hands back", async () => {
+	it("keeps a path-shaped paste into the history follow-up as literal text", async () => {
 		const h = await harness();
 		await h.root("Topic", "Answer");
 		await h.controller.start("");
 		const panel = historySheet(h.ctx.shell);
 		panel.press("f");
-		// An unreadable path comes back as a paste, as the interactive mode's image sink does.
-		const attach = h.handleImagePathPaste.mockImplementation(async path => panel.paste(path));
 
 		panel.paste("/tmp/btw-shot.png");
 		await drain();
 
-		expect(attach).toHaveBeenCalledTimes(1);
-		expect(attach).toHaveBeenCalledWith("/tmp/btw-shot.png");
+		expect(h.handleImagePathPaste).not.toHaveBeenCalled();
 		expect(panel.model.composer?.draft.text).toBe("/tmp/btw-shot.png");
 	});
 

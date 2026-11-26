@@ -495,7 +495,7 @@ describe("InputController keybinding setup", () => {
 		expect(context.editor.text()).toBe("");
 	});
 
-	it("attaches an image path an enhanced text paste delivers to the composer", async () => {
+	it("pastes a path-shaped enhanced text paste literally into the composer without attaching it", async () => {
 		const context = createContext();
 		deliverPastesToComposer(context.spies.shellPaste, context.editor);
 		const pasted = nextCall(context.spies.shellPaste);
@@ -503,11 +503,12 @@ describe("InputController keybinding setup", () => {
 		const attach = vi.spyOn(controller, "handleImagePathPaste").mockResolvedValue();
 		controller.setupKeyHandlers();
 
-		dispatchEnhancedTextPaste(context, "/tmp/Screenshot\\ 2026-10-19\\ at\\ 14.25.32.png");
+		const text = "/tmp/Screenshot\\ 2026-10-19\\ at\\ 14.25.32.png";
+		dispatchEnhancedTextPaste(context, text);
 
 		await pasted;
-		expect(attach).toHaveBeenCalledWith("/tmp/Screenshot 2026-10-19 at 14.25.32.png");
-		expect(context.editor.text()).toBe("");
+		expect(attach).not.toHaveBeenCalled();
+		expect(context.editor.text()).toBe(text);
 	});
 
 	it("collapses a large enhanced text paste into the chip a bracketed paste makes", async () => {
